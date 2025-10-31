@@ -1,0 +1,6 @@
+build/
+.clangd/
+.vscode/
+*.log
+*.core
+.claude/
