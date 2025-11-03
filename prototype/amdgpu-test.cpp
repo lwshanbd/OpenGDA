@@ -22,6 +22,7 @@
  * Based on libfabric Deferred Work Queue specification
  */
 
+#include <cstdint>
 #include <cstdio>
 #include <hip/hip_runtime.h>
 #include <pmi2.h>
@@ -30,6 +31,7 @@
 #include <rdma/fi_cxi_ext.h>
 #include <rdma/fi_domain.h>
 #include <rdma/fi_endpoint.h>
+#include <rdma/fi_eq.h>
 #include <rdma/fi_rma.h>
 #include <rdma/fi_trigger.h>
 #include <stdint.h>
@@ -67,16 +69,22 @@
 int myrank = -1;
 
 // Test parameters
-#define NUM_ITERATIONS 12 // Single iteration for data verification test
+#define NUM_ITERATIONS 10 // Single iteration for data verification test
 const size_t test_sizes[] = {
-    128,
-    // 16 * 1024, // 16KB
-    //            32 * 1024,  // 32KB
-    //            64 * 1024,  // 64KB
-    //            128 * 1024, // 128KB
-    //            256 * 1024, // 256KB
-    //            512 * 1024, // 512KB
-    //            1024 * 1024 // 1MB
+  16 * 1024, // 16KB
+               32 * 1024,  // 32KB
+               64 * 1024,  // 64KB
+               128 * 1024, // 128KB
+               256 * 1024, // 256KB
+               512 * 1024, // 512KB
+               1024 * 1024, // 1MB
+               2 * 1024 * 1024, // 2MB
+               4 * 1024 * 1024, // 4MB
+               8 * 1024 * 1024, // 8MB
+               16 * 1024 * 1024, // 16MB
+              //  32 * 1024 * 1024, // 32MB
+              //  64 * 1024 * 1024, // 64MB
+              //  128 * 1024 * 1024 // 128MB
 };
 const int num_test_sizes = sizeof(test_sizes) / sizeof(test_sizes[0]);
 
@@ -85,17 +93,34 @@ const int num_test_sizes = sizeof(test_sizes) / sizeof(test_sizes[0]);
 // =============================================================================
 
 // GPU kernel to write counter doorbell (trigger NIC operation)
-__global__ void gpu_write_counter_doorbell(volatile uint64_t *counter_addr, void *atomic_result,
-                                           uint64_t value) {
+// Polls atomic_result until NIC completes the atomic write
+// Records timing inside GPU for accurate latency measurement
+__global__ void gpu_write_counter_doorbell(volatile uint64_t *counter_addr,
+                                           volatile uint64_t *atomic_result,
+                                           uint64_t value,
+                                           uint64_t *start_clock,
+                                           uint64_t *end_clock) {
   if (threadIdx.x == 0 && blockIdx.x == 0) {
+    // Record start time (GPU clock cycles)
+    uint64_t t_start = clock64();
+
+    // Step 1: Write to trigger counter to initiate RDMA write
     *counter_addr = value;
+
+    // Step 2: Poll atomic_result until NIC writes to it
+    do {
+      // __threadfence_system();
+    } while (*atomic_result < 1);
+
+    // Record end time (GPU clock cycles)
+    uint64_t t_end = clock64();
     __threadfence_system();
-    while(*(uint64_t *)atomic_result < 1) {
-      __threadfence_system();
-    }
-    // sync with CPU
-    __syncthreads();
+
+    // Store timestamps
+    if (start_clock) *start_clock = t_start;
+    if (end_clock) *end_clock = t_end;
   }
+  __syncthreads();
 }
 
 // =============================================================================
@@ -268,6 +293,9 @@ int main(void) {
 
   hipDeviceProp_t prop;
   CHECK_HIP(hipGetDeviceProperties(&prop, gpu_id), "hipGetDeviceProperties");
+
+  // Get GPU clock rate for time conversion (clock64() returns cycles)
+  double gpu_clock_mhz = prop.clockRate / 1000.0; // Convert kHz to MHz
   fflush(stderr);
 
   // -------------------------------------------------------------------------
@@ -350,8 +378,16 @@ int main(void) {
 
   // Completion counter - NIC will update this when operations complete
   struct fid_cntr *completion_cntr = NULL;
-  CHECK(fi_cntr_open(domain, &cntr_attr, &completion_cntr, NULL),
+  struct fi_cntr_attr completion_cntr_attr = {};
+  completion_cntr_attr.events = FI_CNTR_EVENTS_COMP;
+  completion_cntr_attr.wait_obj = FI_WAIT_UNSPEC;
+  CHECK(fi_cntr_open(domain, &completion_cntr_attr, &completion_cntr, NULL),
         "fi_cntr_open(completion)");
+
+  // Atomic completion counter - tracks when atomic operation completes
+  struct fid_cntr *atomic_completion_cntr = NULL;
+  CHECK(fi_cntr_open(domain, &cntr_attr, &atomic_completion_cntr, NULL),
+        "fi_cntr_open(atomic_completion)");
 
   // Get counter ops for MMIO access
   struct fi_cxi_cntr_ops *trigger_cntr_ops = NULL;
@@ -438,18 +474,20 @@ int main(void) {
   // -------------------------------------------------------------------------
   // STEP 7: Allocate and Register GPU Buffers
   // -------------------------------------------------------------------------
-  size_t max_size = 1024 * 1024; // 1MB
+  size_t max_size = 128 * 1024 * 1024; // 128MB
 
   void *d_local_buf = NULL;
   CHECK_HIP(hipMalloc(&d_local_buf, max_size), "hipMalloc(local)");
-  CHECK_HIP(hipMemset(d_local_buf, 0xAA, max_size), "hipMemset(local)");
 
   void *d_remote_buf = NULL;
   CHECK_HIP(hipMalloc(&d_remote_buf, max_size), "hipMalloc(remote)");
-  if (myrank == 0) {
-    CHECK_HIP(hipMemset(d_remote_buf, 0xCC, max_size), "hipMemset(remote)");
-  } else {
-    CHECK_HIP(hipMemset(d_remote_buf, 0xDD, max_size), "hipMemset(remote)");
+
+  // Allocate host verification buffer
+  uint8_t *h_verify_buf = (uint8_t *)malloc(max_size);
+  if (!h_verify_buf) {
+    fprintf(stderr, "Rank %d: malloc(h_verify_buf) failed\n", myrank);
+    PMI2_Finalize();
+    exit(1);
   }
 
   // allocate memory for atomic operation result and source operand
@@ -463,6 +501,12 @@ int main(void) {
   uint64_t operand_value = 1; // Value to add
   CHECK_HIP(hipMemcpy(atomic_operand, &operand_value, sizeof(uint64_t), hipMemcpyHostToDevice),
             "hipMemcpy(atomic_operand)");
+
+  // Allocate timestamp buffers for GPU timing
+  uint64_t *d_start_clock = NULL;
+  uint64_t *d_end_clock = NULL;
+  CHECK_HIP(hipMalloc(&d_start_clock, sizeof(uint64_t)), "hipMalloc(start_clock)");
+  CHECK_HIP(hipMalloc(&d_end_clock, sizeof(uint64_t)), "hipMalloc(end_clock)");
 
   CHECK_HIP(hipDeviceSynchronize(), "hipDeviceSynchronize after memset");
 
@@ -564,6 +608,9 @@ int main(void) {
 	struct fi_rma_ioc atomic_rma_iov;
   struct fi_deferred_work atomic_work;
 
+  int total_verifications = 0;
+  int total_verification_failures = 0;
+
   for (int size_idx = 0; size_idx < num_test_sizes; size_idx++) {
     size_t current_size = test_sizes[size_idx];
     CHECK(PMI2_KVS_Fence(), "PMI2_KVS_Fence"); // sync before each size
@@ -574,6 +621,32 @@ int main(void) {
     for (int iter = 0; iter < NUM_ITERATIONS; iter++) {
       fi_cntr_set(trigger_cntr, 0);
       fi_cntr_set(completion_cntr, 0);
+      fi_cntr_set(atomic_completion_cntr, 0);
+
+      // CRITICAL: Reset atomic_result to 0 before each iteration
+      // GPU kernel polls this value, so it must start at 0 each time
+      if (myrank == 0) {
+        uint64_t zero = 0;
+        CHECK_HIP(hipMemcpy(atomic_result, &zero, sizeof(uint64_t),
+                            hipMemcpyHostToDevice),
+                  "hipMemcpy reset atomic_result");
+        CHECK_HIP(hipDeviceSynchronize(), "hipDeviceSynchronize reset");
+      }
+
+      // Initialize buffers with iteration-specific patterns for verification
+      if (myrank == 0) {
+        // Rank 0: Fill send buffer with pattern (iter + 0xA0)
+        uint8_t pattern = (iter + 0xA0) & 0xFF;
+        CHECK_HIP(hipMemset(d_local_buf, pattern, current_size),
+                  "hipMemset(local)");
+        CHECK_HIP(hipDeviceSynchronize(), "hipDeviceSynchronize");
+      } else {
+        // Rank 1: Clear receive buffer with different pattern (0xFF)
+        CHECK_HIP(hipMemset(d_remote_buf, 0xFF, current_size),
+                  "hipMemset(remote)");
+        CHECK_HIP(hipDeviceSynchronize(), "hipDeviceSynchronize");
+      }
+      CHECK(PMI2_KVS_Fence(), "PMI2_KVS_Fence");
 
       if (myrank == 0) {
         
@@ -646,13 +719,13 @@ int main(void) {
         // Setup atomic work structure
         atomic.ep = ep;
         atomic.msg = atomic_msg;
-        atomic.flags = 0;
+        atomic.flags = FI_COMPLETION; // Need this to increment completion counter!
 
         atomic_work.op_type = FI_OP_ATOMIC;
         atomic_work.op.atomic = &atomic;
         // Triggered when RMA completion counter reaches threshold
         atomic_work.triggering_cntr = completion_cntr;
-        atomic_work.completion_cntr = NULL; // No completion tracking for this op
+        atomic_work.completion_cntr = atomic_completion_cntr; // Track atomic completion
         atomic_work.threshold = 1;
 
         ret = fi_control(&domain->fid, FI_QUEUE_WORK, &atomic_work);
@@ -663,43 +736,73 @@ int main(void) {
           PMI2_Finalize();
           exit(1);
         }
-        uint64_t completion_val = 0;
-        completion_val = fi_cntr_read(completion_cntr);
 
-        double start_time = get_time_us();
+        // GPU writes trigger counter and waits for atomic_result
+        // Timing is done inside GPU kernel using clock64()
         hipLaunchKernelGGL(gpu_write_counter_doorbell, dim3(1), dim3(1), 0, 0,
-                           dev_trigger_cntr, atomic_result, work.threshold);
+                           dev_trigger_cntr, atomic_result, work.threshold,
+                           d_start_clock, d_end_clock);
         CHECK_HIP(hipDeviceSynchronize(), "hipDeviceSynchronize");
-        double end_time = get_time_us();
 
+        // Read GPU timestamps
+        uint64_t start_clock, end_clock;
+        CHECK_HIP(hipMemcpy(&start_clock, d_start_clock, sizeof(uint64_t),
+                            hipMemcpyDeviceToHost),
+                  "hipMemcpy read start_clock");
+        CHECK_HIP(hipMemcpy(&end_clock, d_end_clock, sizeof(uint64_t),
+                            hipMemcpyDeviceToHost),
+                  "hipMemcpy read end_clock");
 
-        // Check trigger counter AFTER GPU write
-        // uint64_t trigger_after = fi_cntr_read(trigger_cntr);
-        // if (iter == 0 && size_idx == 0) {
-        //   fprintf(
-        //       stderr,
-        //       "Rank %d: trigger_cntr AFTER GPU write = %lu (expected %lu)\n",
-        //       myrank, trigger_after, work.threshold);
-        //   fflush(stderr);
-        // }
+        // Convert GPU cycles to microseconds
+        double elapsed_us = (end_clock - start_clock) / gpu_clock_mhz;
 
-        // !!! IMPORTANT: Wait for completion counter to increment
-        // Completion counter should increment by 1 for each successful
-        // operation
-        // uint64_t target_completion = 1; // Expecting 1 completion per iteration
-        
-        // fi_cntr_wait(completion_cntr, target_completion, -1);
-        completion_val = fi_cntr_read(completion_cntr);
-        printf("Rank %d: completion_cntr = %lu\n", myrank, completion_val);
-
-        total_time += (end_time - start_time);
+        total_time += elapsed_us;
         successful_iterations++;
 
       } else {
         // ---------- Rank 1: Receiver ----------
+        // Wait for data to arrive (just barrier sync for now)
       }
 
+      // Synchronize both ranks before verification
       CHECK(PMI2_KVS_Fence(), "PMI2_KVS_Fence");
+
+      // Rank 1: Verify received data
+      if (myrank == 1) {
+        // usleep(10000);
+        // Copy data from GPU to host for verification
+        CHECK_HIP(hipMemcpy(h_verify_buf, d_remote_buf, current_size,
+                            hipMemcpyDeviceToHost),
+                  "hipMemcpy D2H");
+
+        // Verify the data matches the expected pattern
+        uint8_t expected_pattern = (iter + 0xA0) & 0xFF;
+        int errors = 0;
+        int first_error_idx = -1;
+        uint8_t first_error_val = 0;
+
+        for (size_t i = 0; i < current_size; i++) {
+          if (h_verify_buf[i] != expected_pattern) {
+            if (first_error_idx == -1) {
+              first_error_idx = i;
+              first_error_val = h_verify_buf[i];
+            }
+            errors++;
+            if (errors >= 10)
+              break; // Limit error counting
+          }
+        }
+
+        total_verifications++;
+
+        if (errors > 0) {
+          total_verification_failures++;
+          fprintf(stderr,
+                  "Rank %d: VERIFICATION FAILED - iter=%d, size=%zu, "
+                  "expected=0x%02X, errors=%d\n",
+                  myrank, iter, current_size, expected_pattern, errors);
+        }
+      }
     }
 
     if (myrank == 0 && successful_iterations > 0) {
@@ -717,6 +820,14 @@ int main(void) {
   free(op_rma);
 
   // -------------------------------------------------------------------------
+  // Final Verification Report
+  // -------------------------------------------------------------------------
+  if (myrank == 1 && total_verification_failures > 0) {
+    fprintf(stderr, "\nVerification: %d/%d failed\n",
+            total_verification_failures, total_verifications);
+  }
+
+  // -------------------------------------------------------------------------
   // STEP 10: Cleanup
   // -------------------------------------------------------------------------
 
@@ -726,6 +837,9 @@ int main(void) {
   hipFree(d_remote_buf);
   hipFree(atomic_result);
   hipFree(atomic_operand);
+  hipFree(d_start_clock);
+  hipFree(d_end_clock);
+  free(h_verify_buf);
 
   fi_close(&mr_local->fid);
   fi_close(&mr_remote->fid);
@@ -733,6 +847,7 @@ int main(void) {
   fi_close(&mr_atomic_operand->fid);
   fi_close(&trigger_cntr->fid);
   fi_close(&completion_cntr->fid);
+  fi_close(&atomic_completion_cntr->fid);
   fi_close(&ep->fid);
   fi_close(&cq->fid);
   fi_close(&av->fid);
