@@ -67,17 +67,16 @@
 int myrank = -1;
 
 // Test parameters
-#define NUM_ITERATIONS 10
+#define NUM_ITERATIONS 12 // Single iteration for data verification test
 const size_t test_sizes[] = {
-    16 * 1024,   // 16KB
-    32 * 1024,   // 32KB
-    64 * 1024,   // 64KB
-    128 * 1024,  // 128KB
-    256 * 1024,  // 256KB
-    512 * 1024,  // 512KB
-    1024 * 1024, // 1MB
-                 // 16 * 1024 * 1024, // 16MB
-                 // 128 * 1024 * 1024 // 128MB
+    128,
+    // 16 * 1024, // 16KB
+    //            32 * 1024,  // 32KB
+    //            64 * 1024,  // 64KB
+    //            128 * 1024, // 128KB
+    //            256 * 1024, // 256KB
+    //            512 * 1024, // 512KB
+    //            1024 * 1024 // 1MB
 };
 const int num_test_sizes = sizeof(test_sizes) / sizeof(test_sizes[0]);
 
@@ -86,30 +85,16 @@ const int num_test_sizes = sizeof(test_sizes) / sizeof(test_sizes[0]);
 // =============================================================================
 
 // GPU kernel to write counter doorbell (trigger NIC operation)
-__global__ void gpu_write_counter_doorbell(volatile uint64_t *counter_addr,
+__global__ void gpu_write_counter_doorbell(volatile uint64_t *counter_addr, void *atomic_result,
                                            uint64_t value) {
   if (threadIdx.x == 0 && blockIdx.x == 0) {
     *counter_addr = value;
     __threadfence_system();
-    __syncthreads();
-  }
-}
-
-// GPU kernel to poll completion counter
-__global__ void gpu_poll_completion_counter(volatile uint64_t *counter_addr,
-                                            uint64_t target_value,
-                                            volatile int *done_flag) {
-  if (threadIdx.x == 0 && blockIdx.x == 0) {
-    while (1) {
-      uint64_t val = *counter_addr;
-      // Extract success counter (lower 48 bits)
-      uint64_t success_count = val & 0xFFFFFFFFFFFFULL;
-      if (success_count >= target_value) {
-        *done_flag = 1;
-        __threadfence_system();
-        break;
-      }
+    while(*(uint64_t *)atomic_result < 1) {
+      __threadfence_system();
     }
+    // sync with CPU
+    __syncthreads();
   }
 }
 
@@ -244,37 +229,7 @@ static int exchange_addrs(int rank, int size, const char *my_hex,
   }
   return PMI2_SUCCESS;
 }
-static inline int smart_cntr_wait(struct fid_cntr *cntr, uint64_t threshold,
-                                  size_t transfer_size) {
-  uint64_t val;
 
-  if (transfer_size <= 64 * 1024) { // <= 64KB: 紧密轮询
-    for (int i = 0; i < 10000; i++) {
-      val = fi_cntr_read(cntr);
-      if ((val & 0xFFFFFFFFFFFFULL) >= threshold)
-        return 0;
-      __asm__ __volatile__("pause" ::: "memory");
-    }
-  }
-
-  // 中等大小: 轮询 + yield
-  for (int i = 0; i < 1000; i++) {
-    val = fi_cntr_read(cntr);
-    if ((val & 0xFFFFFFFFFFFFULL) >= threshold)
-      return 0;
-    sched_yield();
-  }
-
-  // 大数据: 轮询 + 短睡眠
-  while (1) {
-    val = fi_cntr_read(cntr);
-    if ((val & 0xFFFFFFFFFFFFULL) >= threshold)
-      return 0;
-    usleep(10); // 10us
-  }
-
-  return 0;
-}
 // =============================================================================
 // Main Function
 // =============================================================================
@@ -313,7 +268,6 @@ int main(void) {
 
   hipDeviceProp_t prop;
   CHECK_HIP(hipGetDeviceProperties(&prop, gpu_id), "hipGetDeviceProperties");
-  printf("Rank %d: Using GPU %d: %s\n", myrank, gpu_id, prop.name);
   fflush(stderr);
 
   // -------------------------------------------------------------------------
@@ -386,7 +340,6 @@ int main(void) {
   // -------------------------------------------------------------------------
   // STEP 5: Create Counters for DWQ (Trigger + Completion)
   // -------------------------------------------------------------------------
-  printf("Rank %d: Creating DWQ counters...\n", myrank);
 
   // Triggering counter - GPU will write to this to trigger operations
   struct fid_cntr *trigger_cntr = NULL;
@@ -396,11 +349,8 @@ int main(void) {
         "fi_cntr_open(trigger)");
 
   // Completion counter - NIC will update this when operations complete
-  struct fi_cntr_attr completion_cntr_attr = {};
-  completion_cntr_attr.events = FI_CNTR_EVENTS_COMP;
-//   completion_cntr_attr.wait_obj = FI_WAIT_UNSPEC;
   struct fid_cntr *completion_cntr = NULL;
-  CHECK(fi_cntr_open(domain, &completion_cntr_attr, &completion_cntr, NULL),
+  CHECK(fi_cntr_open(domain, &cntr_attr, &completion_cntr, NULL),
         "fi_cntr_open(completion)");
 
   // Get counter ops for MMIO access
@@ -420,16 +370,11 @@ int main(void) {
   CHECK(trigger_cntr_ops->get_mmio_addr(&trigger_cntr->fid, &trigger_mmio_addr,
                                         &trigger_mmio_len),
         "get_mmio_addr(trigger)");
-  printf("Rank %d: Trigger MMIO at %p, len=%zu\n", myrank, trigger_mmio_addr,
-         trigger_mmio_len);
-
   void *completion_mmio_addr = NULL;
   size_t completion_mmio_len = 0;
   CHECK(completion_cntr_ops->get_mmio_addr(
             &completion_cntr->fid, &completion_mmio_addr, &completion_mmio_len),
         "get_mmio_addr(completion)");
-  printf("Rank %d: Completion MMIO at %p, len=%zu\n", myrank,
-         completion_mmio_addr, completion_mmio_len);
 
   // Map MMIO to GPU
   CHECK_HIP(hipHostRegister(trigger_mmio_addr, trigger_mmio_len,
@@ -481,12 +426,19 @@ int main(void) {
     exit(1);
   }
 
-  printf("Rank %d: Peer address inserted\n", myrank);
+  // Insert local address into AV for atomic operations to self
+  fi_addr_t local_fi_addr = FI_ADDR_NOTAVAIL;
+  inserted = fi_av_insert(av, local_addr, 1, &local_fi_addr, 0, NULL);
+  if (inserted != 1 || local_fi_addr == FI_ADDR_NOTAVAIL) {
+    fprintf(stderr, "Rank %d: fi_av_insert(local) failed\n", myrank);
+    PMI2_Finalize();
+    exit(1);
+  }
 
   // -------------------------------------------------------------------------
   // STEP 7: Allocate and Register GPU Buffers
   // -------------------------------------------------------------------------
-  size_t max_size = 128 * 1024 * 1024; // 1MB
+  size_t max_size = 1024 * 1024; // 1MB
 
   void *d_local_buf = NULL;
   CHECK_HIP(hipMalloc(&d_local_buf, max_size), "hipMalloc(local)");
@@ -499,6 +451,19 @@ int main(void) {
   } else {
     CHECK_HIP(hipMemset(d_remote_buf, 0xDD, max_size), "hipMemset(remote)");
   }
+
+  // allocate memory for atomic operation result and source operand
+  uint64_t *atomic_result = NULL;
+  CHECK_HIP(hipMalloc(&atomic_result, sizeof(uint64_t)), "hipMalloc(atomic)");
+  CHECK_HIP(hipMemset(atomic_result, 0, sizeof(uint64_t)), "hipMemset(atomic)");
+
+  // Allocate source operand for atomic operation (value to add)
+  uint64_t *atomic_operand = NULL;
+  CHECK_HIP(hipMalloc(&atomic_operand, sizeof(uint64_t)), "hipMalloc(atomic_operand)");
+  uint64_t operand_value = 1; // Value to add
+  CHECK_HIP(hipMemcpy(atomic_operand, &operand_value, sizeof(uint64_t), hipMemcpyHostToDevice),
+            "hipMemcpy(atomic_operand)");
+
   CHECK_HIP(hipDeviceSynchronize(), "hipDeviceSynchronize after memset");
 
   struct fid_mr *mr_local = NULL;
@@ -511,8 +476,17 @@ int main(void) {
                                &mr_remote, true, 0),
         "register_memory_region(remote)");
 
+  struct fid_mr *mr_atomic = NULL;
+  CHECK(register_memory_region(domain, ep, cxi_info, atomic_result, sizeof(uint64_t),
+                               &mr_atomic, true, 0),
+        "register_memory_region(atomic)");
+
+  struct fid_mr *mr_atomic_operand = NULL;
+  CHECK(register_memory_region(domain, ep, cxi_info, atomic_operand, sizeof(uint64_t),
+                               &mr_atomic_operand, true, 0),
+        "register_memory_region(atomic_operand)");
+
   uint64_t my_remote_key = fi_mr_key(mr_remote);
-  printf("Rank %d: my_remote_key = %lu\n", myrank, my_remote_key);
   uint64_t my_remote_addr = (uint64_t)d_remote_buf;
   void *desc_local = fi_mr_desc(mr_local);
 
@@ -556,26 +530,21 @@ int main(void) {
     remote_addr_for_rma = 0; // Use offset from MR base (CXI case)
   }
 
-  printf("Rank %d: Peer remote_key=%lu, remote_addr=0x%lx\n", myrank,
-         peer_remote_key, remote_addr_for_rma);
-
   // -------------------------------------------------------------------------
   // STEP 8: Sync before benchmark
   // -------------------------------------------------------------------------
   CHECK(PMI2_KVS_Fence(), "PMI2_KVS_Fence(pre-benchmark)");
-  //   usleep(100000); // 100ms for readiness
+  usleep(100000); // 100ms for readiness
 
   // -------------------------------------------------------------------------
   // STEP 9: DWQ Benchmark Loop
   // -------------------------------------------------------------------------
+
+  // Note: Skip DWQ support check - will detect on first fi_control call
+
   if (myrank == 0) {
-    printf("\n");
-    printf("========================================\n");
-    printf("GPU-to-GPU RDMA Latency Benchmark (DWQ)\n");
-    printf("========================================\n");
-    printf("%-10s %10s %10s\n", "Size", "Iterations", "Avg Latency");
-    printf("%-10s %10s %10s\n", "", "", "(us)");
-    printf("----------------------------------------\n");
+    printf("%-8s  %12s\n", "Size", "Latency(us)");
+    printf("========  ============\n");
   }
 
   // Allocate persistent structures for DWQ (must remain valid until completion)
@@ -588,90 +557,34 @@ int main(void) {
   struct fi_rma_iov *rma_iov =
       (struct fi_rma_iov *)malloc(sizeof(struct fi_rma_iov));
 
+  // DWQ Work, NIC to GPU completion signaling
+	struct fi_op_atomic atomic;
+	struct fi_msg_atomic atomic_msg;
+	struct fi_ioc atomic_iov;
+	struct fi_rma_ioc atomic_rma_iov;
+  struct fi_deferred_work atomic_work;
+
   for (int size_idx = 0; size_idx < num_test_sizes; size_idx++) {
     size_t current_size = test_sizes[size_idx];
+    CHECK(PMI2_KVS_Fence(), "PMI2_KVS_Fence"); // sync before each size
+
     double total_time = 0.0;
     int successful_iterations = 0;
 
-    // Warmup iteration (not counted)
-    fi_cntr_set(trigger_cntr, 0);
-    fi_cntr_set(completion_cntr, 0);
-
-    // if (myrank == 0) {
-    //   // Setup IOV for local buffer
-    //   iov->iov_base = d_local_buf;
-    //   iov->iov_len = current_size;
-
-    //   // Setup RMA IOV for remote target
-    //   rma_iov->addr = remote_addr_for_rma;
-    //   rma_iov->len = current_size;
-    //   rma_iov->key = peer_remote_key;
-
-    //   // Fill fi_msg_rma
-    //   memset(msg_rma, 0, sizeof(*msg_rma));
-    //   msg_rma->msg_iov = iov;
-    //   msg_rma->desc = &desc_local;
-    //   msg_rma->iov_count = 1;
-    //   msg_rma->addr = peer_fi_addr;
-    //   msg_rma->rma_iov = rma_iov;
-    //   msg_rma->rma_iov_count = 1;
-    //   msg_rma->context = NULL;
-    //   msg_rma->data = 0;
-
-    //   // Fill fi_op_rma
-    //   memset(op_rma, 0, sizeof(*op_rma));
-    //   op_rma->ep = ep;
-    //   op_rma->msg = *msg_rma;
-    //   op_rma->flags = FI_COMPLETION | FI_CXI_CNTR_WB;
-
-    //   // Setup deferred work
-    //   work.triggering_cntr = trigger_cntr;
-    //   work.completion_cntr = completion_cntr;
-    //   work.threshold = 1;
-    //   work.op_type = FI_OP_WRITE;
-    //   work.op.rma = op_rma;
-
-    //   // Queue deferred work
-    //   int ret = fi_control(&domain->fid, FI_QUEUE_WORK, &work);
-    //   if (ret) {
-    //     fprintf(stderr, "Rank %d: Warmup FI_QUEUE_WORK failed: %s (%d)\n",
-    //             myrank, fi_strerror(-ret), ret);
-    //     continue;
-    //   }
-
-    //   // Trigger and wait for warmup
-    //   hipLaunchKernelGGL(gpu_write_counter_doorbell, dim3(1), dim3(1), 0, 0,
-    //                      dev_trigger_cntr, work.threshold);
-    //   CHECK_HIP(hipDeviceSynchronize(), "hipDeviceSynchronize");
-    //   fi_cntr_wait(completion_cntr, 1, -1);
-    // }
-
-    CHECK(PMI2_KVS_Fence(), "PMI2_KVS_Fence"); // sync after warmup
-
-    // Timed iterations
     for (int iter = 0; iter < NUM_ITERATIONS; iter++) {
       fi_cntr_set(trigger_cntr, 0);
       fi_cntr_set(completion_cntr, 0);
 
       if (myrank == 0) {
-        // ---------- Rank 0: Sender using DWQ ----------
-
-        // Reset d_local_buf with iteration-dependent pattern
-        uint8_t pattern = 0x10 + (iter % 240);
-        CHECK_HIP(hipMemset(d_local_buf, pattern, current_size),
-                  "hipMemset(d_local_buf)");
-        CHECK_HIP(hipDeviceSynchronize(), "hipDeviceSynchronize after memset");
-
-        // 1. Setup IOV for local buffer
+        
+        // WORK 1: RDMA write to peer
         iov->iov_base = d_local_buf;
         iov->iov_len = current_size;
 
-        // 2. Setup RMA IOV for remote target
         rma_iov->addr = remote_addr_for_rma;
         rma_iov->len = current_size;
         rma_iov->key = peer_remote_key;
 
-        // 3. Fill fi_msg_rma
         memset(msg_rma, 0, sizeof(*msg_rma));
         msg_rma->msg_iov = iov;
         msg_rma->desc = &desc_local; // Include descriptor for GPU memory
@@ -682,119 +595,120 @@ int main(void) {
         msg_rma->context = NULL; // Not needed for DWQ
         msg_rma->data = 0;
 
-        // 4. Fill fi_op_rma
         memset(op_rma, 0, sizeof(*op_rma));
         op_rma->ep = ep;
         op_rma->msg = *msg_rma;
         // Use FI_CXI_CNTR_WB to ensure counter writeback
         op_rma->flags = FI_COMPLETION | FI_CXI_CNTR_WB;
 
-        // 5. Setup deferred work
         work.triggering_cntr = trigger_cntr;    // Counter GPU will write to
         work.completion_cntr = completion_cntr; // Counter NIC will increment
         work.threshold = 1;                     // Trigger when counter >= 1
         work.op_type = FI_OP_WRITE;             // RMA write operation
         work.op.rma = op_rma;
 
-        // 6. Queue deferred work to domain
         int ret = fi_control(&domain->fid, FI_QUEUE_WORK, &work);
 
-        // 7. Start timing and fire GPU doorbell to trigger
+        // WORK 2: NIC atomic to signal GPU completion
+        // This atomic operation will be triggered when the RMA write completes
+        // and increments the completion counter. It writes to atomic_result
+        // which the GPU kernel is polling.
+
+        void *desc_atomic_operand = fi_mr_desc(mr_atomic_operand);
+        void *desc_atomic_result = fi_mr_desc(mr_atomic);
+
+        // Setup source operand (value to add)
+        atomic_iov.addr = atomic_operand;
+        atomic_iov.count = 1; // Number of elements, not bytes
+
+        // Setup destination (atomic_result on GPU)
+        uint64_t atomic_result_addr = (uint64_t)atomic_result;
+        if (cxi_info->domain_attr->mr_mode & FI_MR_VIRT_ADDR) {
+          atomic_rma_iov.addr = atomic_result_addr;
+        } else {
+          atomic_rma_iov.addr = 0; // Offset from MR base
+        }
+        atomic_rma_iov.count = 1; // Number of elements, not bytes
+        atomic_rma_iov.key = fi_mr_key(mr_atomic);
+
+        // Setup atomic message
+        atomic_msg.msg_iov = &atomic_iov;
+        atomic_msg.desc = &desc_atomic_operand;
+        atomic_msg.iov_count = 1;
+        atomic_msg.addr = local_fi_addr; // Target is local EP
+        atomic_msg.rma_iov = &atomic_rma_iov;
+        atomic_msg.rma_iov_count = 1;
+        atomic_msg.datatype = FI_UINT64;
+        atomic_msg.op = FI_SUM; // Atomic add operation
+        atomic_msg.context = NULL;
+        atomic_msg.data = 0; // Not used for atomic operations
+
+        // Setup atomic work structure
+        atomic.ep = ep;
+        atomic.msg = atomic_msg;
+        atomic.flags = 0;
+
+        atomic_work.op_type = FI_OP_ATOMIC;
+        atomic_work.op.atomic = &atomic;
+        // Triggered when RMA completion counter reaches threshold
+        atomic_work.triggering_cntr = completion_cntr;
+        atomic_work.completion_cntr = NULL; // No completion tracking for this op
+        atomic_work.threshold = 1;
+
+        ret = fi_control(&domain->fid, FI_QUEUE_WORK, &atomic_work);
+
+        if (ret) {
+          fprintf(stderr, "Rank %d: fi_control(atomic) failed: %s (%d)\n",
+                  myrank, fi_strerror(-ret), ret);
+          PMI2_Finalize();
+          exit(1);
+        }
+        uint64_t completion_val = 0;
+        completion_val = fi_cntr_read(completion_cntr);
+
         double start_time = get_time_us();
         hipLaunchKernelGGL(gpu_write_counter_doorbell, dim3(1), dim3(1), 0, 0,
-                           dev_trigger_cntr, 1);
-        // // CHECK_HIP(hipDeviceSynchronize(), "hipDeviceSynchronize");
-
-        // 8. Wait for completion counter to increment
-        // fi_cntr_wait(completion_cntr, 1, -1);
-        smart_cntr_wait(completion_cntr, 1, current_size);
-        // uint64_t completion_val = 0;
-        // completion_val = fi_cntr_read(completion_cntr);
-        // do {
-        //   completion_val = fi_cntr_read(completion_cntr);
-        //   // usleep(10);
-        // } while (completion_val < 1);
+                           dev_trigger_cntr, atomic_result, work.threshold);
+        CHECK_HIP(hipDeviceSynchronize(), "hipDeviceSynchronize");
         double end_time = get_time_us();
+
+
+        // Check trigger counter AFTER GPU write
+        // uint64_t trigger_after = fi_cntr_read(trigger_cntr);
+        // if (iter == 0 && size_idx == 0) {
+        //   fprintf(
+        //       stderr,
+        //       "Rank %d: trigger_cntr AFTER GPU write = %lu (expected %lu)\n",
+        //       myrank, trigger_after, work.threshold);
+        //   fflush(stderr);
+        // }
+
+        // !!! IMPORTANT: Wait for completion counter to increment
+        // Completion counter should increment by 1 for each successful
+        // operation
+        // uint64_t target_completion = 1; // Expecting 1 completion per iteration
+        
+        // fi_cntr_wait(completion_cntr, target_completion, -1);
+        completion_val = fi_cntr_read(completion_cntr);
+        printf("Rank %d: completion_cntr = %lu\n", myrank, completion_val);
 
         total_time += (end_time - start_time);
         successful_iterations++;
-        // CHECK(PMI2_KVS_Fence(), "PMI2_KVS_Fence");
-      } else if (myrank == 1) {
-        // ---------- Rank 1: Receiver - Verify d_remote_buf ----------
-        // CHECK(PMI2_KVS_Fence(), "PMI2_KVS_Fence");
-        // Wait for data to arrive
-        // usleep(1000);
 
-        // Allocate host buffer for verification
-        // uint8_t *h_verify_buf = (uint8_t *)malloc(current_size);
-        // if (!h_verify_buf) {
-        //   fprintf(stderr, "Rank %d: Failed to allocate verify buffer\n",
-        //           myrank);
-        //   continue;
-        // }
-        // CHECK_HIP(hipDeviceSynchronize(), "pre-verify sync on receiver");
-        // // Copy d_remote_buf to host for verification
-        // CHECK_HIP(hipMemcpy(h_verify_buf, d_remote_buf, current_size,
-        //                     hipMemcpyDeviceToHost),
-        //           "hipMemcpy D2H for verification");
-
-        // // Expected pattern from rank 0
-        // uint8_t expected_pattern = 0x10 + (iter % 240);
-
-        // // Verify the data
-        // bool verification_passed = true;
-        // size_t errors = 0;
-        // size_t max_errors_to_show = 5;
-
-        // for (size_t i = 0; i < current_size; i++) {
-        //   if (h_verify_buf[i] != expected_pattern) {
-        //     verification_passed = false;
-        //     if (errors < max_errors_to_show) {
-        //       fprintf(stderr,
-        //               "Rank %d: Verification failed at byte %zu: expected "
-        //               "0x%02x, got 0x%02x\n",
-        //               myrank, i, expected_pattern, h_verify_buf[i]);
-        //     }
-        //     errors++;
-        //   }
-        // }
-
-        // if (verification_passed) {
-        //   printf("Rank %d: Iteration %d - Verification PASSED
-        //   (pattern=0x%02x, "
-        //          "size=%zu)\n",
-        //          myrank, iter, expected_pattern, current_size);
-        // } else {
-        //   fprintf(stderr,
-        //           "Rank %d: Iteration %d - Verification FAILED (%zu errors
-        //           out " "of %zu bytes)\n", myrank, iter, errors,
-        //           current_size);
-        // }
-
-        // free(h_verify_buf);
+      } else {
+        // ---------- Rank 1: Receiver ----------
       }
 
       CHECK(PMI2_KVS_Fence(), "PMI2_KVS_Fence");
     }
 
-    // Print results for this size
     if (myrank == 0 && successful_iterations > 0) {
       double avg_latency = total_time / successful_iterations;
-      char size_str[32];
-      format_size(current_size, size_str);
-      printf("%-10s %10d %10.2f\n", size_str, successful_iterations,
+      char size_buf[32];
+      printf("%-8s  %12.2f\n", format_size(current_size, size_buf),
              avg_latency);
     }
   }
-
-  if (myrank == 0) {
-    printf("========================================\n\n");
-  }
-
-  // -------------------------------------------------------------------------
-  // STEP 10: Final Synchronization
-  // -------------------------------------------------------------------------
-  CHECK(PMI2_KVS_Fence(), "PMI2_KVS_Fence(final)");
 
   // Free persistent DWQ structures
   free(rma_iov);
@@ -803,16 +717,20 @@ int main(void) {
   free(op_rma);
 
   // -------------------------------------------------------------------------
-  // STEP 11: Cleanup
+  // STEP 10: Cleanup
   // -------------------------------------------------------------------------
 
   hipHostUnregister(trigger_mmio_addr);
   hipHostUnregister(completion_mmio_addr);
   hipFree(d_local_buf);
   hipFree(d_remote_buf);
+  hipFree(atomic_result);
+  hipFree(atomic_operand);
 
   fi_close(&mr_local->fid);
   fi_close(&mr_remote->fid);
+  fi_close(&mr_atomic->fid);
+  fi_close(&mr_atomic_operand->fid);
   fi_close(&trigger_cntr->fid);
   fi_close(&completion_cntr->fid);
   fi_close(&ep->fid);
@@ -828,6 +746,5 @@ int main(void) {
   free(all_bin);
 
   PMI2_Finalize();
-  printf("Rank %d: Done\n", myrank);
   return 0;
 }
