@@ -69,7 +69,7 @@
 int myrank = -1;
 
 // Test parameters
-#define NUM_ITERATIONS 10 // Single iteration for data verification test
+#define NUM_ITERATIONS 20 // Run 20 iterations, report average of best 10
 const size_t test_sizes[] = {
   16 * 1024, // 16KB
                32 * 1024,  // 32KB
@@ -82,7 +82,7 @@ const size_t test_sizes[] = {
                4 * 1024 * 1024, // 4MB
                8 * 1024 * 1024, // 8MB
                16 * 1024 * 1024, // 16MB
-              //  32 * 1024 * 1024, // 32MB
+               32 * 1024 * 1024, // 32MB
               //  64 * 1024 * 1024, // 64MB
               //  128 * 1024 * 1024 // 128MB
 };
@@ -197,7 +197,7 @@ static int register_memory_region(struct fid_domain *domain, struct fid_ep *ep,
 
   if (is_device_mem) {
     mr_attr.iface = FI_HMEM_ROCR;
-    mr_attr.device.reserved = 0;
+    mr_attr.device.reserved = device_id;
   } else {
     mr_attr.iface = FI_HMEM_SYSTEM;
   }
@@ -268,6 +268,13 @@ int main(void) {
   unsetenv("ROCR_VISIBLE_DEVICES");
 
   // -------------------------------------------------------------------------
+  // CRITICAL: Set GPU device and CXI device for proper PCIe topology
+  // GPU 7 requires cxi3 for direct MMIO access (PCIe locality)
+  // -------------------------------------------------------------------------
+  setenv("FI_CXI_DEVICE_NAME", "cxi3", 1);
+  CHECK_HIP(hipSetDevice(7), "hipSetDevice(7) at startup");
+
+  // -------------------------------------------------------------------------
   // STEP 1: PMI2 Initialization
   // -------------------------------------------------------------------------
   int spawned, size, appnum;
@@ -287,9 +294,8 @@ int main(void) {
   int device_count;
   CHECK_HIP(hipGetDeviceCount(&device_count), "hipGetDeviceCount");
 
-  // IMPORTANT: In multi-node environment, use rank % device_count
-  int gpu_id = myrank % device_count;
-  CHECK_HIP(hipSetDevice(gpu_id), "hipSetDevice");
+  // Already set to GPU 7 at startup
+  int gpu_id = 7;
 
   hipDeviceProp_t prop;
   CHECK_HIP(hipGetDeviceProperties(&prop, gpu_id), "hipGetDeviceProperties");
@@ -587,8 +593,10 @@ int main(void) {
   // Note: Skip DWQ support check - will detect on first fi_control call
 
   if (myrank == 0) {
-    printf("%-8s  %12s\n", "Size", "Latency(us)");
-    printf("========  ============\n");
+    printf("%-8s  %12s  %s\n", "Size", "Latency(us)", "Statistics");
+    printf("========  ============  ===============================================\n");
+    printf("Note: Latency is average of best 10/%d iterations\n", NUM_ITERATIONS);
+    printf("      GPU-Driven RDMA with Deferred Work Queue (DWQ)\n\n");
   }
 
   // Allocate persistent structures for DWQ (must remain valid until completion)
@@ -615,7 +623,8 @@ int main(void) {
     size_t current_size = test_sizes[size_idx];
     CHECK(PMI2_KVS_Fence(), "PMI2_KVS_Fence"); // sync before each size
 
-    double total_time = 0.0;
+    // Store all iteration times for statistical analysis
+    double iteration_times[NUM_ITERATIONS];
     int successful_iterations = 0;
 
     for (int iter = 0; iter < NUM_ITERATIONS; iter++) {
@@ -756,7 +765,7 @@ int main(void) {
         // Convert GPU cycles to microseconds
         double elapsed_us = (end_clock - start_clock) / gpu_clock_mhz;
 
-        total_time += elapsed_us;
+        iteration_times[successful_iterations] = elapsed_us;
         successful_iterations++;
 
       } else {
@@ -805,11 +814,43 @@ int main(void) {
       }
     }
 
+    // Print results for this size (rank 0 only)
     if (myrank == 0 && successful_iterations > 0) {
-      double avg_latency = total_time / successful_iterations;
+      // Sort iteration times in ascending order
+      for (int i = 0; i < successful_iterations - 1; i++) {
+        for (int j = i + 1; j < successful_iterations; j++) {
+          if (iteration_times[j] < iteration_times[i]) {
+            double temp = iteration_times[i];
+            iteration_times[i] = iteration_times[j];
+            iteration_times[j] = temp;
+          }
+        }
+      }
+
+      // Select top 10 fastest iterations (or all if less than 10)
+      int samples_to_average = (successful_iterations < 10) ? successful_iterations : 10;
+      double sum_best = 0.0;
+      for (int i = 0; i < samples_to_average; i++) {
+        sum_best += iteration_times[i];
+      }
+      double avg_best_latency = sum_best / samples_to_average;
+
       char size_buf[32];
-      printf("%-8s  %12.2f\n", format_size(current_size, size_buf),
-             avg_latency);
+      printf("%-8s  %12.2f  (best %d/%d: min=%.2f max=%.2f)\n",
+             format_size(current_size, size_buf),
+             avg_best_latency,
+             samples_to_average,
+             successful_iterations,
+             iteration_times[0],
+             iteration_times[samples_to_average - 1]);
+      fflush(stdout);
+      ret = fi_control(&domain->fid, FI_FLUSH_WORK, NULL);
+      if (ret) {
+        fprintf(stderr, "Rank %d: FI_FLUSH_WORK failed: %s (%d)\n",
+                myrank, fi_strerror(-ret), ret);
+        PMI2_Finalize();
+        exit(1);
+      }
     }
   }
 
