@@ -8,9 +8,21 @@
 set(OPENGDA_SOURCES
     gda.cpp
     bootstrap/common.cpp
-    bootstrap/pmi2.cpp
-    network/ofi.cpp
 )
+
+# Add bootstrap source files based on type
+if(BOOTSTRAP_TYPE STREQUAL "PMI2")
+    list(APPEND OPENGDA_SOURCES bootstrap/pmi2.cpp)
+elseif(BOOTSTRAP_TYPE STREQUAL "PMIX")
+    list(APPEND OPENGDA_SOURCES bootstrap/pmix.cpp)
+endif()
+
+# Add network source files based on type
+if(NETWORK_TYPE STREQUAL "OFI")
+    list(APPEND OPENGDA_SOURCES network/ofi.cpp)
+elseif(NETWORK_TYPE STREQUAL "IBV")
+    list(APPEND OPENGDA_SOURCES network/ibv.cpp)
+endif()
 
 set(OPENGDA_PUBLIC_HEADERS
     gda.h
@@ -43,9 +55,9 @@ target_include_directories(opengda
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<INSTALL_INTERFACE:include>
     PRIVATE
-        ${LIBFABRIC_INCLUDE_DIR}
+        ${NETWORK_INCLUDE_DIR}
+        ${BOOTSTRAP_INCLUDE_DIR}
         ${HWLOC_INCLUDE_DIR}
-        ${PMI2_INCLUDE_DIR}
 )
 
 # ============================================================================
@@ -53,9 +65,9 @@ target_include_directories(opengda
 # ============================================================================
 target_link_libraries(opengda
     PRIVATE
-        ${LIBFABRIC_LIBRARY}
+        ${NETWORK_LIBRARY}
+        ${BOOTSTRAP_LIBRARY}
         ${HWLOC_LIBRARY}
-        ${PMI2_LIBRARY}
 )
 
 # ============================================================================
@@ -68,8 +80,16 @@ target_compile_options(opengda PRIVATE
 )
 
 # ============================================================================
-# AMD GPU Support
+# Compile Definitions (Macros)
 # ============================================================================
+
+# Bootstrap type macro
+target_compile_definitions(opengda PRIVATE ${BOOTSTRAP_COMPILE_DEF})
+
+# Network type macro
+target_compile_definitions(opengda PRIVATE ${NETWORK_COMPILE_DEF})
+
+# AMD GPU Support
 if(USE_AMDGPU)
     target_compile_definitions(opengda PRIVATE USE_AMDGPU=1)
     target_include_directories(opengda PRIVATE ${HIP_INCLUDE_DIR})

@@ -12,12 +12,16 @@
 
 #include <cstdlib>
 #include <cstdio>
+#include <string>
 
 class PMI2 : public Bootstrap {
 public:
     PMI2();
     ~PMI2();
 
+    bool bootstrap_initialize() override;
+    bool bootstrap_finalize() override;
+    std::string get_bootstrap_name() const override;
 
 private:
     int rank;

@@ -4,7 +4,6 @@
 
 #include "gda.h"
 #include <cstdio>
-#include <string>
 
 // Version string (compile-time construction)
 #define STRINGIFY(x) #x
@@ -25,10 +24,15 @@ int gda_init(void) {
         return -1;
     }
 
-    // TODO: Initialize subsystems
-    // - Bootstrap (PMI2)
-    // - Network (OFI)
-    // - GPU (HIP) if enabled
+    #ifdef BOOTSTRAP_PMI2
+    std::unique_ptr<Bootstrap> bootstrap = Bootstrap::create_bootstrap("pmi2");
+    #else
+    std::unique_ptr<Bootstrap> bootstrap = Bootstrap::create_bootstrap("NONE");
+    #endif
+    if (bootstrap == nullptr) {
+        fprintf(stderr, "OpenGDA: Failed to create bootstrap\n");
+        return -1;
+    }
 
     initialized = true;
     return 0;
