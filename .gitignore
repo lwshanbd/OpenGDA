@@ -1,6 +1,8 @@
 build/
-.clangd/
+.clangd
+.cache/
 .vscode/
 *.log
 *.core
 .claude/
+reference/
