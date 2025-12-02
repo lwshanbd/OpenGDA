@@ -1,6 +1,277 @@
 #include "ofi.hpp"
 #include <map>
 #include <string>
+#include <algorithm>
+
+// ============================================================================
+// MRManager Implementation
+// ============================================================================
+
+MRManager::MRManager()
+    : host_count_(0)
+    , device_count_(0)
+    , total_host_bytes_(0)
+    , total_device_bytes_(0) {
+}
+
+MRManager::~MRManager() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!mrs_by_addr_.empty()) {
+        OPENGDA_Warn("mr_manager", "Destroying MRManager with %zu MRs still registered",
+                     mrs_by_addr_.size());
+    }
+}
+
+bool MRManager::add_mr(struct fid_mr* mr, void* addr, size_t size, bool is_device_mem) {
+    if (!mr || !addr) {
+        OPENGDA_Error("mr_manager", "Cannot add null MR or address");
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // Check if address is already registered
+    if (mrs_by_addr_.find(addr) != mrs_by_addr_.end()) {
+        OPENGDA_Warn("mr_manager", "Address %p already registered", addr);
+        return false;
+    }
+
+    // Get MR key and descriptor
+    uint64_t key = fi_mr_key(mr);
+    void* desc = fi_mr_desc(mr);
+
+    // Create MR info
+    MRInfo info;
+    info.mr = mr;
+    info.addr = addr;
+    info.size = size;
+    info.is_device_mem = is_device_mem;
+    info.key = key;
+    info.desc = desc;
+    info.registered_time = std::chrono::steady_clock::now();
+
+    // Add to indices
+    mrs_by_addr_[addr] = info;
+    mrs_by_key_[key] = addr;
+
+    // Update statistics
+    update_stats_add(size, is_device_mem);
+
+    OPENGDA_Debug("mr_manager", "Added MR: addr=%p, size=%zu, key=0x%lx, %s",
+                  addr, size, key, is_device_mem ? "GPU" : "Host");
+
+    return true;
+}
+
+bool MRManager::remove_mr(struct fid_mr* mr) {
+    if (!mr) {
+        OPENGDA_Error("mr_manager", "Cannot remove null MR");
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // Find the MR by searching through all entries
+    for (auto it = mrs_by_addr_.begin(); it != mrs_by_addr_.end(); ++it) {
+        if (it->second.mr == mr) {
+            uint64_t key = it->second.key;
+            size_t size = it->second.size;
+            bool is_device_mem = it->second.is_device_mem;
+
+            OPENGDA_Debug("mr_manager", "Removed MR: addr=%p, size=%zu, key=0x%lx",
+                          it->second.addr, size, key);
+
+            // Remove from indices
+            mrs_by_key_.erase(key);
+            mrs_by_addr_.erase(it);
+
+            // Update statistics
+            update_stats_remove(size, is_device_mem);
+
+            return true;
+        }
+    }
+
+    OPENGDA_Warn("mr_manager", "MR %p not found in manager", mr);
+    return false;
+}
+
+bool MRManager::remove_by_addr(void* addr) {
+    if (!addr) {
+        OPENGDA_Error("mr_manager", "Cannot remove null address");
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = mrs_by_addr_.find(addr);
+    if (it == mrs_by_addr_.end()) {
+        OPENGDA_Warn("mr_manager", "Address %p not found in manager", addr);
+        return false;
+    }
+
+    uint64_t key = it->second.key;
+    size_t size = it->second.size;
+    bool is_device_mem = it->second.is_device_mem;
+
+    // Remove from indices
+    mrs_by_key_.erase(key);
+    mrs_by_addr_.erase(it);
+
+    // Update statistics
+    update_stats_remove(size, is_device_mem);
+
+    OPENGDA_Debug("mr_manager", "Removed MR by address: addr=%p, size=%zu, key=0x%lx",
+                  addr, size, key);
+
+    return true;
+}
+
+struct fid_mr* MRManager::find_by_addr(void* addr) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = mrs_by_addr_.find(addr);
+    if (it != mrs_by_addr_.end()) {
+        return it->second.mr;
+    }
+    return nullptr;
+}
+
+struct fid_mr* MRManager::find_by_key(uint64_t key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto key_it = mrs_by_key_.find(key);
+    if (key_it != mrs_by_key_.end()) {
+        void* addr = key_it->second;
+        auto addr_it = mrs_by_addr_.find(addr);
+        if (addr_it != mrs_by_addr_.end()) {
+            return addr_it->second.mr;
+        }
+    }
+    return nullptr;
+}
+
+const MRManager::MRInfo* MRManager::get_info_by_addr(void* addr) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = mrs_by_addr_.find(addr);
+    if (it != mrs_by_addr_.end()) {
+        return &(it->second);
+    }
+    return nullptr;
+}
+
+const MRManager::MRInfo* MRManager::get_info_by_key(uint64_t key) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto key_it = mrs_by_key_.find(key);
+    if (key_it != mrs_by_key_.end()) {
+        void* addr = key_it->second;
+        auto addr_it = mrs_by_addr_.find(addr);
+        if (addr_it != mrs_by_addr_.end()) {
+            return &(addr_it->second);
+        }
+    }
+    return nullptr;
+}
+
+bool MRManager::is_registered(void* addr) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return mrs_by_addr_.find(addr) != mrs_by_addr_.end();
+}
+
+std::vector<void*> MRManager::get_all_addresses() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    std::vector<void*> addresses;
+    addresses.reserve(mrs_by_addr_.size());
+
+    for (const auto& pair : mrs_by_addr_) {
+        addresses.push_back(pair.first);
+    }
+
+    return addresses;
+}
+
+MRManager::MRStats MRManager::get_stats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    MRStats stats;
+    stats.total_count = mrs_by_addr_.size();
+    stats.host_count = host_count_;
+    stats.device_count = device_count_;
+    stats.total_host_bytes = total_host_bytes_;
+    stats.total_device_bytes = total_device_bytes_;
+
+    return stats;
+}
+
+void MRManager::print_stats() const {
+    MRStats stats = get_stats();
+
+    OPENGDA_Info("mr_manager", "=== MR Statistics ===");
+    OPENGDA_Info("mr_manager", "Total MRs: %zu", stats.total_count);
+    OPENGDA_Info("mr_manager", "  Host MRs: %zu (%zu bytes, %.2f MB)",
+                 stats.host_count, stats.total_host_bytes,
+                 stats.total_host_bytes / (1024.0 * 1024.0));
+    OPENGDA_Info("mr_manager", "  Device MRs: %zu (%zu bytes, %.2f MB)",
+                 stats.device_count, stats.total_device_bytes,
+                 stats.total_device_bytes / (1024.0 * 1024.0));
+    OPENGDA_Info("mr_manager", "Total memory: %.2f MB",
+                 (stats.total_host_bytes + stats.total_device_bytes) / (1024.0 * 1024.0));
+}
+
+void MRManager::clear_all() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    size_t count = mrs_by_addr_.size();
+    mrs_by_addr_.clear();
+    mrs_by_key_.clear();
+
+    host_count_ = 0;
+    device_count_ = 0;
+    total_host_bytes_ = 0;
+    total_device_bytes_ = 0;
+
+    OPENGDA_Info("mr_manager", "Cleared all MRs (%zu removed)", count);
+}
+
+size_t MRManager::get_mr_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return mrs_by_addr_.size();
+}
+
+void MRManager::update_stats_add(size_t size, bool is_device_mem) {
+    if (is_device_mem) {
+        device_count_++;
+        total_device_bytes_ += size;
+    } else {
+        host_count_++;
+        total_host_bytes_ += size;
+    }
+}
+
+void MRManager::update_stats_remove(size_t size, bool is_device_mem) {
+    if (is_device_mem) {
+        if (device_count_ > 0) device_count_--;
+        if (total_device_bytes_ >= size) {
+            total_device_bytes_ -= size;
+        } else {
+            total_device_bytes_ = 0;
+        }
+    } else {
+        if (host_count_ > 0) host_count_--;
+        if (total_host_bytes_ >= size) {
+            total_host_bytes_ -= size;
+        } else {
+            total_host_bytes_ = 0;
+        }
+    }
+}
+
+// ============================================================================
+// OFI Implementation
+// ============================================================================
 
 #ifdef USE_AMDGPU
 // Helper structure to store device affinity information
@@ -310,6 +581,12 @@ struct fid_mr* OFI::register_memory(void* buf, size_t size, bool is_device_mem) 
         return nullptr;
     }
 
+    // Check if already registered
+    if (mr_manager_.is_registered(buf)) {
+        OPENGDA_Warn("ofi", "Memory at %p is already registered", buf);
+        return mr_manager_.find_by_addr(buf);
+    }
+
     struct fi_mr_attr mr_attr = {};
     struct iovec iov;
     iov.iov_base = buf;
@@ -363,6 +640,13 @@ struct fid_mr* OFI::register_memory(void* buf, size_t size, bool is_device_mem) 
                  buf, size, (unsigned long)fi_mr_key(mr),
                  is_device_mem ? "GPU" : "Host");
 
+    // Add to MR manager
+    if (!mr_manager_.add_mr(mr, buf, size, is_device_mem)) {
+        OPENGDA_Error("ofi", "Failed to add MR to manager");
+        fi_close(&mr->fid);
+        return nullptr;
+    }
+
     return mr;
 }
 
@@ -375,8 +659,77 @@ void OFI::deregister_memory(struct fid_mr* mr) {
     OPENGDA_Debug("ofi", "Deregistering memory: MR=%p, key=0x%lx",
                   mr, (unsigned long)fi_mr_key(mr));
 
+    // Remove from manager first
+    mr_manager_.remove_mr(mr);
+
+    // Close the MR
     int ret = fi_close(&mr->fid);
     if (ret) {
         OPENGDA_Error("ofi", "fi_close(mr) failed: %s (%d)", fi_strerror(-ret), ret);
+    }
+}
+
+bool OFI::deregister_memory_by_addr(void* addr) {
+    struct fid_mr* mr = mr_manager_.find_by_addr(addr);
+    if (!mr) {
+        OPENGDA_Warn("ofi", "No MR found for address %p", addr);
+        return false;
+    }
+
+    deregister_memory(mr);
+    return true;
+}
+
+struct fid_mr* OFI::find_mr_by_addr(void* addr) {
+    return mr_manager_.find_by_addr(addr);
+}
+
+struct fid_mr* OFI::find_mr_by_key(uint64_t key) {
+    return mr_manager_.find_by_key(key);
+}
+
+bool OFI::is_memory_registered(void* addr) {
+    return mr_manager_.is_registered(addr);
+}
+
+const MRManager::MRInfo* OFI::get_mr_info(void* addr) {
+    return mr_manager_.get_info_by_addr(addr);
+}
+
+MRManager::MRStats OFI::get_mr_stats() {
+    return mr_manager_.get_stats();
+}
+
+void OFI::print_mr_stats() {
+    mr_manager_.print_stats();
+}
+
+// Destructor - cleanup any remaining MRs
+OFI::~OFI() {
+    // Get all registered MRs and deregister them
+    std::vector<void*> addrs = mr_manager_.get_all_addresses();
+
+    if (!addrs.empty()) {
+        OPENGDA_Warn("ofi", "Cleaning up %zu unreleased MRs", addrs.size());
+
+        for (void* addr : addrs) {
+            struct fid_mr* mr = mr_manager_.find_by_addr(addr);
+            if (mr) {
+                OPENGDA_Debug("ofi", "Auto-deregistering MR at %p", addr);
+                fi_close(&mr->fid);
+            }
+        }
+
+        mr_manager_.clear_all();
+    }
+
+    // Close OFI resources
+    if (ofi_initialized) {
+        if (ep) fi_close(&ep->fid);
+        if (cq) fi_close(&cq->fid);
+        if (av) fi_close(&av->fid);
+        if (domain) fi_close(&domain->fid);
+        if (fabric) fi_close(&fabric->fid);
+        if (info) fi_freeinfo(info);
     }
 }
