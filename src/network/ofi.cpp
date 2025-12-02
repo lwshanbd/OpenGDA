@@ -65,6 +65,7 @@ static bool get_device_affinity(hwloc_topology_t topo, hwloc_obj_t osdev,
 
 OFI::OFI(int rank) {
     this->rank = rank;
+    this->device_id = 0; // Default to GPU 0
 
     // Initialize logging system
     opengda::LogContext::instance().init(rank);
@@ -78,9 +79,10 @@ OFI::OFI(int rank) {
     hipError_t hip_err = hipGetDeviceCount(&gpu_count);
     if (hip_err == hipSuccess && gpu_count > 0) {
         // Use device 0 (first visible GPU from HIP's perspective)
-        hip_err = hipDeviceGetPCIBusId(hip_pci_bus_id, sizeof(hip_pci_bus_id), 0);
+        device_id = 0;
+        hip_err = hipDeviceGetPCIBusId(hip_pci_bus_id, sizeof(hip_pci_bus_id), device_id);
         if (hip_err == hipSuccess) {
-            OPENGDA_Info("ofi", "HIP reports GPU 0 at PCI Bus ID: %s", hip_pci_bus_id);
+            OPENGDA_Info("ofi", "HIP reports GPU %d at PCI Bus ID: %s", device_id, hip_pci_bus_id);
         } else {
             OPENGDA_Warn("ofi", "hipDeviceGetPCIBusId failed: %s", hipGetErrorString(hip_err));
         }
@@ -296,4 +298,85 @@ bool OFI::ofi_initialize() {
     }
 
     return false;
+}
+
+// ============================================================================
+// Memory Registration
+// ============================================================================
+
+struct fid_mr* OFI::register_memory(void* buf, size_t size, bool is_device_mem) {
+    if (!ofi_initialized) {
+        OPENGDA_Error("ofi", "Cannot register memory: OFI not initialized");
+        return nullptr;
+    }
+
+    struct fi_mr_attr mr_attr = {};
+    struct iovec iov;
+    iov.iov_base = buf;
+    iov.iov_len = size;
+
+    mr_attr.mr_iov = &iov;
+    mr_attr.iov_count = 1;
+    mr_attr.access = FI_SEND | FI_RECV | FI_READ | FI_WRITE |
+                     FI_REMOTE_READ | FI_REMOTE_WRITE;
+
+    if (is_device_mem) {
+        #ifdef USE_AMDGPU
+        mr_attr.iface = FI_HMEM_ROCR;
+        mr_attr.device.reserved = device_id;
+        OPENGDA_Debug("ofi", "Registering GPU memory: buf=%p, size=%zu, device=%d",
+                      buf, size, device_id);
+        #else
+        OPENGDA_Error("ofi", "GPU memory registration requested but USE_AMDGPU not defined");
+        return nullptr;
+        #endif
+    } else {
+        mr_attr.iface = FI_HMEM_SYSTEM;
+        OPENGDA_Debug("ofi", "Registering host memory: buf=%p, size=%zu", buf, size);
+    }
+
+    struct fid_mr *mr = nullptr;
+    int ret = fi_mr_regattr(domain, &mr_attr, 0, &mr);
+    if (ret) {
+        OPENGDA_Error("ofi", "fi_mr_regattr failed: %s (%d)", fi_strerror(-ret), ret);
+        return nullptr;
+    }
+
+    // If endpoint-level MR is required, bind and enable
+    if (cxi_info->domain_attr->mr_mode & FI_MR_ENDPOINT) {
+        ret = fi_mr_bind(mr, &ep->fid, 0);
+        if (ret) {
+            OPENGDA_Error("ofi", "fi_mr_bind failed: %s (%d)", fi_strerror(-ret), ret);
+            fi_close(&mr->fid);
+            return nullptr;
+        }
+
+        ret = fi_mr_enable(mr);
+        if (ret) {
+            OPENGDA_Error("ofi", "fi_mr_enable failed: %s (%d)", fi_strerror(-ret), ret);
+            fi_close(&mr->fid);
+            return nullptr;
+        }
+    }
+
+    OPENGDA_Info("ofi", "Memory registered: buf=%p, size=%zu, key=0x%lx, %s",
+                 buf, size, (unsigned long)fi_mr_key(mr),
+                 is_device_mem ? "GPU" : "Host");
+
+    return mr;
+}
+
+void OFI::deregister_memory(struct fid_mr* mr) {
+    if (!mr) {
+        OPENGDA_Warn("ofi", "Attempted to deregister null MR");
+        return;
+    }
+
+    OPENGDA_Debug("ofi", "Deregistering memory: MR=%p, key=0x%lx",
+                  mr, (unsigned long)fi_mr_key(mr));
+
+    int ret = fi_close(&mr->fid);
+    if (ret) {
+        OPENGDA_Error("ofi", "fi_close(mr) failed: %s (%d)", fi_strerror(-ret), ret);
+    }
 }

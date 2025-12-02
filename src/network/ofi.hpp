@@ -40,9 +40,18 @@ public:
   bool ofi_initialize();
   bool ofi_finalize();
 
+  // Memory registration functions
+  struct fid_mr* register_memory(void* buf, size_t size, bool is_device_mem);
+  void deregister_memory(struct fid_mr* mr);
+
+  // Accessors
+  struct fid_domain* get_domain() { return domain; }
+  struct fid_ep* get_endpoint() { return ep; }
+  struct fi_info* get_info() { return cxi_info; }
+
 private:
     bool ofi_initialized = false;
-    
+
     struct fi_info *hints;
     struct fi_info *info;
     struct fi_info *cxi_info;

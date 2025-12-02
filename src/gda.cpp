@@ -80,4 +80,63 @@ const char* gda_get_version(void) {
     return VERSION_STRING;
 }
 
+// ============================================================================
+// Memory Registration API
+// ============================================================================
+
+gda_mr_t* gda_register_memory(void* buf, size_t size, int is_device_mem) {
+    if (!initialized) {
+        fprintf(stderr, "OpenGDA: Not initialized (call gda_init first)\n");
+        return nullptr;
+    }
+
+    if (!ofi) {
+        fprintf(stderr, "OpenGDA: OFI not initialized\n");
+        return nullptr;
+    }
+
+    struct fid_mr* mr = ofi->register_memory(buf, size, is_device_mem != 0);
+    return reinterpret_cast<gda_mr_t*>(mr);
+}
+
+void gda_deregister_memory(gda_mr_t* mr) {
+    if (!initialized) {
+        fprintf(stderr, "OpenGDA: Not initialized\n");
+        return;
+    }
+
+    if (!ofi) {
+        fprintf(stderr, "OpenGDA: OFI not initialized\n");
+        return;
+    }
+
+    if (!mr) {
+        fprintf(stderr, "OpenGDA: Cannot deregister null MR\n");
+        return;
+    }
+
+    struct fid_mr* fid_mr = reinterpret_cast<struct fid_mr*>(mr);
+    ofi->deregister_memory(fid_mr);
+}
+
+uint64_t gda_mr_get_key(gda_mr_t* mr) {
+    if (!mr) {
+        fprintf(stderr, "OpenGDA: Cannot get key from null MR\n");
+        return 0;
+    }
+
+    struct fid_mr* fid_mr = reinterpret_cast<struct fid_mr*>(mr);
+    return fi_mr_key(fid_mr);
+}
+
+void* gda_mr_get_desc(gda_mr_t* mr) {
+    if (!mr) {
+        fprintf(stderr, "OpenGDA: Cannot get descriptor from null MR\n");
+        return nullptr;
+    }
+
+    struct fid_mr* fid_mr = reinterpret_cast<struct fid_mr*>(mr);
+    return fi_mr_desc(fid_mr);
+}
+
 } // extern "C"
