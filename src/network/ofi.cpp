@@ -4,6 +4,411 @@
 #include <algorithm>
 
 // ============================================================================
+// CntrManager Implementation
+// ============================================================================
+
+CntrManager::CntrManager()
+    : initialized_(false)
+    , domain_(nullptr)
+    , allocated_count_(0) {
+
+    // Initialize all counter info structures
+    for (int i = 0; i < NUM_CNTR_PAIRS; i++) {
+        trigger_cntrs_[i] = {};
+        trigger_cntrs_[i].index = i;
+        trigger_cntrs_[i].is_trigger = true;
+        trigger_cntrs_[i].allocated = false;
+
+        completion_cntrs_[i] = {};
+        completion_cntrs_[i].index = i;
+        completion_cntrs_[i].is_trigger = false;
+        completion_cntrs_[i].allocated = false;
+
+        pairs_[i].index = i;
+        pairs_[i].trigger = &trigger_cntrs_[i];
+        pairs_[i].completion = &completion_cntrs_[i];
+        pairs_[i].allocated = false;
+    }
+}
+
+CntrManager::~CntrManager() {
+    if (initialized_) {
+        finalize();
+    }
+}
+
+bool CntrManager::initialize(struct fid_domain* domain) {
+    if (initialized_) {
+        OPENGDA_Warn("cntr_manager", "Already initialized");
+        return false;
+    }
+
+    if (!domain) {
+        OPENGDA_Error("cntr_manager", "Invalid domain");
+        return false;
+    }
+
+    domain_ = domain;
+
+    OPENGDA_Info("cntr_manager", "Initializing %d counter pairs (%d total counters)...",
+                 NUM_CNTR_PAIRS, TOTAL_CNTRS);
+
+    // Create all triggering counters
+    for (int i = 0; i < NUM_CNTR_PAIRS; i++) {
+        if (!create_counter(&trigger_cntrs_[i], i, true)) {
+            OPENGDA_Error("cntr_manager", "Failed to create trigger counter %d", i);
+            finalize();
+            return false;
+        }
+
+        if (!setup_mmio(&trigger_cntrs_[i])) {
+            OPENGDA_Error("cntr_manager", "Failed to setup MMIO for trigger counter %d", i);
+            finalize();
+            return false;
+        }
+
+#ifdef USE_AMDGPU
+        if (!register_with_hip(&trigger_cntrs_[i])) {
+            OPENGDA_Warn("cntr_manager", "Failed to register trigger counter %d with HIP", i);
+            // Continue - may still work without GPU access
+        }
+#endif
+    }
+
+    // Create all completion counters
+    for (int i = 0; i < NUM_CNTR_PAIRS; i++) {
+        if (!create_counter(&completion_cntrs_[i], i, false)) {
+            OPENGDA_Error("cntr_manager", "Failed to create completion counter %d", i);
+            finalize();
+            return false;
+        }
+
+        if (!setup_mmio(&completion_cntrs_[i])) {
+            OPENGDA_Error("cntr_manager", "Failed to setup MMIO for completion counter %d", i);
+            finalize();
+            return false;
+        }
+
+#ifdef USE_AMDGPU
+        if (!register_with_hip(&completion_cntrs_[i])) {
+            OPENGDA_Warn("cntr_manager", "Failed to register completion counter %d with HIP", i);
+            // Continue - may still work without GPU access
+        }
+#endif
+    }
+
+    initialized_ = true;
+    OPENGDA_Info("cntr_manager", "Successfully initialized %d counter pairs", NUM_CNTR_PAIRS);
+    return true;
+}
+
+void CntrManager::finalize() {
+    if (!initialized_) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    OPENGDA_Info("cntr_manager", "Finalizing counter manager...");
+
+    // Destroy all completion counters
+    for (int i = 0; i < NUM_CNTR_PAIRS; i++) {
+        destroy_counter(&completion_cntrs_[i]);
+    }
+
+    // Destroy all triggering counters
+    for (int i = 0; i < NUM_CNTR_PAIRS; i++) {
+        destroy_counter(&trigger_cntrs_[i]);
+    }
+
+    allocated_count_ = 0;
+    initialized_ = false;
+    domain_ = nullptr;
+
+    OPENGDA_Info("cntr_manager", "Counter manager finalized");
+}
+
+bool CntrManager::create_counter(CntrInfo* info, int index, bool is_trigger) {
+    if (!info || !domain_) {
+        return false;
+    }
+
+    struct fi_cntr_attr cntr_attr = {};
+    cntr_attr.events = FI_CNTR_EVENTS_COMP;
+    cntr_attr.wait_obj = FI_WAIT_UNSPEC;
+
+    int ret = fi_cntr_open(domain_, &cntr_attr, &info->cntr, NULL);
+    if (ret) {
+        OPENGDA_Error("cntr_manager", "fi_cntr_open failed for %s counter %d: %s (%d)",
+                      is_trigger ? "trigger" : "completion", index,
+                      fi_strerror(-ret), ret);
+        return false;
+    }
+
+    // Get CXI counter ops
+    ret = fi_open_ops(&info->cntr->fid, FI_CXI_COUNTER_OPS, 0,
+                      (void**)&info->ops, NULL);
+    if (ret) {
+        OPENGDA_Error("cntr_manager", "fi_open_ops failed for %s counter %d: %s (%d)",
+                      is_trigger ? "trigger" : "completion", index,
+                      fi_strerror(-ret), ret);
+        fi_close(&info->cntr->fid);
+        info->cntr = nullptr;
+        return false;
+    }
+
+    OPENGDA_Debug("cntr_manager", "Created %s counter %d",
+                  is_trigger ? "trigger" : "completion", index);
+
+    return true;
+}
+
+void CntrManager::destroy_counter(CntrInfo* info) {
+    if (!info) {
+        return;
+    }
+
+#ifdef USE_AMDGPU
+    if (info->hip_registered) {
+        unregister_from_hip(info);
+    }
+#endif
+
+    if (info->cntr) {
+        fi_close(&info->cntr->fid);
+        info->cntr = nullptr;
+    }
+
+    info->ops = nullptr;
+    info->mmio_addr = nullptr;
+    info->mmio_len = 0;
+#ifdef USE_AMDGPU
+    info->dev_addr = nullptr;
+    info->hip_registered = false;
+#endif
+}
+
+bool CntrManager::setup_mmio(CntrInfo* info) {
+    if (!info || !info->ops) {
+        return false;
+    }
+
+    int ret = info->ops->get_mmio_addr(&info->cntr->fid, &info->mmio_addr,
+                                       &info->mmio_len);
+    if (ret) {
+        OPENGDA_Error("cntr_manager", "get_mmio_addr failed for %s counter %d: %s (%d)",
+                      info->is_trigger ? "trigger" : "completion", info->index,
+                      fi_strerror(-ret), ret);
+        return false;
+    }
+
+    OPENGDA_Debug("cntr_manager", "Got MMIO for %s counter %d: addr=%p, len=%zu",
+                  info->is_trigger ? "trigger" : "completion", info->index,
+                  info->mmio_addr, info->mmio_len);
+
+    return true;
+}
+
+#ifdef USE_AMDGPU
+bool CntrManager::register_with_hip(CntrInfo* info) {
+    if (!info || !info->mmio_addr) {
+        return false;
+    }
+
+    // Register MMIO memory with HIP
+    hipError_t hip_err = hipHostRegister(info->mmio_addr, info->mmio_len,
+                                         hipHostRegisterMapped);
+    if (hip_err != hipSuccess) {
+        OPENGDA_Error("cntr_manager", "hipHostRegister failed for %s counter %d: %s (%d)",
+                      info->is_trigger ? "trigger" : "completion", info->index,
+                      hipGetErrorString(hip_err), hip_err);
+        return false;
+    }
+
+    // Get GPU device pointer
+    hip_err = hipHostGetDevicePointer((void**)&info->dev_addr, info->mmio_addr, 0);
+    if (hip_err != hipSuccess) {
+        OPENGDA_Error("cntr_manager", "hipHostGetDevicePointer failed for %s counter %d: %s (%d)",
+                      info->is_trigger ? "trigger" : "completion", info->index,
+                      hipGetErrorString(hip_err), hip_err);
+        hipError_t unreg_err = hipHostUnregister(info->mmio_addr);
+        (void)unreg_err;  // Suppress unused warning
+        return false;
+    }
+    info->hip_registered = true;
+
+    OPENGDA_Debug("cntr_manager", "Registered %s counter %d with HIP: dev_addr=%p",
+                  info->is_trigger ? "trigger" : "completion", info->index,
+                  (void*)info->dev_addr);
+
+    return true;
+}
+
+void CntrManager::unregister_from_hip(CntrInfo* info) {
+    if (!info || !info->hip_registered || !info->mmio_addr) {
+        return;
+    }
+
+    hipError_t hip_err = hipHostUnregister(info->mmio_addr);
+    if (hip_err != hipSuccess) {
+        OPENGDA_Warn("cntr_manager", "hipHostUnregister failed for %s counter %d: %s (%d)",
+                     info->is_trigger ? "trigger" : "completion", info->index,
+                     hipGetErrorString(hip_err), hip_err);
+    }
+
+    info->dev_addr = nullptr;
+    info->hip_registered = false;
+}
+#endif
+
+bool CntrManager::allocate_pair(CntrPair** pair_out) {
+    if (!pair_out) {
+        OPENGDA_Error("cntr_manager", "Invalid output parameter");
+        return false;
+    }
+
+    if (!initialized_) {
+        OPENGDA_Error("cntr_manager", "Manager not initialized");
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // Find first free pair
+    for (int i = 0; i < NUM_CNTR_PAIRS; i++) {
+        if (!pairs_[i].allocated) {
+            pairs_[i].allocated = true;
+            pairs_[i].trigger->allocated = true;
+            pairs_[i].completion->allocated = true;
+            allocated_count_++;
+
+            *pair_out = &pairs_[i];
+
+            OPENGDA_Debug("cntr_manager", "Allocated counter pair %d", i);
+            return true;
+        }
+    }
+
+    OPENGDA_Warn("cntr_manager", "No free counter pairs available (%d/%d allocated)",
+                 allocated_count_, NUM_CNTR_PAIRS);
+    return false;
+}
+
+bool CntrManager::release_pair(CntrPair* pair) {
+    if (!pair) {
+        OPENGDA_Error("cntr_manager", "Invalid pair");
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!pair->allocated) {
+        OPENGDA_Warn("cntr_manager", "Pair %d not allocated", pair->index);
+        return false;
+    }
+
+    pair->allocated = false;
+    pair->trigger->allocated = false;
+    pair->completion->allocated = false;
+
+    if (allocated_count_ > 0) {
+        allocated_count_--;
+    }
+
+    OPENGDA_Debug("cntr_manager", "Released counter pair %d", pair->index);
+    return true;
+}
+
+bool CntrManager::release_pair_by_index(int index) {
+    if (index < 0 || index >= NUM_CNTR_PAIRS) {
+        OPENGDA_Error("cntr_manager", "Invalid pair index %d", index);
+        return false;
+    }
+
+    return release_pair(&pairs_[index]);
+}
+
+CntrManager::CntrPair* CntrManager::get_pair(int index) {
+    if (index < 0 || index >= NUM_CNTR_PAIRS) {
+        return nullptr;
+    }
+
+    return &pairs_[index];
+}
+
+CntrManager::CntrInfo* CntrManager::get_trigger_cntr(int pair_index) {
+    if (pair_index < 0 || pair_index >= NUM_CNTR_PAIRS) {
+        return nullptr;
+    }
+
+    return &trigger_cntrs_[pair_index];
+}
+
+CntrManager::CntrInfo* CntrManager::get_completion_cntr(int pair_index) {
+    if (pair_index < 0 || pair_index >= NUM_CNTR_PAIRS) {
+        return nullptr;
+    }
+
+    return &completion_cntrs_[pair_index];
+}
+
+int CntrManager::find_free_pair() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (int i = 0; i < NUM_CNTR_PAIRS; i++) {
+        if (!pairs_[i].allocated) {
+            return i;
+        }
+    }
+
+    return -1;  // No free pairs
+}
+
+int CntrManager::get_allocated_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return allocated_count_;
+}
+
+int CntrManager::get_free_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return NUM_CNTR_PAIRS - allocated_count_;
+}
+
+CntrManager::CntrStats CntrManager::get_stats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    CntrStats stats;
+    stats.total_pairs = NUM_CNTR_PAIRS;
+    stats.allocated_pairs = allocated_count_;
+    stats.free_pairs = NUM_CNTR_PAIRS - allocated_count_;
+    stats.total_trigger_cntrs = NUM_CNTR_PAIRS;
+    stats.total_completion_cntrs = NUM_CNTR_PAIRS;
+
+    return stats;
+}
+
+void CntrManager::print_stats() const {
+    CntrStats stats = get_stats();
+
+    OPENGDA_Info("cntr_manager", "=== Counter Statistics ===");
+    OPENGDA_Info("cntr_manager", "Total pairs: %d", stats.total_pairs);
+    OPENGDA_Info("cntr_manager", "  Allocated: %d", stats.allocated_pairs);
+    OPENGDA_Info("cntr_manager", "  Free: %d", stats.free_pairs);
+    OPENGDA_Info("cntr_manager", "Total counters: %d (%d trigger + %d completion)",
+                 TOTAL_CNTRS, stats.total_trigger_cntrs, stats.total_completion_cntrs);
+
+#ifdef USE_AMDGPU
+    int hip_registered_count = 0;
+    for (int i = 0; i < NUM_CNTR_PAIRS; i++) {
+        if (trigger_cntrs_[i].hip_registered) hip_registered_count++;
+        if (completion_cntrs_[i].hip_registered) hip_registered_count++;
+    }
+    OPENGDA_Info("cntr_manager", "HIP registered: %d/%d counters",
+                 hip_registered_count, TOTAL_CNTRS);
+#endif
+}
+
+// ============================================================================
 // MRManager Implementation
 // ============================================================================
 
@@ -559,7 +964,11 @@ OFI::OFI(int rank) {
 
     ofi_initialized = true;
 
-    
+    // Initialize Counter Manager for DWQ
+    if (!cntr_manager_.initialize(domain)) {
+        OPENGDA_Error("ofi", "Failed to initialize counter manager");
+        exit(1);
+    }
 
 }
 
@@ -723,6 +1132,9 @@ OFI::~OFI() {
         mr_manager_.clear_all();
     }
 
+    // Finalize Counter Manager (before closing domain)
+    cntr_manager_.finalize();
+
     // Close OFI resources
     if (ofi_initialized) {
         if (ep) fi_close(&ep->fid);
@@ -732,4 +1144,32 @@ OFI::~OFI() {
         if (fabric) fi_close(&fabric->fid);
         if (info) fi_freeinfo(info);
     }
+}
+
+// ============================================================================
+// Counter Management Wrappers
+// ============================================================================
+
+bool OFI::allocate_cntr_pair(CntrManager::CntrPair** pair_out) {
+    return cntr_manager_.allocate_pair(pair_out);
+}
+
+bool OFI::release_cntr_pair(CntrManager::CntrPair* pair) {
+    return cntr_manager_.release_pair(pair);
+}
+
+bool OFI::release_cntr_pair_by_index(int index) {
+    return cntr_manager_.release_pair_by_index(index);
+}
+
+CntrManager::CntrPair* OFI::get_cntr_pair(int index) {
+    return cntr_manager_.get_pair(index);
+}
+
+CntrManager::CntrStats OFI::get_cntr_stats() {
+    return cntr_manager_.get_stats();
+}
+
+void OFI::print_cntr_stats() {
+    cntr_manager_.print_stats();
 }

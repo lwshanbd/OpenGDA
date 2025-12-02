@@ -38,6 +38,200 @@
   } while (0)
 
 // ============================================================================
+// CntrManager - Counter Management for Deferred Work Queue (DWQ)
+// ============================================================================
+
+/**
+ * CntrManager provides centralized management of libfabric counters for DWQ.
+ *
+ * Features:
+ * - Manages 32 counters (16 triggering + 16 completion)
+ * - Obtains MMIO addresses for each counter
+ * - Registers MMIO with HIP for GPU access (if USE_AMDGPU)
+ * - Provides GPU device pointers for doorbell operations
+ * - Thread-safe counter allocation and release
+ */
+class CntrManager {
+public:
+    // Number of counter pairs (trigger + completion)
+    static constexpr int NUM_CNTR_PAIRS = 16;
+    static constexpr int TOTAL_CNTRS = NUM_CNTR_PAIRS * 2;  // 32 total
+
+    /**
+     * Information for a single counter
+     */
+    struct CntrInfo {
+        struct fid_cntr* cntr;              // Libfabric counter handle
+        struct fi_cxi_cntr_ops* ops;        // CXI counter ops interface
+        void* mmio_addr;                    // MMIO address (host accessible)
+        size_t mmio_len;                    // MMIO region length
+
+#ifdef USE_AMDGPU
+        volatile uint64_t* dev_addr;        // GPU device pointer to MMIO
+        bool hip_registered;                // Whether HIP registration succeeded
+#endif
+
+        bool allocated;                     // Whether this counter is in use
+        int index;                          // Counter index (0-15 for trigger, 0-15 for completion)
+        bool is_trigger;                    // true=trigger, false=completion
+    };
+
+    /**
+     * Counter pair (trigger + completion)
+     */
+    struct CntrPair {
+        int index;                          // Pair index (0-15)
+        CntrInfo* trigger;                  // Triggering counter
+        CntrInfo* completion;               // Completion counter
+        bool allocated;                     // Whether this pair is in use
+    };
+
+    /**
+     * Statistics about counter usage
+     */
+    struct CntrStats {
+        int total_pairs;                    // Total number of pairs (16)
+        int allocated_pairs;                // Number of allocated pairs
+        int free_pairs;                     // Number of free pairs
+        int total_trigger_cntrs;            // Total triggering counters
+        int total_completion_cntrs;         // Total completion counters
+    };
+
+    CntrManager();
+    ~CntrManager();
+
+    // Disable copy and move
+    CntrManager(const CntrManager&) = delete;
+    CntrManager& operator=(const CntrManager&) = delete;
+
+    // ========================================================================
+    // Initialization
+    // ========================================================================
+
+    /**
+     * Initialize all counters (must be called during OFI initialization)
+     * @param domain Libfabric domain
+     * @return true on success, false on failure
+     */
+    bool initialize(struct fid_domain* domain);
+
+    /**
+     * Cleanup all counters
+     */
+    void finalize();
+
+    /**
+     * Check if manager is initialized
+     */
+    bool is_initialized() const { return initialized_; }
+
+    // ========================================================================
+    // Counter Allocation
+    // ========================================================================
+
+    /**
+     * Allocate a counter pair (trigger + completion)
+     * @param pair_out Pointer to store allocated pair info
+     * @return true on success, false if no pairs available
+     */
+    bool allocate_pair(CntrPair** pair_out);
+
+    /**
+     * Release a counter pair
+     * @param pair Pair to release
+     * @return true on success, false if pair was not allocated
+     */
+    bool release_pair(CntrPair* pair);
+
+    /**
+     * Release a counter pair by index
+     * @param index Pair index (0-15)
+     * @return true on success, false if not found or not allocated
+     */
+    bool release_pair_by_index(int index);
+
+    // ========================================================================
+    // Query Operations
+    // ========================================================================
+
+    /**
+     * Get counter pair by index
+     * @param index Pair index (0-15)
+     * @return Pointer to pair if valid, nullptr otherwise
+     */
+    CntrPair* get_pair(int index);
+
+    /**
+     * Get triggering counter by pair index
+     * @param pair_index Pair index (0-15)
+     * @return Pointer to trigger counter info, nullptr if invalid
+     */
+    CntrInfo* get_trigger_cntr(int pair_index);
+
+    /**
+     * Get completion counter by pair index
+     * @param pair_index Pair index (0-15)
+     * @return Pointer to completion counter info, nullptr if invalid
+     */
+    CntrInfo* get_completion_cntr(int pair_index);
+
+    /**
+     * Find first available (free) counter pair
+     * @return Index of free pair (0-15), or -1 if none available
+     */
+    int find_free_pair() const;
+
+    /**
+     * Get number of allocated pairs
+     */
+    int get_allocated_count() const;
+
+    /**
+     * Get number of free pairs
+     */
+    int get_free_count() const;
+
+    // ========================================================================
+    // Statistics
+    // ========================================================================
+
+    /**
+     * Get current statistics
+     * @return Structure containing current statistics
+     */
+    CntrStats get_stats() const;
+
+    /**
+     * Print statistics to log (Info level)
+     */
+    void print_stats() const;
+
+private:
+    bool initialized_;
+    struct fid_domain* domain_;
+
+    // Arrays for all counters
+    CntrInfo trigger_cntrs_[NUM_CNTR_PAIRS];      // 16 triggering counters
+    CntrInfo completion_cntrs_[NUM_CNTR_PAIRS];   // 16 completion counters
+    CntrPair pairs_[NUM_CNTR_PAIRS];              // 16 counter pairs
+
+    // Allocation tracking
+    int allocated_count_;
+
+    // Mutex for thread-safe access
+    mutable std::mutex mutex_;
+
+    // Helper functions
+    bool create_counter(CntrInfo* info, int index, bool is_trigger);
+    void destroy_counter(CntrInfo* info);
+    bool setup_mmio(CntrInfo* info);
+#ifdef USE_AMDGPU
+    bool register_with_hip(CntrInfo* info);
+    void unregister_from_hip(CntrInfo* info);
+#endif
+};
+
+// ============================================================================
 // MRManager - Memory Region Management
 // ============================================================================
 
@@ -297,6 +491,49 @@ public:
   void print_mr_stats();
 
   // ========================================================================
+  // Counter Management Functions
+  // ========================================================================
+
+  /**
+   * Allocate a counter pair for DWQ operations
+   * @param pair_out Pointer to store allocated pair
+   * @return true on success, false if no pairs available
+   */
+  bool allocate_cntr_pair(CntrManager::CntrPair** pair_out);
+
+  /**
+   * Release a counter pair
+   * @param pair Pair to release
+   * @return true on success
+   */
+  bool release_cntr_pair(CntrManager::CntrPair* pair);
+
+  /**
+   * Release counter pair by index
+   * @param index Pair index (0-15)
+   * @return true on success
+   */
+  bool release_cntr_pair_by_index(int index);
+
+  /**
+   * Get counter pair by index
+   * @param index Pair index (0-15)
+   * @return Pointer to pair, or nullptr if invalid
+   */
+  CntrManager::CntrPair* get_cntr_pair(int index);
+
+  /**
+   * Get counter statistics
+   * @return Structure containing counter statistics
+   */
+  CntrManager::CntrStats get_cntr_stats();
+
+  /**
+   * Print counter statistics to log
+   */
+  void print_cntr_stats();
+
+  // ========================================================================
   // Accessors
   // ========================================================================
 
@@ -304,6 +541,7 @@ public:
   struct fid_ep* get_endpoint() { return ep; }
   struct fi_info* get_info() { return cxi_info; }
   MRManager* get_mr_manager() { return &mr_manager_; }
+  CntrManager* get_cntr_manager() { return &cntr_manager_; }
 
 private:
     bool ofi_initialized = false;
@@ -322,4 +560,7 @@ private:
 
     // MR management
     MRManager mr_manager_;
+
+    // Counter management for DWQ
+    CntrManager cntr_manager_;
 };
