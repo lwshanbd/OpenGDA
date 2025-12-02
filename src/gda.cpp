@@ -3,7 +3,10 @@
  */
 
 #include "gda.h"
+#include "bootstrap/common.hpp"
+#include "network/ofi.hpp"
 #include <cstdio>
+#include <memory>
 
 // Version string (compile-time construction)
 #define STRINGIFY(x) #x
@@ -15,7 +18,8 @@ static const char* VERSION_STRING =
 
 // Global initialization flag
 static bool initialized = false;
-
+std::unique_ptr<Bootstrap> bootstrap;
+std::unique_ptr<OFI> ofi;
 extern "C" {
 
 int gda_init(void) {
@@ -25,12 +29,33 @@ int gda_init(void) {
     }
 
     #ifdef BOOTSTRAP_PMI2
-    std::unique_ptr<Bootstrap> bootstrap = Bootstrap::create_bootstrap("pmi2");
+    bootstrap = Bootstrap::create_bootstrap("pmi2");
+    #elif defined(BOOTSTRAP_PMIX)
+    bootstrap = Bootstrap::create_bootstrap("pmix");
     #else
-    std::unique_ptr<Bootstrap> bootstrap = Bootstrap::create_bootstrap("NONE");
+    bootstrap = nullptr;
+    fprintf(stderr, "OpenGDA: No bootstrap type defined\n");
+    return -1;
     #endif
+
     if (bootstrap == nullptr) {
         fprintf(stderr, "OpenGDA: Failed to create bootstrap\n");
+        return -1;
+    }
+
+    // Initialize bootstrap
+    if (!bootstrap->bootstrap_initialize()) {
+        fprintf(stderr, "OpenGDA: Failed to initialize bootstrap\n");
+        bootstrap = nullptr;
+        return -1;
+    }
+
+    int rank = bootstrap->get_rank();
+
+    ofi = std::make_unique<OFI>(rank);
+    if (!ofi->ofi_initialize()) {
+        fprintf(stderr, "OpenGDA: Failed to initialize OFI\n");
+        ofi = nullptr;
         return -1;
     }
 
@@ -44,8 +69,9 @@ int gda_finalize(void) {
         return -1;
     }
 
-    // TODO: Cleanup subsystems
+    bootstrap->bootstrap_finalize();
 
+    bootstrap = nullptr;
     initialized = false;
     return 0;
 }

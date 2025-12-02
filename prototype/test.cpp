@@ -65,6 +65,7 @@ __global__ void gpu_compute(uint64_t* data, int size) {
 }
 
 int main() {
+    hipSetDevice(7);
     struct fi_info *info;
     struct fid_fabric *fabric;
     struct fid_domain *domain;

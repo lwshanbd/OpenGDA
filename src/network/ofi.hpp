@@ -20,23 +20,29 @@
 #include <hwloc.h>
 #endif
 
+#include "../common/log.hpp"
+
+// OFI Error checking macro
 #define OFI_CHECK(x, msg)                                                      \
   do {                                                                         \
     int ret = (x);                                                             \
     if (ret) {                                                                 \
-      fprintf(stderr, "%s failed: %s (%d)\n", msg, fi_strerror(-ret), ret);    \
+      OPENGDA_Error("ofi", "%s failed: %s (%d)", msg, fi_strerror(-ret), ret); \
       exit(1);                                                                 \
     }                                                                          \
   } while (0)
 
-#define OFI_DEBUG(fmt, ...) fprintf(stderr, fmt, __VA_ARGS__);
-
 class OFI {
 public:
-  OFI();
-  ~OFI();
+  OFI(int rank);
+  ~OFI() = default;
+
+  bool ofi_initialize();
+  bool ofi_finalize();
 
 private:
+    bool ofi_initialized = false;
+    
     struct fi_info *hints;
     struct fi_info *info;
     struct fi_info *cxi_info;

@@ -33,9 +33,9 @@ all: $(TARGETS)
 help:
 	@echo "Available targets:"
 	@echo "  all           - Build all targets"
-	@echo "  amdgpu-test   - GPU-Driven RDMA with DWQ (includes SAXPY computation)"
+	@echo "  amdgpu-test   - GPU-Direct Async (GDA) with DWQ (includes SAXPY computation)"
 	@echo "  ofi-comp      - CPU-driven RDMA baseline (includes SAXPY computation)"
-	@echo "  gda-comp      - GPU-Driven RDMA comparison test (includes SAXPY computation)"
+	@echo "  gda-comp      - GPU-Direct Async (GDA) comparison test (includes SAXPY computation)"
 	@echo "  mpi-comp      - MPI GPU-Direct communication (includes SAXPY computation)"
 	@echo "  comp-tests    - Build gda-comp, ofi-comp, and mpi-comp for comparison"
 	@echo "  clean         - Remove all built targets"
@@ -64,7 +64,7 @@ rank-amdgpu: rank-amdgpu.cpp
 rank-amdgpu-gda: rank-amdgpu-gda.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) --offload-arch=$(GPU_ARCH) -o $@ $^ $(LIBS)
 
-# GPU-Driven RDMA test with Deferred Work Queue (DWQ)
+# GPU-Direct Async (GDA) test with Deferred Work Queue (DWQ)
 # Includes GPU computation (SAXPY) before and after communication
 amdgpu-test: amdgpu-test.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) --offload-arch=$(GPU_ARCH) -o $@ $^ $(LIBS)

@@ -1,7 +1,7 @@
 /*
- * rank-amdgpu-gda.cpp - GPU-Driven RDMA using Deferred Work Queue
+ * rank-amdgpu-gda.cpp - GPU-Direct Async (GDA) RDMA using Deferred Work Queue
  *
- * This program implements true GPU-Driven RDMA using libfabric's
+ * This program implements GPU-Direct Async (GDA) using libfabric's
  * Deferred Work Queue (DWQ) interface where:
  * 1. CPU submits deferred work request to domain work queue
  * 2. GPU signals by writing to triggering counter doorbell (MMIO)
@@ -311,6 +311,9 @@
    // Must unset BEFORE PMI2/HIP init - they may read env vars during init
    // Flux sets ROCR_VISIBLE_DEVICES which causes HSA virtualization
    unsetenv("ROCR_VISIBLE_DEVICES");
+   setenv("FI_CXI_DEVICE_NAME", "cxi3", 1);
+   int device_id = 7;
+   CHECK_HIP(hipSetDevice(device_id), "hipSetDevice");
  
    // -------------------------------------------------------------------------
    // STEP 1: PMI2 Initialization
@@ -333,7 +336,7 @@
    CHECK_HIP(hipGetDeviceCount(&device_count), "hipGetDeviceCount");
  
    // IMPORTANT: In multi-node environment, use rank % device_count
-   int gpu_id = myrank % device_count;
+   int gpu_id = 7;
    CHECK_HIP(hipSetDevice(gpu_id), "hipSetDevice");
  
    hipDeviceProp_t prop;
@@ -570,22 +573,22 @@
 
    struct fid_mr *mr_local = NULL;
    CHECK(register_memory_region(domain, ep, cxi_info, d_local_buf, max_size,
-                                &mr_local, true, 0),
+                                &mr_local, true, device_id),
          "register_memory_region(local)");
  
    struct fid_mr *mr_remote = NULL;
    CHECK(register_memory_region(domain, ep, cxi_info, d_remote_buf, max_size,
-                                &mr_remote, true, 0),
+                                &mr_remote, true, device_id),
          "register_memory_region(remote)");
  
    struct fid_mr *mr_atomic = NULL;
    CHECK(register_memory_region(domain, ep, cxi_info, atomic_result, sizeof(uint64_t),
-                                &mr_atomic, true, 0),
+                                &mr_atomic, true, device_id),
          "register_memory_region(atomic)");
  
    struct fid_mr *mr_atomic_operand = NULL;
    CHECK(register_memory_region(domain, ep, cxi_info, atomic_operand, sizeof(uint64_t),
-                                &mr_atomic_operand, true, 0),
+                                &mr_atomic_operand, true, device_id),
          "register_memory_region(atomic_operand)");
  
    uint64_t my_remote_key = fi_mr_key(mr_remote);

@@ -18,6 +18,10 @@ public:
     PMIX();
     ~PMIX();
 
+    bool bootstrap_initialize() override;
+    bool bootstrap_finalize() override;
+    std::string get_bootstrap_name() const override;
+
 private:
     int rank;
     int size;

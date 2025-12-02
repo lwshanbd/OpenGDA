@@ -1,15 +1,28 @@
 #include "pmix.hpp"
 
 PMIX::PMIX() : Bootstrap() {
-    // TODO: Initialize PMIx
-    pmix_proc_t myproc;
+    // Constructor - don't initialize here, use bootstrap_initialize()
+}
+
+PMIX::~PMIX() {
+    // Cleanup if still initialized
+    if (bootstrap_initialized) {
+        bootstrap_finalize();
+    }
+}
+
+bool PMIX::bootstrap_initialize() {
+    if (bootstrap_initialized) {
+        return true;  // Already initialized
+    }
+
     pmix_value_t *val;
 
     // Initialize PMIx client
     int rc = PMIx_Init(&myproc, NULL, 0);
     if (rc != PMIX_SUCCESS) {
         fprintf(stderr, "PMIx_Init failed (%d)\n", rc);
-        exit(1);
+        return false;
     }
 
     // Get rank
@@ -26,8 +39,21 @@ PMIX::PMIX() : Bootstrap() {
         size = val->data.uint32;
         PMIX_VALUE_RELEASE(val);
     }
+
+    bootstrap_initialized = true;
+    return true;
 }
 
-PMIX::~PMIX() {
+bool PMIX::bootstrap_finalize() {
+    if (!bootstrap_initialized) {
+        return true;  // Already finalized
+    }
+
     PMIx_Finalize(NULL, 0);
+    bootstrap_initialized = false;
+    return true;
+}
+
+std::string PMIX::get_bootstrap_name() const {
+    return "pmix";
 }

@@ -1,7 +1,7 @@
 /*
- * rank-amdgpu-gda.cpp - GPU-Driven RDMA using Deferred Work Queue
+ * rank-amdgpu-gda.cpp - GPU-Direct Async (GDA) RDMA using Deferred Work Queue
  *
- * This program implements true GPU-Driven RDMA using libfabric's
+ * This program implements GPU-Direct Async (GDA) using libfabric's
  * Deferred Work Queue (DWQ) interface where:
  * 1. CPU submits deferred work request to domain work queue
  * 2. GPU signals by writing to triggering counter doorbell (MMIO)
@@ -271,7 +271,7 @@ int main(void) {
   // CRITICAL: Set GPU device and CXI device for proper PCIe topology
   // GPU 7 requires cxi3 for direct MMIO access (PCIe locality)
   // -------------------------------------------------------------------------
-  setenv("FI_CXI_DEVICE_NAME", "cxi3", 1);
+  // setenv("FI_CXI_DEVICE_NAME", "cxi3", 1);
   CHECK_HIP(hipSetDevice(7), "hipSetDevice(7) at startup");
 
   // -------------------------------------------------------------------------
@@ -335,9 +335,12 @@ int main(void) {
     if (cur->fabric_attr && cur->fabric_attr->prov_name &&
         strcmp(cur->fabric_attr->prov_name, "cxi") == 0) {
       cxi_info = cur;
-      break;
+      printf("Rank %d: Using CXI provider %s\n", myrank, cxi_info->domain_attr->name);
+      // break;
     }
+    
   }
+  exit(0);
   if (!cxi_info) {
     fprintf(stderr, "Rank %d: CXI provider not found!\n", myrank);
     fi_freeinfo(info);
@@ -596,7 +599,7 @@ int main(void) {
     printf("%-8s  %12s  %s\n", "Size", "Latency(us)", "Statistics");
     printf("========  ============  ===============================================\n");
     printf("Note: Latency is average of best 10/%d iterations\n", NUM_ITERATIONS);
-    printf("      GPU-Driven RDMA with Deferred Work Queue (DWQ)\n\n");
+    printf("      GPU-Direct Async (GDA) with Deferred Work Queue (DWQ)\n\n");
   }
 
   // Allocate persistent structures for DWQ (must remain valid until completion)

@@ -4,17 +4,13 @@
  * This is the main public header for the OpenGDA library.
  * OpenGDA (GPU-Direct Async) provides asynchronous GPU-direct RDMA
  * communication using Libfabric and ROCm.
+ *
+ * This header provides the C API.
+ * For C++ API, include <opengda/bootstrap/common.hpp> and <opengda/network/ofi.hpp>
  */
 
 #ifndef OPENGDA_H
 #define OPENGDA_H
-
-// C++ Interface
-#include "bootstrap/common.hpp"
-#include "network/ofi.hpp"
-#ifdef BOOTSTRAP_PMI2
-#include "bootstrap/pmi2.hpp"
-#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,9 +44,6 @@ const char* gda_get_version(void);
 
 #ifdef __cplusplus
 }
-
-
-
-#endif // __cplusplus
+#endif
 
 #endif // OPENGDA_H

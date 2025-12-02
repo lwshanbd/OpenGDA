@@ -7,6 +7,7 @@
 # ============================================================================
 set(OPENGDA_SOURCES
     gda.cpp
+    common/log.cpp
     bootstrap/common.cpp
 )
 
@@ -29,6 +30,7 @@ set(OPENGDA_PUBLIC_HEADERS
 )
 
 set(OPENGDA_PRIVATE_HEADERS
+    common/log.hpp
     bootstrap/common.hpp
     bootstrap/pmi2.hpp
     network/ofi.hpp
@@ -100,6 +102,83 @@ if(USE_AMDGPU)
         target_link_libraries(opengda PRIVATE ${HIP_LIBRARY})
     endif()
 endif()
+
+# Debug Support
+if(DEBUG_OFI)
+    target_compile_definitions(opengda PRIVATE DEBUG_OFI=1)
+    message(STATUS "Debug logging: ENABLED (DEBUG/TRACE compiled in)")
+else()
+    message(STATUS "Debug logging: DISABLED (DEBUG/TRACE optimized out, INFO/WARN/ERROR always available)")
+endif()
+
+# ============================================================================
+# Copy Headers to Build Directory (for development)
+# ============================================================================
+
+# Create include directory in build
+set(BUILD_INCLUDE_DIR ${CMAKE_BINARY_DIR}/include)
+file(MAKE_DIRECTORY ${BUILD_INCLUDE_DIR})
+
+# Copy public header
+add_custom_command(
+    TARGET opengda POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/gda.h
+        ${BUILD_INCLUDE_DIR}/gda.h
+    COMMENT "Copying public header to build directory"
+)
+
+# Copy bootstrap headers
+add_custom_command(
+    TARGET opengda POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        ${BUILD_INCLUDE_DIR}/opengda/bootstrap
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/bootstrap/common.hpp
+        ${BUILD_INCLUDE_DIR}/opengda/bootstrap/common.hpp
+)
+
+# Copy bootstrap-specific headers
+if(BOOTSTRAP_TYPE STREQUAL "PMI2")
+    add_custom_command(
+        TARGET opengda POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/bootstrap/pmi2.hpp
+            ${BUILD_INCLUDE_DIR}/opengda/bootstrap/pmi2.hpp
+    )
+elseif(BOOTSTRAP_TYPE STREQUAL "PMIX")
+    add_custom_command(
+        TARGET opengda POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/bootstrap/pmix.hpp
+            ${BUILD_INCLUDE_DIR}/opengda/bootstrap/pmix.hpp
+    )
+endif()
+
+# Copy network headers
+add_custom_command(
+    TARGET opengda POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        ${BUILD_INCLUDE_DIR}/opengda/network
+)
+
+if(NETWORK_TYPE STREQUAL "OFI")
+    add_custom_command(
+        TARGET opengda POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/network/ofi.hpp
+            ${BUILD_INCLUDE_DIR}/opengda/network/ofi.hpp
+    )
+elseif(NETWORK_TYPE STREQUAL "IBV")
+    add_custom_command(
+        TARGET opengda POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/network/ibv.hpp
+            ${BUILD_INCLUDE_DIR}/opengda/network/ibv.hpp
+    )
+endif()
+
+message(STATUS "Headers will be copied to: ${BUILD_INCLUDE_DIR}")
 
 # ============================================================================
 # Installation

@@ -7,8 +7,8 @@
 #ifndef PMI2_HPP
 #define PMI2_HPP
 
-#include <pmi2.h>
 #include "common.hpp"
+#include <pmi2.h>
 
 #include <cstdlib>
 #include <cstdio>
@@ -22,6 +22,7 @@ public:
     bool bootstrap_initialize() override;
     bool bootstrap_finalize() override;
     std::string get_bootstrap_name() const override;
+    int get_rank() const override;
 
 private:
     int rank;
@@ -29,7 +30,6 @@ private:
     int device_id;
     int spawned;
     int appnum;
-
 };
 
 #endif

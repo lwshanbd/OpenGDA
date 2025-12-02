@@ -1,118 +1,157 @@
 #include "ofi.hpp"
-#include <fstream>
-#include <climits>
-#include <cmath>
-#include <hwloc.h>
+#include <map>
+#include <string>
 
-
-// Helper function to get NUMA node of a GPU device using hwloc
 #ifdef USE_AMDGPU
-static int get_gpu_numa_node(int device_id) {
-    hwloc_topology_t topology;
-    hwloc_topology_init(&topology);
+// Helper structure to store device affinity information
+struct DeviceAffinity {
+    std::string pci_id;           // PCI address like "0000:c1:00.0"
+    hwloc_obj_type_t affinity_type;  // Type of affinity object (GROUP/PACKAGE/NUMANODE)
+    int affinity_index;           // Logical index of affinity object
+};
 
-    // Load I/O devices
-    hwloc_topology_set_io_types_filter(topology, HWLOC_TYPE_FILTER_KEEP_ALL);
-    hwloc_topology_load(topology);
-
-    // Find GPU by device_id using ROCm/HSA interface
-    // GPUs are typically exposed as OS devices with name like "renderD128", "renderD129", etc.
-    int gpu_count = 0;
-    int numa_node = -1;
-
-    hwloc_obj_t obj = NULL;
-    while ((obj = hwloc_get_next_osdev(topology, obj)) != NULL) {
-        if (obj->attr->osdev.type == HWLOC_OBJ_OSDEV_GPU) {
-            if (gpu_count == device_id) {
-                // Get the NUMA node of this GPU
-                hwloc_obj_t ancestor = hwloc_get_non_io_ancestor_obj(topology, obj);
-                if (ancestor) {
-                    // Find the NUMA node ancestor
-                    hwloc_obj_t numa_obj = hwloc_get_ancestor_obj_by_type(topology, HWLOC_OBJ_NUMANODE, ancestor);
-                    if (numa_obj) {
-                        numa_node = numa_obj->os_index;
-                    }
-                }
-                break;
-            }
-            gpu_count++;
-        }
+// Helper function to get device affinity using hwloc
+// Returns true if affinity was found, false otherwise
+static bool get_device_affinity(hwloc_topology_t topo, hwloc_obj_t osdev,
+                                 DeviceAffinity& affinity) {
+    // Get parent PCI device
+    hwloc_obj_t pci_dev = osdev->parent;
+    while (pci_dev && pci_dev->type != HWLOC_OBJ_PCI_DEVICE) {
+        pci_dev = pci_dev->parent;
     }
 
-    hwloc_topology_destroy(topology);
-    return numa_node;
+    if (!pci_dev) return false;
+
+    // Store PCI ID
+    char pci_str[64];
+    snprintf(pci_str, sizeof(pci_str), "%04x:%02x:%02x.%01x",
+             pci_dev->attr->pcidev.domain,
+             pci_dev->attr->pcidev.bus,
+             pci_dev->attr->pcidev.dev,
+             pci_dev->attr->pcidev.func);
+    affinity.pci_id = pci_str;
+
+    // Get CPU affinity
+    hwloc_obj_t ancestor = hwloc_get_non_io_ancestor_obj(topo, pci_dev);
+    if (!ancestor) return false;
+
+    hwloc_bitmap_t cpuset = hwloc_bitmap_alloc();
+    hwloc_bitmap_copy(cpuset, ancestor->cpuset);
+
+    int first_cpu = hwloc_bitmap_first(cpuset);
+    hwloc_bitmap_free(cpuset);
+
+    if (first_cpu == -1) return false;
+
+    // Find affinity object (Group/Package/NUMANODE)
+    hwloc_obj_t pu = hwloc_get_pu_obj_by_os_index(topo, first_cpu);
+    if (!pu) return false;
+
+    hwloc_obj_t node_obj = pu->parent;
+    while (node_obj) {
+        if (node_obj->type == HWLOC_OBJ_GROUP ||
+            node_obj->type == HWLOC_OBJ_PACKAGE ||
+            node_obj->type == HWLOC_OBJ_NUMANODE) {
+            affinity.affinity_type = node_obj->type;
+            affinity.affinity_index = node_obj->logical_index;
+            return true;
+        }
+        node_obj = node_obj->parent;
+    }
+
+    return false;
 }
 #endif
-// Helper function to get NUMA node of a CXI device from its name using hwloc
-// CXI device names are typically like "cxi0", "cxi1", etc.
-static int get_cxi_numa_node(const char* cxi_name) {
-    if (!cxi_name) return -1;
 
-    hwloc_topology_t topology;
-    hwloc_topology_init(&topology);
+OFI::OFI(int rank) {
+    this->rank = rank;
 
-    // Load I/O devices
-    hwloc_topology_set_io_types_filter(topology, HWLOC_TYPE_FILTER_KEEP_ALL);
-    hwloc_topology_load(topology);
+    // Initialize logging system
+    opengda::LogContext::instance().init(rank);
 
-    int numa_node = -1;
+    #ifdef USE_AMDGPU
+    // Get PCI Bus ID of the first HIP-visible GPU
+    char hip_pci_bus_id[32] = {0};
+    int gpu_count = 0;
+    bool gpu_found = false;
 
-    // Method 1: Try to find by PCI device name in hwloc
-    hwloc_obj_t obj = NULL;
-    while ((obj = hwloc_get_next_osdev(topology, obj)) != NULL) {
-        if (obj->name && strcmp(obj->name, cxi_name) == 0) {
-            // Found the CXI device, get its NUMA node
-            hwloc_obj_t ancestor = hwloc_get_non_io_ancestor_obj(topology, obj);
-            if (ancestor) {
-                hwloc_obj_t numa_obj = hwloc_get_ancestor_obj_by_type(topology, HWLOC_OBJ_NUMANODE, ancestor);
-                if (numa_obj) {
-                    numa_node = numa_obj->os_index;
-                }
-            }
-            break;
+    hipError_t hip_err = hipGetDeviceCount(&gpu_count);
+    if (hip_err == hipSuccess && gpu_count > 0) {
+        // Use device 0 (first visible GPU from HIP's perspective)
+        hip_err = hipDeviceGetPCIBusId(hip_pci_bus_id, sizeof(hip_pci_bus_id), 0);
+        if (hip_err == hipSuccess) {
+            OPENGDA_Info("ofi", "HIP reports GPU 0 at PCI Bus ID: %s", hip_pci_bus_id);
+        } else {
+            OPENGDA_Warn("ofi", "hipDeviceGetPCIBusId failed: %s", hipGetErrorString(hip_err));
         }
+    } else {
+        OPENGDA_Warn("ofi", "No HIP devices found (count=%d, error=%s)",
+                     gpu_count, hipGetErrorString(hip_err));
     }
 
-    // Method 2: If not found by name, try PCI devices (CXI devices are on PCIe)
-    if (numa_node == -1) {
-        obj = NULL;
-        while ((obj = hwloc_get_next_pcidev(topology, obj)) != NULL) {
-            // Check if this PCI device name matches (some systems expose CXI as PCI device name)
-            const char* pci_name = hwloc_obj_get_info_by_name(obj, "Device");
-            if (pci_name && strcmp(pci_name, cxi_name) == 0) {
-                hwloc_obj_t ancestor = hwloc_get_non_io_ancestor_obj(topology, obj);
-                if (ancestor) {
-                    hwloc_obj_t numa_obj = hwloc_get_ancestor_obj_by_type(topology, HWLOC_OBJ_NUMANODE, ancestor);
-                    if (numa_obj) {
-                        numa_node = numa_obj->os_index;
+    // Initialize hwloc topology for GPU-NIC affinity detection
+    hwloc_topology_t topo;
+    hwloc_topology_init(&topo);
+    hwloc_topology_set_io_types_filter(topo, HWLOC_TYPE_FILTER_KEEP_ALL);
+    hwloc_topology_load(topo);
+
+    // Find the GPU matching the HIP PCI Bus ID in hwloc
+    DeviceAffinity gpu_affinity;
+    std::string gpu_name;
+
+    if (hip_pci_bus_id[0] != '\0') {
+        // Convert HIP PCI Bus ID format to hwloc format if needed
+        // HIP format is usually "0000:d1:00.0", which matches hwloc format
+        hwloc_obj_t osdev = NULL;
+        while ((osdev = hwloc_get_next_osdev(topo, osdev)) != NULL) {
+            // Look for AMD GPU (OSDEV_GPU or OSDEV_COPROC)
+            if (osdev->attr->osdev.type == HWLOC_OBJ_OSDEV_GPU ||
+                osdev->attr->osdev.type == HWLOC_OBJ_OSDEV_COPROC) {
+
+                DeviceAffinity temp_affinity;
+                if (get_device_affinity(topo, osdev, temp_affinity)) {
+                    // Compare PCI Bus IDs (case-insensitive)
+                    if (strcasecmp(temp_affinity.pci_id.c_str(), hip_pci_bus_id) == 0) {
+                        gpu_affinity = temp_affinity;
+                        gpu_found = true;
+                        gpu_name = osdev->name ? osdev->name : "unknown";
+                        OPENGDA_Info("ofi", "Found GPU '%s' at PCI %s (matched HIP device 0), affinity: %s L#%d",
+                                     gpu_name.c_str(), gpu_affinity.pci_id.c_str(),
+                                     hwloc_obj_type_string(gpu_affinity.affinity_type),
+                                     gpu_affinity.affinity_index);
+                        break;  // Found the matching GPU
                     }
                 }
-                break;
             }
+        }
+
+        if (!gpu_found) {
+            OPENGDA_Warn("ofi", "Could not find GPU with PCI ID %s in hwloc", hip_pci_bus_id);
         }
     }
 
-    // Method 3: Fallback to sysfs if hwloc doesn't find it
-    if (numa_node == -1) {
-        int cxi_num = -1;
-        if (sscanf(cxi_name, "cxi%d", &cxi_num) == 1) {
-            char sysfs_path[256];
-            snprintf(sysfs_path, sizeof(sysfs_path),
-                     "/sys/class/cxi/cxi%d/device/numa_node", cxi_num);
-
-            std::ifstream numa_file(sysfs_path);
-            if (numa_file.is_open()) {
-                numa_file >> numa_node;
-                numa_file.close();
+    // Build map of network devices and their affinities
+    std::map<std::string, DeviceAffinity> nic_affinities;
+    hwloc_obj_t osdev_nic = NULL;
+    while ((osdev_nic = hwloc_get_next_osdev(topo, osdev_nic)) != NULL) {
+        // Look for network devices (including CXI/OpenFabrics)
+        if (osdev_nic->attr->osdev.type == HWLOC_OBJ_OSDEV_NETWORK ||
+            osdev_nic->attr->osdev.type == HWLOC_OBJ_OSDEV_OPENFABRICS) {
+            DeviceAffinity nic_affinity;
+            if (get_device_affinity(topo, osdev_nic, nic_affinity)) {
+                std::string nic_name = osdev_nic->name ? osdev_nic->name : "";
+                if (!nic_name.empty()) {
+                    nic_affinities[nic_name] = nic_affinity;
+                    OPENGDA_Debug("ofi", "Found NIC '%s' at PCI %s, affinity: %s L#%d",
+                                  nic_name.c_str(), nic_affinity.pci_id.c_str(),
+                                  hwloc_obj_type_string(nic_affinity.affinity_type),
+                                  nic_affinity.affinity_index);
+                }
             }
         }
     }
+    #endif
 
-    hwloc_topology_destroy(topology);
-    return numa_node;
-}
-
-OFI::OFI() {
     // Initialize OFI
     hints = fi_allocinfo();
     hints->caps = FI_RMA | FI_MSG | FI_HMEM;
@@ -123,90 +162,99 @@ OFI::OFI() {
     hints->domain_attr->threading = FI_THREAD_SAFE;
     hints->domain_attr->control_progress = FI_PROGRESS_MANUAL;
     hints->domain_attr->data_progress = FI_PROGRESS_MANUAL;
-  
+
     info = NULL;
     OFI_CHECK(fi_getinfo(FI_VERSION(FI_MAJOR_VERSION, FI_MINOR_VERSION), NULL,
                          NULL, 0, hints, &info),
               "fi_getinfo");
     fi_freeinfo(hints);
-  
-    // Find CXI provider
+
+    // Find CXI provider with GPU affinity awareness
     cxi_info = NULL;
-    
+
     #ifdef USE_AMDGPU
-    // GPU-aware CXI selection: find CXI device on same NUMA node as GPU
-    int rank = 0;  // Assuming rank is available in your context
-    int device_id = 0;  // Assuming device_id is available in your context
-
-    // Get GPU NUMA node
-    int gpu_numa_node = get_gpu_numa_node(device_id);
-    OFI_DEBUG("Rank %d: GPU %d is on NUMA node %d\n", rank, device_id, gpu_numa_node);
-
-    // Find all CXI providers and their NUMA nodes
     struct fi_info *best_cxi = NULL;
-    int best_numa_distance = INT_MAX;
 
-    for (struct fi_info *cur = info; cur; cur = cur->next) {
-        if (cur->fabric_attr && cur->fabric_attr->prov_name &&
-            strcmp(cur->fabric_attr->prov_name, "cxi") == 0) {
+    if (gpu_found) {
+        // Try to find CXI device with same affinity as GPU
+        for (struct fi_info *cur = info; cur; cur = cur->next) {
+            if (cur->fabric_attr && cur->fabric_attr->prov_name &&
+                strcmp(cur->fabric_attr->prov_name, "cxi") == 0) {
 
-            // Get CXI device name from domain_attr->name (e.g., "cxi0")
-            const char* cxi_name = cur->domain_attr->name;
-            int cxi_numa_node = get_cxi_numa_node(cxi_name);
+                const char* cxi_domain_name = cur->domain_attr->name;
 
-            OFI_DEBUG("Rank %d: Found CXI device %s on NUMA node %d\n",
-                     rank, cxi_name, cxi_numa_node);
+                // Extract CXI device ID (e.g., "cxi0" -> "0")
+                int cxi_id = -1;
+                if (sscanf(cxi_domain_name, "cxi%d", &cxi_id) != 1 || cxi_id < 0) {
+                    continue;
+                }
 
-            // Calculate NUMA distance (simple heuristic)
-            int numa_distance;
-            if (gpu_numa_node == cxi_numa_node && gpu_numa_node >= 0) {
-                // Same NUMA node - best case (local PCIe)
-                numa_distance = 0;
-            } else if (gpu_numa_node >= 0 && cxi_numa_node >= 0) {
-                // Different NUMA nodes - approximate distance
-                numa_distance = abs(gpu_numa_node - cxi_numa_node) * 10;
-            } else {
-                // NUMA info not available
-                numa_distance = 100;
-            }
+                // In hwloc, CXI devices appear as "hsi" instead of "cxi"
+                // Map: cxi0 -> hsi0, cxi1 -> hsi1, etc.
+                char hsi_name[32];
+                snprintf(hsi_name, sizeof(hsi_name), "hsi%d", cxi_id);
 
-            // Select CXI with smallest NUMA distance
-            if (numa_distance < best_numa_distance) {
-                best_numa_distance = numa_distance;
-                best_cxi = cur;
+                // Match with hwloc NIC names
+                for (const auto& nic_pair : nic_affinities) {
+                    const std::string& nic_name = nic_pair.first;
+                    const DeviceAffinity& nic_affinity = nic_pair.second;
+
+                    // Check if NIC name matches the mapped hsi name
+                    if (nic_name == hsi_name) {
+                        // Check if affinity matches GPU
+                        if (nic_affinity.affinity_type == gpu_affinity.affinity_type &&
+                            nic_affinity.affinity_index == gpu_affinity.affinity_index) {
+                            best_cxi = cur;
+                            OPENGDA_Info("ofi", "Selected CXI '%s' (hwloc: %s) with matching GPU affinity (%s L#%d)",
+                                         cxi_domain_name, hsi_name,
+                                         hwloc_obj_type_string(nic_affinity.affinity_type),
+                                         nic_affinity.affinity_index);
+                            break;
+                        }
+                    }
+                }
+
+                if (best_cxi) break;
             }
         }
     }
 
-    if (best_cxi) {
-        cxi_info = best_cxi;
-        OFI_DEBUG("Rank %d: Selected CXI device %s (NUMA distance: %d)\n",
-                 rank, cxi_info->domain_attr->name, best_numa_distance);
-    } else {
-        // Fallback: use first available CXI
+    // Fallback: use first available CXI if no affinity match found
+    if (!best_cxi) {
         for (struct fi_info *cur = info; cur; cur = cur->next) {
             if (cur->fabric_attr && cur->fabric_attr->prov_name &&
                 strcmp(cur->fabric_attr->prov_name, "cxi") == 0) {
-                cxi_info = cur;
-                OFI_DEBUG("Rank %d: Warning - using fallback CXI device %s\n",
-                         rank, cxi_info->domain_attr->name);
+                best_cxi = cur;
+                OPENGDA_Warn("ofi", "Using fallback CXI device '%s' (no GPU affinity match)",
+                             cur->domain_attr->name);
                 break;
             }
         }
     }
+
+    cxi_info = best_cxi;
+    hwloc_topology_destroy(topo);
+
     #else
+    // Non-GPU build: just use first CXI provider
     for (struct fi_info *cur = info; cur; cur = cur->next) {
-      if (cur->fabric_attr && cur->fabric_attr->prov_name &&
-          strcmp(cur->fabric_attr->prov_name, "cxi") == 0) {
-        cxi_info = cur;
-        break;
-      }
+        if (cur->fabric_attr && cur->fabric_attr->prov_name &&
+            strcmp(cur->fabric_attr->prov_name, "cxi") == 0) {
+            cxi_info = cur;
+            break;
+        }
     }
     #endif
-    OFI_DEBUG("Using CXI provider: %s", cxi_info->domain_attr->name);
-    OFI_DEBUG("  - mr_mode: 0x%lx", (unsigned long)cxi_info->domain_attr->mr_mode);
-    OFI_DEBUG("  - inject_size: %zu bytes", cxi_info->tx_attr->inject_size);
-    OFI_DEBUG("  - max_msg_size: %zu bytes", cxi_info->ep_attr->max_msg_size);
+
+    if (!cxi_info) {
+        OPENGDA_Error("ofi", "No CXI provider found");
+        exit(1);
+    }
+
+    OPENGDA_Info("ofi", "Using CXI provider: %s", cxi_info->domain_attr->name);
+    OPENGDA_Debug("ofi", "  - mr_mode: 0x%lx", (unsigned long)cxi_info->domain_attr->mr_mode);
+    OPENGDA_Debug("ofi", "  - inject_size: %zu bytes", cxi_info->tx_attr->inject_size);
+    OPENGDA_Debug("ofi", "  - max_msg_size: %zu bytes", cxi_info->ep_attr->max_msg_size);
 
     // Create Fabric
     fabric = NULL;
@@ -236,6 +284,16 @@ OFI::OFI() {
     OFI_CHECK(fi_ep_bind(ep, &cq->fid, FI_TRANSMIT | FI_RECV), "fi_ep_bind(cq)");
     OFI_CHECK(fi_enable(ep), "fi_enable");
 
+    ofi_initialized = true;
+
     
 
+}
+
+bool OFI::ofi_initialize() {
+    if (ofi_initialized) {
+        return true;
+    }
+
+    return false;
 }

@@ -178,6 +178,7 @@ int register_memory_region(struct fid_domain *domain,
 // =============================================================================
 
 int main(void) {
+
     // Libfabric objects
     struct fi_info *info = NULL;
     struct fi_info *cxi_info = NULL;
