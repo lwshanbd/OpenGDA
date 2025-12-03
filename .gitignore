@@ -1,9 +1,18 @@
-build/
+# IDE and editor files
 .clangd
 .cache/
 .vscode/
-*.log
-*.core
 .claude/
+
+# Build directory
+build/
+# Log files
+*.log
+# Core files
+*.core
+# Claude files
+
+# Reference files
 reference/
+# Prototype files
 prototype/docs/
