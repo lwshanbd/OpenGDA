@@ -10,7 +10,9 @@ build/
 *.log
 # Core files
 *.core
-# Claude files
+
+# Developer Markdown files
+examples/*.md
 
 # Reference files
 reference/
