@@ -21,6 +21,8 @@ endif()
 # Add network source files based on type
 if(NETWORK_TYPE STREQUAL "OFI")
     list(APPEND OPENGDA_SOURCES network/ofi.cpp)
+elseif(NETWORK_TYPE STREQUAL "OFI_PROXY")
+    list(APPEND OPENGDA_SOURCES network/ofi-proxy.cpp)
 elseif(NETWORK_TYPE STREQUAL "IBV")
     list(APPEND OPENGDA_SOURCES network/ibv.cpp)
 endif()
@@ -180,6 +182,13 @@ if(NETWORK_TYPE STREQUAL "OFI")
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_CURRENT_SOURCE_DIR}/network/ofi.hpp
             ${BUILD_INCLUDE_DIR}/opengda/network/ofi.hpp
+    )
+elseif(NETWORK_TYPE STREQUAL "OFI_PROXY")
+    add_custom_command(
+        TARGET opengda POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/network/ofi-proxy.hpp
+            ${BUILD_INCLUDE_DIR}/opengda/network/ofi-proxy.hpp
     )
 elseif(NETWORK_TYPE STREQUAL "IBV")
     add_custom_command(

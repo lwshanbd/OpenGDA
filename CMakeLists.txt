@@ -19,8 +19,8 @@ set(BOOTSTRAP_TYPE "PMI2" CACHE STRING "Bootstrap type: PMI2 or PMIX")
 set_property(CACHE BOOTSTRAP_TYPE PROPERTY STRINGS "PMI2" "PMIX")
 
 # Network options
-set(NETWORK_TYPE "OFI" CACHE STRING "Network backend: OFI or IBV")
-set_property(CACHE NETWORK_TYPE PROPERTY STRINGS "OFI" "IBV")
+set(NETWORK_TYPE "OFI" CACHE STRING "Network backend: OFI, OFI_PROXY, or IBV")
+set_property(CACHE NETWORK_TYPE PROPERTY STRINGS "OFI" "OFI_PROXY" "IBV")
 
 # ============================================================================
 # Compiler Settings
@@ -71,7 +71,7 @@ endif()
 # ============================================================================
 # Find Network Dependencies
 # ============================================================================
-if(NETWORK_TYPE STREQUAL "OFI")
+if(NETWORK_TYPE STREQUAL "OFI" OR NETWORK_TYPE STREQUAL "OFI_PROXY")
     # Libfabric (OFI) - Prefer Cray libfabric if available
     if(DEFINED ENV{CRAY_LIBFABRIC_PREFIX})
         set(NETWORK_INCLUDE_DIR "$ENV{CRAY_LIBFABRIC_PREFIX}/include")
@@ -91,7 +91,12 @@ if(NETWORK_TYPE STREQUAL "OFI")
         find_path(NETWORK_INCLUDE_DIR rdma/fabric.h REQUIRED)
         message(STATUS "Found Libfabric (system): ${NETWORK_LIBRARY}")
     endif()
-    set(NETWORK_COMPILE_DEF "NETWORK_OFI")
+    if(NETWORK_TYPE STREQUAL "OFI")
+        set(NETWORK_COMPILE_DEF "NETWORK_OFI")
+    else()
+        set(NETWORK_COMPILE_DEF "NETWORK_OFI_PROXY")
+        message(STATUS "Using OFI with CPU Proxy mode")
+    endif()
 elseif(NETWORK_TYPE STREQUAL "IBV")
     # InfiniBand Verbs
     find_library(NETWORK_LIBRARY NAMES ibverbs REQUIRED)
@@ -99,7 +104,7 @@ elseif(NETWORK_TYPE STREQUAL "IBV")
     message(STATUS "Found libibverbs: ${NETWORK_LIBRARY}")
     set(NETWORK_COMPILE_DEF "NETWORK_IBV")
 else()
-    message(FATAL_ERROR "Invalid NETWORK_TYPE: ${NETWORK_TYPE}. Must be OFI or IBV.")
+    message(FATAL_ERROR "Invalid NETWORK_TYPE: ${NETWORK_TYPE}. Must be OFI, OFI_PROXY, or IBV.")
 endif()
 
 # ============================================================================
