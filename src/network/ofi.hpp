@@ -20,6 +20,11 @@
 #include <hwloc.h>
 #endif
 
+#ifdef USE_NVGPU
+#include <cuda_runtime.h>
+#include <hwloc.h>
+#endif
+
 #include "../common/log.hpp"
 
 #include <map>
@@ -67,8 +72,13 @@ public:
         size_t mmio_len;                    // MMIO region length
 
 #ifdef USE_AMDGPU
-        volatile uint64_t* dev_addr;        // GPU device pointer to MMIO
+        volatile uint64_t* dev_addr;        // GPU device pointer to MMIO (AMD)
         bool hip_registered;                // Whether HIP registration succeeded
+#endif
+
+#ifdef USE_NVGPU
+        volatile uint64_t* dev_addr;        // GPU device pointer to MMIO (NVIDIA)
+        bool cuda_registered;               // Whether CUDA registration succeeded
 #endif
 
         bool allocated;                     // Whether this counter is in use
@@ -228,6 +238,10 @@ private:
 #ifdef USE_AMDGPU
     bool register_with_hip(CntrInfo* info);
     void unregister_from_hip(CntrInfo* info);
+#endif
+#ifdef USE_NVGPU
+    bool register_with_cuda(CntrInfo* info);
+    void unregister_from_cuda(CntrInfo* info);
 #endif
 };
 

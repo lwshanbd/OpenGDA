@@ -73,6 +73,12 @@ bool CntrManager::initialize(struct fid_domain* domain) {
             // Continue - may still work without GPU access
         }
 #endif
+#ifdef USE_NVGPU
+        if (!register_with_cuda(&trigger_cntrs_[i])) {
+            OPENGDA_Warn("cntr_manager", "Failed to register trigger counter %d with CUDA", i);
+            // Continue - may still work without GPU access
+        }
+#endif
     }
 
     // Create all completion counters
@@ -92,6 +98,12 @@ bool CntrManager::initialize(struct fid_domain* domain) {
 #ifdef USE_AMDGPU
         if (!register_with_hip(&completion_cntrs_[i])) {
             OPENGDA_Warn("cntr_manager", "Failed to register completion counter %d with HIP", i);
+            // Continue - may still work without GPU access
+        }
+#endif
+#ifdef USE_NVGPU
+        if (!register_with_cuda(&completion_cntrs_[i])) {
+            OPENGDA_Warn("cntr_manager", "Failed to register completion counter %d with CUDA", i);
             // Continue - may still work without GPU access
         }
 #endif
@@ -173,6 +185,11 @@ void CntrManager::destroy_counter(CntrInfo* info) {
         unregister_from_hip(info);
     }
 #endif
+#ifdef USE_NVGPU
+    if (info->cuda_registered) {
+        unregister_from_cuda(info);
+    }
+#endif
 
     if (info->cntr) {
         fi_close(&info->cntr->fid);
@@ -185,6 +202,10 @@ void CntrManager::destroy_counter(CntrInfo* info) {
 #ifdef USE_AMDGPU
     info->dev_addr = nullptr;
     info->hip_registered = false;
+#endif
+#ifdef USE_NVGPU
+    info->dev_addr = nullptr;
+    info->cuda_registered = false;
 #endif
 }
 
@@ -258,6 +279,58 @@ void CntrManager::unregister_from_hip(CntrInfo* info) {
 
     info->dev_addr = nullptr;
     info->hip_registered = false;
+}
+#endif
+
+#ifdef USE_NVGPU
+bool CntrManager::register_with_cuda(CntrInfo* info) {
+    if (!info || !info->mmio_addr) {
+        return false;
+    }
+
+    // Register MMIO memory with CUDA
+    cudaError_t cuda_err = cudaHostRegister(info->mmio_addr, info->mmio_len,
+                                            cudaHostRegisterMapped);
+    if (cuda_err != cudaSuccess) {
+        OPENGDA_Error("cntr_manager", "cudaHostRegister failed for %s counter %d: %s (%d)",
+                      info->is_trigger ? "trigger" : "completion", info->index,
+                      cudaGetErrorString(cuda_err), cuda_err);
+        return false;
+    }
+
+    // Get GPU device pointer
+    cuda_err = cudaHostGetDevicePointer((void**)&info->dev_addr, info->mmio_addr, 0);
+    if (cuda_err != cudaSuccess) {
+        OPENGDA_Error("cntr_manager", "cudaHostGetDevicePointer failed for %s counter %d: %s (%d)",
+                      info->is_trigger ? "trigger" : "completion", info->index,
+                      cudaGetErrorString(cuda_err), cuda_err);
+        cudaError_t unreg_err = cudaHostUnregister(info->mmio_addr);
+        (void)unreg_err;  // Suppress unused warning
+        return false;
+    }
+    info->cuda_registered = true;
+
+    OPENGDA_Debug("cntr_manager", "Registered %s counter %d with CUDA: dev_addr=%p",
+                  info->is_trigger ? "trigger" : "completion", info->index,
+                  (void*)info->dev_addr);
+
+    return true;
+}
+
+void CntrManager::unregister_from_cuda(CntrInfo* info) {
+    if (!info || !info->cuda_registered || !info->mmio_addr) {
+        return;
+    }
+
+    cudaError_t cuda_err = cudaHostUnregister(info->mmio_addr);
+    if (cuda_err != cudaSuccess) {
+        OPENGDA_Warn("cntr_manager", "cudaHostUnregister failed for %s counter %d: %s (%d)",
+                     info->is_trigger ? "trigger" : "completion", info->index,
+                     cudaGetErrorString(cuda_err), cuda_err);
+    }
+
+    info->dev_addr = nullptr;
+    info->cuda_registered = false;
 }
 #endif
 
@@ -405,6 +478,15 @@ void CntrManager::print_stats() const {
     }
     OPENGDA_Info("cntr_manager", "HIP registered: %d/%d counters",
                  hip_registered_count, TOTAL_CNTRS);
+#endif
+#ifdef USE_NVGPU
+    int cuda_registered_count = 0;
+    for (int i = 0; i < NUM_CNTR_PAIRS; i++) {
+        if (trigger_cntrs_[i].cuda_registered) cuda_registered_count++;
+        if (completion_cntrs_[i].cuda_registered) cuda_registered_count++;
+    }
+    OPENGDA_Info("cntr_manager", "CUDA registered: %d/%d counters",
+                 cuda_registered_count, TOTAL_CNTRS);
 #endif
 }
 
@@ -678,7 +760,7 @@ void MRManager::update_stats_remove(size_t size, bool is_device_mem) {
 // OFI Implementation
 // ============================================================================
 
-#ifdef USE_AMDGPU
+#if defined(USE_AMDGPU) || defined(USE_NVGPU)
 // Helper structure to store device affinity information
 struct DeviceAffinity {
     std::string pci_id;           // PCI address like "0000:c1:00.0"
@@ -830,6 +912,90 @@ OFI::OFI(int rank) {
     }
     #endif
 
+    #ifdef USE_NVGPU
+    // Get PCI Bus ID of the first CUDA-visible GPU
+    char cuda_pci_bus_id[32] = {0};
+    int gpu_count = 0;
+    bool gpu_found = false;
+
+    cudaError_t cuda_err = cudaGetDeviceCount(&gpu_count);
+    if (cuda_err == cudaSuccess && gpu_count > 0) {
+        // Use device 0 (first visible GPU from CUDA's perspective)
+        device_id = 0;
+        cuda_err = cudaDeviceGetPCIBusId(cuda_pci_bus_id, sizeof(cuda_pci_bus_id), device_id);
+        if (cuda_err == cudaSuccess) {
+            OPENGDA_Info("ofi", "CUDA reports GPU %d at PCI Bus ID: %s", device_id, cuda_pci_bus_id);
+        } else {
+            OPENGDA_Warn("ofi", "cudaDeviceGetPCIBusId failed: %s", cudaGetErrorString(cuda_err));
+        }
+    } else {
+        OPENGDA_Warn("ofi", "No CUDA devices found (count=%d, error=%s)",
+                     gpu_count, cudaGetErrorString(cuda_err));
+    }
+
+    // Initialize hwloc topology for GPU-NIC affinity detection
+    hwloc_topology_t topo;
+    hwloc_topology_init(&topo);
+    hwloc_topology_set_io_types_filter(topo, HWLOC_TYPE_FILTER_KEEP_ALL);
+    hwloc_topology_load(topo);
+
+    // Find the GPU matching the CUDA PCI Bus ID in hwloc
+    DeviceAffinity gpu_affinity;
+    std::string gpu_name;
+
+    if (cuda_pci_bus_id[0] != '\0') {
+        // Convert CUDA PCI Bus ID format to hwloc format if needed
+        // CUDA format is usually "0000:d1:00.0", which matches hwloc format
+        hwloc_obj_t osdev = NULL;
+        while ((osdev = hwloc_get_next_osdev(topo, osdev)) != NULL) {
+            // Look for NVIDIA GPU (OSDEV_GPU or OSDEV_COPROC)
+            if (osdev->attr->osdev.type == HWLOC_OBJ_OSDEV_GPU ||
+                osdev->attr->osdev.type == HWLOC_OBJ_OSDEV_COPROC) {
+
+                DeviceAffinity temp_affinity;
+                if (get_device_affinity(topo, osdev, temp_affinity)) {
+                    // Compare PCI Bus IDs (case-insensitive)
+                    if (strcasecmp(temp_affinity.pci_id.c_str(), cuda_pci_bus_id) == 0) {
+                        gpu_affinity = temp_affinity;
+                        gpu_found = true;
+                        gpu_name = osdev->name ? osdev->name : "unknown";
+                        OPENGDA_Info("ofi", "Found GPU '%s' at PCI %s (matched CUDA device 0), affinity: %s L#%d",
+                                     gpu_name.c_str(), gpu_affinity.pci_id.c_str(),
+                                     hwloc_obj_type_string(gpu_affinity.affinity_type),
+                                     gpu_affinity.affinity_index);
+                        break;  // Found the matching GPU
+                    }
+                }
+            }
+        }
+
+        if (!gpu_found) {
+            OPENGDA_Warn("ofi", "Could not find GPU with PCI ID %s in hwloc", cuda_pci_bus_id);
+        }
+    }
+
+    // Build map of network devices and their affinities
+    std::map<std::string, DeviceAffinity> nic_affinities;
+    hwloc_obj_t osdev_nic = NULL;
+    while ((osdev_nic = hwloc_get_next_osdev(topo, osdev_nic)) != NULL) {
+        // Look for network devices (including CXI/OpenFabrics)
+        if (osdev_nic->attr->osdev.type == HWLOC_OBJ_OSDEV_NETWORK ||
+            osdev_nic->attr->osdev.type == HWLOC_OBJ_OSDEV_OPENFABRICS) {
+            DeviceAffinity nic_affinity;
+            if (get_device_affinity(topo, osdev_nic, nic_affinity)) {
+                std::string nic_name = osdev_nic->name ? osdev_nic->name : "";
+                if (!nic_name.empty()) {
+                    nic_affinities[nic_name] = nic_affinity;
+                    OPENGDA_Debug("ofi", "Found NIC '%s' at PCI %s, affinity: %s L#%d",
+                                  nic_name.c_str(), nic_affinity.pci_id.c_str(),
+                                  hwloc_obj_type_string(nic_affinity.affinity_type),
+                                  nic_affinity.affinity_index);
+                }
+            }
+        }
+    }
+    #endif
+
     // Initialize OFI
     hints = fi_allocinfo();
     hints->caps = FI_RMA | FI_MSG | FI_HMEM;
@@ -851,6 +1017,69 @@ OFI::OFI(int rank) {
     cxi_info = NULL;
 
     #ifdef USE_AMDGPU
+    struct fi_info *best_cxi = NULL;
+
+    if (gpu_found) {
+        // Try to find CXI device with same affinity as GPU
+        for (struct fi_info *cur = info; cur; cur = cur->next) {
+            if (cur->fabric_attr && cur->fabric_attr->prov_name &&
+                strcmp(cur->fabric_attr->prov_name, "cxi") == 0) {
+
+                const char* cxi_domain_name = cur->domain_attr->name;
+
+                // Extract CXI device ID (e.g., "cxi0" -> "0")
+                int cxi_id = -1;
+                if (sscanf(cxi_domain_name, "cxi%d", &cxi_id) != 1 || cxi_id < 0) {
+                    continue;
+                }
+
+                // In hwloc, CXI devices appear as "hsi" instead of "cxi"
+                // Map: cxi0 -> hsi0, cxi1 -> hsi1, etc.
+                char hsi_name[32];
+                snprintf(hsi_name, sizeof(hsi_name), "hsi%d", cxi_id);
+
+                // Match with hwloc NIC names
+                for (const auto& nic_pair : nic_affinities) {
+                    const std::string& nic_name = nic_pair.first;
+                    const DeviceAffinity& nic_affinity = nic_pair.second;
+
+                    // Check if NIC name matches the mapped hsi name
+                    if (nic_name == hsi_name) {
+                        // Check if affinity matches GPU
+                        if (nic_affinity.affinity_type == gpu_affinity.affinity_type &&
+                            nic_affinity.affinity_index == gpu_affinity.affinity_index) {
+                            best_cxi = cur;
+                            OPENGDA_Info("ofi", "Selected CXI '%s' (hwloc: %s) with matching GPU affinity (%s L#%d)",
+                                         cxi_domain_name, hsi_name,
+                                         hwloc_obj_type_string(nic_affinity.affinity_type),
+                                         nic_affinity.affinity_index);
+                            break;
+                        }
+                    }
+                }
+
+                if (best_cxi) break;
+            }
+        }
+    }
+
+    // Fallback: use first available CXI if no affinity match found
+    if (!best_cxi) {
+        for (struct fi_info *cur = info; cur; cur = cur->next) {
+            if (cur->fabric_attr && cur->fabric_attr->prov_name &&
+                strcmp(cur->fabric_attr->prov_name, "cxi") == 0) {
+                best_cxi = cur;
+                OPENGDA_Warn("ofi", "Using fallback CXI device '%s' (no GPU affinity match)",
+                             cur->domain_attr->name);
+                break;
+            }
+        }
+    }
+
+    cxi_info = best_cxi;
+    hwloc_topology_destroy(topo);
+
+    #elif defined(USE_NVGPU)
     struct fi_info *best_cxi = NULL;
 
     if (gpu_found) {
@@ -1010,10 +1239,15 @@ struct fid_mr* OFI::register_memory(void* buf, size_t size, bool is_device_mem) 
         #ifdef USE_AMDGPU
         mr_attr.iface = FI_HMEM_ROCR;
         mr_attr.device.reserved = device_id;
-        OPENGDA_Debug("ofi", "Registering GPU memory: buf=%p, size=%zu, device=%d",
+        OPENGDA_Debug("ofi", "Registering AMD GPU memory: buf=%p, size=%zu, device=%d",
+                      buf, size, device_id);
+        #elif defined(USE_NVGPU)
+        mr_attr.iface = FI_HMEM_CUDA;
+        mr_attr.device.reserved = device_id;
+        OPENGDA_Debug("ofi", "Registering NVIDIA GPU memory: buf=%p, size=%zu, device=%d",
                       buf, size, device_id);
         #else
-        OPENGDA_Error("ofi", "GPU memory registration requested but USE_AMDGPU not defined");
+        OPENGDA_Error("ofi", "GPU memory registration requested but no GPU support defined");
         return nullptr;
         #endif
     } else {

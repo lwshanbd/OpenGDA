@@ -103,6 +103,18 @@ if(USE_AMDGPU)
     endif()
 endif()
 
+# NVIDIA GPU Support
+if(USE_NVGPU)
+    target_compile_definitions(opengda PRIVATE USE_NVGPU=1)
+    target_include_directories(opengda PRIVATE ${CUDA_INCLUDE_DIR})
+
+    if(CUDAToolkit_FOUND)
+        target_link_libraries(opengda PRIVATE CUDA::cudart)
+    else()
+        target_link_libraries(opengda PRIVATE ${CUDA_RUNTIME_LIBRARY})
+    endif()
+endif()
+
 # Debug Support
 if(DEBUG_OFI)
     target_compile_definitions(opengda PRIVATE DEBUG_OFI=1)
