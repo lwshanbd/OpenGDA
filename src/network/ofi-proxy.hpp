@@ -418,105 +418,12 @@ private:
 };
 
 // ============================================================================
-// Peer Information for RDMA Operations
-// ============================================================================
-
-/**
- * Memory region information for a peer
- */
-struct PeerMRInfo {
-    uint64_t host_mr_addr;    // Remote host MR base address
-    uint64_t host_mr_key;     // Remote host MR key
-    size_t host_mr_size;      // Remote host MR size
-    uint64_t gpu_mr_addr;     // Remote GPU MR base address
-    uint64_t gpu_mr_key;      // Remote GPU MR key
-    size_t gpu_mr_size;       // Remote GPU MR size
-};
-
-/**
- * Complete peer information
- */
-struct PeerInfo {
-    int rank;                 // Peer's rank
-    fi_addr_t fi_addr;        // Libfabric address for this peer
-    PeerMRInfo mr_info;       // MR information
-    bool valid;               // Whether this peer info is valid
-};
-
-/**
- * Data structure for address exchange (serialized format)
- * This is what gets exchanged via bootstrap
- */
-struct ExchangeData {
-    // Endpoint address (variable length, stored as hex)
-    // MR info
-    uint64_t host_mr_addr;
-    uint64_t host_mr_key;
-    size_t host_mr_size;
-    uint64_t gpu_mr_addr;
-    uint64_t gpu_mr_key;
-    size_t gpu_mr_size;
-};
-
-// Maximum endpoint address length
-constexpr size_t MAX_EP_ADDR_LEN = 128;
-
-// ============================================================================
-// Default MR Configuration
-// ============================================================================
-
-// Compile-time defaults (can be overridden via CMake)
-#ifndef DEFAULT_HOST_MR_SIZE
-#define DEFAULT_HOST_MR_SIZE (16ULL * 1024 * 1024 * 1024)  // 16GB
-#endif
-
-#ifndef DEFAULT_GPU_MR_SIZE
-#define DEFAULT_GPU_MR_SIZE (16ULL * 1024 * 1024 * 1024)   // 16GB
-#endif
-
-// Environment variable names for runtime configuration
-#define ENV_HOST_MR_SIZE "OPENGDA_HOST_MR_SIZE"
-#define ENV_GPU_MR_SIZE  "OPENGDA_GPU_MR_SIZE"
-
-/**
- * Configuration for default memory regions
- */
-struct DefaultMRConfig {
-    size_t host_mr_size;      // Size of default host MR (bytes)
-    size_t gpu_mr_size;       // Size of default GPU MR (bytes)
-    bool enable_host_mr;      // Whether to allocate host MR
-    bool enable_gpu_mr;       // Whether to allocate GPU MR
-};
-
-/**
- * Information about a default memory region
- */
-struct DefaultMRInfo {
-    void* buffer;             // Allocated buffer (host or GPU)
-    size_t size;              // Size in bytes
-    struct fid_mr* mr;        // Registered MR handle
-    uint64_t key;             // Remote key
-    void* desc;               // Local descriptor
-    bool is_device_mem;       // True if GPU memory
-    bool allocated;           // True if successfully allocated and registered
-};
-
-// Forward declaration
-class Bootstrap;
-
-// ============================================================================
 // OFI - OpenFabrics Interface
 // ============================================================================
 
 class OFI {
 public:
-  /**
-   * Constructor
-   * @param rank Local rank
-   * @param size Total number of processes
-   * @param bootstrap Bootstrap instance for address exchange (required)
-   */
-  OFI(int rank, int size, Bootstrap* bootstrap);
+  OFI(int rank);
   ~OFI();
 
   bool ofi_initialize();
@@ -641,64 +548,6 @@ public:
   void print_cntr_stats();
 
   // ========================================================================
-  // Default MR Accessors
-  // ========================================================================
-
-  /**
-   * Get default host MR info
-   * @return Pointer to default host MR info, nullptr if not allocated
-   */
-  const DefaultMRInfo* get_default_host_mr() const {
-      return default_host_mr_.allocated ? &default_host_mr_ : nullptr;
-  }
-
-  /**
-   * Get default GPU MR info
-   * @return Pointer to default GPU MR info, nullptr if not allocated
-   */
-  const DefaultMRInfo* get_default_gpu_mr() const {
-      return default_gpu_mr_.allocated ? &default_gpu_mr_ : nullptr;
-  }
-
-  /**
-   * Get default MR configuration
-   */
-  const DefaultMRConfig& get_default_mr_config() const { return default_mr_config_; }
-
-  // ========================================================================
-  // Peer Information Accessors
-  // ========================================================================
-
-  /**
-   * Get peer info by rank
-   * @param rank Peer rank
-   * @return Pointer to PeerInfo, nullptr if invalid rank
-   */
-  const PeerInfo* get_peer_info(int rank) const;
-
-  /**
-   * Get fi_addr for a peer
-   * @param rank Peer rank
-   * @return fi_addr_t for the peer, FI_ADDR_NOTAVAIL if invalid
-   */
-  fi_addr_t get_peer_fi_addr(int rank) const;
-
-  /**
-   * Get local fi_addr (for self operations)
-   */
-  fi_addr_t get_local_fi_addr() const { return local_fi_addr_; }
-
-  /**
-   * Get total number of peers
-   */
-  int get_size() const { return size_; }
-
-  /**
-   * Get local rank
-   */
-  int get_rank() const { return rank_; }
-
-  // ========================================================================
   // Accessors
   // ========================================================================
 
@@ -707,7 +556,6 @@ public:
   struct fi_info* get_info() { return cxi_info; }
   MRManager* get_mr_manager() { return &mr_manager_; }
   CntrManager* get_cntr_manager() { return &cntr_manager_; }
-  Bootstrap* get_bootstrap() { return bootstrap_; }
 
 private:
     bool ofi_initialized = false;
@@ -721,40 +569,12 @@ private:
     struct fid_cq *cq;
     struct fid_ep *ep;
 
-    int rank_;
-    int size_;
+    int rank;
     int device_id;
-
-    // Bootstrap for address exchange
-    Bootstrap* bootstrap_;
-
-    // Local endpoint address
-    void* local_ep_addr_;
-    size_t local_ep_addr_len_;
-    fi_addr_t local_fi_addr_;
-
-    // Peer information (indexed by rank)
-    std::vector<PeerInfo> peers_;
 
     // MR management
     MRManager mr_manager_;
 
     // Counter management for DWQ
     CntrManager cntr_manager_;
-
-    // Default MR configuration and info
-    DefaultMRConfig default_mr_config_;
-    DefaultMRInfo default_host_mr_;
-    DefaultMRInfo default_gpu_mr_;
-
-    // Helper functions for default MR initialization
-    void init_default_mr_config();
-    bool allocate_default_host_mr();
-    bool allocate_default_gpu_mr();
-    void cleanup_default_mrs();
-
-    // Helper functions for address exchange
-    bool exchange_addresses();
-    static void bytes_to_hex(const uint8_t* bytes, size_t len, char* hex);
-    static int hex_to_bytes(const char* hex, uint8_t* bytes, size_t max_len);
 };

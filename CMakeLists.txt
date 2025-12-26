@@ -5,20 +5,25 @@ project(OpenGDA VERSION 0.1.0 LANGUAGES CXX)
 # Build Options
 # ============================================================================
 option(USE_AMDGPU "Enable AMD GPU support with ROCm/HIP" ON)
+option(USE_NVGPU "Enable NVIDIA GPU support with CUDA" OFF)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(DEBUG_OFI "Enable DEBUG/TRACE log levels (default OFF for production)" OFF)
 
 # Default Memory Region sizes (in bytes, can be overridden by environment variables)
 set(DEFAULT_HOST_MR_SIZE "17179869184" CACHE STRING "Default host MR size in bytes (default 16GB)")
 set(DEFAULT_GPU_MR_SIZE "17179869184" CACHE STRING "Default GPU MR size in bytes (default 16GB)")
+# Validate GPU options - only one can be enabled at a time
+if(USE_AMDGPU AND USE_NVGPU)
+    message(FATAL_ERROR "Cannot enable both USE_AMDGPU and USE_NVGPU. Please choose one GPU backend.")
+endif()
 
 # Bootstrap options
 set(BOOTSTRAP_TYPE "PMI2" CACHE STRING "Bootstrap type: PMI2 or PMIX")
 set_property(CACHE BOOTSTRAP_TYPE PROPERTY STRINGS "PMI2" "PMIX")
 
 # Network options
-set(NETWORK_TYPE "OFI" CACHE STRING "Network backend: OFI or IBV")
-set_property(CACHE NETWORK_TYPE PROPERTY STRINGS "OFI" "IBV")
+set(NETWORK_TYPE "OFI" CACHE STRING "Network backend: OFI, OFI_PROXY, or IBV")
+set_property(CACHE NETWORK_TYPE PROPERTY STRINGS "OFI" "OFI_PROXY" "IBV")
 
 # ============================================================================
 # Compiler Settings
@@ -69,7 +74,7 @@ endif()
 # ============================================================================
 # Find Network Dependencies
 # ============================================================================
-if(NETWORK_TYPE STREQUAL "OFI")
+if(NETWORK_TYPE STREQUAL "OFI" OR NETWORK_TYPE STREQUAL "OFI_PROXY")
     # Libfabric (OFI) - Prefer Cray libfabric if available
     if(DEFINED ENV{CRAY_LIBFABRIC_PREFIX})
         set(NETWORK_INCLUDE_DIR "$ENV{CRAY_LIBFABRIC_PREFIX}/include")
@@ -89,7 +94,12 @@ if(NETWORK_TYPE STREQUAL "OFI")
         find_path(NETWORK_INCLUDE_DIR rdma/fabric.h REQUIRED)
         message(STATUS "Found Libfabric (system): ${NETWORK_LIBRARY}")
     endif()
-    set(NETWORK_COMPILE_DEF "NETWORK_OFI")
+    if(NETWORK_TYPE STREQUAL "OFI")
+        set(NETWORK_COMPILE_DEF "NETWORK_OFI")
+    else()
+        set(NETWORK_COMPILE_DEF "NETWORK_OFI_PROXY")
+        message(STATUS "Using OFI with CPU Proxy mode")
+    endif()
 elseif(NETWORK_TYPE STREQUAL "IBV")
     # InfiniBand Verbs
     find_library(NETWORK_LIBRARY NAMES ibverbs REQUIRED)
@@ -97,7 +107,7 @@ elseif(NETWORK_TYPE STREQUAL "IBV")
     message(STATUS "Found libibverbs: ${NETWORK_LIBRARY}")
     set(NETWORK_COMPILE_DEF "NETWORK_IBV")
 else()
-    message(FATAL_ERROR "Invalid NETWORK_TYPE: ${NETWORK_TYPE}. Must be OFI or IBV.")
+    message(FATAL_ERROR "Invalid NETWORK_TYPE: ${NETWORK_TYPE}. Must be OFI, OFI_PROXY, or IBV.")
 endif()
 
 # ============================================================================
@@ -131,6 +141,42 @@ if(USE_AMDGPU)
 endif()
 
 # ============================================================================
+# Find Optional Dependencies (NVIDIA GPU)
+# ============================================================================
+if(USE_NVGPU)
+    # Find CUDA
+    if(NOT DEFINED CUDA_PATH)
+        if(DEFINED ENV{CUDA_HOME})
+            set(CUDA_PATH $ENV{CUDA_HOME})
+        elseif(DEFINED ENV{CUDA_PATH})
+            set(CUDA_PATH $ENV{CUDA_PATH})
+        else()
+            set(CUDA_PATH "/usr/local/cuda")
+        endif()
+    endif()
+
+    # Try find_package first (CMake 3.17+)
+    find_package(CUDAToolkit QUIET)
+    if(CUDAToolkit_FOUND)
+        set(CUDA_FOUND TRUE)
+        set(CUDA_INCLUDE_DIR ${CUDAToolkit_INCLUDE_DIRS})
+        message(STATUS "Found CUDA (via find_package): ${CUDAToolkit_VERSION}")
+    else()
+        # Fallback: manually set CUDA paths
+        set(CUDA_INCLUDE_DIR "${CUDA_PATH}/include")
+        set(CUDA_LIBRARY_DIR "${CUDA_PATH}/lib64")
+        find_library(CUDA_RUNTIME_LIBRARY NAMES cudart PATHS ${CUDA_LIBRARY_DIR})
+        if(CUDA_RUNTIME_LIBRARY)
+            set(CUDA_FOUND TRUE)
+            message(STATUS "Found CUDA (manual): ${CUDA_RUNTIME_LIBRARY}")
+        else()
+            message(WARNING "CUDA not found, disabling NVIDIA GPU support")
+            set(USE_NVGPU OFF)
+        endif()
+    endif()
+endif()
+
+# ============================================================================
 # Subdirectories
 # ============================================================================
 add_subdirectory(src)
@@ -158,6 +204,8 @@ message(STATUS "  Bootstrap: ${BOOTSTRAP_TYPE}")
 message(STATUS "  Network: ${NETWORK_TYPE}")
 if(USE_AMDGPU)
     message(STATUS "  GPU support: ENABLED (AMD/ROCm)")
+elseif(USE_NVGPU)
+    message(STATUS "  GPU support: ENABLED (NVIDIA/CUDA)")
 else()
     message(STATUS "  GPU support: DISABLED")
 endif()
@@ -171,6 +219,13 @@ if(USE_AMDGPU)
         message(STATUS "  HIP: Found (via find_package)")
     else()
         message(STATUS "  HIP: ${HIP_LIBRARY}")
+    endif()
+endif()
+if(USE_NVGPU)
+    if(CUDAToolkit_FOUND)
+        message(STATUS "  CUDA: Found (via find_package) ${CUDAToolkit_VERSION}")
+    else()
+        message(STATUS "  CUDA: ${CUDA_RUNTIME_LIBRARY}")
     endif()
 endif()
 message(STATUS "========================================")
