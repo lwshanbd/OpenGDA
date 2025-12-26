@@ -8,6 +8,10 @@ option(USE_AMDGPU "Enable AMD GPU support with ROCm/HIP" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(DEBUG_OFI "Enable DEBUG/TRACE log levels (default OFF for production)" OFF)
 
+# Default Memory Region sizes (in bytes, can be overridden by environment variables)
+set(DEFAULT_HOST_MR_SIZE "17179869184" CACHE STRING "Default host MR size in bytes (default 16GB)")
+set(DEFAULT_GPU_MR_SIZE "17179869184" CACHE STRING "Default GPU MR size in bytes (default 16GB)")
+
 # Bootstrap options
 set(BOOTSTRAP_TYPE "PMI2" CACHE STRING "Bootstrap type: PMI2 or PMIX")
 set_property(CACHE BOOTSTRAP_TYPE PROPERTY STRINGS "PMI2" "PMIX")

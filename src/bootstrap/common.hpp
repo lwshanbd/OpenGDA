@@ -9,18 +9,35 @@
 
 #include <string>
 #include <memory>
+#include <cstddef>
 
 class Bootstrap {
 public:
     Bootstrap();
     virtual ~Bootstrap() = default;
 
+    // Core initialization/finalization
     virtual bool bootstrap_initialize() = 0;
     virtual bool bootstrap_finalize() = 0;
     virtual std::string get_bootstrap_name() const = 0;
+
+    // Process information
     virtual int get_rank() const = 0;
+    virtual int get_size() const = 0;
+
+    // Synchronization barrier
+    virtual bool bootstrap_barrier() = 0;
+
+    // Key-Value Store operations
+    virtual bool bootstrap_kvs_put(const char* key, const char* value) = 0;
+    virtual bool bootstrap_kvs_get(const char* key, char* value, int* value_len) = 0;
+
+    // Address exchange helper
+    virtual bool bootstrap_exchange(const char* my_data, size_t data_len, char* all_data) = 0;
 
     static std::unique_ptr<Bootstrap> create_bootstrap(const std::string& type);
+
+    bool is_initialized() const { return bootstrap_initialized; }
 
 protected:
     bool bootstrap_initialized = false;

@@ -19,17 +19,30 @@ public:
     PMI2();
     ~PMI2();
 
+    // Core initialization/finalization
     bool bootstrap_initialize() override;
     bool bootstrap_finalize() override;
     std::string get_bootstrap_name() const override;
+
+    // Process information
     int get_rank() const override;
+    int get_size() const override;
+
+    // Synchronization barrier (wraps PMI2_KVS_Fence)
+    bool bootstrap_barrier() override;
+
+    // Key-Value Store operations
+    bool bootstrap_kvs_put(const char* key, const char* value) override;
+    bool bootstrap_kvs_get(const char* key, char* value, int* value_len) override;
+
+    // Address exchange helper (like exchange_addrs in gda-comp.cpp)
+    bool bootstrap_exchange(const char* my_data, size_t data_len, char* all_data) override;
 
 private:
-    int rank;
-    int size;
-    int device_id;
-    int spawned;
-    int appnum;
+    int rank_;
+    int size_;
+    int spawned_;
+    int appnum_;
 };
 
 #endif

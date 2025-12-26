@@ -32,9 +32,21 @@ set(OPENGDA_PUBLIC_HEADERS
 set(OPENGDA_PRIVATE_HEADERS
     common/log.hpp
     bootstrap/common.hpp
-    bootstrap/pmi2.hpp
-    network/ofi.hpp
 )
+
+# Add bootstrap headers based on type
+if(BOOTSTRAP_TYPE STREQUAL "PMI2")
+    list(APPEND OPENGDA_PRIVATE_HEADERS bootstrap/pmi2.hpp)
+elseif(BOOTSTRAP_TYPE STREQUAL "PMIX")
+    list(APPEND OPENGDA_PRIVATE_HEADERS bootstrap/pmix.hpp)
+endif()
+
+# Add network headers based on type
+if(NETWORK_TYPE STREQUAL "OFI")
+    list(APPEND OPENGDA_PRIVATE_HEADERS network/ofi.hpp)
+elseif(NETWORK_TYPE STREQUAL "IBV")
+    list(APPEND OPENGDA_PRIVATE_HEADERS network/ibv.hpp)
+endif()
 
 # ============================================================================
 # Build Library Target
@@ -110,6 +122,12 @@ if(DEBUG_OFI)
 else()
     message(STATUS "Debug logging: DISABLED (DEBUG/TRACE optimized out, INFO/WARN/ERROR always available)")
 endif()
+
+# Default MR sizes (compile-time defaults, can be overridden by environment variables)
+target_compile_definitions(opengda PRIVATE
+    DEFAULT_HOST_MR_SIZE=${DEFAULT_HOST_MR_SIZE}ULL
+    DEFAULT_GPU_MR_SIZE=${DEFAULT_GPU_MR_SIZE}ULL
+)
 
 # ============================================================================
 # Copy Headers to Build Directory (for development)

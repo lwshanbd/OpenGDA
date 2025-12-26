@@ -51,13 +51,12 @@ int gda_init(void) {
     }
 
     int rank = bootstrap->get_rank();
+    int size = bootstrap->get_size();
 
-    ofi = std::make_unique<OFI>(rank);
-    if (!ofi->ofi_initialize()) {
-        fprintf(stderr, "OpenGDA: Failed to initialize OFI\n");
-        ofi = nullptr;
-        return -1;
-    }
+    // Create OFI with bootstrap for address exchange
+    ofi = std::make_unique<OFI>(rank, size, bootstrap.get());
+
+    // Note: OFI constructor now handles initialization including address exchange
 
     initialized = true;
     return 0;
