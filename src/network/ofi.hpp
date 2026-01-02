@@ -1,4 +1,5 @@
 #include <rdma/fabric.h>
+#include <rdma/fi_atomic.h>
 #include <rdma/fi_cm.h>
 #include <rdma/fi_domain.h>
 #include <rdma/fi_endpoint.h>
@@ -28,6 +29,7 @@
 #include "../common/log.hpp"
 
 #include <map>
+#include <memory>
 #include <mutex>
 #include <chrono>
 #include <vector>
@@ -461,6 +463,253 @@ struct ExchangeData {
 // Maximum endpoint address length
 constexpr size_t MAX_EP_ADDR_LEN = 128;
 
+// Forward declarations
+class OFI;
+
+// ============================================================================
+// DWQOperation - GPU-triggered Deferred Work Queue Operation
+// ============================================================================
+
+/**
+ * DWQOperation encapsulates a complete GPU-triggered RDMA operation using DWQ.
+ *
+ * Architecture:
+ * 1. CPU prepares work items via prepare() -> fi_control(FI_QUEUE_WORK)
+ * 2. GPU writes to trigger counter (MMIO doorbell) to initiate RDMA
+ * 3. NIC executes RDMA write autonomously
+ * 4. NIC performs atomic operation to signal completion to GPU
+ * 5. GPU polls completion signal to detect completion
+ *
+ * Usage:
+ *   DWQOperation op;
+ *   op.initialize(ofi);
+ *   op.prepare_write(local_buf, size, target_rank, remote_offset);
+ *   // GPU kernel: *op.get_trigger_addr() = 1;
+ *   // GPU kernel: while(*op.get_completion_signal() == 0);
+ *   op.reset();  // Reuse for next operation
+ */
+class DWQOperation {
+public:
+    /**
+     * Operation type
+     */
+    enum class OpType {
+        WRITE,      // RMA write (put)
+        READ,       // RMA read (get) - future
+    };
+
+    /**
+     * Operation state
+     */
+    enum class State {
+        UNINITIALIZED,  // Not yet initialized
+        INITIALIZED,    // Initialized, ready to prepare
+        PREPARED,       // Work queued, waiting for GPU trigger
+        COMPLETED,      // Operation completed (detected by GPU or CPU)
+    };
+
+    DWQOperation();
+    ~DWQOperation();
+
+    // Disable copy, allow move
+    DWQOperation(const DWQOperation&) = delete;
+    DWQOperation& operator=(const DWQOperation&) = delete;
+    DWQOperation(DWQOperation&&) = default;
+    DWQOperation& operator=(DWQOperation&&) = default;
+
+    // ========================================================================
+    // Initialization
+    // ========================================================================
+
+    /**
+     * Initialize the DWQ operation with OFI resources
+     * Must be called before prepare_*
+     * @param ofi OFI instance (provides domain, endpoint, counters, etc.)
+     * @return true on success
+     */
+    bool initialize(OFI* ofi);
+
+    /**
+     * Check if initialized
+     */
+    bool is_initialized() const { return state_ != State::UNINITIALIZED; }
+
+    // ========================================================================
+    // Operation Preparation (CPU side)
+    // ========================================================================
+
+    /**
+     * Prepare a DWQ write operation
+     * This queues the deferred work, ready for GPU to trigger
+     *
+     * @param local_buf    Local buffer to send (must be registered)
+     * @param size         Size in bytes
+     * @param target_rank  Target rank to write to
+     * @param remote_offset Offset into target's default GPU MR
+     * @return true on success
+     */
+    bool prepare_write(void* local_buf, size_t size, int target_rank,
+                       uint64_t remote_offset = 0);
+
+    /**
+     * Prepare a DWQ write with explicit remote address/key
+     *
+     * @param local_buf    Local buffer to send (must be registered)
+     * @param size         Size in bytes
+     * @param target_addr  Target fi_addr_t
+     * @param remote_addr  Remote buffer address
+     * @param remote_key   Remote MR key
+     * @return true on success
+     */
+    bool prepare_write_explicit(void* local_buf, size_t size,
+                                fi_addr_t target_addr,
+                                uint64_t remote_addr, uint64_t remote_key);
+
+    /**
+     * Prepare a DWQ read (get) operation
+     * This queues the deferred work, ready for GPU to trigger
+     *
+     * @param local_buf    Local buffer to receive data (must be registered)
+     * @param size         Size in bytes
+     * @param source_rank  Source rank to read from
+     * @param remote_offset Offset into source's default GPU MR
+     * @return true on success
+     */
+    bool prepare_read(void* local_buf, size_t size, int source_rank,
+                      uint64_t remote_offset = 0);
+
+    /**
+     * Prepare a DWQ read with explicit remote address/key
+     *
+     * @param local_buf    Local buffer to receive data (must be registered)
+     * @param size         Size in bytes
+     * @param source_addr  Source fi_addr_t
+     * @param remote_addr  Remote buffer address to read from
+     * @param remote_key   Remote MR key
+     * @return true on success
+     */
+    bool prepare_read_explicit(void* local_buf, size_t size,
+                               fi_addr_t source_addr,
+                               uint64_t remote_addr, uint64_t remote_key);
+
+    // ========================================================================
+    // GPU Interface
+    // ========================================================================
+
+    /**
+     * Get the trigger counter address for GPU to write
+     * GPU writes to this address (MMIO doorbell) to initiate RDMA
+     * @return Device pointer to trigger counter, or nullptr if not ready
+     */
+    volatile uint64_t* get_trigger_addr() const;
+
+    /**
+     * Get the completion signal address for GPU to poll
+     * GPU polls this address until it becomes non-zero
+     * @return Device pointer to completion signal, or nullptr if not ready
+     */
+    volatile uint64_t* get_completion_signal() const;
+
+    /**
+     * Get the threshold value to write to trigger counter
+     * GPU should write this value (or greater) to trigger the operation
+     */
+    uint64_t get_trigger_threshold() const { return threshold_; }
+
+    // ========================================================================
+    // State Management
+    // ========================================================================
+
+    /**
+     * Reset the operation for reuse
+     * Clears counters and completion signal, returns to INITIALIZED state
+     * @return true on success
+     */
+    bool reset();
+
+    /**
+     * Get current state
+     */
+    State get_state() const { return state_; }
+
+    /**
+     * Check if operation completed (polls completion counter)
+     * @return true if completed
+     */
+    bool is_completed() const;
+
+    /**
+     * Wait for completion (CPU-side blocking wait)
+     * @param timeout_ms Timeout in milliseconds (-1 for infinite)
+     * @return true if completed, false if timeout
+     */
+    bool wait_completion(int timeout_ms = -1);
+
+    // ========================================================================
+    // Accessors
+    // ========================================================================
+
+    OpType get_op_type() const { return op_type_; }
+    CntrManager::CntrPair* get_cntr_pair() const { return cntr_pair_; }
+
+private:
+    // ========================================================================
+    // Internal Methods
+    // ========================================================================
+
+    bool setup_atomic_notification();
+    bool queue_rma_work();
+    bool queue_atomic_work();
+    void cleanup();
+
+    // ========================================================================
+    // Member Variables
+    // ========================================================================
+
+    State state_;
+    OpType op_type_;
+    OFI* ofi_;
+
+    // Counter pair for this operation
+    CntrManager::CntrPair* cntr_pair_;
+
+    // Additional counter for atomic completion
+    struct fid_cntr* atomic_completion_cntr_;
+    struct fi_cxi_cntr_ops* atomic_cntr_ops_;
+
+    // Completion signal for GPU polling (GPU memory)
+    uint64_t* completion_signal_;           // GPU memory for polling
+    struct fid_mr* completion_signal_mr_;   // MR for completion signal
+
+    // Atomic operand (value to add, stored in GPU memory)
+    uint64_t* atomic_operand_;
+    struct fid_mr* atomic_operand_mr_;
+
+    // Threshold for triggering
+    uint64_t threshold_;
+
+    // ========================================================================
+    // Deferred Work Structures (must remain valid until completion)
+    // ========================================================================
+
+    // RMA work structures
+    struct fi_deferred_work rma_work_;
+    struct fi_op_rma* op_rma_;
+    struct fi_msg_rma* msg_rma_;
+    struct iovec* iov_;
+    struct fi_rma_iov* rma_iov_;
+
+    // Atomic work structures
+    struct fi_deferred_work atomic_work_;
+    struct fi_op_atomic* op_atomic_;
+    struct fi_msg_atomic* atomic_msg_;
+    struct fi_ioc* atomic_iov_;
+    struct fi_rma_ioc* atomic_rma_iov_;
+
+    // Local descriptor for the local buffer
+    void* local_desc_;
+};
+
 // ============================================================================
 // Default MR Configuration
 // ============================================================================
@@ -639,6 +888,27 @@ public:
    * Print counter statistics to log
    */
   void print_cntr_stats();
+
+  // ========================================================================
+  // DWQ Operation Support
+  // ========================================================================
+
+  /**
+   * Create and initialize a new DWQ operation
+   * Caller is responsible for managing the operation's lifecycle
+   * @return Initialized DWQOperation, or nullptr on failure
+   */
+  std::unique_ptr<DWQOperation> create_dwq_operation();
+
+  /**
+   * Create a counter for atomic completion notification
+   * Used internally by DWQOperation
+   * @param cntr_out Output: created counter
+   * @param ops_out Output: CXI counter ops
+   * @return true on success
+   */
+  bool create_atomic_completion_counter(struct fid_cntr** cntr_out,
+                                        struct fi_cxi_cntr_ops** ops_out);
 
   // ========================================================================
   // Default MR Accessors

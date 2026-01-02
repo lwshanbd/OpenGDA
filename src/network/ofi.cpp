@@ -1830,3 +1830,705 @@ fi_addr_t OFI::get_peer_fi_addr(int rank) const {
     }
     return peers_[rank].valid ? peers_[rank].fi_addr : FI_ADDR_NOTAVAIL;
 }
+
+// ============================================================================
+// DWQ Operation Support
+// ============================================================================
+
+std::unique_ptr<DWQOperation> OFI::create_dwq_operation() {
+    auto op = std::make_unique<DWQOperation>();
+    if (!op->initialize(this)) {
+        OPENGDA_Error("ofi", "Failed to initialize DWQ operation");
+        return nullptr;
+    }
+    return op;
+}
+
+bool OFI::create_atomic_completion_counter(struct fid_cntr** cntr_out,
+                                           struct fi_cxi_cntr_ops** ops_out) {
+    if (!cntr_out || !ops_out) {
+        return false;
+    }
+
+    struct fi_cntr_attr cntr_attr = {};
+    cntr_attr.events = FI_CNTR_EVENTS_COMP;
+
+    int ret = fi_cntr_open(domain, &cntr_attr, cntr_out, NULL);
+    if (ret) {
+        OPENGDA_Error("ofi", "fi_cntr_open(atomic_completion) failed: %s (%d)",
+                      fi_strerror(-ret), ret);
+        return false;
+    }
+
+    ret = fi_open_ops(&(*cntr_out)->fid, FI_CXI_COUNTER_OPS, 0,
+                      (void**)ops_out, NULL);
+    if (ret) {
+        OPENGDA_Error("ofi", "fi_open_ops(atomic_completion) failed: %s (%d)",
+                      fi_strerror(-ret), ret);
+        fi_close(&(*cntr_out)->fid);
+        *cntr_out = nullptr;
+        return false;
+    }
+
+    return true;
+}
+
+// ============================================================================
+// DWQOperation Implementation
+// ============================================================================
+
+DWQOperation::DWQOperation()
+    : state_(State::UNINITIALIZED)
+    , op_type_(OpType::WRITE)
+    , ofi_(nullptr)
+    , cntr_pair_(nullptr)
+    , atomic_completion_cntr_(nullptr)
+    , atomic_cntr_ops_(nullptr)
+    , completion_signal_(nullptr)
+    , completion_signal_mr_(nullptr)
+    , atomic_operand_(nullptr)
+    , atomic_operand_mr_(nullptr)
+    , threshold_(1)
+    , op_rma_(nullptr)
+    , msg_rma_(nullptr)
+    , iov_(nullptr)
+    , rma_iov_(nullptr)
+    , op_atomic_(nullptr)
+    , atomic_msg_(nullptr)
+    , atomic_iov_(nullptr)
+    , atomic_rma_iov_(nullptr)
+    , local_desc_(nullptr)
+{
+    memset(&rma_work_, 0, sizeof(rma_work_));
+    memset(&atomic_work_, 0, sizeof(atomic_work_));
+}
+
+DWQOperation::~DWQOperation() {
+    cleanup();
+}
+
+void DWQOperation::cleanup() {
+    // Free RMA work structures
+    if (op_rma_) { free(op_rma_); op_rma_ = nullptr; }
+    if (msg_rma_) { free(msg_rma_); msg_rma_ = nullptr; }
+    if (iov_) { free(iov_); iov_ = nullptr; }
+    if (rma_iov_) { free(rma_iov_); rma_iov_ = nullptr; }
+
+    // Free atomic work structures
+    if (op_atomic_) { free(op_atomic_); op_atomic_ = nullptr; }
+    if (atomic_msg_) { free(atomic_msg_); atomic_msg_ = nullptr; }
+    if (atomic_iov_) { free(atomic_iov_); atomic_iov_ = nullptr; }
+    if (atomic_rma_iov_) { free(atomic_rma_iov_); atomic_rma_iov_ = nullptr; }
+
+    // Deregister and free GPU memory
+    if (ofi_ && completion_signal_mr_) {
+        ofi_->deregister_memory(completion_signal_mr_);
+        completion_signal_mr_ = nullptr;
+    }
+    if (ofi_ && atomic_operand_mr_) {
+        ofi_->deregister_memory(atomic_operand_mr_);
+        atomic_operand_mr_ = nullptr;
+    }
+
+#ifdef USE_AMDGPU
+    if (completion_signal_) {
+        hipFree(completion_signal_);
+        completion_signal_ = nullptr;
+    }
+    if (atomic_operand_) {
+        hipFree(atomic_operand_);
+        atomic_operand_ = nullptr;
+    }
+#endif
+
+#ifdef USE_NVGPU
+    if (completion_signal_) {
+        cudaFree(completion_signal_);
+        completion_signal_ = nullptr;
+    }
+    if (atomic_operand_) {
+        cudaFree(atomic_operand_);
+        atomic_operand_ = nullptr;
+    }
+#endif
+
+    // Close atomic completion counter
+    if (atomic_completion_cntr_) {
+        fi_close(&atomic_completion_cntr_->fid);
+        atomic_completion_cntr_ = nullptr;
+    }
+
+    // Release counter pair back to OFI
+    if (ofi_ && cntr_pair_) {
+        ofi_->release_cntr_pair(cntr_pair_);
+        cntr_pair_ = nullptr;
+    }
+
+    state_ = State::UNINITIALIZED;
+    ofi_ = nullptr;
+}
+
+bool DWQOperation::initialize(OFI* ofi) {
+    if (!ofi) {
+        OPENGDA_Error("dwq", "OFI instance is null");
+        return false;
+    }
+
+    if (state_ != State::UNINITIALIZED) {
+        OPENGDA_Error("dwq", "DWQOperation already initialized");
+        return false;
+    }
+
+    ofi_ = ofi;
+
+    // Allocate counter pair for RMA trigger/completion
+    if (!ofi_->allocate_cntr_pair(&cntr_pair_)) {
+        OPENGDA_Error("dwq", "Failed to allocate counter pair");
+        cleanup();
+        return false;
+    }
+
+    // Create atomic completion counter
+    if (!ofi_->create_atomic_completion_counter(&atomic_completion_cntr_,
+                                                 &atomic_cntr_ops_)) {
+        OPENGDA_Error("dwq", "Failed to create atomic completion counter");
+        cleanup();
+        return false;
+    }
+
+    // Allocate GPU memory for completion signal and atomic operand
+#ifdef USE_AMDGPU
+    hipError_t hip_ret = hipMalloc(&completion_signal_, sizeof(uint64_t));
+    if (hip_ret != hipSuccess) {
+        OPENGDA_Error("dwq", "hipMalloc(completion_signal) failed: %s",
+                      hipGetErrorString(hip_ret));
+        cleanup();
+        return false;
+    }
+    hip_ret = hipMemset(completion_signal_, 0, sizeof(uint64_t));
+    if (hip_ret != hipSuccess) {
+        OPENGDA_Error("dwq", "hipMemset(completion_signal) failed");
+        cleanup();
+        return false;
+    }
+
+    hip_ret = hipMalloc(&atomic_operand_, sizeof(uint64_t));
+    if (hip_ret != hipSuccess) {
+        OPENGDA_Error("dwq", "hipMalloc(atomic_operand) failed: %s",
+                      hipGetErrorString(hip_ret));
+        cleanup();
+        return false;
+    }
+    uint64_t operand_value = 1;
+    hip_ret = hipMemcpy(atomic_operand_, &operand_value, sizeof(uint64_t),
+                        hipMemcpyHostToDevice);
+    if (hip_ret != hipSuccess) {
+        OPENGDA_Error("dwq", "hipMemcpy(atomic_operand) failed");
+        cleanup();
+        return false;
+    }
+    hipDeviceSynchronize();
+#endif
+
+#ifdef USE_NVGPU
+    cudaError_t cuda_ret = cudaMalloc(&completion_signal_, sizeof(uint64_t));
+    if (cuda_ret != cudaSuccess) {
+        OPENGDA_Error("dwq", "cudaMalloc(completion_signal) failed: %s",
+                      cudaGetErrorString(cuda_ret));
+        cleanup();
+        return false;
+    }
+    cuda_ret = cudaMemset(completion_signal_, 0, sizeof(uint64_t));
+    if (cuda_ret != cudaSuccess) {
+        OPENGDA_Error("dwq", "cudaMemset(completion_signal) failed");
+        cleanup();
+        return false;
+    }
+
+    cuda_ret = cudaMalloc(&atomic_operand_, sizeof(uint64_t));
+    if (cuda_ret != cudaSuccess) {
+        OPENGDA_Error("dwq", "cudaMalloc(atomic_operand) failed: %s",
+                      cudaGetErrorString(cuda_ret));
+        cleanup();
+        return false;
+    }
+    uint64_t operand_value = 1;
+    cuda_ret = cudaMemcpy(atomic_operand_, &operand_value, sizeof(uint64_t),
+                          cudaMemcpyHostToDevice);
+    if (cuda_ret != cudaSuccess) {
+        OPENGDA_Error("dwq", "cudaMemcpy(atomic_operand) failed");
+        cleanup();
+        return false;
+    }
+    cudaDeviceSynchronize();
+#endif
+
+    // Register completion signal and atomic operand as MRs
+    completion_signal_mr_ = ofi_->register_memory(completion_signal_,
+                                                   sizeof(uint64_t), true);
+    if (!completion_signal_mr_) {
+        OPENGDA_Error("dwq", "Failed to register completion_signal MR");
+        cleanup();
+        return false;
+    }
+
+    atomic_operand_mr_ = ofi_->register_memory(atomic_operand_,
+                                                sizeof(uint64_t), true);
+    if (!atomic_operand_mr_) {
+        OPENGDA_Error("dwq", "Failed to register atomic_operand MR");
+        cleanup();
+        return false;
+    }
+
+    // Allocate work structures (must remain valid until completion)
+    op_rma_ = (struct fi_op_rma*)malloc(sizeof(struct fi_op_rma));
+    msg_rma_ = (struct fi_msg_rma*)malloc(sizeof(struct fi_msg_rma));
+    iov_ = (struct iovec*)malloc(sizeof(struct iovec));
+    rma_iov_ = (struct fi_rma_iov*)malloc(sizeof(struct fi_rma_iov));
+
+    op_atomic_ = (struct fi_op_atomic*)malloc(sizeof(struct fi_op_atomic));
+    atomic_msg_ = (struct fi_msg_atomic*)malloc(sizeof(struct fi_msg_atomic));
+    atomic_iov_ = (struct fi_ioc*)malloc(sizeof(struct fi_ioc));
+    atomic_rma_iov_ = (struct fi_rma_ioc*)malloc(sizeof(struct fi_rma_ioc));
+
+    if (!op_rma_ || !msg_rma_ || !iov_ || !rma_iov_ ||
+        !op_atomic_ || !atomic_msg_ || !atomic_iov_ || !atomic_rma_iov_) {
+        OPENGDA_Error("dwq", "Failed to allocate work structures");
+        cleanup();
+        return false;
+    }
+
+    state_ = State::INITIALIZED;
+    OPENGDA_Debug("dwq", "DWQOperation initialized successfully");
+    return true;
+}
+
+bool DWQOperation::prepare_write(void* local_buf, size_t size, int target_rank,
+                                  uint64_t remote_offset) {
+    if (!ofi_) {
+        OPENGDA_Error("dwq", "OFI not set");
+        return false;
+    }
+
+    // Get peer info for target
+    const PeerInfo* peer = ofi_->get_peer_info(target_rank);
+    if (!peer || !peer->valid) {
+        OPENGDA_Error("dwq", "Invalid target rank: %d", target_rank);
+        return false;
+    }
+
+    // Use peer's GPU MR for remote address
+    uint64_t remote_addr = peer->mr_info.gpu_mr_addr + remote_offset;
+    uint64_t remote_key = peer->mr_info.gpu_mr_key;
+
+    return prepare_write_explicit(local_buf, size, peer->fi_addr,
+                                  remote_addr, remote_key);
+}
+
+bool DWQOperation::prepare_write_explicit(void* local_buf, size_t size,
+                                           fi_addr_t target_addr,
+                                           uint64_t remote_addr,
+                                           uint64_t remote_key) {
+    if (state_ != State::INITIALIZED) {
+        OPENGDA_Error("dwq", "Operation not in INITIALIZED state");
+        return false;
+    }
+
+    if (!ofi_ || !cntr_pair_ || !cntr_pair_->trigger || !cntr_pair_->completion) {
+        OPENGDA_Error("dwq", "Invalid OFI or counter state");
+        return false;
+    }
+
+    op_type_ = OpType::WRITE;
+
+    // Get local MR info for the buffer
+    const MRManager::MRInfo* mr_info = ofi_->get_mr_info(local_buf);
+    if (!mr_info) {
+        OPENGDA_Error("dwq", "Local buffer not registered: %p", local_buf);
+        return false;
+    }
+    local_desc_ = mr_info->desc;
+
+    // Reset counters
+    fi_cntr_set(cntr_pair_->trigger->cntr, 0);
+    fi_cntr_set(cntr_pair_->completion->cntr, 0);
+    fi_cntr_set(atomic_completion_cntr_, 0);
+
+    // Reset completion signal
+#ifdef USE_AMDGPU
+    hipMemset(completion_signal_, 0, sizeof(uint64_t));
+    hipDeviceSynchronize();
+#endif
+#ifdef USE_NVGPU
+    cudaMemset(completion_signal_, 0, sizeof(uint64_t));
+    cudaDeviceSynchronize();
+#endif
+
+    // Determine remote address mode
+    uint64_t remote_addr_for_rma = remote_addr;
+    struct fi_info* info = ofi_->get_info();
+    if (info && !(info->domain_attr->mr_mode & FI_MR_VIRT_ADDR)) {
+        // CXI uses offset from MR base (key encodes the base)
+        remote_addr_for_rma = 0;
+    }
+
+    // Setup RMA work (WORK 1)
+    iov_->iov_base = local_buf;
+    iov_->iov_len = size;
+
+    rma_iov_->addr = remote_addr_for_rma;
+    rma_iov_->len = size;
+    rma_iov_->key = remote_key;
+
+    memset(msg_rma_, 0, sizeof(*msg_rma_));
+    msg_rma_->msg_iov = iov_;
+    msg_rma_->desc = &local_desc_;
+    msg_rma_->iov_count = 1;
+    msg_rma_->addr = target_addr;
+    msg_rma_->rma_iov = rma_iov_;
+    msg_rma_->rma_iov_count = 1;
+    msg_rma_->context = NULL;
+    msg_rma_->data = 0;
+
+    memset(op_rma_, 0, sizeof(*op_rma_));
+    op_rma_->ep = ofi_->get_endpoint();
+    op_rma_->msg = *msg_rma_;
+    op_rma_->flags = FI_COMPLETION | FI_CXI_CNTR_WB;
+
+    memset(&rma_work_, 0, sizeof(rma_work_));
+    rma_work_.triggering_cntr = cntr_pair_->trigger->cntr;
+    rma_work_.completion_cntr = cntr_pair_->completion->cntr;
+    rma_work_.threshold = threshold_;
+    rma_work_.op_type = FI_OP_WRITE;
+    rma_work_.op.rma = op_rma_;
+
+    // Queue RMA work
+    struct fid_domain* domain = ofi_->get_domain();
+    int ret = fi_control(&domain->fid, FI_QUEUE_WORK, &rma_work_);
+    if (ret) {
+        OPENGDA_Error("dwq", "fi_control(FI_QUEUE_WORK, rma) failed: %s (%d)",
+                      fi_strerror(-ret), ret);
+        return false;
+    }
+
+    // Setup atomic work (WORK 2) - NIC signals GPU when RMA completes
+    void* desc_atomic_operand = fi_mr_desc(atomic_operand_mr_);
+    void* desc_completion_signal = fi_mr_desc(completion_signal_mr_);
+
+    // Source operand (value to add)
+    atomic_iov_->addr = atomic_operand_;
+    atomic_iov_->count = 1;
+
+    // Destination (completion_signal on GPU) - local atomic to self
+    uint64_t completion_signal_addr = (uint64_t)completion_signal_;
+    struct fi_info* fi_info = ofi_->get_info();
+    if (fi_info && (fi_info->domain_attr->mr_mode & FI_MR_VIRT_ADDR)) {
+        atomic_rma_iov_->addr = completion_signal_addr;
+    } else {
+        atomic_rma_iov_->addr = 0;
+    }
+    atomic_rma_iov_->count = 1;
+    atomic_rma_iov_->key = fi_mr_key(completion_signal_mr_);
+
+    // Setup atomic message
+    memset(atomic_msg_, 0, sizeof(*atomic_msg_));
+    atomic_msg_->msg_iov = atomic_iov_;
+    atomic_msg_->desc = &desc_atomic_operand;
+    atomic_msg_->iov_count = 1;
+    atomic_msg_->addr = ofi_->get_local_fi_addr();  // Target is local
+    atomic_msg_->rma_iov = atomic_rma_iov_;
+    atomic_msg_->rma_iov_count = 1;
+    atomic_msg_->datatype = FI_UINT64;
+    atomic_msg_->op = FI_SUM;
+    atomic_msg_->context = NULL;
+    atomic_msg_->data = 0;
+
+    memset(op_atomic_, 0, sizeof(*op_atomic_));
+    op_atomic_->ep = ofi_->get_endpoint();
+    op_atomic_->msg = *atomic_msg_;
+    op_atomic_->flags = FI_COMPLETION;
+
+    memset(&atomic_work_, 0, sizeof(atomic_work_));
+    atomic_work_.op_type = FI_OP_ATOMIC;
+    atomic_work_.op.atomic = op_atomic_;
+    // Triggered when RMA completion counter reaches threshold
+    atomic_work_.triggering_cntr = cntr_pair_->completion->cntr;
+    atomic_work_.completion_cntr = atomic_completion_cntr_;
+    atomic_work_.threshold = threshold_;
+
+    // Queue atomic work
+    ret = fi_control(&domain->fid, FI_QUEUE_WORK, &atomic_work_);
+    if (ret) {
+        OPENGDA_Error("dwq", "fi_control(FI_QUEUE_WORK, atomic) failed: %s (%d)",
+                      fi_strerror(-ret), ret);
+        return false;
+    }
+
+    state_ = State::PREPARED;
+    OPENGDA_Debug("dwq", "DWQ write prepared: %zu bytes to fi_addr %lu",
+                  size, target_addr);
+    return true;
+}
+
+bool DWQOperation::prepare_read(void* local_buf, size_t size, int source_rank,
+                                 uint64_t remote_offset) {
+    if (!ofi_) {
+        OPENGDA_Error("dwq", "OFI not set");
+        return false;
+    }
+
+    // Get peer info for source
+    const PeerInfo* peer = ofi_->get_peer_info(source_rank);
+    if (!peer || !peer->valid) {
+        OPENGDA_Error("dwq", "Invalid source rank: %d", source_rank);
+        return false;
+    }
+
+    // Use peer's GPU MR for remote address
+    uint64_t remote_addr = peer->mr_info.gpu_mr_addr + remote_offset;
+    uint64_t remote_key = peer->mr_info.gpu_mr_key;
+
+    return prepare_read_explicit(local_buf, size, peer->fi_addr,
+                                 remote_addr, remote_key);
+}
+
+bool DWQOperation::prepare_read_explicit(void* local_buf, size_t size,
+                                          fi_addr_t source_addr,
+                                          uint64_t remote_addr,
+                                          uint64_t remote_key) {
+    if (state_ != State::INITIALIZED) {
+        OPENGDA_Error("dwq", "Operation not in INITIALIZED state");
+        return false;
+    }
+
+    if (!ofi_ || !cntr_pair_ || !cntr_pair_->trigger || !cntr_pair_->completion) {
+        OPENGDA_Error("dwq", "Invalid OFI or counter state");
+        return false;
+    }
+
+    op_type_ = OpType::READ;
+
+    // Get local MR info for the buffer
+    const MRManager::MRInfo* mr_info = ofi_->get_mr_info(local_buf);
+    if (!mr_info) {
+        OPENGDA_Error("dwq", "Local buffer not registered: %p", local_buf);
+        return false;
+    }
+    local_desc_ = mr_info->desc;
+
+    // Reset counters
+    fi_cntr_set(cntr_pair_->trigger->cntr, 0);
+    fi_cntr_set(cntr_pair_->completion->cntr, 0);
+    fi_cntr_set(atomic_completion_cntr_, 0);
+
+    // Reset completion signal
+#ifdef USE_AMDGPU
+    hipMemset(completion_signal_, 0, sizeof(uint64_t));
+    hipDeviceSynchronize();
+#endif
+#ifdef USE_NVGPU
+    cudaMemset(completion_signal_, 0, sizeof(uint64_t));
+    cudaDeviceSynchronize();
+#endif
+
+    // Determine remote address mode
+    uint64_t remote_addr_for_rma = remote_addr;
+    struct fi_info* info = ofi_->get_info();
+    if (info && !(info->domain_attr->mr_mode & FI_MR_VIRT_ADDR)) {
+        // CXI uses offset from MR base (key encodes the base)
+        remote_addr_for_rma = 0;
+    }
+
+    // Setup RMA read work (WORK 1)
+    // For read: local buffer receives data FROM remote
+    iov_->iov_base = local_buf;
+    iov_->iov_len = size;
+
+    rma_iov_->addr = remote_addr_for_rma;
+    rma_iov_->len = size;
+    rma_iov_->key = remote_key;
+
+    memset(msg_rma_, 0, sizeof(*msg_rma_));
+    msg_rma_->msg_iov = iov_;
+    msg_rma_->desc = &local_desc_;
+    msg_rma_->iov_count = 1;
+    msg_rma_->addr = source_addr;
+    msg_rma_->rma_iov = rma_iov_;
+    msg_rma_->rma_iov_count = 1;
+    msg_rma_->context = NULL;
+    msg_rma_->data = 0;
+
+    memset(op_rma_, 0, sizeof(*op_rma_));
+    op_rma_->ep = ofi_->get_endpoint();
+    op_rma_->msg = *msg_rma_;
+    op_rma_->flags = FI_COMPLETION | FI_CXI_CNTR_WB;
+
+    memset(&rma_work_, 0, sizeof(rma_work_));
+    rma_work_.triggering_cntr = cntr_pair_->trigger->cntr;
+    rma_work_.completion_cntr = cntr_pair_->completion->cntr;
+    rma_work_.threshold = threshold_;
+    rma_work_.op_type = FI_OP_READ;  // Read operation instead of write
+    rma_work_.op.rma = op_rma_;
+
+    // Queue RMA work
+    struct fid_domain* domain = ofi_->get_domain();
+    int ret = fi_control(&domain->fid, FI_QUEUE_WORK, &rma_work_);
+    if (ret) {
+        OPENGDA_Error("dwq", "fi_control(FI_QUEUE_WORK, rma read) failed: %s (%d)",
+                      fi_strerror(-ret), ret);
+        return false;
+    }
+
+    // Setup atomic work (WORK 2) - NIC signals GPU when RMA completes
+    void* desc_atomic_operand = fi_mr_desc(atomic_operand_mr_);
+    void* desc_completion_signal = fi_mr_desc(completion_signal_mr_);
+
+    // Source operand (value to add)
+    atomic_iov_->addr = atomic_operand_;
+    atomic_iov_->count = 1;
+
+    // Destination (completion_signal on GPU) - local atomic to self
+    uint64_t completion_signal_addr = (uint64_t)completion_signal_;
+    struct fi_info* fi_info = ofi_->get_info();
+    if (fi_info && (fi_info->domain_attr->mr_mode & FI_MR_VIRT_ADDR)) {
+        atomic_rma_iov_->addr = completion_signal_addr;
+    } else {
+        atomic_rma_iov_->addr = 0;
+    }
+    atomic_rma_iov_->count = 1;
+    atomic_rma_iov_->key = fi_mr_key(completion_signal_mr_);
+
+    // Setup atomic message
+    memset(atomic_msg_, 0, sizeof(*atomic_msg_));
+    atomic_msg_->msg_iov = atomic_iov_;
+    atomic_msg_->desc = &desc_atomic_operand;
+    atomic_msg_->iov_count = 1;
+    atomic_msg_->addr = ofi_->get_local_fi_addr();  // Target is local
+    atomic_msg_->rma_iov = atomic_rma_iov_;
+    atomic_msg_->rma_iov_count = 1;
+    atomic_msg_->datatype = FI_UINT64;
+    atomic_msg_->op = FI_SUM;
+    atomic_msg_->context = NULL;
+    atomic_msg_->data = 0;
+
+    memset(op_atomic_, 0, sizeof(*op_atomic_));
+    op_atomic_->ep = ofi_->get_endpoint();
+    op_atomic_->msg = *atomic_msg_;
+    op_atomic_->flags = FI_COMPLETION;
+
+    memset(&atomic_work_, 0, sizeof(atomic_work_));
+    atomic_work_.op_type = FI_OP_ATOMIC;
+    atomic_work_.op.atomic = op_atomic_;
+    // Triggered when RMA completion counter reaches threshold
+    atomic_work_.triggering_cntr = cntr_pair_->completion->cntr;
+    atomic_work_.completion_cntr = atomic_completion_cntr_;
+    atomic_work_.threshold = threshold_;
+
+    // Queue atomic work
+    ret = fi_control(&domain->fid, FI_QUEUE_WORK, &atomic_work_);
+    if (ret) {
+        OPENGDA_Error("dwq", "fi_control(FI_QUEUE_WORK, atomic) failed: %s (%d)",
+                      fi_strerror(-ret), ret);
+        return false;
+    }
+
+    state_ = State::PREPARED;
+    OPENGDA_Debug("dwq", "DWQ read prepared: %zu bytes from fi_addr %lu",
+                  size, source_addr);
+    return true;
+}
+
+volatile uint64_t* DWQOperation::get_trigger_addr() const {
+    if (state_ != State::PREPARED) {
+        return nullptr;
+    }
+    if (!cntr_pair_ || !cntr_pair_->trigger) {
+        return nullptr;
+    }
+#if defined(USE_AMDGPU) || defined(USE_NVGPU)
+    return cntr_pair_->trigger->dev_addr;
+#else
+    return nullptr;
+#endif
+}
+
+volatile uint64_t* DWQOperation::get_completion_signal() const {
+    if (state_ != State::PREPARED) {
+        return nullptr;
+    }
+    return completion_signal_;
+}
+
+bool DWQOperation::reset() {
+    if (state_ == State::UNINITIALIZED) {
+        return false;
+    }
+
+    // Reset counters
+    if (cntr_pair_ && cntr_pair_->trigger && cntr_pair_->completion) {
+        fi_cntr_set(cntr_pair_->trigger->cntr, 0);
+        fi_cntr_set(cntr_pair_->completion->cntr, 0);
+    }
+    if (atomic_completion_cntr_) {
+        fi_cntr_set(atomic_completion_cntr_, 0);
+    }
+
+    // Reset completion signal
+#ifdef USE_AMDGPU
+    if (completion_signal_) {
+        hipMemset(completion_signal_, 0, sizeof(uint64_t));
+        hipDeviceSynchronize();
+    }
+#endif
+#ifdef USE_NVGPU
+    if (completion_signal_) {
+        cudaMemset(completion_signal_, 0, sizeof(uint64_t));
+        cudaDeviceSynchronize();
+    }
+#endif
+
+    state_ = State::INITIALIZED;
+    return true;
+}
+
+bool DWQOperation::is_completed() const {
+    if (state_ != State::PREPARED) {
+        return state_ == State::COMPLETED;
+    }
+
+    // Check atomic completion counter
+    if (atomic_completion_cntr_) {
+        uint64_t cnt = fi_cntr_read(atomic_completion_cntr_);
+        return cnt >= threshold_;
+    }
+    return false;
+}
+
+bool DWQOperation::wait_completion(int timeout_ms) {
+    if (state_ != State::PREPARED) {
+        return state_ == State::COMPLETED;
+    }
+
+    if (!atomic_completion_cntr_) {
+        return false;
+    }
+
+    int ret;
+    if (timeout_ms < 0) {
+        // Infinite wait
+        ret = fi_cntr_wait(atomic_completion_cntr_, threshold_, -1);
+    } else {
+        ret = fi_cntr_wait(atomic_completion_cntr_, threshold_, timeout_ms);
+    }
+
+    if (ret == 0) {
+        state_ = State::COMPLETED;
+        return true;
+    } else if (ret == -FI_ETIMEDOUT) {
+        return false;
+    } else {
+        OPENGDA_Error("dwq", "fi_cntr_wait failed: %s (%d)",
+                      fi_strerror(-ret), ret);
+        return false;
+    }
+}
