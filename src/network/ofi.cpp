@@ -649,6 +649,21 @@ const MRManager::MRInfo* MRManager::get_info_by_addr(void* addr) const {
     return nullptr;
 }
 
+const MRManager::MRInfo* MRManager::find_containing(void* addr) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    uintptr_t target = reinterpret_cast<uintptr_t>(addr);
+
+    for (const auto& pair : mrs_by_addr_) {
+        uintptr_t base = reinterpret_cast<uintptr_t>(pair.first);
+        size_t size = pair.second.size;
+        if (target >= base && target < base + size) {
+            return &(pair.second);
+        }
+    }
+    return nullptr;
+}
+
 const MRManager::MRInfo* MRManager::get_info_by_key(uint64_t key) const {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -758,6 +773,399 @@ void MRManager::update_stats_remove(size_t size, bool is_device_mem) {
 }
 
 // ============================================================================
+// CompletionQueue Implementation
+// ============================================================================
+
+CompletionQueue::CompletionQueue()
+    : next_seq_num_(1) {  // Start at 1, 0 is INVALID_SEQ
+}
+
+CompletionQueue::~CompletionQueue() {
+    // Clear all tracking
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_ops_.clear();
+    completed_seq_nums_.clear();
+}
+
+uint64_t CompletionQueue::allocate_seq_num() {
+    return next_seq_num_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void CompletionQueue::register_pending(uint64_t seq_num, DWQOperation* op) {
+    if (seq_num == INVALID_SEQ || !op) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_ops_[seq_num] = op;
+
+    OPENGDA_Debug("cq", "Registered pending op: seq=%lu", seq_num);
+}
+
+void CompletionQueue::mark_completed(uint64_t seq_num) {
+    if (seq_num == INVALID_SEQ) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // Remove from pending
+    auto it = pending_ops_.find(seq_num);
+    if (it != pending_ops_.end()) {
+        pending_ops_.erase(it);
+    }
+
+    // Add to completed
+    completed_seq_nums_.insert(seq_num);
+
+    OPENGDA_Debug("cq", "Marked completed: seq=%lu", seq_num);
+}
+
+void CompletionQueue::unregister(uint64_t seq_num) {
+    if (seq_num == INVALID_SEQ) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // Remove from pending
+    pending_ops_.erase(seq_num);
+
+    // Remove from completed
+    completed_seq_nums_.erase(seq_num);
+
+    OPENGDA_Debug("cq", "Unregistered op: seq=%lu", seq_num);
+}
+
+bool CompletionQueue::poll_one(uint64_t seq_num) {
+    if (seq_num == INVALID_SEQ) {
+        return false;
+    }
+
+    // First poll all pending operations to update completion status
+    poll_pending_operations();
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // Check if in completed set
+    return completed_seq_nums_.count(seq_num) > 0;
+}
+
+bool CompletionQueue::wait_one(uint64_t seq_num, int timeout_ms) {
+    if (seq_num == INVALID_SEQ) {
+        return false;
+    }
+
+    auto start = std::chrono::steady_clock::now();
+
+    while (true) {
+        if (poll_one(seq_num)) {
+            return true;
+        }
+
+        // Check timeout
+        if (timeout_ms >= 0) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - start).count();
+            if (elapsed_ms >= timeout_ms) {
+                return false;
+            }
+        }
+
+        // Brief sleep to avoid spinning
+        usleep(10);  // 10 microseconds
+    }
+}
+
+std::vector<uint64_t> CompletionQueue::poll_any(size_t max_count) {
+    // First poll all pending operations
+    poll_pending_operations();
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    std::vector<uint64_t> result;
+    result.reserve(std::min(max_count, completed_seq_nums_.size()));
+
+    for (auto it = completed_seq_nums_.begin();
+         it != completed_seq_nums_.end() && result.size() < max_count;
+         ++it) {
+        result.push_back(*it);
+    }
+
+    return result;
+}
+
+bool CompletionQueue::wait_batch(const std::vector<uint64_t>& seq_nums, int timeout_ms) {
+    if (seq_nums.empty()) {
+        return true;
+    }
+
+    auto start = std::chrono::steady_clock::now();
+
+    while (true) {
+        // Poll all pending
+        poll_pending_operations();
+
+        // Check if all in the batch are completed
+        bool all_done = true;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (uint64_t seq : seq_nums) {
+                if (seq != INVALID_SEQ && completed_seq_nums_.count(seq) == 0) {
+                    all_done = false;
+                    break;
+                }
+            }
+        }
+
+        if (all_done) {
+            return true;
+        }
+
+        // Check timeout
+        if (timeout_ms >= 0) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - start).count();
+            if (elapsed_ms >= timeout_ms) {
+                return false;
+            }
+        }
+
+        usleep(10);
+    }
+}
+
+bool CompletionQueue::wait_all(int timeout_ms) {
+    auto start = std::chrono::steady_clock::now();
+
+    while (true) {
+        // Poll all pending
+        poll_pending_operations();
+
+        // Check if all pending are now completed
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pending_ops_.empty()) {
+                return true;
+            }
+        }
+
+        // Check timeout
+        if (timeout_ms >= 0) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - start).count();
+            if (elapsed_ms >= timeout_ms) {
+                return false;
+            }
+        }
+
+        usleep(10);
+    }
+}
+
+size_t CompletionQueue::get_pending_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pending_ops_.size();
+}
+
+size_t CompletionQueue::get_completed_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return completed_seq_nums_.size();
+}
+
+bool CompletionQueue::is_pending(uint64_t seq_num) const {
+    if (seq_num == INVALID_SEQ) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pending_ops_.count(seq_num) > 0;
+}
+
+bool CompletionQueue::is_completed(uint64_t seq_num) const {
+    if (seq_num == INVALID_SEQ) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    return completed_seq_nums_.count(seq_num) > 0;
+}
+
+void CompletionQueue::clear_completed() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    completed_seq_nums_.clear();
+}
+
+std::vector<uint64_t> CompletionQueue::get_pending_seq_nums() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint64_t> result;
+    result.reserve(pending_ops_.size());
+    for (const auto& pair : pending_ops_) {
+        result.push_back(pair.first);
+    }
+    return result;
+}
+
+void CompletionQueue::poll_pending_operations() {
+    // Make a copy of pending ops to avoid holding lock while polling
+    std::vector<std::pair<uint64_t, DWQOperation*>> ops_to_poll;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ops_to_poll.reserve(pending_ops_.size());
+        for (const auto& pair : pending_ops_) {
+            ops_to_poll.push_back(pair);
+        }
+    }
+
+    // Poll each operation and mark completed ones
+    for (const auto& pair : ops_to_poll) {
+        uint64_t seq = pair.first;
+        DWQOperation* op = pair.second;
+
+        if (op && op->is_completed()) {
+            mark_completed(seq);
+        }
+    }
+}
+
+// ============================================================================
+// CompletionSignalPool Implementation
+// ============================================================================
+
+CompletionSignalPool::CompletionSignalPool()
+    : base_addr_(nullptr)
+    , mr_desc_(nullptr)
+    , mr_key_(0)
+    , pool_offset_in_mr_(0)
+    , allocated_count_(0)
+    , initialized_(false) {
+    allocated_.reset();
+}
+
+CompletionSignalPool::~CompletionSignalPool() {
+    finalize();
+}
+
+bool CompletionSignalPool::initialize(volatile uint64_t* base_addr, size_t pool_offset,
+                                       void* mr_desc, uint64_t mr_key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (initialized_) {
+        OPENGDA_Warn("signal_pool", "Already initialized");
+        return false;
+    }
+
+    if (!base_addr) {
+        OPENGDA_Error("signal_pool", "Invalid base address");
+        return false;
+    }
+
+    base_addr_ = base_addr;
+    pool_offset_in_mr_ = pool_offset;
+    mr_desc_ = mr_desc;
+    mr_key_ = mr_key;
+
+    allocated_.reset();
+    allocated_count_ = 0;
+    initialized_ = true;
+
+    OPENGDA_Info("signal_pool", "Initialized with %zu signals at offset %zu",
+                 MAX_SIGNALS, pool_offset);
+    return true;
+}
+
+void CompletionSignalPool::finalize() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!initialized_) {
+        return;
+    }
+
+    if (allocated_count_ > 0) {
+        OPENGDA_Warn("signal_pool", "%zu signals still allocated at finalize",
+                    allocated_count_);
+    }
+
+    base_addr_ = nullptr;
+    mr_desc_ = nullptr;
+    mr_key_ = 0;
+    pool_offset_in_mr_ = 0;
+    allocated_.reset();
+    allocated_count_ = 0;
+    initialized_ = false;
+}
+
+bool CompletionSignalPool::allocate(volatile uint64_t** signal_out, size_t* offset_out) {
+    if (!signal_out || !offset_out) {
+        OPENGDA_Error("signal_pool", "Invalid output parameters");
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!initialized_) {
+        OPENGDA_Error("signal_pool", "Pool not initialized");
+        return false;
+    }
+
+    // Find first free slot
+    for (size_t i = 0; i < MAX_SIGNALS; i++) {
+        if (!allocated_.test(i)) {
+            allocated_.set(i);
+            allocated_count_++;
+
+            *signal_out = &base_addr_[i];
+            *offset_out = pool_offset_in_mr_ + i * SIGNAL_SIZE;
+
+            OPENGDA_Debug("signal_pool", "Allocated signal %zu, offset=%zu, total=%zu",
+                         i, *offset_out, allocated_count_);
+            return true;
+        }
+    }
+
+    OPENGDA_Error("signal_pool", "No free signals available (%zu/%zu allocated)",
+                 allocated_count_, MAX_SIGNALS);
+    return false;
+}
+
+void CompletionSignalPool::release(volatile uint64_t* signal) {
+    if (!signal) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!initialized_) {
+        return;
+    }
+
+    // Calculate index from address
+    ptrdiff_t diff = signal - base_addr_;
+    if (diff < 0 || (size_t)diff >= MAX_SIGNALS) {
+        OPENGDA_Warn("signal_pool", "Signal %p not in pool range", (void*)signal);
+        return;
+    }
+
+    size_t index = (size_t)diff;
+    if (!allocated_.test(index)) {
+        OPENGDA_Warn("signal_pool", "Signal %zu not allocated", index);
+        return;
+    }
+
+    allocated_.reset(index);
+    allocated_count_--;
+
+    OPENGDA_Debug("signal_pool", "Released signal %zu, remaining=%zu",
+                 index, allocated_count_);
+}
+
+size_t CompletionSignalPool::get_allocated_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return allocated_count_;
+}
+
+// ============================================================================
 // OFI Implementation
 // ============================================================================
 
@@ -834,6 +1242,10 @@ OFI::OFI(int rank, int size, Bootstrap* bootstrap) {
     // Initialize default MR info structs
     memset(&default_host_mr_, 0, sizeof(default_host_mr_));
     memset(&default_gpu_mr_, 0, sizeof(default_gpu_mr_));
+
+    // Initialize shared atomic operand (will be allocated in ofi_initialize)
+    shared_atomic_operand_ = nullptr;
+    shared_atomic_operand_mr_ = nullptr;
 
     // Initialize peer info array
     peers_.resize(size);
@@ -1235,6 +1647,39 @@ OFI::OFI(int rank, int size, Bootstrap* bootstrap) {
             OPENGDA_Error("ofi", "Failed to allocate default GPU MR");
             exit(1);
         }
+
+        // Initialize completion signal pool at the end of GPU MR
+        // Layout: [user data ... ] [signal pool (last POOL_SIZE bytes)]
+        size_t pool_offset = default_gpu_mr_.size - CompletionSignalPool::POOL_SIZE;
+        volatile uint64_t* pool_base = (volatile uint64_t*)((uint8_t*)default_gpu_mr_.buffer + pool_offset);
+
+        // Clear the signal pool region
+        hipMemset((void*)pool_base, 0, CompletionSignalPool::POOL_SIZE);
+        hipDeviceSynchronize();
+
+        if (!signal_pool_.initialize(pool_base, pool_offset,
+                                      default_gpu_mr_.desc, default_gpu_mr_.key)) {
+            OPENGDA_Error("ofi", "Failed to initialize completion signal pool");
+            exit(1);
+        }
+
+        // Allocate and register shared atomic operand
+        // This is a single uint64_t with value 1, shared by all DWQ operations
+        hipError_t hip_ret = hipMalloc(&shared_atomic_operand_, sizeof(uint64_t));
+        if (hip_ret != hipSuccess) {
+            OPENGDA_Error("ofi", "Failed to allocate shared atomic operand");
+            exit(1);
+        }
+        uint64_t operand_value = 1;
+        hipMemcpy(shared_atomic_operand_, &operand_value, sizeof(uint64_t), hipMemcpyHostToDevice);
+        hipDeviceSynchronize();
+
+        shared_atomic_operand_mr_ = register_memory(shared_atomic_operand_, sizeof(uint64_t), true);
+        if (!shared_atomic_operand_mr_) {
+            OPENGDA_Error("ofi", "Failed to register shared atomic operand MR");
+            exit(1);
+        }
+        OPENGDA_Info("ofi", "Shared atomic operand initialized at %p", shared_atomic_operand_);
     }
 #endif
 
@@ -1381,7 +1826,12 @@ bool OFI::is_memory_registered(void* addr) {
 }
 
 const MRManager::MRInfo* OFI::get_mr_info(void* addr) {
-    return mr_manager_.get_info_by_addr(addr);
+    // First try exact match, then range lookup
+    const MRManager::MRInfo* info = mr_manager_.get_info_by_addr(addr);
+    if (!info) {
+        info = mr_manager_.find_containing(addr);
+    }
+    return info;
 }
 
 MRManager::MRStats OFI::get_mr_stats() {
@@ -1460,6 +1910,77 @@ CntrManager::CntrStats OFI::get_cntr_stats() {
 
 void OFI::print_cntr_stats() {
     cntr_manager_.print_stats();
+}
+
+size_t OFI::get_dwq_depth() {
+    if (!domain) {
+        OPENGDA_Warn("ofi", "Domain not initialized, cannot query DWQ depth");
+        return 0;
+    }
+
+    // Get CXI domain ops
+    struct fi_cxi_dom_ops* dom_ops = nullptr;
+    int ret = fi_open_ops(&domain->fid, FI_CXI_DOM_OPS_5, 0, (void**)&dom_ops, NULL);
+    if (ret) {
+        // Try older versions
+        ret = fi_open_ops(&domain->fid, FI_CXI_DOM_OPS_4, 0, (void**)&dom_ops, NULL);
+        if (ret) {
+            ret = fi_open_ops(&domain->fid, FI_CXI_DOM_OPS_3, 0, (void**)&dom_ops, NULL);
+            if (ret) {
+                OPENGDA_Warn("ofi", "Failed to get CXI domain ops: %s (%d)",
+                            fi_strerror(-ret), ret);
+                return 0;
+            }
+        }
+    }
+
+    if (!dom_ops || !dom_ops->get_dwq_depth) {
+        OPENGDA_Warn("ofi", "get_dwq_depth not available in CXI domain ops");
+        return 0;
+    }
+
+    size_t depth = 0;
+    ret = dom_ops->get_dwq_depth(&domain->fid, &depth);
+    if (ret) {
+        OPENGDA_Warn("ofi", "get_dwq_depth failed: %s (%d)",
+                    fi_strerror(-ret), ret);
+        return 0;
+    }
+
+    OPENGDA_Info("ofi", "DWQ depth: %zu triggered operations available", depth);
+    return depth;
+}
+
+bool OFI::flush_work_queue() {
+    if (!domain) {
+        OPENGDA_Error("ofi", "Domain not initialized, cannot flush work queue");
+        return false;
+    }
+
+    int ret = fi_control(&domain->fid, FI_FLUSH_WORK, NULL);
+    if (ret) {
+        OPENGDA_Error("ofi", "FI_FLUSH_WORK failed: %s (%d)",
+                     fi_strerror(-ret), ret);
+        return false;
+    }
+
+    OPENGDA_Debug("ofi", "Work queue flushed successfully");
+    return true;
+}
+
+bool OFI::get_shared_atomic_operand(uint64_t** addr_out, struct fid_mr** mr_out) {
+    if (!addr_out || !mr_out) {
+        return false;
+    }
+
+    if (!shared_atomic_operand_ || !shared_atomic_operand_mr_) {
+        OPENGDA_Error("ofi", "Shared atomic operand not initialized");
+        return false;
+    }
+
+    *addr_out = shared_atomic_operand_;
+    *mr_out = shared_atomic_operand_mr_;
+    return true;
 }
 
 // ============================================================================
@@ -1602,6 +2123,21 @@ bool OFI::allocate_default_gpu_mr() {
 }
 
 void OFI::cleanup_default_mrs() {
+    // Clean up signal pool first (before GPU MR)
+    signal_pool_.finalize();
+
+    // Clean up shared atomic operand
+#ifdef USE_AMDGPU
+    if (shared_atomic_operand_mr_) {
+        deregister_memory(shared_atomic_operand_mr_);
+        shared_atomic_operand_mr_ = nullptr;
+    }
+    if (shared_atomic_operand_) {
+        hipFree(shared_atomic_operand_);
+        shared_atomic_operand_ = nullptr;
+    }
+#endif
+
     // Clean up GPU MR
     if (default_gpu_mr_.allocated) {
         OPENGDA_Debug("ofi", "Cleaning up default GPU MR");
@@ -1844,35 +2380,6 @@ std::unique_ptr<DWQOperation> OFI::create_dwq_operation() {
     return op;
 }
 
-bool OFI::create_atomic_completion_counter(struct fid_cntr** cntr_out,
-                                           struct fi_cxi_cntr_ops** ops_out) {
-    if (!cntr_out || !ops_out) {
-        return false;
-    }
-
-    struct fi_cntr_attr cntr_attr = {};
-    cntr_attr.events = FI_CNTR_EVENTS_COMP;
-
-    int ret = fi_cntr_open(domain, &cntr_attr, cntr_out, NULL);
-    if (ret) {
-        OPENGDA_Error("ofi", "fi_cntr_open(atomic_completion) failed: %s (%d)",
-                      fi_strerror(-ret), ret);
-        return false;
-    }
-
-    ret = fi_open_ops(&(*cntr_out)->fid, FI_CXI_COUNTER_OPS, 0,
-                      (void**)ops_out, NULL);
-    if (ret) {
-        OPENGDA_Error("ofi", "fi_open_ops(atomic_completion) failed: %s (%d)",
-                      fi_strerror(-ret), ret);
-        fi_close(&(*cntr_out)->fid);
-        *cntr_out = nullptr;
-        return false;
-    }
-
-    return true;
-}
-
 // ============================================================================
 // DWQOperation Implementation
 // ============================================================================
@@ -1881,13 +2388,16 @@ DWQOperation::DWQOperation()
     : state_(State::UNINITIALIZED)
     , op_type_(OpType::WRITE)
     , ofi_(nullptr)
+    , seq_num_(CompletionQueue::INVALID_SEQ)
+    , completion_queue_(nullptr)
     , cntr_pair_(nullptr)
-    , atomic_completion_cntr_(nullptr)
-    , atomic_cntr_ops_(nullptr)
     , completion_signal_(nullptr)
     , completion_signal_mr_(nullptr)
+    , completion_signal_offset_(0)
+    , uses_signal_pool_(false)
     , atomic_operand_(nullptr)
     , atomic_operand_mr_(nullptr)
+    , uses_shared_operand_(false)
     , threshold_(1)
     , op_rma_(nullptr)
     , msg_rma_(nullptr)
@@ -1908,6 +2418,13 @@ DWQOperation::~DWQOperation() {
 }
 
 void DWQOperation::cleanup() {
+    // Unregister from completion queue
+    if (completion_queue_ && seq_num_ != CompletionQueue::INVALID_SEQ) {
+        completion_queue_->unregister(seq_num_);
+        seq_num_ = CompletionQueue::INVALID_SEQ;
+    }
+    completion_queue_ = nullptr;
+
     // Free RMA work structures
     if (op_rma_) { free(op_rma_); op_rma_ = nullptr; }
     if (msg_rma_) { free(msg_rma_); msg_rma_ = nullptr; }
@@ -1920,43 +2437,41 @@ void DWQOperation::cleanup() {
     if (atomic_iov_) { free(atomic_iov_); atomic_iov_ = nullptr; }
     if (atomic_rma_iov_) { free(atomic_rma_iov_); atomic_rma_iov_ = nullptr; }
 
-    // Deregister and free GPU memory
-    if (ofi_ && completion_signal_mr_) {
-        ofi_->deregister_memory(completion_signal_mr_);
+    // Release completion signal
+    if (completion_signal_) {
+        if (uses_signal_pool_ && ofi_) {
+            // Release back to pool
+            ofi_->get_signal_pool()->release(completion_signal_);
+        } else if (completion_signal_mr_ && ofi_) {
+            // Deregister and free separately allocated memory
+            ofi_->deregister_memory(completion_signal_mr_);
+#ifdef USE_AMDGPU
+            hipFree((void*)completion_signal_);
+#endif
+#ifdef USE_NVGPU
+            cudaFree((void*)completion_signal_);
+#endif
+        }
+        completion_signal_ = nullptr;
         completion_signal_mr_ = nullptr;
     }
-    if (ofi_ && atomic_operand_mr_) {
-        ofi_->deregister_memory(atomic_operand_mr_);
-        atomic_operand_mr_ = nullptr;
-    }
 
+    // Release atomic operand (only if not using shared)
+    if (atomic_operand_ && !uses_shared_operand_) {
+        if (atomic_operand_mr_ && ofi_) {
+            ofi_->deregister_memory(atomic_operand_mr_);
+        }
 #ifdef USE_AMDGPU
-    if (completion_signal_) {
-        hipFree(completion_signal_);
-        completion_signal_ = nullptr;
-    }
-    if (atomic_operand_) {
         hipFree(atomic_operand_);
-        atomic_operand_ = nullptr;
-    }
 #endif
-
 #ifdef USE_NVGPU
-    if (completion_signal_) {
-        cudaFree(completion_signal_);
-        completion_signal_ = nullptr;
-    }
-    if (atomic_operand_) {
         cudaFree(atomic_operand_);
-        atomic_operand_ = nullptr;
-    }
 #endif
-
-    // Close atomic completion counter
-    if (atomic_completion_cntr_) {
-        fi_close(&atomic_completion_cntr_->fid);
-        atomic_completion_cntr_ = nullptr;
     }
+    atomic_operand_ = nullptr;
+    atomic_operand_mr_ = nullptr;
+    uses_signal_pool_ = false;
+    uses_shared_operand_ = false;
 
     // Release counter pair back to OFI
     if (ofi_ && cntr_pair_) {
@@ -1988,96 +2503,130 @@ bool DWQOperation::initialize(OFI* ofi) {
         return false;
     }
 
-    // Create atomic completion counter
-    if (!ofi_->create_atomic_completion_counter(&atomic_completion_cntr_,
-                                                 &atomic_cntr_ops_)) {
-        OPENGDA_Error("dwq", "Failed to create atomic completion counter");
-        cleanup();
-        return false;
-    }
+    // Try to use signal pool and shared atomic operand (more efficient)
+    CompletionSignalPool* pool = ofi_->get_signal_pool();
+    if (pool && pool->is_initialized()) {
+        // Allocate completion signal from pool
+        if (!pool->allocate(&completion_signal_, &completion_signal_offset_)) {
+            OPENGDA_Error("dwq", "Failed to allocate from signal pool");
+            cleanup();
+            return false;
+        }
+        uses_signal_pool_ = true;
+        completion_signal_mr_ = nullptr;  // Use pool's MR
 
-    // Allocate GPU memory for completion signal and atomic operand
+        // Clear the signal
 #ifdef USE_AMDGPU
-    hipError_t hip_ret = hipMalloc(&completion_signal_, sizeof(uint64_t));
-    if (hip_ret != hipSuccess) {
-        OPENGDA_Error("dwq", "hipMalloc(completion_signal) failed: %s",
-                      hipGetErrorString(hip_ret));
-        cleanup();
-        return false;
-    }
-    hip_ret = hipMemset(completion_signal_, 0, sizeof(uint64_t));
-    if (hip_ret != hipSuccess) {
-        OPENGDA_Error("dwq", "hipMemset(completion_signal) failed");
-        cleanup();
-        return false;
-    }
+        hipMemset((void*)completion_signal_, 0, sizeof(uint64_t));
+        hipDeviceSynchronize();
+#endif
+#ifdef USE_NVGPU
+        cudaMemset((void*)completion_signal_, 0, sizeof(uint64_t));
+        cudaDeviceSynchronize();
+#endif
 
-    hip_ret = hipMalloc(&atomic_operand_, sizeof(uint64_t));
-    if (hip_ret != hipSuccess) {
-        OPENGDA_Error("dwq", "hipMalloc(atomic_operand) failed: %s",
-                      hipGetErrorString(hip_ret));
-        cleanup();
-        return false;
-    }
-    uint64_t operand_value = 1;
-    hip_ret = hipMemcpy(atomic_operand_, &operand_value, sizeof(uint64_t),
-                        hipMemcpyHostToDevice);
-    if (hip_ret != hipSuccess) {
-        OPENGDA_Error("dwq", "hipMemcpy(atomic_operand) failed");
-        cleanup();
-        return false;
-    }
-    hipDeviceSynchronize();
+        // Use shared atomic operand
+        if (!ofi_->get_shared_atomic_operand(&atomic_operand_, &atomic_operand_mr_)) {
+            OPENGDA_Error("dwq", "Failed to get shared atomic operand");
+            cleanup();
+            return false;
+        }
+        uses_shared_operand_ = true;
+
+        OPENGDA_Debug("dwq", "Using signal pool (offset=%zu) and shared operand",
+                     completion_signal_offset_);
+    } else {
+        // Fallback: Allocate GPU memory separately (less efficient)
+        OPENGDA_Warn("dwq", "Signal pool not available, allocating separately");
+        uses_signal_pool_ = false;
+        uses_shared_operand_ = false;
+
+#ifdef USE_AMDGPU
+        uint64_t* signal_ptr = nullptr;
+        hipError_t hip_ret = hipMalloc(&signal_ptr, sizeof(uint64_t));
+        if (hip_ret != hipSuccess) {
+            OPENGDA_Error("dwq", "hipMalloc(completion_signal) failed: %s",
+                          hipGetErrorString(hip_ret));
+            cleanup();
+            return false;
+        }
+        completion_signal_ = signal_ptr;
+        hip_ret = hipMemset((void*)completion_signal_, 0, sizeof(uint64_t));
+        if (hip_ret != hipSuccess) {
+            OPENGDA_Error("dwq", "hipMemset(completion_signal) failed");
+            cleanup();
+            return false;
+        }
+
+        hip_ret = hipMalloc(&atomic_operand_, sizeof(uint64_t));
+        if (hip_ret != hipSuccess) {
+            OPENGDA_Error("dwq", "hipMalloc(atomic_operand) failed: %s",
+                          hipGetErrorString(hip_ret));
+            cleanup();
+            return false;
+        }
+        uint64_t operand_value = 1;
+        hip_ret = hipMemcpy(atomic_operand_, &operand_value, sizeof(uint64_t),
+                            hipMemcpyHostToDevice);
+        if (hip_ret != hipSuccess) {
+            OPENGDA_Error("dwq", "hipMemcpy(atomic_operand) failed");
+            cleanup();
+            return false;
+        }
+        hipDeviceSynchronize();
 #endif
 
 #ifdef USE_NVGPU
-    cudaError_t cuda_ret = cudaMalloc(&completion_signal_, sizeof(uint64_t));
-    if (cuda_ret != cudaSuccess) {
-        OPENGDA_Error("dwq", "cudaMalloc(completion_signal) failed: %s",
-                      cudaGetErrorString(cuda_ret));
-        cleanup();
-        return false;
-    }
-    cuda_ret = cudaMemset(completion_signal_, 0, sizeof(uint64_t));
-    if (cuda_ret != cudaSuccess) {
-        OPENGDA_Error("dwq", "cudaMemset(completion_signal) failed");
-        cleanup();
-        return false;
-    }
+        uint64_t* signal_ptr = nullptr;
+        cudaError_t cuda_ret = cudaMalloc(&signal_ptr, sizeof(uint64_t));
+        if (cuda_ret != cudaSuccess) {
+            OPENGDA_Error("dwq", "cudaMalloc(completion_signal) failed: %s",
+                          cudaGetErrorString(cuda_ret));
+            cleanup();
+            return false;
+        }
+        completion_signal_ = signal_ptr;
+        cuda_ret = cudaMemset((void*)completion_signal_, 0, sizeof(uint64_t));
+        if (cuda_ret != cudaSuccess) {
+            OPENGDA_Error("dwq", "cudaMemset(completion_signal) failed");
+            cleanup();
+            return false;
+        }
 
-    cuda_ret = cudaMalloc(&atomic_operand_, sizeof(uint64_t));
-    if (cuda_ret != cudaSuccess) {
-        OPENGDA_Error("dwq", "cudaMalloc(atomic_operand) failed: %s",
-                      cudaGetErrorString(cuda_ret));
-        cleanup();
-        return false;
-    }
-    uint64_t operand_value = 1;
-    cuda_ret = cudaMemcpy(atomic_operand_, &operand_value, sizeof(uint64_t),
-                          cudaMemcpyHostToDevice);
-    if (cuda_ret != cudaSuccess) {
-        OPENGDA_Error("dwq", "cudaMemcpy(atomic_operand) failed");
-        cleanup();
-        return false;
-    }
-    cudaDeviceSynchronize();
+        cuda_ret = cudaMalloc(&atomic_operand_, sizeof(uint64_t));
+        if (cuda_ret != cudaSuccess) {
+            OPENGDA_Error("dwq", "cudaMalloc(atomic_operand) failed: %s",
+                          cudaGetErrorString(cuda_ret));
+            cleanup();
+            return false;
+        }
+        uint64_t operand_value = 1;
+        cuda_ret = cudaMemcpy(atomic_operand_, &operand_value, sizeof(uint64_t),
+                              cudaMemcpyHostToDevice);
+        if (cuda_ret != cudaSuccess) {
+            OPENGDA_Error("dwq", "cudaMemcpy(atomic_operand) failed");
+            cleanup();
+            return false;
+        }
+        cudaDeviceSynchronize();
 #endif
 
-    // Register completion signal and atomic operand as MRs
-    completion_signal_mr_ = ofi_->register_memory(completion_signal_,
-                                                   sizeof(uint64_t), true);
-    if (!completion_signal_mr_) {
-        OPENGDA_Error("dwq", "Failed to register completion_signal MR");
-        cleanup();
-        return false;
-    }
+        // Register completion signal and atomic operand as MRs
+        completion_signal_mr_ = ofi_->register_memory((void*)completion_signal_,
+                                                       sizeof(uint64_t), true);
+        if (!completion_signal_mr_) {
+            OPENGDA_Error("dwq", "Failed to register completion_signal MR");
+            cleanup();
+            return false;
+        }
 
-    atomic_operand_mr_ = ofi_->register_memory(atomic_operand_,
-                                                sizeof(uint64_t), true);
-    if (!atomic_operand_mr_) {
-        OPENGDA_Error("dwq", "Failed to register atomic_operand MR");
-        cleanup();
-        return false;
+        atomic_operand_mr_ = ofi_->register_memory(atomic_operand_,
+                                                    sizeof(uint64_t), true);
+        if (!atomic_operand_mr_) {
+            OPENGDA_Error("dwq", "Failed to register atomic_operand MR");
+            cleanup();
+            return false;
+        }
     }
 
     // Allocate work structures (must remain valid until completion)
@@ -2156,21 +2705,19 @@ bool DWQOperation::prepare_write_explicit(void* local_buf, size_t size,
 
     // Reset completion signal
 #ifdef USE_AMDGPU
-    hipMemset(completion_signal_, 0, sizeof(uint64_t));
+    (void)hipMemset((void*)completion_signal_, 0, sizeof(uint64_t));
     hipDeviceSynchronize();
 #endif
 #ifdef USE_NVGPU
-    cudaMemset(completion_signal_, 0, sizeof(uint64_t));
+    (void)cudaMemset((void*)completion_signal_, 0, sizeof(uint64_t));
     cudaDeviceSynchronize();
 #endif
 
     // Determine remote address mode
+    // For CXI (no FI_MR_VIRT_ADDR): remote_addr is treated as offset from MR base
+    // For providers with FI_MR_VIRT_ADDR: remote_addr is absolute virtual address
     uint64_t remote_addr_for_rma = remote_addr;
-    struct fi_info* info = ofi_->get_info();
-    if (info && !(info->domain_attr->mr_mode & FI_MR_VIRT_ADDR)) {
-        // CXI uses offset from MR base (key encodes the base)
-        remote_addr_for_rma = 0;
-    }
+    // Note: CXI uses offset mode, so remote_addr should be passed as offset directly
 
     // Setup RMA work (WORK 1)
     iov_->iov_base = local_buf;
@@ -2213,22 +2760,32 @@ bool DWQOperation::prepare_write_explicit(void* local_buf, size_t size,
 
     // Setup atomic work (WORK 2) - NIC signals GPU when RMA completes
     void* desc_atomic_operand = fi_mr_desc(atomic_operand_mr_);
-    void* desc_completion_signal = fi_mr_desc(completion_signal_mr_);
 
     // Source operand (value to add)
     atomic_iov_->addr = atomic_operand_;
     atomic_iov_->count = 1;
 
     // Destination (completion_signal on GPU) - local atomic to self
-    uint64_t completion_signal_addr = (uint64_t)completion_signal_;
     struct fi_info* fi_info = ofi_->get_info();
-    if (fi_info && (fi_info->domain_attr->mr_mode & FI_MR_VIRT_ADDR)) {
-        atomic_rma_iov_->addr = completion_signal_addr;
+    if (uses_signal_pool_) {
+        // Using signal pool - use pool's MR key and signal offset
+        CompletionSignalPool* pool = ofi_->get_signal_pool();
+        if (fi_info && (fi_info->domain_attr->mr_mode & FI_MR_VIRT_ADDR)) {
+            atomic_rma_iov_->addr = (uint64_t)completion_signal_;
+        } else {
+            atomic_rma_iov_->addr = completion_signal_offset_;
+        }
+        atomic_rma_iov_->key = pool->get_mr_key();
     } else {
-        atomic_rma_iov_->addr = 0;
+        // Using separately registered MR
+        if (fi_info && (fi_info->domain_attr->mr_mode & FI_MR_VIRT_ADDR)) {
+            atomic_rma_iov_->addr = (uint64_t)completion_signal_;
+        } else {
+            atomic_rma_iov_->addr = 0;
+        }
+        atomic_rma_iov_->key = fi_mr_key(completion_signal_mr_);
     }
     atomic_rma_iov_->count = 1;
-    atomic_rma_iov_->key = fi_mr_key(completion_signal_mr_);
 
     // Setup atomic message
     memset(atomic_msg_, 0, sizeof(*atomic_msg_));
@@ -2253,7 +2810,7 @@ bool DWQOperation::prepare_write_explicit(void* local_buf, size_t size,
     atomic_work_.op.atomic = op_atomic_;
     // Triggered when RMA completion counter reaches threshold
     atomic_work_.triggering_cntr = cntr_pair_->completion->cntr;
-    atomic_work_.completion_cntr = atomic_completion_cntr_;
+    atomic_work_.completion_cntr = nullptr;  // GPU polls completion_signal_ directly
     atomic_work_.threshold = threshold_;
 
     // Queue atomic work
@@ -2264,9 +2821,14 @@ bool DWQOperation::prepare_write_explicit(void* local_buf, size_t size,
         return false;
     }
 
+    // Assign sequence number and register with completion queue
+    completion_queue_ = ofi_->get_completion_queue();
+    seq_num_ = completion_queue_->allocate_seq_num();
+    completion_queue_->register_pending(seq_num_, this);
+
     state_ = State::PREPARED;
-    OPENGDA_Debug("dwq", "DWQ write prepared: %zu bytes to fi_addr %lu",
-                  size, target_addr);
+    OPENGDA_Debug("dwq", "DWQ write prepared: seq=%lu, %zu bytes to fi_addr %lu",
+                  seq_num_, size, target_addr);
     return true;
 }
 
@@ -2323,21 +2885,19 @@ bool DWQOperation::prepare_read_explicit(void* local_buf, size_t size,
 
     // Reset completion signal
 #ifdef USE_AMDGPU
-    hipMemset(completion_signal_, 0, sizeof(uint64_t));
+    (void)hipMemset((void*)completion_signal_, 0, sizeof(uint64_t));
     hipDeviceSynchronize();
 #endif
 #ifdef USE_NVGPU
-    cudaMemset(completion_signal_, 0, sizeof(uint64_t));
+    (void)cudaMemset((void*)completion_signal_, 0, sizeof(uint64_t));
     cudaDeviceSynchronize();
 #endif
 
     // Determine remote address mode
+    // For CXI (no FI_MR_VIRT_ADDR): remote_addr is treated as offset from MR base
+    // For providers with FI_MR_VIRT_ADDR: remote_addr is absolute virtual address
     uint64_t remote_addr_for_rma = remote_addr;
-    struct fi_info* info = ofi_->get_info();
-    if (info && !(info->domain_attr->mr_mode & FI_MR_VIRT_ADDR)) {
-        // CXI uses offset from MR base (key encodes the base)
-        remote_addr_for_rma = 0;
-    }
+    // Note: CXI uses offset mode, so remote_addr should be passed as offset directly
 
     // Setup RMA read work (WORK 1)
     // For read: local buffer receives data FROM remote
@@ -2381,22 +2941,32 @@ bool DWQOperation::prepare_read_explicit(void* local_buf, size_t size,
 
     // Setup atomic work (WORK 2) - NIC signals GPU when RMA completes
     void* desc_atomic_operand = fi_mr_desc(atomic_operand_mr_);
-    void* desc_completion_signal = fi_mr_desc(completion_signal_mr_);
 
     // Source operand (value to add)
     atomic_iov_->addr = atomic_operand_;
     atomic_iov_->count = 1;
 
     // Destination (completion_signal on GPU) - local atomic to self
-    uint64_t completion_signal_addr = (uint64_t)completion_signal_;
     struct fi_info* fi_info = ofi_->get_info();
-    if (fi_info && (fi_info->domain_attr->mr_mode & FI_MR_VIRT_ADDR)) {
-        atomic_rma_iov_->addr = completion_signal_addr;
+    if (uses_signal_pool_) {
+        // Using signal pool - use pool's MR key and signal offset
+        CompletionSignalPool* pool = ofi_->get_signal_pool();
+        if (fi_info && (fi_info->domain_attr->mr_mode & FI_MR_VIRT_ADDR)) {
+            atomic_rma_iov_->addr = (uint64_t)completion_signal_;
+        } else {
+            atomic_rma_iov_->addr = completion_signal_offset_;
+        }
+        atomic_rma_iov_->key = pool->get_mr_key();
     } else {
-        atomic_rma_iov_->addr = 0;
+        // Using separately registered MR
+        if (fi_info && (fi_info->domain_attr->mr_mode & FI_MR_VIRT_ADDR)) {
+            atomic_rma_iov_->addr = (uint64_t)completion_signal_;
+        } else {
+            atomic_rma_iov_->addr = 0;
+        }
+        atomic_rma_iov_->key = fi_mr_key(completion_signal_mr_);
     }
     atomic_rma_iov_->count = 1;
-    atomic_rma_iov_->key = fi_mr_key(completion_signal_mr_);
 
     // Setup atomic message
     memset(atomic_msg_, 0, sizeof(*atomic_msg_));
@@ -2421,7 +2991,7 @@ bool DWQOperation::prepare_read_explicit(void* local_buf, size_t size,
     atomic_work_.op.atomic = op_atomic_;
     // Triggered when RMA completion counter reaches threshold
     atomic_work_.triggering_cntr = cntr_pair_->completion->cntr;
-    atomic_work_.completion_cntr = atomic_completion_cntr_;
+    atomic_work_.completion_cntr = nullptr;  // GPU polls completion_signal_ directly
     atomic_work_.threshold = threshold_;
 
     // Queue atomic work
@@ -2432,9 +3002,14 @@ bool DWQOperation::prepare_read_explicit(void* local_buf, size_t size,
         return false;
     }
 
+    // Assign sequence number and register with completion queue
+    completion_queue_ = ofi_->get_completion_queue();
+    seq_num_ = completion_queue_->allocate_seq_num();
+    completion_queue_->register_pending(seq_num_, this);
+
     state_ = State::PREPARED;
-    OPENGDA_Debug("dwq", "DWQ read prepared: %zu bytes from fi_addr %lu",
-                  size, source_addr);
+    OPENGDA_Debug("dwq", "DWQ read prepared: seq=%lu, %zu bytes from fi_addr %lu",
+                  seq_num_, size, source_addr);
     return true;
 }
 
@@ -2464,25 +3039,29 @@ bool DWQOperation::reset() {
         return false;
     }
 
+    // Unregister from completion queue
+    if (completion_queue_ && seq_num_ != CompletionQueue::INVALID_SEQ) {
+        completion_queue_->unregister(seq_num_);
+        seq_num_ = CompletionQueue::INVALID_SEQ;
+    }
+    completion_queue_ = nullptr;
+
     // Reset counters
     if (cntr_pair_ && cntr_pair_->trigger && cntr_pair_->completion) {
         fi_cntr_set(cntr_pair_->trigger->cntr, 0);
         fi_cntr_set(cntr_pair_->completion->cntr, 0);
     }
-    if (atomic_completion_cntr_) {
-        fi_cntr_set(atomic_completion_cntr_, 0);
-    }
 
     // Reset completion signal
 #ifdef USE_AMDGPU
     if (completion_signal_) {
-        hipMemset(completion_signal_, 0, sizeof(uint64_t));
+        (void)hipMemset((void*)completion_signal_, 0, sizeof(uint64_t));
         hipDeviceSynchronize();
     }
 #endif
 #ifdef USE_NVGPU
     if (completion_signal_) {
-        cudaMemset(completion_signal_, 0, sizeof(uint64_t));
+        (void)cudaMemset((void*)completion_signal_, 0, sizeof(uint64_t));
         cudaDeviceSynchronize();
     }
 #endif
@@ -2496,10 +3075,9 @@ bool DWQOperation::is_completed() const {
         return state_ == State::COMPLETED;
     }
 
-    // Check atomic completion counter
-    if (atomic_completion_cntr_) {
-        uint64_t cnt = fi_cntr_read(atomic_completion_cntr_);
-        return cnt >= threshold_;
+    // Check completion signal (written by DWQ atomic operation)
+    if (completion_signal_) {
+        return *completion_signal_ >= threshold_;
     }
     return false;
 }
@@ -2509,26 +3087,24 @@ bool DWQOperation::wait_completion(int timeout_ms) {
         return state_ == State::COMPLETED;
     }
 
-    if (!atomic_completion_cntr_) {
+    if (!completion_signal_) {
         return false;
     }
 
-    int ret;
-    if (timeout_ms < 0) {
-        // Infinite wait
-        ret = fi_cntr_wait(atomic_completion_cntr_, threshold_, -1);
-    } else {
-        ret = fi_cntr_wait(atomic_completion_cntr_, threshold_, timeout_ms);
+    // Poll completion signal with timeout
+    auto start = std::chrono::steady_clock::now();
+    while (*completion_signal_ < threshold_) {
+        if (timeout_ms >= 0) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            if (elapsed >= timeout_ms) {
+                return false;  // Timeout
+            }
+        }
+        // Brief pause to avoid spinning too hard
+        std::this_thread::sleep_for(std::chrono::microseconds(10));
     }
 
-    if (ret == 0) {
-        state_ = State::COMPLETED;
-        return true;
-    } else if (ret == -FI_ETIMEDOUT) {
-        return false;
-    } else {
-        OPENGDA_Error("dwq", "fi_cntr_wait failed: %s (%d)",
-                      fi_strerror(-ret), ret);
-        return false;
-    }
+    state_ = State::COMPLETED;
+    return true;
 }

@@ -28,10 +28,14 @@
 
 #include "../common/log.hpp"
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <chrono>
+#include <thread>
+#include <set>
+#include <bitset>
 #include <vector>
 
 // OFI Error checking macro
@@ -52,7 +56,7 @@
  * CntrManager provides centralized management of libfabric counters for DWQ.
  *
  * Features:
- * - Manages 32 counters (16 triggering + 16 completion)
+ * - Manages 128 counters (64 triggering + 64 completion)
  * - Obtains MMIO addresses for each counter
  * - Registers MMIO with HIP for GPU access (if USE_AMDGPU)
  * - Provides GPU device pointers for doorbell operations
@@ -61,8 +65,8 @@
 class CntrManager {
 public:
     // Number of counter pairs (trigger + completion)
-    static constexpr int NUM_CNTR_PAIRS = 16;
-    static constexpr int TOTAL_CNTRS = NUM_CNTR_PAIRS * 2;  // 32 total
+    static constexpr int NUM_CNTR_PAIRS = 64;
+    static constexpr int TOTAL_CNTRS = NUM_CNTR_PAIRS * 2;  // 128 total
 
     /**
      * Information for a single counter
@@ -84,7 +88,7 @@ public:
 #endif
 
         bool allocated;                     // Whether this counter is in use
-        int index;                          // Counter index (0-15 for trigger, 0-15 for completion)
+        int index;                          // Counter index (0-63 for trigger, 0-63 for completion)
         bool is_trigger;                    // true=trigger, false=completion
     };
 
@@ -92,7 +96,7 @@ public:
      * Counter pair (trigger + completion)
      */
     struct CntrPair {
-        int index;                          // Pair index (0-15)
+        int index;                          // Pair index (0-63)
         CntrInfo* trigger;                  // Triggering counter
         CntrInfo* completion;               // Completion counter
         bool allocated;                     // Whether this pair is in use
@@ -102,7 +106,7 @@ public:
      * Statistics about counter usage
      */
     struct CntrStats {
-        int total_pairs;                    // Total number of pairs (16)
+        int total_pairs;                    // Total number of pairs (64)
         int allocated_pairs;                // Number of allocated pairs
         int free_pairs;                     // Number of free pairs
         int total_trigger_cntrs;            // Total triggering counters
@@ -157,7 +161,7 @@ public:
 
     /**
      * Release a counter pair by index
-     * @param index Pair index (0-15)
+     * @param index Pair index (0-63)
      * @return true on success, false if not found or not allocated
      */
     bool release_pair_by_index(int index);
@@ -168,28 +172,28 @@ public:
 
     /**
      * Get counter pair by index
-     * @param index Pair index (0-15)
+     * @param index Pair index (0-63)
      * @return Pointer to pair if valid, nullptr otherwise
      */
     CntrPair* get_pair(int index);
 
     /**
      * Get triggering counter by pair index
-     * @param pair_index Pair index (0-15)
+     * @param pair_index Pair index (0-63)
      * @return Pointer to trigger counter info, nullptr if invalid
      */
     CntrInfo* get_trigger_cntr(int pair_index);
 
     /**
      * Get completion counter by pair index
-     * @param pair_index Pair index (0-15)
+     * @param pair_index Pair index (0-63)
      * @return Pointer to completion counter info, nullptr if invalid
      */
     CntrInfo* get_completion_cntr(int pair_index);
 
     /**
      * Find first available (free) counter pair
-     * @return Index of free pair (0-15), or -1 if none available
+     * @return Index of free pair (0-63), or -1 if none available
      */
     int find_free_pair() const;
 
@@ -347,6 +351,13 @@ public:
     const MRInfo* get_info_by_addr(void* addr) const;
 
     /**
+     * Find MR that contains the given address (range lookup)
+     * @param addr Address that may be within a registered MR
+     * @return Pointer to MRInfo if found, nullptr otherwise
+     */
+    const MRInfo* find_containing(void* addr) const;
+
+    /**
      * Get full MR information by remote key
      * @param key Remote key to search for
      * @return Pointer to MRInfo if found, nullptr otherwise (pointer valid until next modification)
@@ -465,6 +476,173 @@ constexpr size_t MAX_EP_ADDR_LEN = 128;
 
 // Forward declarations
 class OFI;
+class DWQOperation;
+
+// ============================================================================
+// CompletionQueue - Operation Tracking with Sequence Numbers
+// ============================================================================
+
+/**
+ * CompletionQueue provides sequence number-based tracking for DWQ operations.
+ *
+ * Features:
+ * - Assigns unique sequence numbers to each operation
+ * - Tracks outstanding and completed operations
+ * - Flexible polling API: poll_one, poll_any, wait_one, wait_batch, wait_all
+ * - Thread-safe operations
+ *
+ * Usage:
+ *   CompletionQueue* cq = ofi->get_completion_queue();
+ *   auto op = ofi->create_dwq_operation();
+ *   op->prepare_write(...);
+ *   uint64_t seq = op->get_seq_num();
+ *   // GPU triggers operation
+ *   cq->wait_one(seq, timeout_ms);  // Wait for this specific operation
+ *   // OR
+ *   auto completed = cq->poll_any(10);  // Poll for any completed ops
+ */
+class CompletionQueue {
+public:
+    /**
+     * Invalid sequence number (never assigned)
+     */
+    static constexpr uint64_t INVALID_SEQ = 0;
+
+    CompletionQueue();
+    ~CompletionQueue();
+
+    // Disable copy, allow move
+    CompletionQueue(const CompletionQueue&) = delete;
+    CompletionQueue& operator=(const CompletionQueue&) = delete;
+
+    // ========================================================================
+    // Sequence Number Management (called by DWQOperation)
+    // ========================================================================
+
+    /**
+     * Allocate a new sequence number for an operation
+     * Called internally by DWQOperation::prepare_*
+     * @return New unique sequence number (> 0)
+     */
+    uint64_t allocate_seq_num();
+
+    /**
+     * Register an operation as pending
+     * Called by DWQOperation when prepared
+     * @param seq_num Sequence number of the operation
+     * @param op Pointer to the operation (for polling)
+     */
+    void register_pending(uint64_t seq_num, DWQOperation* op);
+
+    /**
+     * Mark an operation as completed
+     * Called when completion is detected
+     * @param seq_num Sequence number of the completed operation
+     */
+    void mark_completed(uint64_t seq_num);
+
+    /**
+     * Unregister an operation (e.g., on reset or destruction)
+     * @param seq_num Sequence number to unregister
+     */
+    void unregister(uint64_t seq_num);
+
+    // ========================================================================
+    // Single Operation Polling
+    // ========================================================================
+
+    /**
+     * Poll for a specific operation's completion (non-blocking)
+     * @param seq_num Sequence number to check
+     * @return true if completed, false if still pending or not found
+     */
+    bool poll_one(uint64_t seq_num);
+
+    /**
+     * Wait for a specific operation to complete (blocking)
+     * @param seq_num Sequence number to wait for
+     * @param timeout_ms Timeout in milliseconds (-1 for infinite)
+     * @return true if completed, false if timeout or not found
+     */
+    bool wait_one(uint64_t seq_num, int timeout_ms = -1);
+
+    // ========================================================================
+    // Batch Polling
+    // ========================================================================
+
+    /**
+     * Poll for any completed operations (non-blocking)
+     * @param max_count Maximum number of completions to return
+     * @return Vector of completed sequence numbers
+     */
+    std::vector<uint64_t> poll_any(size_t max_count = 64);
+
+    /**
+     * Wait for a batch of operations to complete
+     * @param seq_nums Sequence numbers to wait for
+     * @param timeout_ms Timeout in milliseconds (-1 for infinite)
+     * @return true if all completed, false if timeout
+     */
+    bool wait_batch(const std::vector<uint64_t>& seq_nums, int timeout_ms = -1);
+
+    /**
+     * Wait for all outstanding operations to complete
+     * @param timeout_ms Timeout in milliseconds (-1 for infinite)
+     * @return true if all completed, false if timeout
+     */
+    bool wait_all(int timeout_ms = -1);
+
+    // ========================================================================
+    // Query Operations
+    // ========================================================================
+
+    /**
+     * Get number of pending (outstanding) operations
+     */
+    size_t get_pending_count() const;
+
+    /**
+     * Get number of completed operations not yet acknowledged
+     */
+    size_t get_completed_count() const;
+
+    /**
+     * Check if a sequence number is pending
+     */
+    bool is_pending(uint64_t seq_num) const;
+
+    /**
+     * Check if a sequence number is completed
+     */
+    bool is_completed(uint64_t seq_num) const;
+
+    /**
+     * Clear completed operations from the tracking set
+     * (frees memory from accumulated completions)
+     */
+    void clear_completed();
+
+    /**
+     * Get all pending sequence numbers
+     */
+    std::vector<uint64_t> get_pending_seq_nums() const;
+
+private:
+    // Internal method to poll all pending operations
+    void poll_pending_operations();
+
+    // Next sequence number to assign (starts at 1)
+    std::atomic<uint64_t> next_seq_num_;
+
+    // Map of pending operations: seq_num -> DWQOperation*
+    std::map<uint64_t, DWQOperation*> pending_ops_;
+
+    // Set of completed sequence numbers
+    std::set<uint64_t> completed_seq_nums_;
+
+    // Mutex for thread-safe access
+    mutable std::mutex mutex_;
+};
 
 // ============================================================================
 // DWQOperation - GPU-triggered Deferred Work Queue Operation
@@ -652,6 +830,19 @@ public:
     OpType get_op_type() const { return op_type_; }
     CntrManager::CntrPair* get_cntr_pair() const { return cntr_pair_; }
 
+    /**
+     * Get the sequence number assigned to this operation
+     * Valid after prepare_* is called
+     * @return Sequence number (> 0), or INVALID_SEQ if not prepared
+     */
+    uint64_t get_seq_num() const { return seq_num_; }
+
+    /**
+     * Get the CompletionQueue this operation is registered with
+     * @return CompletionQueue pointer, or nullptr if not registered
+     */
+    CompletionQueue* get_completion_queue() const { return completion_queue_; }
+
 private:
     // ========================================================================
     // Internal Methods
@@ -670,20 +861,23 @@ private:
     OpType op_type_;
     OFI* ofi_;
 
+    // Sequence number for tracking (assigned by CompletionQueue)
+    uint64_t seq_num_;
+    CompletionQueue* completion_queue_;
+
     // Counter pair for this operation
     CntrManager::CntrPair* cntr_pair_;
 
-    // Additional counter for atomic completion
-    struct fid_cntr* atomic_completion_cntr_;
-    struct fi_cxi_cntr_ops* atomic_cntr_ops_;
+    // Completion signal for GPU polling (from signal pool in GPU MR)
+    volatile uint64_t* completion_signal_;  // GPU memory for polling
+    struct fid_mr* completion_signal_mr_;   // MR for completion signal (or nullptr if using pool)
+    size_t completion_signal_offset_;       // Offset in MR for atomic operations
+    bool uses_signal_pool_;                 // True if using shared signal pool
 
-    // Completion signal for GPU polling (GPU memory)
-    uint64_t* completion_signal_;           // GPU memory for polling
-    struct fid_mr* completion_signal_mr_;   // MR for completion signal
-
-    // Atomic operand (value to add, stored in GPU memory)
+    // Atomic operand (value to add, shared across all operations)
     uint64_t* atomic_operand_;
     struct fid_mr* atomic_operand_mr_;
+    bool uses_shared_operand_;              // True if using shared operand
 
     // Threshold for triggering
     uint64_t threshold_;
@@ -752,6 +946,86 @@ struct DefaultMRInfo {
 
 // Forward declaration
 class Bootstrap;
+
+// ============================================================================
+// CompletionSignalPool - Pool of completion signals from default GPU MR
+// ============================================================================
+
+/**
+ * Manages a pool of completion signals within the default GPU MR.
+ * This avoids creating separate MR registrations for each DWQOperation.
+ *
+ * Layout in default GPU MR:
+ *   [user data region] ... [completion signal pool (at end)]
+ */
+class CompletionSignalPool {
+public:
+    static constexpr size_t MAX_SIGNALS = 256;  // Maximum number of signals
+    static constexpr size_t SIGNAL_SIZE = sizeof(uint64_t);  // 8 bytes each
+    static constexpr size_t POOL_SIZE = MAX_SIGNALS * SIGNAL_SIZE;  // 2KB total
+
+    CompletionSignalPool();
+    ~CompletionSignalPool();
+
+    /**
+     * Initialize the pool using a region of already-registered GPU memory
+     * @param base_addr Base address of the signal pool (within default GPU MR)
+     * @param pool_offset Offset of pool from the start of the MR
+     * @param mr_desc Memory region descriptor for the containing MR
+     * @param mr_key Memory region key for the containing MR
+     * @return true on success
+     */
+    bool initialize(volatile uint64_t* base_addr, size_t pool_offset,
+                    void* mr_desc, uint64_t mr_key);
+
+    void finalize();
+
+    /**
+     * Allocate a completion signal from the pool
+     * @param signal_out Output: pointer to the allocated signal
+     * @param offset_out Output: offset of signal from MR base (for atomic operations)
+     * @return true if allocated, false if pool exhausted
+     */
+    bool allocate(volatile uint64_t** signal_out, size_t* offset_out);
+
+    /**
+     * Release a completion signal back to the pool
+     * @param signal Pointer to the signal to release
+     */
+    void release(volatile uint64_t* signal);
+
+    /**
+     * Get the MR descriptor for signals in this pool
+     */
+    void* get_mr_desc() const { return mr_desc_; }
+
+    /**
+     * Get the MR key for signals in this pool
+     */
+    uint64_t get_mr_key() const { return mr_key_; }
+
+    /**
+     * Check if initialized
+     */
+    bool is_initialized() const { return initialized_; }
+
+    /**
+     * Get statistics
+     */
+    size_t get_allocated_count() const;
+    size_t get_max_signals() const { return MAX_SIGNALS; }
+
+private:
+    volatile uint64_t* base_addr_;  // Base address of signal pool
+    void* mr_desc_;                  // MR descriptor
+    uint64_t mr_key_;               // MR key
+    size_t pool_offset_in_mr_;      // Offset of pool from MR base
+
+    std::bitset<MAX_SIGNALS> allocated_;  // Track which signals are allocated
+    size_t allocated_count_;
+    mutable std::mutex mutex_;
+    bool initialized_;
+};
 
 // ============================================================================
 // OFI - OpenFabrics Interface
@@ -866,14 +1140,14 @@ public:
 
   /**
    * Release counter pair by index
-   * @param index Pair index (0-15)
+   * @param index Pair index (0-63)
    * @return true on success
    */
   bool release_cntr_pair_by_index(int index);
 
   /**
    * Get counter pair by index
-   * @param index Pair index (0-15)
+   * @param index Pair index (0-63)
    * @return Pointer to pair, or nullptr if invalid
    */
   CntrManager::CntrPair* get_cntr_pair(int index);
@@ -889,6 +1163,22 @@ public:
    */
   void print_cntr_stats();
 
+  /**
+   * Get the depth of the deferred work queue
+   * This is the total number of triggered operations that can be queued
+   * across all processes using the same CXI service ID
+   * @return DWQ depth, or 0 if query fails
+   */
+  size_t get_dwq_depth();
+
+  /**
+   * Flush the deferred work queue
+   * This releases all triggered operation slots that have completed
+   * Must be called after operations complete to reuse DWQ slots
+   * @return true on success
+   */
+  bool flush_work_queue();
+
   // ========================================================================
   // DWQ Operation Support
   // ========================================================================
@@ -901,14 +1191,26 @@ public:
   std::unique_ptr<DWQOperation> create_dwq_operation();
 
   /**
-   * Create a counter for atomic completion notification
-   * Used internally by DWQOperation
-   * @param cntr_out Output: created counter
-   * @param ops_out Output: CXI counter ops
-   * @return true on success
+   * Get the completion queue for operation tracking
+   * @return Pointer to the CompletionQueue
    */
-  bool create_atomic_completion_counter(struct fid_cntr** cntr_out,
-                                        struct fi_cxi_cntr_ops** ops_out);
+  CompletionQueue* get_completion_queue() { return &completion_queue_; }
+
+  /**
+   * Get the completion signal pool
+   * Signals are allocated from default GPU MR to avoid extra MR registrations
+   * @return Pointer to the CompletionSignalPool
+   */
+  CompletionSignalPool* get_signal_pool() { return &signal_pool_; }
+
+  /**
+   * Get shared atomic operand for DWQ operations
+   * All operations use the same operand (value=1) to avoid extra MR registrations
+   * @param addr_out Output: pointer to the atomic operand
+   * @param mr_out Output: MR for the atomic operand
+   * @return true if available
+   */
+  bool get_shared_atomic_operand(uint64_t** addr_out, struct fid_mr** mr_out);
 
   // ========================================================================
   // Default MR Accessors
@@ -1011,6 +1313,16 @@ private:
 
     // Counter management for DWQ
     CntrManager cntr_manager_;
+
+    // Completion queue for operation tracking
+    CompletionQueue completion_queue_;
+
+    // Completion signal pool (uses end of default GPU MR)
+    CompletionSignalPool signal_pool_;
+
+    // Shared atomic operand for DWQ operations (allocated once, used by all)
+    uint64_t* shared_atomic_operand_;
+    struct fid_mr* shared_atomic_operand_mr_;
 
     // Default MR configuration and info
     DefaultMRConfig default_mr_config_;
