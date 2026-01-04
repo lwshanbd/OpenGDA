@@ -2701,7 +2701,6 @@ bool DWQOperation::prepare_write_explicit(void* local_buf, size_t size,
     // Reset counters
     fi_cntr_set(cntr_pair_->trigger->cntr, 0);
     fi_cntr_set(cntr_pair_->completion->cntr, 0);
-    fi_cntr_set(atomic_completion_cntr_, 0);
 
     // Reset completion signal
 #ifdef USE_AMDGPU
@@ -2881,7 +2880,6 @@ bool DWQOperation::prepare_read_explicit(void* local_buf, size_t size,
     // Reset counters
     fi_cntr_set(cntr_pair_->trigger->cntr, 0);
     fi_cntr_set(cntr_pair_->completion->cntr, 0);
-    fi_cntr_set(atomic_completion_cntr_, 0);
 
     // Reset completion signal
 #ifdef USE_AMDGPU

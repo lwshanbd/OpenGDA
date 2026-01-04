@@ -914,7 +914,7 @@ private:
 #endif
 
 #ifndef DEFAULT_GPU_MR_SIZE
-#define DEFAULT_GPU_MR_SIZE (16ULL * 1024 * 1024 * 1024)   // 16GB
+#define DEFAULT_GPU_MR_SIZE (8ULL * 1024 * 1024 * 1024)   // 8GB (CXI limitation with triggered ops)
 #endif
 
 // Environment variable names for runtime configuration
