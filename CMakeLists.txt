@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(OpenGDA VERSION 0.1.0 LANGUAGES CXX)
+project(OpenGDA VERSION 0.1.0 LANGUAGES CXX HIP)
 
 # ============================================================================
 # Build Options
@@ -10,8 +10,8 @@ option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(DEBUG_OFI "Enable DEBUG/TRACE log levels (default OFF for production)" OFF)
 
 # Default Memory Region sizes (in bytes, can be overridden by environment variables)
-set(DEFAULT_HOST_MR_SIZE "17179869184" CACHE STRING "Default host MR size in bytes (default 16GB)")
-set(DEFAULT_GPU_MR_SIZE "17179869184" CACHE STRING "Default GPU MR size in bytes (default 16GB)")
+set(DEFAULT_HOST_MR_SIZE "8589934592" CACHE STRING "Default host MR size in bytes (default 8GB)")
+set(DEFAULT_GPU_MR_SIZE "8589934592" CACHE STRING "Default GPU MR size in bytes (default 8GB)")
 # Validate GPU options - only one can be enabled at a time
 if(USE_AMDGPU AND USE_NVGPU)
     message(FATAL_ERROR "Cannot enable both USE_AMDGPU and USE_NVGPU. Please choose one GPU backend.")
@@ -180,6 +180,7 @@ endif()
 # Subdirectories
 # ============================================================================
 add_subdirectory(src)
+add_subdirectory(examples)
 
 # ============================================================================
 # Installation (Simple mode - no CMake package config)

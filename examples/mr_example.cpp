@@ -1,8 +1,11 @@
 /**
- * mr_example.c - Example of using OpenGDA Memory Registration API
+ * mr_example.cpp - Memory registration API
  *
- * This example demonstrates how to register and use memory regions
+ * Demonstrates how to register and use memory regions
  * for both host and GPU memory.
+ *
+ * Run:
+ *   srun -n 1 ./mr_example
  */
 
 #include <gda.h>
@@ -91,4 +94,3 @@ int main(void) {
     printf("OpenGDA memory registration example completed successfully\n");
     return 0;
 }
-// hipcc -I../build/include -L../build/src mr_example.cpp -lopengda -Wl,-rpath,$(realpath ../build/src) -DUSE_AMDGPU=ON -o mr_example
