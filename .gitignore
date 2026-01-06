@@ -18,3 +18,7 @@ examples/*.md
 reference/
 # Prototype files
 prototype/docs/
+
+# Private Claude instructions
+.claude.local.md
+.claude/settings.local.json
