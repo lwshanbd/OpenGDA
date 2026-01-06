@@ -174,6 +174,30 @@ int gda_wait(gda_handle_t* handle);
 int gda_wait_timeout(gda_handle_t* handle, int timeout_ms);
 
 /**
+ * Test if an operation has completed (non-blocking)
+ * @param handle Operation handle
+ * @return 1 if completed, 0 if still pending, negative on error
+ */
+int gda_test(gda_handle_t* handle);
+
+/**
+ * Test if any operation in an array has completed (non-blocking)
+ * @param handles Array of operation handles
+ * @param count Number of handles in the array
+ * @param completed_idx Output: index of the first completed operation (if any)
+ * @return 1 if at least one completed, 0 if none completed, negative on error
+ */
+int gda_test_any(gda_handle_t** handles, int count, int* completed_idx);
+
+/**
+ * Test if all operations in an array have completed (non-blocking)
+ * @param handles Array of operation handles
+ * @param count Number of handles in the array
+ * @return 1 if all completed, 0 if any still pending, negative on error
+ */
+int gda_test_all(gda_handle_t** handles, int count);
+
+/**
  * Reset operation for reuse (avoids reallocation overhead)
  * After reset, call gda_put/gda_get to prepare a new operation
  * @param handle Operation handle to reset

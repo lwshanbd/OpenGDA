@@ -335,6 +335,85 @@ int gda_wait_timeout(gda_handle_t* handle, int timeout_ms) {
     return 0;
 }
 
+int gda_test(gda_handle_t* handle) {
+    if (!handle || !handle->op || !handle->op->dwq_op) {
+        return -EINVAL;
+    }
+
+    CompletionQueue* cq = ofi->get_completion_queue();
+    if (!cq) {
+        return -EINVAL;
+    }
+
+    uint64_t seq_num = handle->op->dwq_op->get_seq_num();
+    if (seq_num == CompletionQueue::INVALID_SEQ) {
+        return -EINVAL;
+    }
+
+    return cq->poll_one(seq_num) ? 1 : 0;
+}
+
+int gda_test_any(gda_handle_t** handles, int count, int* completed_idx) {
+    if (!handles || count <= 0) {
+        return -EINVAL;
+    }
+
+    CompletionQueue* cq = ofi->get_completion_queue();
+    if (!cq) {
+        return -EINVAL;
+    }
+
+    for (int i = 0; i < count; i++) {
+        gda_handle_t* h = handles[i];
+        if (!h || !h->op || !h->op->dwq_op) {
+            continue;  // Skip invalid handles
+        }
+
+        uint64_t seq_num = h->op->dwq_op->get_seq_num();
+        if (seq_num == CompletionQueue::INVALID_SEQ) {
+            continue;
+        }
+
+        if (cq->poll_one(seq_num)) {
+            if (completed_idx) {
+                *completed_idx = i;
+            }
+            return 1;
+        }
+    }
+
+    return 0;  // None completed
+}
+
+int gda_test_all(gda_handle_t** handles, int count) {
+    if (!handles || count <= 0) {
+        return -EINVAL;
+    }
+
+    CompletionQueue* cq = ofi->get_completion_queue();
+    if (!cq) {
+        return -EINVAL;
+    }
+
+    for (int i = 0; i < count; i++) {
+        gda_handle_t* h = handles[i];
+        if (!h || !h->op || !h->op->dwq_op) {
+            return -EINVAL;  // Invalid handle in array
+        }
+
+        uint64_t seq_num = h->op->dwq_op->get_seq_num();
+        if (seq_num == CompletionQueue::INVALID_SEQ) {
+            return -EINVAL;
+        }
+
+        if (!cq->poll_one(seq_num)) {
+            return 0;  // At least one not completed
+        }
+    }
+
+    return 1;  // All completed
+}
+
 int gda_reset(gda_handle_t* handle) {
     if (!handle || !handle->op || !handle->op->dwq_op) {
         return -EINVAL;
