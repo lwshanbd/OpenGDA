@@ -25,6 +25,11 @@ public:
     virtual int get_rank() const = 0;
     virtual int get_size() const = 0;
 
+    // Node-local rank information (for same-node detection)
+    virtual int get_local_rank() const = 0;      // Rank within the node (0, 1, 2, ...)
+    virtual int get_local_size() const = 0;      // Number of processes on this node
+    virtual int get_node_id() const = 0;         // Unique node identifier
+
     // Synchronization barrier
     virtual bool bootstrap_barrier() = 0;
 

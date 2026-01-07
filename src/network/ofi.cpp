@@ -1254,7 +1254,20 @@ OFI::OFI(int rank, int size, Bootstrap* bootstrap) {
         peers_[i].fi_addr = FI_ADDR_NOTAVAIL;
         peers_[i].valid = false;
         memset(&peers_[i].mr_info, 0, sizeof(PeerMRInfo));
+        peers_[i].node_id = -1;
+        peers_[i].same_node = false;
+#ifdef USE_AMDGPU
+        memset(&peers_[i].ipc_info, 0, sizeof(PeerIPCInfo));
+        peers_[i].can_use_ipc = false;
+#endif
     }
+
+#ifdef USE_AMDGPU
+    // Initialize IPC-related fields
+    local_node_id_ = -1;
+    memset(&local_ipc_handle_, 0, sizeof(local_ipc_handle_));
+    local_ipc_handle_valid_ = false;
+#endif
 
     // Initialize logging system
     opengda::LogContext::instance().init(rank);
@@ -1844,6 +1857,11 @@ void OFI::print_mr_stats() {
 
 // Destructor - cleanup any remaining MRs
 OFI::~OFI() {
+#ifdef USE_AMDGPU
+    // Clean up IPC mappings first
+    cleanup_ipc_mappings();
+#endif
+
     // Clean up default MRs first (they have their own memory allocations)
     cleanup_default_mrs();
 
@@ -2245,6 +2263,12 @@ bool OFI::exchange_addresses() {
     ExchangeData* my_mr_data = (ExchangeData*)(my_data + sizeof(uint32_t) + local_ep_addr_len_);
     memset(my_mr_data, 0, sizeof(ExchangeData));
 
+    // Fill in node ID for same-node detection
+    my_mr_data->node_id = bootstrap_->get_node_id();
+#ifdef USE_AMDGPU
+    local_node_id_ = my_mr_data->node_id;
+#endif
+
     // Fill in MR info
     if (default_host_mr_.allocated) {
         my_mr_data->host_mr_addr = (uint64_t)default_host_mr_.buffer;
@@ -2256,6 +2280,23 @@ bool OFI::exchange_addresses() {
         my_mr_data->gpu_mr_addr = (uint64_t)default_gpu_mr_.buffer;
         my_mr_data->gpu_mr_key = default_gpu_mr_.key;
         my_mr_data->gpu_mr_size = default_gpu_mr_.size;
+
+#ifdef USE_AMDGPU
+        // Create IPC handle for our GPU buffer (for same-node peers)
+        hipError_t hip_err = hipIpcGetMemHandle(&local_ipc_handle_, default_gpu_mr_.buffer);
+        if (hip_err == hipSuccess) {
+            local_ipc_handle_valid_ = true;
+            memcpy(&my_mr_data->gpu_ipc_handle, &local_ipc_handle_, sizeof(hipIpcMemHandle_t));
+            my_mr_data->gpu_device_id = device_id;
+            my_mr_data->ipc_handle_valid = true;
+            OPENGDA_Info("ofi", "Created IPC handle for GPU buffer on node %d", local_node_id_);
+        } else {
+            OPENGDA_Warn("ofi", "hipIpcGetMemHandle failed: %s - IPC disabled for this rank",
+                        hipGetErrorString(hip_err));
+            local_ipc_handle_valid_ = false;
+            my_mr_data->ipc_handle_valid = false;
+        }
+#endif
     }
 
     // Convert to hex for exchange
@@ -2322,15 +2363,38 @@ bool OFI::exchange_addresses() {
         peers_[i].mr_info.gpu_mr_size = peer_mr_data->gpu_mr_size;
         peers_[i].valid = true;
 
+        // Store node info for same-node detection
+        peers_[i].node_id = peer_mr_data->node_id;
+#ifdef USE_AMDGPU
+        peers_[i].same_node = (peer_mr_data->node_id == local_node_id_);
+
+        // Store IPC handle if peer is on same node and IPC is available
+        if (peers_[i].same_node && peer_mr_data->ipc_handle_valid && i != rank_) {
+            memcpy(&peers_[i].ipc_info.ipc_handle, &peer_mr_data->gpu_ipc_handle, sizeof(hipIpcMemHandle_t));
+            peers_[i].ipc_info.mapped_size = peer_mr_data->gpu_mr_size;
+            peers_[i].ipc_info.peer_device_id = peer_mr_data->gpu_device_id;
+            peers_[i].ipc_info.mapped = false;  // Will be mapped in setup_peer_ipc_mappings
+            peers_[i].can_use_ipc = true;
+
+            OPENGDA_Debug("ofi", "Peer %d is same-node (node_id=%d), IPC available",
+                         i, peer_mr_data->node_id);
+        } else {
+            peers_[i].can_use_ipc = false;
+        }
+#else
+        peers_[i].same_node = false;
+#endif
+
         // Store local fi_addr
         if (i == rank_) {
             local_fi_addr_ = peer_fi_addr;
         }
 
-        OPENGDA_Debug("ofi", "Peer %d: fi_addr=%lu, host_mr_key=0x%lx, gpu_mr_key=0x%lx",
+        OPENGDA_Debug("ofi", "Peer %d: fi_addr=%lu, host_mr_key=0x%lx, gpu_mr_key=0x%lx, node_id=%d, same_node=%d",
                       i, (unsigned long)peer_fi_addr,
                       (unsigned long)peers_[i].mr_info.host_mr_key,
-                      (unsigned long)peers_[i].mr_info.gpu_mr_key);
+                      (unsigned long)peers_[i].mr_info.gpu_mr_key,
+                      peers_[i].node_id, peers_[i].same_node);
     }
 
     // Cleanup
@@ -2344,6 +2408,14 @@ bool OFI::exchange_addresses() {
         OPENGDA_Error("ofi", "Final barrier after address exchange failed");
         return false;
     }
+
+#ifdef USE_AMDGPU
+    // Setup IPC mappings for same-node peers
+    if (!setup_peer_ipc_mappings()) {
+        OPENGDA_Warn("ofi", "Failed to setup some IPC mappings - continuing with OFI fallback");
+        // Not fatal - we can still use OFI for same-node communication
+    }
+#endif
 
     OPENGDA_Info("ofi", "Address exchange completed successfully");
     return true;
@@ -3106,3 +3178,109 @@ bool DWQOperation::wait_completion(int timeout_ms) {
     state_ = State::COMPLETED;
     return true;
 }
+
+// ============================================================================
+// IPC (Same-Node GPU Communication) Implementation
+// ============================================================================
+
+#ifdef USE_AMDGPU
+bool OFI::setup_local_ipc_handle() {
+    if (!default_gpu_mr_.allocated || !default_gpu_mr_.buffer) {
+        OPENGDA_Debug("ofi", "No GPU buffer available for IPC");
+        return false;
+    }
+
+    hipError_t hip_err = hipIpcGetMemHandle(&local_ipc_handle_, default_gpu_mr_.buffer);
+    if (hip_err != hipSuccess) {
+        OPENGDA_Warn("ofi", "hipIpcGetMemHandle failed: %s", hipGetErrorString(hip_err));
+        local_ipc_handle_valid_ = false;
+        return false;
+    }
+
+    local_ipc_handle_valid_ = true;
+    OPENGDA_Info("ofi", "Created local IPC handle for GPU buffer");
+    return true;
+}
+
+bool OFI::setup_peer_ipc_mappings() {
+    int ipc_mapped_count = 0;
+    int ipc_failed_count = 0;
+
+    for (int i = 0; i < size_; i++) {
+        if (i == rank_) {
+            continue;  // Skip self
+        }
+
+        if (!peers_[i].can_use_ipc) {
+            continue;  // Skip peers without IPC support
+        }
+
+        // Open IPC handle from peer
+        void* mapped_ptr = nullptr;
+        hipError_t hip_err = hipIpcOpenMemHandle(&mapped_ptr,
+                                                  peers_[i].ipc_info.ipc_handle,
+                                                  hipIpcMemLazyEnablePeerAccess);
+        if (hip_err != hipSuccess) {
+            OPENGDA_Warn("ofi", "hipIpcOpenMemHandle failed for peer %d: %s",
+                        i, hipGetErrorString(hip_err));
+            peers_[i].can_use_ipc = false;
+            peers_[i].ipc_info.mapped = false;
+            ipc_failed_count++;
+            continue;
+        }
+
+        peers_[i].ipc_info.mapped_ptr = mapped_ptr;
+        peers_[i].ipc_info.mapped = true;
+        ipc_mapped_count++;
+
+        OPENGDA_Debug("ofi", "IPC mapped peer %d GPU buffer at %p (size=%zu)",
+                     i, mapped_ptr, peers_[i].ipc_info.mapped_size);
+    }
+
+    OPENGDA_Info("ofi", "IPC setup complete: %d mappings successful, %d failed",
+                 ipc_mapped_count, ipc_failed_count);
+
+    return (ipc_failed_count == 0);
+}
+
+void OFI::cleanup_ipc_mappings() {
+    for (int i = 0; i < size_; i++) {
+        if (i == rank_) {
+            continue;
+        }
+
+        if (peers_[i].ipc_info.mapped && peers_[i].ipc_info.mapped_ptr) {
+            hipError_t hip_err = hipIpcCloseMemHandle(peers_[i].ipc_info.mapped_ptr);
+            if (hip_err != hipSuccess) {
+                OPENGDA_Warn("ofi", "hipIpcCloseMemHandle failed for peer %d: %s",
+                            i, hipGetErrorString(hip_err));
+            }
+            peers_[i].ipc_info.mapped_ptr = nullptr;
+            peers_[i].ipc_info.mapped = false;
+        }
+    }
+
+    OPENGDA_Debug("ofi", "IPC mappings cleaned up");
+}
+
+bool OFI::is_ipc_available(int rank) const {
+    if (rank < 0 || rank >= size_ || rank == rank_) {
+        return false;
+    }
+    return peers_[rank].can_use_ipc && peers_[rank].ipc_info.mapped;
+}
+
+void* OFI::get_ipc_ptr(int rank) const {
+    if (!is_ipc_available(rank)) {
+        return nullptr;
+    }
+    return peers_[rank].ipc_info.mapped_ptr;
+}
+
+size_t OFI::get_ipc_size(int rank) const {
+    if (!is_ipc_available(rank)) {
+        return 0;
+    }
+    return peers_[rank].ipc_info.mapped_size;
+}
+#endif // USE_AMDGPU

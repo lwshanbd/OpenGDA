@@ -28,6 +28,11 @@ public:
     int get_rank() const override;
     int get_size() const override;
 
+    // Node-local rank information
+    int get_local_rank() const override;
+    int get_local_size() const override;
+    int get_node_id() const override;
+
     // Synchronization barrier (wraps PMI2_KVS_Fence)
     bool bootstrap_barrier() override;
 
@@ -43,6 +48,14 @@ private:
     int size_;
     int spawned_;
     int appnum_;
+
+    // Node-local information
+    int local_rank_;
+    int local_size_;
+    int node_id_;
+
+    // Helper to query node attributes
+    bool query_node_info();
 };
 
 #endif

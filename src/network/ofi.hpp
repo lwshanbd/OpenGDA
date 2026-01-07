@@ -446,6 +446,20 @@ struct PeerMRInfo {
     size_t gpu_mr_size;       // Remote GPU MR size
 };
 
+#ifdef USE_AMDGPU
+/**
+ * IPC information for same-node GPU peers
+ * Used for direct GPU-to-GPU memory access within a node
+ */
+struct PeerIPCInfo {
+    hipIpcMemHandle_t ipc_handle;     // IPC handle for GPU memory
+    void* mapped_ptr;                  // Locally mapped pointer to peer's GPU memory
+    size_t mapped_size;                // Size of mapped region
+    bool mapped;                       // Whether IPC mapping is active
+    int peer_device_id;                // Peer's GPU device ID
+};
+#endif
+
 /**
  * Complete peer information
  */
@@ -454,6 +468,16 @@ struct PeerInfo {
     fi_addr_t fi_addr;        // Libfabric address for this peer
     PeerMRInfo mr_info;       // MR information
     bool valid;               // Whether this peer info is valid
+
+    // Same-node detection
+    int node_id;              // Peer's node ID (for same-node detection)
+    bool same_node;           // True if peer is on the same node
+
+#ifdef USE_AMDGPU
+    // IPC information for same-node GPU communication
+    PeerIPCInfo ipc_info;     // IPC mapping info (valid only if same_node && can_use_ipc)
+    bool can_use_ipc;         // True if IPC is available for this peer
+#endif
 };
 
 /**
@@ -461,6 +485,9 @@ struct PeerInfo {
  * This is what gets exchanged via bootstrap
  */
 struct ExchangeData {
+    // Host identification for same-node detection
+    int node_id;              // Node ID from bootstrap
+
     // Endpoint address (variable length, stored as hex)
     // MR info
     uint64_t host_mr_addr;
@@ -469,6 +496,13 @@ struct ExchangeData {
     uint64_t gpu_mr_addr;
     uint64_t gpu_mr_key;
     size_t gpu_mr_size;
+
+#ifdef USE_AMDGPU
+    // IPC handle for same-node GPU communication
+    hipIpcMemHandle_t gpu_ipc_handle;
+    int gpu_device_id;        // Local GPU device ID
+    bool ipc_handle_valid;    // Whether IPC handle is valid
+#endif
 };
 
 // Maximum endpoint address length
@@ -1271,6 +1305,40 @@ public:
   int get_rank() const { return rank_; }
 
   // ========================================================================
+  // IPC (Same-Node GPU Communication) Support
+  // ========================================================================
+
+#ifdef USE_AMDGPU
+  /**
+   * Check if IPC can be used for communication with a peer
+   * IPC is available for same-node peers with compatible GPUs
+   * @param rank Peer rank
+   * @return true if IPC is available
+   */
+  bool is_ipc_available(int rank) const;
+
+  /**
+   * Get the locally-mapped IPC pointer to a peer's GPU buffer
+   * This allows direct GPU-to-GPU memory access for same-node peers
+   * @param rank Peer rank
+   * @return Mapped pointer to peer's GPU buffer, nullptr if not available
+   */
+  void* get_ipc_ptr(int rank) const;
+
+  /**
+   * Get the size of the IPC-mapped region for a peer
+   * @param rank Peer rank
+   * @return Size in bytes, 0 if not available
+   */
+  size_t get_ipc_size(int rank) const;
+
+  /**
+   * Get local node ID (for same-node detection)
+   */
+  int get_local_node_id() const { return local_node_id_; }
+#endif
+
+  // ========================================================================
   // Accessors
   // ========================================================================
 
@@ -1339,4 +1407,16 @@ private:
     bool exchange_addresses();
     static void bytes_to_hex(const uint8_t* bytes, size_t len, char* hex);
     static int hex_to_bytes(const char* hex, uint8_t* bytes, size_t max_len);
+
+#ifdef USE_AMDGPU
+    // IPC support for same-node GPU communication
+    int local_node_id_;                    // Local node ID from bootstrap
+    hipIpcMemHandle_t local_ipc_handle_;   // IPC handle for our GPU buffer
+    bool local_ipc_handle_valid_;          // Whether our IPC handle is valid
+
+    // Helper functions for IPC
+    bool setup_local_ipc_handle();         // Create IPC handle for our GPU buffer
+    bool setup_peer_ipc_mappings();        // Map same-node peers' GPU buffers
+    void cleanup_ipc_mappings();           // Unmap all IPC mappings
+#endif
 };

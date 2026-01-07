@@ -10,7 +10,7 @@ option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(DEBUG_OFI "Enable DEBUG/TRACE log levels (default OFF for production)" OFF)
 
 # Default Memory Region sizes (in bytes, can be overridden by environment variables)
-set(DEFAULT_HOST_MR_SIZE "8589934592" CACHE STRING "Default host MR size in bytes (default 8GB)")
+set(DEFAULT_HOST_MR_SIZE "4294967296" CACHE STRING "Default host MR size in bytes (default 4GB)")
 set(DEFAULT_GPU_MR_SIZE "8589934592" CACHE STRING "Default GPU MR size in bytes (default 8GB)")
 # Validate GPU options - only one can be enabled at a time
 if(USE_AMDGPU AND USE_NVGPU)

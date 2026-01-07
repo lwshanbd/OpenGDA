@@ -27,6 +27,11 @@ public:
     int get_rank() const override;
     int get_size() const override;
 
+    // Node-local rank information
+    int get_local_rank() const override;
+    int get_local_size() const override;
+    int get_node_id() const override;
+
     // Synchronization barrier
     bool bootstrap_barrier() override;
 
@@ -40,7 +45,12 @@ public:
 private:
     int rank_;
     int size_;
+    int local_rank_;
+    int local_size_;
+    int node_id_;
     pmix_proc_t myproc_;
+
+    bool query_node_info();
 };
 
 #endif

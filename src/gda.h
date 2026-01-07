@@ -42,11 +42,21 @@ typedef struct gda_mr gda_mr_t;
 /**
  * GPU-accessible handle for triggering and waiting on operations.
  * This structure is designed to be passed to GPU kernels.
+ *
+ * Two modes are supported:
+ * - DWQ mode (is_ipc=0): GPU writes to trigger_addr to initiate RDMA via NIC
+ * - IPC mode (is_ipc=1): GPU can directly copy to/from ipc_dest_addr for same-node peers
  */
 typedef struct gda_gpu_handle {
-    volatile uint64_t* trigger_addr;      // Write threshold here to trigger
+    volatile uint64_t* trigger_addr;      // Write threshold here to trigger (DWQ mode)
     volatile uint64_t* completion_addr;   // Poll this until non-zero
-    uint64_t trigger_threshold;           // Value to write to trigger
+    uint64_t trigger_threshold;           // Value to write to trigger (DWQ mode)
+
+    // IPC mode fields (for same-node GPU communication)
+    int is_ipc;                           // 1 = IPC mode (direct copy), 0 = DWQ mode (RDMA)
+    void* ipc_dest_addr;                  // Destination address in peer's GPU memory (IPC mode)
+    void* ipc_src_addr;                   // Source address (local GPU memory)
+    size_t ipc_size;                      // Transfer size in bytes
 } gda_gpu_handle_t;
 
 /**
@@ -222,9 +232,63 @@ void gda_flush(void);
 // ============================================================================
 
 #ifdef __HIPCC__
+/**
+ * Trigger the operation - single thread version
+ * - DWQ mode: Writes to trigger_addr to initiate RDMA via NIC (efficient)
+ * - IPC mode: Sequential copy (slow for large data, use gda_gpu_trigger_all instead)
+ *
+ * Use this for small transfers or when only master thread should trigger.
+ */
 #define gda_gpu_trigger(gpu_handle) do { \
-    *(gpu_handle).trigger_addr = (gpu_handle).trigger_threshold; \
-    __threadfence_system(); \
+    if ((gpu_handle).is_ipc) { \
+        /* IPC mode: sequential 64-bit copy */ \
+        volatile uint64_t* dst = (volatile uint64_t*)(gpu_handle).ipc_dest_addr; \
+        volatile uint64_t* src = (volatile uint64_t*)(gpu_handle).ipc_src_addr; \
+        size_t count = (gpu_handle).ipc_size / sizeof(uint64_t); \
+        for (size_t i = 0; i < count; i++) { \
+            dst[i] = src[i]; \
+        } \
+        __threadfence_system(); \
+        *(gpu_handle).completion_addr = 1; \
+    } else { \
+        /* DWQ mode: trigger RDMA via NIC */ \
+        *(gpu_handle).trigger_addr = (gpu_handle).trigger_threshold; \
+        __threadfence_system(); \
+    } \
+} while(0)
+
+/**
+ * Parallel trigger - ALL threads in grid should call this
+ * - IPC mode: Parallel copy using all threads (efficient for large data)
+ * - DWQ mode: Only thread 0 triggers, others do nothing
+ *
+ * Use this for large data transfers when all threads can participate.
+ */
+#define gda_gpu_trigger_all(gpu_handle) do { \
+    size_t tid = threadIdx.x + blockIdx.x * blockDim.x + \
+                 (threadIdx.y + blockIdx.y * blockDim.y) * (blockDim.x * gridDim.x); \
+    size_t total_threads = blockDim.x * blockDim.y * gridDim.x * gridDim.y; \
+    if ((gpu_handle).is_ipc) { \
+        /* IPC mode: parallel copy using all threads */ \
+        volatile uint64_t* dst = (volatile uint64_t*)(gpu_handle).ipc_dest_addr; \
+        volatile uint64_t* src = (volatile uint64_t*)(gpu_handle).ipc_src_addr; \
+        size_t count = (gpu_handle).ipc_size / sizeof(uint64_t); \
+        for (size_t i = tid; i < count; i += total_threads) { \
+            dst[i] = src[i]; \
+        } \
+        __threadfence_system(); \
+        /* Only thread 0 signals completion after all threads sync */ \
+        __syncthreads(); \
+        if (tid == 0) { \
+            *(gpu_handle).completion_addr = 1; \
+        } \
+    } else { \
+        /* DWQ mode: only thread 0 triggers */ \
+        if (tid == 0) { \
+            *(gpu_handle).trigger_addr = (gpu_handle).trigger_threshold; \
+            __threadfence_system(); \
+        } \
+    } \
 } while(0)
 
 #define gda_gpu_wait(gpu_handle) do { \
@@ -234,9 +298,50 @@ void gda_flush(void);
 #endif
 
 #ifdef __CUDACC__
+/**
+ * Trigger the operation - single thread version
+ */
 #define gda_gpu_trigger(gpu_handle) do { \
-    *(gpu_handle).trigger_addr = (gpu_handle).trigger_threshold; \
-    __threadfence_system(); \
+    if ((gpu_handle).is_ipc) { \
+        volatile uint64_t* dst = (volatile uint64_t*)(gpu_handle).ipc_dest_addr; \
+        volatile uint64_t* src = (volatile uint64_t*)(gpu_handle).ipc_src_addr; \
+        size_t count = (gpu_handle).ipc_size / sizeof(uint64_t); \
+        for (size_t i = 0; i < count; i++) { \
+            dst[i] = src[i]; \
+        } \
+        __threadfence_system(); \
+        *(gpu_handle).completion_addr = 1; \
+    } else { \
+        *(gpu_handle).trigger_addr = (gpu_handle).trigger_threshold; \
+        __threadfence_system(); \
+    } \
+} while(0)
+
+/**
+ * Parallel trigger - ALL threads in grid should call this
+ */
+#define gda_gpu_trigger_all(gpu_handle) do { \
+    size_t tid = threadIdx.x + blockIdx.x * blockDim.x + \
+                 (threadIdx.y + blockIdx.y * blockDim.y) * (blockDim.x * gridDim.x); \
+    size_t total_threads = blockDim.x * blockDim.y * gridDim.x * gridDim.y; \
+    if ((gpu_handle).is_ipc) { \
+        volatile uint64_t* dst = (volatile uint64_t*)(gpu_handle).ipc_dest_addr; \
+        volatile uint64_t* src = (volatile uint64_t*)(gpu_handle).ipc_src_addr; \
+        size_t count = (gpu_handle).ipc_size / sizeof(uint64_t); \
+        for (size_t i = tid; i < count; i += total_threads) { \
+            dst[i] = src[i]; \
+        } \
+        __threadfence_system(); \
+        __syncthreads(); \
+        if (tid == 0) { \
+            *(gpu_handle).completion_addr = 1; \
+        } \
+    } else { \
+        if (tid == 0) { \
+            *(gpu_handle).trigger_addr = (gpu_handle).trigger_threshold; \
+            __threadfence_system(); \
+        } \
+    } \
 } while(0)
 
 #define gda_gpu_wait(gpu_handle) do { \
@@ -244,6 +349,116 @@ void gda_flush(void);
     __threadfence_system(); \
 } while(0)
 #endif
+
+// ============================================================================
+// GPU-side Barrier API
+// ============================================================================
+
+/**
+ * Maximum number of ranks supported for GPU barrier
+ */
+#define GDA_BARRIER_MAX_RANKS 64
+
+/**
+ * Maximum number of phases in dissemination algorithm (log2(MAX_RANKS))
+ */
+#define GDA_BARRIER_MAX_PHASES 6
+
+/**
+ * Maximum number of barrier iterations supported
+ * (DWQ operations are one-shot, so we pre-allocate for all iterations)
+ */
+#define GDA_BARRIER_MAX_ITERS 128
+
+/**
+ * GPU-accessible barrier structure
+ * This structure is designed to be used within GPU kernels.
+ */
+typedef struct gda_gpu_barrier {
+    volatile uint64_t* sync_arr;          // Sync array: one slot per rank
+    volatile uint64_t* sync_counter;      // Current barrier counter (also iteration index)
+    int mype;                             // My rank
+    int npes;                             // Total number of ranks
+    int num_phases;                       // Number of phases in dissemination
+    int max_iters;                        // Max iterations allocated
+    // Handles for each phase and iteration: [iter * num_phases + phase]
+    gda_gpu_handle_t* phase_handles;      // Dynamically allocated array
+    int phase_targets[GDA_BARRIER_MAX_PHASES];   // Target ranks for each phase
+    int phase_sources[GDA_BARRIER_MAX_PHASES];   // Source ranks for each phase
+} gda_gpu_barrier_t;
+
+/**
+ * Allocate and initialize GPU barrier resources
+ * Must be called by all ranks before using the barrier.
+ *
+ * @param max_iters Maximum number of barrier iterations (DWQ ops are one-shot)
+ *                  Default: GDA_BARRIER_MAX_ITERS if 0
+ * @return Pointer to GPU-accessible barrier structure, or NULL on failure
+ *
+ * Usage:
+ *   gda_gpu_barrier_t* barrier = gda_gpu_barrier_alloc(10); // 10 iterations max
+ *   // Copy to GPU, then in kernel:
+ *   //   gda_gpu_barrier_wait(barrier);
+ *   gda_gpu_barrier_free(barrier);
+ */
+gda_gpu_barrier_t* gda_gpu_barrier_alloc(int max_iters);
+
+/**
+ * Free GPU barrier resources
+ * @param barrier Barrier handle to free
+ */
+void gda_gpu_barrier_free(gda_gpu_barrier_t* barrier);
+
+/**
+ * Reset barrier for reuse (call between barrier uses if needed)
+ * @param barrier Barrier handle
+ * @return 0 on success, negative on error
+ */
+int gda_gpu_barrier_reset(gda_gpu_barrier_t* barrier);
+
+// ============================================================================
+// GPU Barrier Macros (for use in HIP/CUDA kernels)
+// ============================================================================
+
+#if defined(__HIPCC__) || defined(__CUDACC__)
+
+/**
+ * GPU-side barrier wait (dissemination algorithm)
+ * Should be called by a single thread (typically thread 0)
+ */
+#define gda_gpu_barrier_wait(barrier) do { \
+    volatile uint64_t* sync_arr = (barrier)->sync_arr; \
+    volatile uint64_t* counter = (barrier)->sync_counter; \
+    uint64_t cur_iter = *counter; \
+    uint64_t next_iter = cur_iter + 1; \
+    int mype = (barrier)->mype; \
+    int num_phases = (barrier)->num_phases; \
+    \
+    /* Update our sync slot with next iteration value */ \
+    sync_arr[mype] = next_iter; \
+    __threadfence_system(); \
+    \
+    /* Dissemination algorithm (similar to NVSHMEM) */ \
+    /* Use iteration-indexed handles since DWQ ops are one-shot */ \
+    int handle_base = (int)(cur_iter * num_phases); \
+    for (int phase = 0; phase < num_phases; phase++) { \
+        /* Signal to neighbor: trigger put to write our sync value */ \
+        gda_gpu_trigger((barrier)->phase_handles[handle_base + phase]); \
+        \
+        /* Wait for signal from neighbor (their sync value arriving) */ \
+        int src = (barrier)->phase_sources[phase]; \
+        while (sync_arr[src] < next_iter) { \
+            /* spin */ \
+        } \
+        __threadfence_system(); \
+    } \
+    \
+    /* Update counter for next barrier iteration */ \
+    *counter = next_iter; \
+    __threadfence_system(); \
+} while(0)
+
+#endif /* __HIPCC__ || __CUDACC__ */
 
 // ============================================================================
 // Legacy Memory Registration API (for advanced use)

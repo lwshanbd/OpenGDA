@@ -1,7 +1,9 @@
 #include "pmix.hpp"
 #include <cstring>
+#include <unistd.h>
+#include <cstdint>
 
-PMIX::PMIX() : Bootstrap(), rank_(0), size_(0) {
+PMIX::PMIX() : Bootstrap(), rank_(0), size_(0), local_rank_(-1), local_size_(-1), node_id_(-1) {
     memset(&myproc_, 0, sizeof(myproc_));
 }
 
@@ -39,8 +41,58 @@ bool PMIX::bootstrap_initialize() {
     size_ = val->data.uint32;
     PMIX_VALUE_RELEASE(val);
 
+    // Query node-local information
+    if (!query_node_info()) {
+        fprintf(stderr, "PMIX: Warning: Could not query node info, IPC optimization disabled\n");
+        // Not fatal - continue without node info
+    }
+
     bootstrap_initialized = true;
     return true;
+}
+
+bool PMIX::query_node_info() {
+    pmix_value_t *val;
+    pmix_status_t rc;
+
+    // Get local rank (rank within node)
+    rc = PMIx_Get(&myproc_, PMIX_LOCAL_RANK, NULL, 0, &val);
+    if (rc == PMIX_SUCCESS) {
+        local_rank_ = val->data.uint16;
+        PMIX_VALUE_RELEASE(val);
+    } else {
+        local_rank_ = 0;  // Fallback
+    }
+
+    // Get local size (number of processes on this node)
+    rc = PMIx_Get(&myproc_, PMIX_LOCAL_SIZE, NULL, 0, &val);
+    if (rc == PMIX_SUCCESS) {
+        local_size_ = val->data.uint32;
+        PMIX_VALUE_RELEASE(val);
+    } else {
+        local_size_ = 1;  // Fallback
+    }
+
+    // Try to get node ID
+    rc = PMIx_Get(&myproc_, PMIX_NODEID, NULL, 0, &val);
+    if (rc == PMIX_SUCCESS) {
+        node_id_ = val->data.uint32;
+        PMIX_VALUE_RELEASE(val);
+    } else {
+        // Fallback: use hostname hash
+        char hostname[256];
+        if (gethostname(hostname, sizeof(hostname)) == 0) {
+            uint64_t hash = 0;
+            for (char* p = hostname; *p; p++) {
+                hash = hash * 31 + (unsigned char)*p;
+            }
+            node_id_ = (int)(hash % 1000000);
+        } else {
+            node_id_ = rank_;
+        }
+    }
+
+    return (local_rank_ >= 0 && local_size_ > 0);
 }
 
 bool PMIX::bootstrap_finalize() {
@@ -59,6 +111,18 @@ int PMIX::get_rank() const {
 
 int PMIX::get_size() const {
     return size_;
+}
+
+int PMIX::get_local_rank() const {
+    return local_rank_;
+}
+
+int PMIX::get_local_size() const {
+    return local_size_;
+}
+
+int PMIX::get_node_id() const {
+    return node_id_;
 }
 
 std::string PMIX::get_bootstrap_name() const {
