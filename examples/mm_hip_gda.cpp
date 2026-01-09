@@ -130,7 +130,6 @@ int main(int argc, char** argv)
     int mype = gda_rank();
     int npes = gda_size();
 
-    std::cout << "Rank " << mype << "/" << npes << " initialized" << std::endl;
 
     // Matrix size from command line or default
     int N = (argc > 1) ? atoi(argv[1]) : 4096;
