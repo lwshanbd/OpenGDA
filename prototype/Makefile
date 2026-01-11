@@ -25,7 +25,7 @@ LIBS = -lfabric -lpmi2
 GPU_ARCH = gfx90a
 
 # Targets
-TARGETS = test test_2 rank rank-amdgpu rank-amdgpu-gda rank-nvidia-gda benchmark-mpi benchmark-mpi-rma amdgpu-test ofi-comp gda-comp mpi-comp
+TARGETS = test test_2 rank rank-amdgpu rank-amdgpu-gda rank-nvidia-gda benchmark-mpi benchmark-mpi-rma amdgpu-test ofi-comp gda-comp gda-multi gda-proxy gda-proxy-barrier barrier-proxy mpi-comp
 
 all: $(TARGETS)
 
@@ -72,6 +72,20 @@ amdgpu-test: amdgpu-test.cpp
 gda-comp: gda-comp.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) --offload-arch=$(GPU_ARCH) -o $@ $^ $(LIBS)
 
+gda-multi: gda-multi.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) --offload-arch=$(GPU_ARCH) -o $@ $^ $(LIBS)
+
+# CPU Proxy + GPU persistent kernel for unlimited iterations
+gda-proxy: gda-proxy.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) --offload-arch=$(GPU_ARCH) -o $@ $^ $(LIBS) -lpthread
+
+# CPU Proxy Barrier - 2-rank barrier with CPU proxy for unlimited iterations
+gda-proxy-barrier: gda-proxy-barrier.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) --offload-arch=$(GPU_ARCH) -o $@ $^ $(LIBS) -lpthread
+
+# Barrier Proxy - All-to-all arrival barrier with CPU proxy for unlimited iterations
+barrier-proxy: barrier_proxy.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) --offload-arch=$(GPU_ARCH) -o $@ $^ $(LIBS) -lpthread
 
 # CPU-driven RDMA test (comparison baseline)
 # Includes same GPU computation (SAXPY) before and after communication
