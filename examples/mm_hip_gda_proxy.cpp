@@ -95,6 +95,10 @@ __global__ void mm_kernel_proxy(
         }
         __syncthreads();
 
+        // Explicit system fence to invalidate L2 cache and ensure RDMA-written
+        // data is visible to all compute units before we swap and read from it
+        __threadfence_system();
+
         // Swap Bs and Bn for next iteration
         float* tmp = cur_Bs;
         cur_Bs = cur_Bn;
@@ -159,6 +163,9 @@ int main(int argc, char** argv)
     float* d_Cs = gpu_buf + 2 * N * Ns;
     float* d_Bn = gpu_buf + 3 * N * Ns;
 
+    // Define offsets for double-buffering
+    // d_Bs is at offset 1 * stripe_size, d_Bn is at offset 3 * stripe_size
+    size_t offset_Bs = 1 * stripe_size;
     size_t offset_Bn = 3 * stripe_size;
 
     // Initialize matrices on GPU
@@ -200,7 +207,11 @@ int main(int argc, char** argv)
     for (int s = 0; s < npes; s++) {
         // Source alternates between d_Bs and d_Bn due to swapping
         float* src = (s % 2 == 0) ? d_Bs : d_Bn;
-        put_handles[s] = gda_put(src, stripe_size, left_neighbor, offset_Bn);
+        // Target offset must alternate to avoid read-write races:
+        // - Even iterations: GPU reads from d_Bs, so RDMA writes to d_Bn
+        // - Odd iterations: GPU reads from d_Bn, so RDMA writes to d_Bs
+        size_t dest_offset = (s % 2 == 0) ? offset_Bn : offset_Bs;
+        put_handles[s] = gda_put(src, stripe_size, left_neighbor, dest_offset);
         if (!put_handles[s]) {
             std::cerr << "Rank " << mype << ": Failed to create put handle " << s << std::endl;
             gda_finalize();
