@@ -1445,7 +1445,7 @@ OFI::OFI(int rank, int size, Bootstrap* bootstrap) {
 
     // Initialize OFI
     hints = fi_allocinfo();
-    hints->caps = FI_RMA | FI_MSG | FI_HMEM;
+    hints->caps = FI_RMA | FI_MSG | FI_HMEM | FI_ATOMIC;
     hints->mode = FI_CONTEXT2; // DWQ requires FI_CONTEXT2
     hints->ep_attr->type = FI_EP_RDM;
     hints->domain_attr->mr_mode = FI_MR_VIRT_ADDR | FI_MR_ALLOCATED |
@@ -2811,7 +2811,7 @@ bool DWQOperation::prepare_write_explicit(void* local_buf, size_t size,
     memset(op_rma_, 0, sizeof(*op_rma_));
     op_rma_->ep = ofi_->get_endpoint();
     op_rma_->msg = *msg_rma_;
-    op_rma_->flags = FI_COMPLETION | FI_CXI_CNTR_WB;
+    op_rma_->flags = FI_COMPLETION;
 
     memset(&rma_work_, 0, sizeof(rma_work_));
     rma_work_.triggering_cntr = cntr_pair_->trigger->cntr;
@@ -2991,7 +2991,7 @@ bool DWQOperation::prepare_read_explicit(void* local_buf, size_t size,
     memset(op_rma_, 0, sizeof(*op_rma_));
     op_rma_->ep = ofi_->get_endpoint();
     op_rma_->msg = *msg_rma_;
-    op_rma_->flags = FI_COMPLETION | FI_CXI_CNTR_WB;
+    op_rma_->flags = FI_COMPLETION;
 
     memset(&rma_work_, 0, sizeof(rma_work_));
     rma_work_.triggering_cntr = cntr_pair_->trigger->cntr;
@@ -3284,3 +3284,801 @@ size_t OFI::get_ipc_size(int rank) const {
     return peers_[rank].ipc_info.mapped_size;
 }
 #endif // USE_AMDGPU
+
+// ============================================================================
+// ProxyManager Implementation
+// ============================================================================
+
+ProxyManager::ProxyManager()
+    : initialized_(false)
+    , ofi_(nullptr) {
+}
+
+ProxyManager::~ProxyManager() {
+    if (initialized_) {
+        finalize();
+    }
+}
+
+bool ProxyManager::initialize(OFI* ofi) {
+    if (initialized_) {
+        OPENGDA_Warn("proxy_manager", "Already initialized");
+        return false;
+    }
+
+    if (!ofi) {
+        OPENGDA_Error("proxy_manager", "Invalid OFI instance");
+        return false;
+    }
+
+    ofi_ = ofi;
+    initialized_ = true;
+
+    OPENGDA_Info("proxy_manager", "Initialized (window_size_max=%d, ring_size=%d)",
+                 MAX_WINDOW_SIZE, RING_BUFFER_SIZE);
+    return true;
+}
+
+void ProxyManager::finalize() {
+    if (!initialized_) {
+        return;
+    }
+
+    // Stop and destroy all active contexts
+    std::lock_guard<std::mutex> lock(contexts_mutex_);
+    for (auto ctx : active_contexts_) {
+        if (ctx->running.load()) {
+            stop_proxy(ctx);
+        }
+        free_barrier_resources(ctx);
+        delete ctx;
+    }
+    active_contexts_.clear();
+
+    initialized_ = false;
+    OPENGDA_Debug("proxy_manager", "Finalized");
+}
+
+ProxyManager::ProxyBarrierContext* ProxyManager::create_barrier(int window_size) {
+    if (!initialized_) {
+        OPENGDA_Error("proxy_manager", "Not initialized");
+        return nullptr;
+    }
+
+    // Validate and adjust window size
+    if (window_size <= 0) {
+        window_size = DEFAULT_WINDOW_SIZE;
+    }
+    if (window_size > MAX_WINDOW_SIZE) {
+        OPENGDA_Warn("proxy_manager", "Window size %d exceeds max %d, clamping",
+                     window_size, MAX_WINDOW_SIZE);
+        window_size = MAX_WINDOW_SIZE;
+    }
+
+    // Create context
+    ProxyBarrierContext* ctx = new ProxyBarrierContext();
+    ctx->window_size = window_size;
+    ctx->mype = ofi_->get_rank();
+    ctx->npes = ofi_->get_size();
+    ctx->ofi = ofi_;
+    ctx->initialized = false;
+    ctx->running.store(false);
+    ctx->stop_requested.store(false);
+    ctx->total_rearms.store(0);
+    ctx->ring_polls.store(0);
+    ctx->idle_polls.store(0);
+    ctx->cq_events_drained.store(0);
+
+    // Calculate number of phases (log2(npes), rounded up)
+    ctx->num_phases = 0;
+    for (int k = 1; k < ctx->npes; k <<= 1) {
+        ctx->num_phases++;
+    }
+    if (ctx->num_phases > GDA_BARRIER_MAX_PHASES) {
+        OPENGDA_Error("proxy_manager", "Too many phases (%d > %d) for %d ranks",
+                      ctx->num_phases, GDA_BARRIER_MAX_PHASES, ctx->npes);
+        delete ctx;
+        return nullptr;
+    }
+
+    OPENGDA_Info("proxy_manager", "Creating proxy barrier: window=%d, npes=%d, phases=%d",
+                 window_size, ctx->npes, ctx->num_phases);
+
+    // Allocate resources
+    if (!allocate_barrier_resources(ctx, window_size)) {
+        OPENGDA_Error("proxy_manager", "Failed to allocate barrier resources");
+        delete ctx;
+        return nullptr;
+    }
+
+    // Setup slots and initial DWQ operations
+    if (!setup_barrier_slots(ctx)) {
+        OPENGDA_Error("proxy_manager", "Failed to setup barrier slots");
+        free_barrier_resources(ctx);
+        delete ctx;
+        return nullptr;
+    }
+
+    // Arm all slots initially
+    if (!arm_all_slots(ctx)) {
+        OPENGDA_Error("proxy_manager", "Failed to arm initial slots");
+        free_barrier_resources(ctx);
+        delete ctx;
+        return nullptr;
+    }
+
+    ctx->initialized = true;
+
+    // Track active context
+    {
+        std::lock_guard<std::mutex> lock(contexts_mutex_);
+        active_contexts_.push_back(ctx);
+    }
+
+    OPENGDA_Info("proxy_manager", "Proxy barrier created successfully");
+    return ctx;
+}
+
+void ProxyManager::destroy_barrier(ProxyBarrierContext* ctx) {
+    if (!ctx) return;
+
+    // Stop proxy if running
+    if (ctx->running.load()) {
+        stop_proxy(ctx);
+    }
+
+    // Remove from active contexts
+    {
+        std::lock_guard<std::mutex> lock(contexts_mutex_);
+        auto it = std::find(active_contexts_.begin(), active_contexts_.end(), ctx);
+        if (it != active_contexts_.end()) {
+            active_contexts_.erase(it);
+        }
+    }
+
+    free_barrier_resources(ctx);
+    delete ctx;
+}
+
+bool ProxyManager::allocate_barrier_resources(ProxyBarrierContext* ctx, int window_size) {
+    int total_slots = window_size * ctx->num_phases;
+
+    // Allocate GPU-accessible memory for state arrays
+#ifdef USE_AMDGPU
+    hipError_t hip_err;
+
+    // armed_epoch array [window_size]
+    hip_err = hipHostMalloc((void**)&ctx->armed_epoch,
+                            sizeof(uint64_t) * window_size,
+                            hipHostMallocMapped);
+    if (hip_err != hipSuccess) {
+        OPENGDA_Error("proxy_manager", "hipHostMalloc(armed_epoch) failed: %s",
+                      hipGetErrorString(hip_err));
+        return false;
+    }
+
+    // slot_state array [window_size]
+    hip_err = hipHostMalloc((void**)&ctx->slot_state,
+                            sizeof(int) * window_size,
+                            hipHostMallocMapped);
+    if (hip_err != hipSuccess) {
+        OPENGDA_Error("proxy_manager", "hipHostMalloc(slot_state) failed");
+        hipHostFree((void*)ctx->armed_epoch);
+        return false;
+    }
+
+    // sync_arr [npes] - allocated from GPU MR buffer for RDMA compatibility
+    // (will be set later after getting GPU MR info)
+    ctx->sync_arr = nullptr;
+
+    // sync_counter
+    hip_err = hipHostMalloc((void**)&ctx->sync_counter,
+                            sizeof(uint64_t),
+                            hipHostMallocMapped);
+    if (hip_err != hipSuccess) {
+        OPENGDA_Error("proxy_manager", "hipHostMalloc(sync_counter) failed");
+        hipHostFree((void*)ctx->armed_epoch);
+        hipHostFree((void*)ctx->slot_state);
+        // sync_arr will be set from GPU MR, not freed here
+        return false;
+    }
+
+    // Ring buffer for GPU->CPU communication
+    ctx->ring_size = RING_BUFFER_SIZE;
+    hip_err = hipHostMalloc((void**)&ctx->free_ring,
+                            sizeof(uint64_t) * ctx->ring_size,
+                            hipHostMallocMapped);
+    if (hip_err != hipSuccess) {
+        OPENGDA_Error("proxy_manager", "hipHostMalloc(free_ring) failed");
+        hipHostFree((void*)ctx->armed_epoch);
+        hipHostFree((void*)ctx->slot_state);
+        // sync_arr points into GPU MR, not freed separately
+        hipHostFree((void*)ctx->sync_counter);
+        return false;
+    }
+
+    hip_err = hipHostMalloc((void**)&ctx->free_ring_head,
+                            sizeof(uint64_t),
+                            hipHostMallocMapped);
+    if (hip_err != hipSuccess) {
+        OPENGDA_Error("proxy_manager", "hipHostMalloc(free_ring_head) failed");
+        hipHostFree((void*)ctx->armed_epoch);
+        hipHostFree((void*)ctx->slot_state);
+        hipHostFree((void*)ctx->sync_counter);
+        hipHostFree((void*)ctx->free_ring);
+        return false;
+    }
+
+    hip_err = hipHostMalloc((void**)&ctx->free_ring_tail,
+                            sizeof(uint64_t),
+                            hipHostMallocMapped);
+    if (hip_err != hipSuccess) {
+        OPENGDA_Error("proxy_manager", "hipHostMalloc(free_ring_tail) failed");
+        hipHostFree((void*)ctx->armed_epoch);
+        hipHostFree((void*)ctx->slot_state);
+        hipHostFree((void*)ctx->sync_counter);
+        hipHostFree((void*)ctx->free_ring);
+        hipHostFree((void*)ctx->free_ring_head);
+        return false;
+    }
+
+    // GPU handles array
+    hip_err = hipHostMalloc((void**)&ctx->gpu_handles,
+                            sizeof(gda_gpu_handle_t) * total_slots,
+                            hipHostMallocMapped);
+    if (hip_err != hipSuccess) {
+        OPENGDA_Error("proxy_manager", "hipHostMalloc(gpu_handles) failed");
+        // Cleanup all previous allocations
+        hipHostFree((void*)ctx->armed_epoch);
+        hipHostFree((void*)ctx->slot_state);
+        hipHostFree((void*)ctx->sync_counter);
+        hipHostFree((void*)ctx->free_ring);
+        hipHostFree((void*)ctx->free_ring_head);
+        hipHostFree((void*)ctx->free_ring_tail);
+        return false;
+    }
+#else
+    // Non-GPU fallback (allocate regular memory)
+    ctx->armed_epoch = (volatile uint64_t*)malloc(sizeof(uint64_t) * window_size);
+    ctx->slot_state = (volatile int*)malloc(sizeof(int) * window_size);
+    ctx->sync_arr = (volatile uint64_t*)malloc(sizeof(uint64_t) * ctx->npes);
+    ctx->sync_counter = (volatile uint64_t*)malloc(sizeof(uint64_t));
+    ctx->ring_size = RING_BUFFER_SIZE;
+    ctx->free_ring = (volatile uint64_t*)malloc(sizeof(uint64_t) * ctx->ring_size);
+    ctx->free_ring_head = (volatile uint64_t*)malloc(sizeof(uint64_t));
+    ctx->free_ring_tail = (volatile uint64_t*)malloc(sizeof(uint64_t));
+    ctx->gpu_handles = (gda_gpu_handle_t*)malloc(sizeof(gda_gpu_handle_t) * total_slots);
+
+    if (!ctx->armed_epoch || !ctx->slot_state || !ctx->sync_arr ||
+        !ctx->sync_counter || !ctx->free_ring || !ctx->free_ring_head ||
+        !ctx->free_ring_tail || !ctx->gpu_handles) {
+        OPENGDA_Error("proxy_manager", "Memory allocation failed");
+        // Cleanup
+        free((void*)ctx->armed_epoch);
+        free((void*)ctx->slot_state);
+        free((void*)ctx->sync_arr);
+        free((void*)ctx->sync_counter);
+        free((void*)ctx->free_ring);
+        free((void*)ctx->free_ring_head);
+        free((void*)ctx->free_ring_tail);
+        free(ctx->gpu_handles);
+        return false;
+    }
+#endif
+
+    // Initialize state arrays
+    for (int i = 0; i < window_size; i++) {
+        ctx->armed_epoch[i] = 0;
+        ctx->slot_state[i] = GDA_PROXY_SLOT_NEED_REARM;
+    }
+#ifndef USE_AMDGPU
+    // For non-GPU builds, sync_arr is allocated here; initialize it
+    for (int i = 0; i < ctx->npes; i++) {
+        ctx->sync_arr[i] = 0;
+    }
+#endif
+    // For USE_AMDGPU, sync_arr is set from GPU MR later and initialized with hipMemset
+    *ctx->sync_counter = 0;
+    *ctx->free_ring_head = 0;
+    *ctx->free_ring_tail = 0;
+
+    // Allocate slots vector
+    ctx->slots.resize(total_slots);
+    for (int i = 0; i < total_slots; i++) {
+        ctx->slots[i].index = i;
+        ctx->slots[i].cntr_pair = nullptr;
+        ctx->slots[i].completion_signal = nullptr;
+        ctx->slots[i].initialized = false;
+    }
+
+    // Calculate phase targets and sources (dissemination algorithm)
+    for (int phase = 0; phase < ctx->num_phases; phase++) {
+        int distance = 1 << phase;
+        ctx->phase_targets[phase] = (ctx->mype + distance) % ctx->npes;
+        ctx->phase_sources[phase] = (ctx->mype - distance + ctx->npes) % ctx->npes;
+    }
+
+    // Get peer info for phase targets
+    for (int phase = 0; phase < ctx->num_phases; phase++) {
+        int target = ctx->phase_targets[phase];
+        const PeerInfo* peer = ofi_->get_peer_info(target);
+        if (!peer || !peer->valid) {
+            OPENGDA_Error("proxy_manager", "Invalid peer info for target rank %d", target);
+            return false;
+        }
+        ctx->phase_fi_addrs[phase] = peer->fi_addr;
+        ctx->phase_remote_addrs[phase] = peer->mr_info.gpu_mr_addr;
+        ctx->phase_remote_keys[phase] = peer->mr_info.gpu_mr_key;
+    }
+
+    // Use the GPU MR buffer for sync_arr (for RDMA compatibility)
+    // This ensures remote RDMA writes go to the same buffer GPU reads from
+    const DefaultMRInfo* gpu_mr = ofi_->get_default_gpu_mr();
+    if (!gpu_mr || !gpu_mr->allocated) {
+        OPENGDA_Error("proxy_manager", "No GPU MR available");
+        return false;
+    }
+
+    // Set sync_arr to point into the beginning of GPU MR buffer
+    size_t sync_arr_size = sizeof(uint64_t) * ctx->npes;
+    ctx->sync_arr_offset = 0;
+    ctx->sync_arr = (volatile uint64_t*)gpu_mr->buffer;
+
+    // Use the GPU MR's registration info for RDMA operations
+    ctx->sync_arr_mr = nullptr;  // Not separately registered
+    ctx->sync_arr_key = gpu_mr->key;
+    ctx->sync_arr_desc = gpu_mr->desc;
+
+    // Initialize sync_arr in GPU memory
+    hipError_t hip_init_err = hipMemset((void*)ctx->sync_arr, 0, sync_arr_size);
+    if (hip_init_err != hipSuccess) {
+        OPENGDA_Error("proxy_manager", "Failed to initialize sync_arr: %s",
+                      hipGetErrorString(hip_init_err));
+        return false;
+    }
+    hipDeviceSynchronize();
+
+    OPENGDA_Debug("proxy_manager", "Set sync_arr in GPU MR: addr=%p, key=0x%lx, size=%zu",
+                  (void*)ctx->sync_arr, (unsigned long)ctx->sync_arr_key, sync_arr_size);
+
+    OPENGDA_Debug("proxy_manager", "Allocated barrier resources: %d slots",
+                  total_slots);
+    return true;
+}
+
+void ProxyManager::free_barrier_resources(ProxyBarrierContext* ctx) {
+    if (!ctx) return;
+
+    // Note: sync_arr_mr is nullptr since we use GPU MR directly
+    // No need to deregister
+
+    // Release counter pairs
+    for (auto& slot : ctx->slots) {
+        if (slot.cntr_pair) {
+            ofi_->release_cntr_pair(slot.cntr_pair);
+            slot.cntr_pair = nullptr;
+        }
+        // Note: completion signals are from the pool, not owned by slot
+    }
+    ctx->slots.clear();
+
+#ifdef USE_AMDGPU
+    if (ctx->armed_epoch) hipHostFree((void*)ctx->armed_epoch);
+    if (ctx->slot_state) hipHostFree((void*)ctx->slot_state);
+    // sync_arr points into GPU MR buffer, don't free it
+    if (ctx->sync_counter) hipHostFree((void*)ctx->sync_counter);
+    if (ctx->free_ring) hipHostFree((void*)ctx->free_ring);
+    if (ctx->free_ring_head) hipHostFree((void*)ctx->free_ring_head);
+    if (ctx->free_ring_tail) hipHostFree((void*)ctx->free_ring_tail);
+    if (ctx->gpu_handles) hipHostFree(ctx->gpu_handles);
+#else
+    free((void*)ctx->armed_epoch);
+    free((void*)ctx->slot_state);
+    free((void*)ctx->sync_arr);
+    free((void*)ctx->sync_counter);
+    free((void*)ctx->free_ring);
+    free((void*)ctx->free_ring_head);
+    free((void*)ctx->free_ring_tail);
+    free(ctx->gpu_handles);
+#endif
+
+    ctx->armed_epoch = nullptr;
+    ctx->slot_state = nullptr;
+    ctx->sync_arr = nullptr;
+    ctx->sync_counter = nullptr;
+    ctx->free_ring = nullptr;
+    ctx->free_ring_head = nullptr;
+    ctx->free_ring_tail = nullptr;
+    ctx->gpu_handles = nullptr;
+}
+
+bool ProxyManager::setup_barrier_slots(ProxyBarrierContext* ctx) {
+    CompletionSignalPool* signal_pool = ofi_->get_signal_pool();
+    if (!signal_pool || !signal_pool->is_initialized()) {
+        OPENGDA_Error("proxy_manager", "Signal pool not available");
+        return false;
+    }
+
+    const DefaultMRInfo* gpu_mr = ofi_->get_default_gpu_mr();
+    if (!gpu_mr) {
+        OPENGDA_Error("proxy_manager", "No GPU MR available");
+        return false;
+    }
+
+    // Allocate counter pairs and completion signals for each slot
+    for (int slot_idx = 0; slot_idx < (int)ctx->slots.size(); slot_idx++) {
+        ProxySlot& slot = ctx->slots[slot_idx];
+
+        // Allocate counter pair
+        if (!ofi_->allocate_cntr_pair(&slot.cntr_pair)) {
+            OPENGDA_Error("proxy_manager", "Failed to allocate counter pair for slot %d",
+                          slot_idx);
+            return false;
+        }
+
+        // Allocate completion signal from pool
+        if (!signal_pool->allocate(&slot.completion_signal, &slot.completion_signal_offset)) {
+            OPENGDA_Error("proxy_manager", "Failed to allocate completion signal for slot %d",
+                          slot_idx);
+            return false;
+        }
+
+        // Initialize completion signal to 0
+        *slot.completion_signal = 0;
+
+        // Setup GPU handle for this slot
+        gda_gpu_handle_t& gpu_handle = ctx->gpu_handles[slot_idx];
+        gpu_handle.trigger_addr = slot.cntr_pair->trigger->dev_addr;
+        gpu_handle.completion_addr = slot.completion_signal;
+        gpu_handle.trigger_threshold = 1;
+        gpu_handle.is_ipc = 0;
+        gpu_handle.ipc_dest_addr = nullptr;
+        gpu_handle.ipc_src_addr = nullptr;
+        gpu_handle.ipc_size = 0;
+
+        slot.initialized = true;
+    }
+
+    OPENGDA_Debug("proxy_manager", "Setup %zu barrier slots", ctx->slots.size());
+    return true;
+}
+
+bool ProxyManager::arm_slot(ProxyBarrierContext* ctx, int slot_idx, uint64_t epoch) {
+    if (slot_idx < 0 || slot_idx >= (int)ctx->slots.size()) {
+        OPENGDA_Error("proxy_manager", "Invalid slot index %d", slot_idx);
+        return false;
+    }
+
+    ProxySlot& slot = ctx->slots[slot_idx];
+    if (!slot.initialized || !slot.cntr_pair) {
+        OPENGDA_Error("proxy_manager", "Slot %d not initialized", slot_idx);
+        return false;
+    }
+
+    // Calculate which window slot and phase this is
+    int window_slot = slot_idx / ctx->num_phases;
+    int phase = slot_idx % ctx->num_phases;
+
+    // Reset counters
+    fi_cntr_set(slot.cntr_pair->trigger->cntr, 0);
+    fi_cntr_set(slot.cntr_pair->completion->cntr, 0);
+
+    // Reset completion signal
+    *slot.completion_signal = 0;
+
+    // Get remote info for this phase's target
+    int target = ctx->phase_targets[phase];
+    fi_addr_t target_fi_addr = ctx->phase_fi_addrs[phase];
+    uint64_t remote_addr = ctx->phase_remote_addrs[phase];
+    uint64_t remote_key = ctx->phase_remote_keys[phase];
+
+    // Get local buffer info (sync_arr slot for our rank)
+    // Use the registered sync_arr MR descriptor for RDMA
+    void* local_desc = ctx->sync_arr_desc;
+
+    // We write our sync_arr[mype] to remote's sync_arr[mype]
+    // Local buffer: address of our sync_arr[mype]
+    // Remote buffer: offset mype * sizeof(uint64_t) in remote's sync_arr
+
+    void* local_buf = (void*)&ctx->sync_arr[ctx->mype];
+    size_t xfer_size = sizeof(uint64_t);
+    uint64_t remote_offset = ctx->mype * sizeof(uint64_t);  // Our slot in remote's sync_arr
+
+    // Setup RDMA write work
+    memset(&slot.iov, 0, sizeof(slot.iov));
+    slot.iov.iov_base = local_buf;
+    slot.iov.iov_len = xfer_size;
+
+    memset(&slot.rma_iov, 0, sizeof(slot.rma_iov));
+    slot.rma_iov.addr = remote_addr + remote_offset;
+    slot.rma_iov.len = xfer_size;
+    slot.rma_iov.key = remote_key;
+
+    memset(&slot.msg_rma, 0, sizeof(slot.msg_rma));
+    slot.msg_rma.msg_iov = &slot.iov;
+    slot.msg_rma.desc = &local_desc;
+    slot.msg_rma.iov_count = 1;
+    slot.msg_rma.addr = target_fi_addr;
+    slot.msg_rma.rma_iov = &slot.rma_iov;
+    slot.msg_rma.rma_iov_count = 1;
+
+    memset(&slot.op_rma, 0, sizeof(slot.op_rma));
+    slot.op_rma.ep = ofi_->get_endpoint();
+    slot.op_rma.msg = slot.msg_rma;
+    slot.op_rma.flags = FI_COMPLETION;
+
+    memset(&slot.rma_work, 0, sizeof(slot.rma_work));
+    slot.rma_work.triggering_cntr = slot.cntr_pair->trigger->cntr;
+    slot.rma_work.completion_cntr = slot.cntr_pair->completion->cntr;
+    slot.rma_work.threshold = 1;
+    slot.rma_work.op_type = FI_OP_WRITE;
+    slot.rma_work.op.rma = &slot.op_rma;
+
+    // Queue RMA work
+    int ret = fi_control(&ofi_->get_domain()->fid, FI_QUEUE_WORK, &slot.rma_work);
+    if (ret) {
+        OPENGDA_Error("proxy_manager", "fi_control(QUEUE_WORK) failed for slot %d: %s",
+                      slot_idx, fi_strerror(-ret));
+        return false;
+    }
+
+    // Setup atomic work (for completion notification)
+    uint64_t* atomic_operand = nullptr;
+    struct fid_mr* atomic_operand_mr = nullptr;
+    if (!ofi_->get_shared_atomic_operand(&atomic_operand, &atomic_operand_mr)) {
+        OPENGDA_Error("proxy_manager", "Failed to get atomic operand");
+        return false;
+    }
+
+    memset(&slot.atomic_iov, 0, sizeof(slot.atomic_iov));
+    slot.atomic_iov.addr = atomic_operand;
+    slot.atomic_iov.count = 1;
+
+    // Atomic writes to local completion signal
+    CompletionSignalPool* signal_pool = ofi_->get_signal_pool();
+    uint64_t signal_addr;
+    if (ofi_->get_info()->domain_attr->mr_mode & FI_MR_VIRT_ADDR) {
+        signal_addr = (uint64_t)slot.completion_signal;
+    } else {
+        signal_addr = slot.completion_signal_offset;
+    }
+
+    memset(&slot.atomic_rma_iov, 0, sizeof(slot.atomic_rma_iov));
+    slot.atomic_rma_iov.addr = signal_addr;
+    slot.atomic_rma_iov.count = 1;
+    slot.atomic_rma_iov.key = signal_pool->get_mr_key();
+
+    memset(&slot.atomic_msg, 0, sizeof(slot.atomic_msg));
+    slot.atomic_msg.msg_iov = &slot.atomic_iov;
+    void* atomic_desc = fi_mr_desc(atomic_operand_mr);
+    slot.atomic_msg.desc = &atomic_desc;
+    slot.atomic_msg.iov_count = 1;
+    slot.atomic_msg.addr = ofi_->get_local_fi_addr();  // Atomic to self
+    slot.atomic_msg.rma_iov = &slot.atomic_rma_iov;
+    slot.atomic_msg.rma_iov_count = 1;
+    slot.atomic_msg.datatype = FI_UINT64;
+    slot.atomic_msg.op = FI_SUM;
+
+    memset(&slot.op_atomic, 0, sizeof(slot.op_atomic));
+    slot.op_atomic.ep = ofi_->get_endpoint();
+    slot.op_atomic.msg = slot.atomic_msg;
+    slot.op_atomic.flags = FI_COMPLETION;
+
+    memset(&slot.atomic_work, 0, sizeof(slot.atomic_work));
+    slot.atomic_work.triggering_cntr = slot.cntr_pair->completion->cntr;
+    slot.atomic_work.completion_cntr = nullptr;  // No completion counter for atomic
+    slot.atomic_work.threshold = 1;
+    slot.atomic_work.op_type = FI_OP_ATOMIC;
+    slot.atomic_work.op.atomic = &slot.op_atomic;
+
+    // Queue atomic work
+    ret = fi_control(&ofi_->get_domain()->fid, FI_QUEUE_WORK, &slot.atomic_work);
+    if (ret) {
+        OPENGDA_Error("proxy_manager", "fi_control(QUEUE_WORK atomic) failed for slot %d: %s",
+                      slot_idx, fi_strerror(-ret));
+        return false;
+    }
+
+    return true;
+}
+
+bool ProxyManager::arm_all_slots(ProxyBarrierContext* ctx) {
+    OPENGDA_Debug("proxy_manager", "Arming all %zu slots", ctx->slots.size());
+
+    for (int slot_idx = 0; slot_idx < (int)ctx->slots.size(); slot_idx++) {
+        if (!arm_slot(ctx, slot_idx, 0)) {
+            OPENGDA_Error("proxy_manager", "Failed to arm slot %d", slot_idx);
+            return false;
+        }
+    }
+
+    // Mark all window slots as armed for epoch 0
+    for (int w = 0; w < ctx->window_size; w++) {
+        ctx->armed_epoch[w] = 0;
+        ctx->slot_state[w] = GDA_PROXY_SLOT_ARMED;
+    }
+
+    __sync_synchronize();  // Memory barrier
+
+    OPENGDA_Debug("proxy_manager", "All slots armed");
+    return true;
+}
+
+bool ProxyManager::start_proxy(ProxyBarrierContext* ctx) {
+    if (!ctx || !ctx->initialized) {
+        OPENGDA_Error("proxy_manager", "Invalid or uninitialized context");
+        return false;
+    }
+
+    if (ctx->running.load()) {
+        OPENGDA_Warn("proxy_manager", "Proxy already running");
+        return true;
+    }
+
+    ctx->stop_requested.store(false);
+    ctx->running.store(true);
+
+    // Start proxy thread
+    ctx->proxy_thread = std::thread(proxy_thread_func, ctx);
+
+    OPENGDA_Info("proxy_manager", "Proxy thread started");
+    return true;
+}
+
+bool ProxyManager::stop_proxy(ProxyBarrierContext* ctx) {
+    if (!ctx) {
+        return false;
+    }
+
+    if (!ctx->running.load()) {
+        return true;  // Already stopped
+    }
+
+    ctx->stop_requested.store(true);
+
+    if (ctx->proxy_thread.joinable()) {
+        ctx->proxy_thread.join();
+    }
+
+    ctx->running.store(false);
+
+    OPENGDA_Info("proxy_manager", "Proxy thread stopped (rearms=%lu, polls=%lu, idle=%lu, cq=%lu)",
+                 ctx->total_rearms.load(),
+                 ctx->ring_polls.load(),
+                 ctx->idle_polls.load(),
+                 ctx->cq_events_drained.load());
+
+    return true;
+}
+
+ProxyManager::ProxyStats ProxyManager::get_stats(ProxyBarrierContext* ctx) {
+    ProxyStats stats = {};
+    if (ctx) {
+        stats.total_rearms = ctx->total_rearms.load();
+        stats.ring_polls = ctx->ring_polls.load();
+        stats.idle_polls = ctx->idle_polls.load();
+        stats.cq_events_drained = ctx->cq_events_drained.load();
+    }
+    return stats;
+}
+
+// Internal arm_slot that doesn't log as much (forward declaration for use in process_ring_buffer)
+static bool arm_slot_internal(ProxyManager::ProxyBarrierContext* ctx, int slot_idx, uint64_t epoch) {
+    if (slot_idx < 0 || slot_idx >= (int)ctx->slots.size()) {
+        return false;
+    }
+
+    ProxyManager::ProxySlot& slot = ctx->slots[slot_idx];
+    if (!slot.initialized || !slot.cntr_pair) {
+        return false;
+    }
+
+    OFI* ofi = ctx->ofi;
+
+    // Reset counters
+    fi_cntr_set(slot.cntr_pair->trigger->cntr, 0);
+    fi_cntr_set(slot.cntr_pair->completion->cntr, 0);
+
+    // Reset completion signal
+    *slot.completion_signal = 0;
+
+    // Queue RMA work (structures already setup from initial arm)
+    int ret = fi_control(&ofi->get_domain()->fid, FI_QUEUE_WORK, &slot.rma_work);
+    if (ret) {
+        return false;
+    }
+
+    // Queue atomic work
+    ret = fi_control(&ofi->get_domain()->fid, FI_QUEUE_WORK, &slot.atomic_work);
+    if (ret) {
+        return false;
+    }
+
+    return true;
+}
+
+void ProxyManager::proxy_thread_func(ProxyBarrierContext* ctx) {
+    OPENGDA_Debug("proxy_manager", "Proxy thread starting");
+
+    while (!ctx->stop_requested.load()) {
+        bool did_work = false;
+
+        // Process ring buffer entries
+        process_ring_buffer(ctx);
+        ctx->ring_polls.fetch_add(1);
+
+        // Drain CQ to prevent overflow
+        drain_cq(ctx);
+
+        if (!did_work) {
+            ctx->idle_polls.fetch_add(1);
+            std::this_thread::sleep_for(std::chrono::microseconds(PROXY_POLL_INTERVAL_US));
+        }
+    }
+
+    OPENGDA_Debug("proxy_manager", "Proxy thread exiting");
+}
+
+void ProxyManager::process_ring_buffer(ProxyBarrierContext* ctx) {
+    volatile uint64_t* ring = ctx->free_ring;
+    volatile uint64_t* head = ctx->free_ring_head;
+    volatile uint64_t* tail = ctx->free_ring_tail;
+    int ring_size = ctx->ring_size;
+
+    // Process all available entries
+    while (*tail != *head) {
+        uint64_t entry = ring[*tail];
+        uint64_t epoch = entry >> 8;
+        int slot = (int)(entry & 0xFF);
+
+        // Validate slot
+        if (slot < 0 || slot >= ctx->window_size) {
+            OPENGDA_Warn("proxy_manager", "Invalid slot %d in ring buffer", slot);
+            *tail = (*tail + 1) % ring_size;
+            continue;
+        }
+
+        // Calculate next epoch for this slot
+        uint64_t next_epoch = epoch + ctx->window_size;
+
+        // Rearm all phases for this window slot
+        int base_slot_idx = slot * ctx->num_phases;
+        bool arm_success = true;
+        for (int phase = 0; phase < ctx->num_phases; phase++) {
+            int slot_idx = base_slot_idx + phase;
+            if (!arm_slot_internal(ctx, slot_idx, next_epoch)) {
+                arm_success = false;
+                break;
+            }
+        }
+
+        if (arm_success) {
+            // Update armed_epoch for this window slot
+            ctx->armed_epoch[slot] = next_epoch;
+            ctx->slot_state[slot] = GDA_PROXY_SLOT_ARMED;
+            __sync_synchronize();
+
+            ctx->total_rearms.fetch_add(1);
+        }
+
+        // Advance tail
+        *tail = (*tail + 1) % ring_size;
+    }
+}
+
+void ProxyManager::drain_cq(ProxyBarrierContext* ctx) {
+    struct fid_cq* cq = ctx->ofi->get_cq();
+    struct fi_cq_entry entries[32];
+
+    while (true) {
+        int ret = fi_cq_read(cq, entries, 32);
+        if (ret > 0) {
+            ctx->cq_events_drained.fetch_add(ret);
+        } else if (ret == -FI_EAGAIN) {
+            break;  // No more entries
+        } else if (ret < 0) {
+            // Error - could log but continue
+            break;
+        }
+    }
+}

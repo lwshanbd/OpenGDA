@@ -7,6 +7,7 @@
 # ============================================================================
 set(OPENGDA_SOURCES
     gda.cpp
+    gda_barrier_proxy.cpp
     common/log.cpp
     bootstrap/common.cpp
 )
@@ -29,6 +30,7 @@ endif()
 
 set(OPENGDA_PUBLIC_HEADERS
     gda.h
+    gda_barrier_proxy.h
 )
 
 set(OPENGDA_PRIVATE_HEADERS
@@ -84,6 +86,7 @@ target_link_libraries(opengda
         ${NETWORK_LIBRARY}
         ${BOOTSTRAP_LIBRARY}
         ${HWLOC_LIBRARY}
+        pthread
 )
 
 # ============================================================================
@@ -151,13 +154,16 @@ target_compile_definitions(opengda PRIVATE
 set(BUILD_INCLUDE_DIR ${CMAKE_BINARY_DIR}/include)
 file(MAKE_DIRECTORY ${BUILD_INCLUDE_DIR})
 
-# Copy public header
+# Copy public headers
 add_custom_command(
     TARGET opengda POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/gda.h
         ${BUILD_INCLUDE_DIR}/gda.h
-    COMMENT "Copying public header to build directory"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/gda_barrier_proxy.h
+        ${BUILD_INCLUDE_DIR}/gda_barrier_proxy.h
+    COMMENT "Copying public headers to build directory"
 )
 
 # Copy bootstrap headers

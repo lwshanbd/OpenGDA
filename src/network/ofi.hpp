@@ -9,6 +9,9 @@
 
 #include <rdma/fi_cxi_ext.h>
 
+// Include gda.h for GPU handle types (needed by ProxyManager)
+#include "../gda.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -65,7 +68,7 @@
 class CntrManager {
 public:
     // Number of counter pairs (trigger + completion)
-    static constexpr int NUM_CNTR_PAIRS = 64;
+    static constexpr int NUM_CNTR_PAIRS = 256;
     static constexpr int TOTAL_CNTRS = NUM_CNTR_PAIRS * 2;  // 128 total
 
     /**
@@ -1062,6 +1065,230 @@ private:
 };
 
 // ============================================================================
+// ProxyManager - CPU Proxy Thread for Unlimited GPU Operations
+// ============================================================================
+
+/**
+ * ProxyManager provides CPU proxy thread support for unlimited GPU-triggered
+ * operations. It continuously rearms DWQ operations as they complete.
+ *
+ * Architecture:
+ * - GPU uses a window of slots and signals completion via ring buffer
+ * - CPU proxy thread polls the ring buffer and rearms slots
+ * - GPU waits for armed_epoch[slot] to match current epoch before using
+ *
+ * This enables unlimited barrier/put/get operations from a persistent GPU kernel.
+ */
+// Slot states for proxy slot management
+#define GDA_PROXY_SLOT_NEED_REARM 0
+#define GDA_PROXY_SLOT_ARMED 1
+
+class ProxyManager {
+public:
+    // Configuration
+    static constexpr int DEFAULT_WINDOW_SIZE = 16;
+    static constexpr int MAX_WINDOW_SIZE = 64;
+    static constexpr int RING_BUFFER_SIZE = 256;
+    static constexpr int PROXY_POLL_INTERVAL_US = 1;  // Polling interval in microseconds
+
+    /**
+     * Slot information for a single proxy slot
+     */
+    struct ProxySlot {
+        int index;                              // Slot index
+        CntrManager::CntrPair* cntr_pair;       // Counter pair for this slot
+        volatile uint64_t* completion_signal;   // Completion signal for GPU
+        size_t completion_signal_offset;        // Offset in MR for atomic
+
+        // DWQ structures (must remain valid)
+        struct fi_deferred_work rma_work;
+        struct fi_op_rma op_rma;
+        struct fi_msg_rma msg_rma;
+        struct iovec iov;
+        struct fi_rma_iov rma_iov;
+
+        struct fi_deferred_work atomic_work;
+        struct fi_op_atomic op_atomic;
+        struct fi_msg_atomic atomic_msg;
+        struct fi_ioc atomic_iov;
+        struct fi_rma_ioc atomic_rma_iov;
+
+        bool initialized;
+    };
+
+    /**
+     * Proxy barrier context
+     * All the data needed to manage a proxy barrier
+     */
+    struct ProxyBarrierContext {
+        // Window management
+        int window_size;
+        int num_phases;
+        int mype;
+        int npes;
+
+        // Slots: [window_size * num_phases]
+        std::vector<ProxySlot> slots;
+
+        // GPU-accessible state (pinned memory)
+        volatile uint64_t* armed_epoch;         // [window_size] - armed epoch per slot
+        volatile int* slot_state;               // [window_size] - state per slot
+        volatile uint64_t* sync_arr;            // [npes] - sync array
+        volatile uint64_t* sync_counter;        // Current epoch
+
+        // Ring buffer (GPU->CPU)
+        volatile uint64_t* free_ring;           // Ring buffer entries
+        volatile uint64_t* free_ring_head;      // Producer (GPU)
+        volatile uint64_t* free_ring_tail;      // Consumer (CPU)
+        int ring_size;
+
+        // GPU handles array: [window_size * num_phases]
+        gda_gpu_handle_t* gpu_handles;
+
+        // Phase configuration (same for all iterations)
+        int phase_targets[GDA_BARRIER_MAX_PHASES];
+        int phase_sources[GDA_BARRIER_MAX_PHASES];
+
+        // Per-phase target info
+        fi_addr_t phase_fi_addrs[GDA_BARRIER_MAX_PHASES];
+        uint64_t phase_remote_addrs[GDA_BARRIER_MAX_PHASES];
+        uint64_t phase_remote_keys[GDA_BARRIER_MAX_PHASES];
+
+        // Thread control
+        std::atomic<bool> running;
+        std::atomic<bool> stop_requested;
+        std::thread proxy_thread;
+
+        // Statistics
+        std::atomic<uint64_t> total_rearms;
+        std::atomic<uint64_t> ring_polls;
+        std::atomic<uint64_t> idle_polls;
+        std::atomic<uint64_t> cq_events_drained;
+
+        // Sync array offset in GPU MR (for RDMA writes)
+        size_t sync_arr_offset;
+
+        // Memory region for sync_arr (local RDMA source)
+        fid_mr* sync_arr_mr;
+        uint64_t sync_arr_key;
+        void* sync_arr_desc;
+
+        // Reference to OFI for DWQ operations
+        OFI* ofi;
+
+        bool initialized;
+    };
+
+    /**
+     * Statistics for proxy operations
+     */
+    struct ProxyStats {
+        uint64_t total_rearms;
+        uint64_t ring_polls;
+        uint64_t idle_polls;
+        uint64_t cq_events_drained;
+    };
+
+    ProxyManager();
+    ~ProxyManager();
+
+    // Disable copy
+    ProxyManager(const ProxyManager&) = delete;
+    ProxyManager& operator=(const ProxyManager&) = delete;
+
+    /**
+     * Initialize the proxy manager
+     * @param ofi OFI instance for DWQ operations
+     * @return true on success
+     */
+    bool initialize(OFI* ofi);
+
+    void finalize();
+
+    bool is_initialized() const { return initialized_; }
+
+    // ========================================================================
+    // Proxy Barrier Management
+    // ========================================================================
+
+    /**
+     * Create a proxy barrier context
+     * Allocates all resources needed for unlimited barrier iterations
+     *
+     * @param window_size Number of reusable slots (0 for default)
+     * @return Pointer to context, nullptr on failure
+     */
+    ProxyBarrierContext* create_barrier(int window_size = 0);
+
+    /**
+     * Destroy a proxy barrier context
+     * Releases all resources
+     * Proxy thread must be stopped first
+     *
+     * @param ctx Context to destroy
+     */
+    void destroy_barrier(ProxyBarrierContext* ctx);
+
+    /**
+     * Start the proxy thread for a barrier
+     * Must be called before GPU kernel starts using the barrier
+     *
+     * @param ctx Barrier context
+     * @return true on success
+     */
+    bool start_proxy(ProxyBarrierContext* ctx);
+
+    /**
+     * Stop the proxy thread for a barrier
+     * Should be called after GPU kernel completes
+     *
+     * @param ctx Barrier context
+     * @return true on success
+     */
+    bool stop_proxy(ProxyBarrierContext* ctx);
+
+    /**
+     * Get statistics for a barrier
+     *
+     * @param ctx Barrier context
+     * @return Current statistics
+     */
+    ProxyStats get_stats(ProxyBarrierContext* ctx);
+
+    /**
+     * Arm all slots initially (called during barrier creation)
+     * This queues the initial DWQ operations for all slots
+     *
+     * @param ctx Barrier context
+     * @return true on success
+     */
+    bool arm_all_slots(ProxyBarrierContext* ctx);
+
+private:
+    bool initialized_;
+    OFI* ofi_;
+
+    // Active barrier contexts
+    std::vector<ProxyBarrierContext*> active_contexts_;
+    std::mutex contexts_mutex_;
+
+    // Helper functions
+    bool allocate_barrier_resources(ProxyBarrierContext* ctx, int window_size);
+    void free_barrier_resources(ProxyBarrierContext* ctx);
+    bool setup_barrier_slots(ProxyBarrierContext* ctx);
+    bool arm_slot(ProxyBarrierContext* ctx, int slot_idx, uint64_t epoch);
+
+    // Proxy thread function
+    static void proxy_thread_func(ProxyBarrierContext* ctx);
+
+    // Process ring buffer entries
+    static void process_ring_buffer(ProxyBarrierContext* ctx);
+
+    // Drain CQ to prevent overflow
+    static void drain_cq(ProxyBarrierContext* ctx);
+};
+
+// ============================================================================
 // OFI - OpenFabrics Interface
 // ============================================================================
 
@@ -1344,10 +1571,12 @@ public:
 
   struct fid_domain* get_domain() { return domain; }
   struct fid_ep* get_endpoint() { return ep; }
+  struct fid_cq* get_cq() { return cq; }
   struct fi_info* get_info() { return cxi_info; }
   MRManager* get_mr_manager() { return &mr_manager_; }
   CntrManager* get_cntr_manager() { return &cntr_manager_; }
   Bootstrap* get_bootstrap() { return bootstrap_; }
+  ProxyManager* get_proxy_manager() { return &proxy_manager_; }
 
 private:
     bool ofi_initialized = false;
@@ -1387,6 +1616,9 @@ private:
 
     // Completion signal pool (uses end of default GPU MR)
     CompletionSignalPool signal_pool_;
+
+    // Proxy manager for unlimited GPU operations
+    ProxyManager proxy_manager_;
 
     // Shared atomic operand for DWQ operations (allocated once, used by all)
     uint64_t* shared_atomic_operand_;
