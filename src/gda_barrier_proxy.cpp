@@ -183,17 +183,10 @@ static int queue_slot_work(gda_proxy_barrier_t* pb, int slot) {
     fi_cntr_set(sc.trigger_cntr, 0);
     fi_cntr_set(sc.completion_cntr, 0);
 
-    // Reset d_slot_done[slot] to 0 for the GPU to detect completion
-#ifdef USE_AMDGPU
-    uint64_t zero = 0;
-    hipError_t hip_err = hipMemcpy((void*)&pb->dev.d_slot_done[slot], &zero,
-                                    sizeof(uint64_t), hipMemcpyHostToDevice);
-    if (hip_err != hipSuccess) {
-        OPENGDA_Error("proxy_barrier", "hipMemcpy(d_slot_done[%d]=0) failed: %s",
-                     slot, hipGetErrorString(hip_err));
-        return -1;
-    }
-#endif
+    // Note: d_slot_done[slot] is NOT cleared here. It's a monotonic counter
+    // that increments (+1) each time the slot completes. The GPU computes
+    // the expected value based on epoch: expected = (epoch / window_size) + 1
+    // This avoids hipMemcpy in the hot path which would add jitter.
 
     int num_rounds = pb->num_rounds;
     int base_idx = slot * num_rounds;

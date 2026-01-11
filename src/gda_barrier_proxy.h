@@ -189,17 +189,18 @@ int gda_proxy_barrier_get_stats(gda_proxy_barrier_t* barrier, gda_proxy_stats_t*
  *
  * Algorithm:
  * 1. Compute slot = epoch % window_size
- * 2. Wait for slot to be armed (slot_state[slot] == ARMED)
- *    - CPU proxy clears d_slot_done[slot] when arming
- * 3. For each round k = 0..num_rounds-1:
+ * 2. Compute expected_done = (epoch / window_size) + 1 (monotonic counter)
+ * 3. Wait for slot to be armed (slot_state[slot] == ARMED)
+ * 4. For each round k = 0..num_rounds-1:
  *    a. Write (k+1) to trigger doorbell to fire round k's DWQ work
  *    b. Wait for d_round_recv[k] >= (epoch+1) (peer's atomic arrived)
- * 4. Wait for d_slot_done[slot] != 0 (all outbound RDMA ops complete)
- *    - NIC writes +1 to d_slot_done when completion_cntr reaches num_rounds
- * 5. Mark slot_state[slot] = NEED_QUEUE (tells CPU proxy to rearm)
- * 6. Increment epoch
+ * 5. Wait for d_slot_done[slot] >= expected_done (all outbound RDMA ops complete)
+ *    - NIC increments d_slot_done[slot] when completion_cntr reaches num_rounds
+ *    - Using monotonic counter avoids hipMemcpy clearing in proxy hot path
+ * 6. Mark slot_state[slot] = NEED_QUEUE (tells CPU proxy to rearm)
+ * 7. Increment epoch
  *
- * CRITICAL: Step 4 prevents race conditions where a slot is re-queued
+ * CRITICAL: Step 5 prevents race conditions where a slot is re-queued
  * while outbound RDMA operations are still in-flight.
  *
  * This macro should be called by a single thread (typically thread 0).
@@ -209,6 +210,10 @@ int gda_proxy_barrier_get_stats(gda_proxy_barrier_t* barrier, gda_proxy_stats_t*
     uint64_t _epoch = __atomic_load_n((unsigned long long*)(dev)->d_epoch, __ATOMIC_ACQUIRE); \
     int _slot = (int)(_epoch % (dev)->window_size); \
     int _num_rounds = (dev)->num_rounds; \
+    \
+    /* Compute expected d_slot_done value (monotonic counter) */ \
+    /* Each time this slot completes, d_slot_done[slot] increments by 1 */ \
+    uint64_t _expected_done = (_epoch / (dev)->window_size) + 1; \
     \
     /* Wait for slot to be armed by CPU proxy */ \
     while (__atomic_load_n(&(dev)->slot_state[_slot], __ATOMIC_ACQUIRE) != GDA_SLOT_ARMED) { \
@@ -230,10 +235,10 @@ int gda_proxy_barrier_get_stats(gda_proxy_barrier_t* barrier, gda_proxy_stats_t*
     \
     __threadfence_system(); \
     \
-    /* Wait for d_slot_done[slot] to become non-zero, indicating all outbound */ \
-    /* RDMA operations have completed. This prevents recycling a slot while */ \
-    /* operations are still in-flight. */ \
-    while (__atomic_load_n((unsigned long long*)&(dev)->d_slot_done[_slot], __ATOMIC_ACQUIRE) == 0) { \
+    /* Wait for d_slot_done[slot] >= expected_done, indicating all outbound */ \
+    /* RDMA operations have completed. Uses monotonic counter to avoid */ \
+    /* hipMemcpy clearing in proxy hot path. */ \
+    while (__atomic_load_n((unsigned long long*)&(dev)->d_slot_done[_slot], __ATOMIC_ACQUIRE) < _expected_done) { \
         /* spin */ \
     } \
     \
