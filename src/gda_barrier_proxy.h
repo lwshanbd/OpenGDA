@@ -190,13 +190,17 @@ int gda_proxy_barrier_get_stats(gda_proxy_barrier_t* barrier, gda_proxy_stats_t*
  * Algorithm:
  * 1. Compute slot = epoch % window_size
  * 2. Wait for slot to be armed (slot_state[slot] == ARMED)
- * 3. Clear d_slot_done[slot] for this epoch
- * 4. For each round k = 0..num_rounds-1:
+ *    - CPU proxy clears d_slot_done[slot] when arming
+ * 3. For each round k = 0..num_rounds-1:
  *    a. Write (k+1) to trigger doorbell to fire round k's DWQ work
- *    b. Wait for d_round_recv[k] >= (epoch+1)
- * 5. Wait for d_slot_done[slot] >= 1 (all outgoing ops complete)
- * 6. Mark slot_state[slot] = NEED_QUEUE
- * 7. Increment epoch
+ *    b. Wait for d_round_recv[k] >= (epoch+1) (peer's atomic arrived)
+ * 4. Wait for d_slot_done[slot] != 0 (all outbound RDMA ops complete)
+ *    - NIC writes +1 to d_slot_done when completion_cntr reaches num_rounds
+ * 5. Mark slot_state[slot] = NEED_QUEUE (tells CPU proxy to rearm)
+ * 6. Increment epoch
+ *
+ * CRITICAL: Step 4 prevents race conditions where a slot is re-queued
+ * while outbound RDMA operations are still in-flight.
  *
  * This macro should be called by a single thread (typically thread 0).
  */
@@ -225,6 +229,13 @@ int gda_proxy_barrier_get_stats(gda_proxy_barrier_t* barrier, gda_proxy_stats_t*
     } \
     \
     __threadfence_system(); \
+    \
+    /* Wait for d_slot_done[slot] to become non-zero, indicating all outbound */ \
+    /* RDMA operations have completed. This prevents recycling a slot while */ \
+    /* operations are still in-flight. */ \
+    while (__atomic_load_n((unsigned long long*)&(dev)->d_slot_done[_slot], __ATOMIC_ACQUIRE) == 0) { \
+        /* spin */ \
+    } \
     \
     /* Mark slot for CPU proxy to rearm */ \
     __atomic_store_n(&(dev)->slot_state[_slot], GDA_SLOT_NEED_QUEUE, __ATOMIC_RELEASE); \

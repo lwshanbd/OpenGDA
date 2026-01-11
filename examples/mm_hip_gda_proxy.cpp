@@ -98,6 +98,7 @@ __global__ void mm_kernel_proxy(
         // Explicit system fence to invalidate L2 cache and ensure RDMA-written
         // data is visible to all compute units before we swap and read from it
         __threadfence_system();
+        __syncthreads();
 
         // Swap Bs and Bn for next iteration
         float* tmp = cur_Bs;
@@ -182,7 +183,7 @@ int main(int argc, char** argv)
     HIP_CHECK(hipDeviceSynchronize());
 
     // Allocate proxy barrier
-    int window_size = 16;
+    int window_size = 32;
     gda_proxy_barrier_t* barrier = gda_proxy_barrier_alloc(window_size);
     if (!barrier) {
         std::cerr << "Rank " << mype << ": Failed to allocate proxy GPU barrier" << std::endl;
@@ -301,6 +302,5 @@ int main(int argc, char** argv)
     gda_barrier();
     gda_finalize();
 
-    std::cout << "Rank " << mype << ": Done!" << std::endl;
     return 0;
 }

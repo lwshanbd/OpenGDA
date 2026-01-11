@@ -183,6 +183,18 @@ static int queue_slot_work(gda_proxy_barrier_t* pb, int slot) {
     fi_cntr_set(sc.trigger_cntr, 0);
     fi_cntr_set(sc.completion_cntr, 0);
 
+    // Reset d_slot_done[slot] to 0 for the GPU to detect completion
+#ifdef USE_AMDGPU
+    uint64_t zero = 0;
+    hipError_t hip_err = hipMemcpy((void*)&pb->dev.d_slot_done[slot], &zero,
+                                    sizeof(uint64_t), hipMemcpyHostToDevice);
+    if (hip_err != hipSuccess) {
+        OPENGDA_Error("proxy_barrier", "hipMemcpy(d_slot_done[%d]=0) failed: %s",
+                     slot, hipGetErrorString(hip_err));
+        return -1;
+    }
+#endif
+
     int num_rounds = pb->num_rounds;
     int base_idx = slot * num_rounds;
 
@@ -230,12 +242,55 @@ static int queue_slot_work(gda_proxy_barrier_t* pb, int slot) {
         }
     }
 
-    // Note: d_slot_done mechanism removed for simplicity
-    // The dissemination rounds with proper arrival waiting is sufficient
-    // for barrier correctness. Slot reuse is safe because:
-    // 1. DWQ work items are one-shot (consumed when triggered)
-    // 2. Counter reset by proxy doesn't affect in-flight operations
-    // 3. New DWQ work is queued with fresh counters
+    // Queue the "done" atomic to signal when all outbound ops complete
+    // This local atomic SUM (+1) to d_slot_done[slot] is triggered when
+    // completion_cntr reaches num_rounds (all rounds have completed)
+    {
+        // Setup atomic IOV (source operand = 1)
+        pb->done_iovs[slot].addr = pb->d_atomic_operand;
+        pb->done_iovs[slot].count = 1;
+
+        // Setup remote RMA IOV (target: local d_slot_done[slot])
+        uint64_t slot_done_addr;
+        if (pb->info->domain_attr->mr_mode & FI_MR_VIRT_ADDR) {
+            slot_done_addr = (uint64_t)&pb->dev.d_slot_done[slot];
+        } else {
+            slot_done_addr = slot * sizeof(uint64_t);
+        }
+        pb->done_rma_iovs[slot].addr = slot_done_addr;
+        pb->done_rma_iovs[slot].count = 1;
+        pb->done_rma_iovs[slot].key = pb->key_slot_done;
+
+        // Setup atomic message (local atomic to self)
+        pb->done_msgs[slot].msg_iov = &pb->done_iovs[slot];
+        pb->done_msgs[slot].desc = &pb->desc_atomic_operand;
+        pb->done_msgs[slot].iov_count = 1;
+        pb->done_msgs[slot].addr = pb->local_fi_addr;  // Target is self
+        pb->done_msgs[slot].rma_iov = &pb->done_rma_iovs[slot];
+        pb->done_msgs[slot].rma_iov_count = 1;
+        pb->done_msgs[slot].datatype = FI_UINT64;
+        pb->done_msgs[slot].op = FI_SUM;
+
+        // Setup atomic op
+        pb->done_ops[slot].ep = pb->ep;
+        pb->done_ops[slot].msg = pb->done_msgs[slot];
+        pb->done_ops[slot].flags = 0;
+
+        // Setup deferred work: trigger when completion_cntr >= num_rounds
+        // This means all outbound atomic ops have completed
+        pb->done_works[slot].triggering_cntr = sc.completion_cntr;
+        pb->done_works[slot].completion_cntr = nullptr;  // No further completion needed
+        pb->done_works[slot].threshold = num_rounds;
+        pb->done_works[slot].op_type = FI_OP_ATOMIC;
+        pb->done_works[slot].op.atomic = &pb->done_ops[slot];
+
+        int ret = fi_control(&pb->domain->fid, FI_QUEUE_WORK, &pb->done_works[slot]);
+        if (ret) {
+            OPENGDA_Error("proxy_barrier", "fi_control(done slot=%d) failed: %s",
+                         slot, fi_strerror(-ret));
+            return ret;
+        }
+    }
 
     return 0;
 }
@@ -244,8 +299,24 @@ static int queue_slot_work(gda_proxy_barrier_t* pb, int slot) {
 // Proxy Thread
 // ============================================================================
 
+// Low-latency pause for busy-wait loops
+static inline void cpu_relax() {
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile("pause" ::: "memory");
+#elif defined(__aarch64__)
+    __asm__ volatile("yield" ::: "memory");
+#else
+    // Fallback: compiler memory barrier
+    __asm__ volatile("" ::: "memory");
+#endif
+}
+
 static void proxy_thread_func(gda_proxy_barrier_t* pb) {
     OPENGDA_Debug("proxy_barrier", "Proxy thread started for rank %d", pb->mype);
+
+    // Consecutive idle iterations before yielding to OS
+    constexpr int BUSY_WAIT_ITERS = 1000;
+    int idle_count = 0;
 
     while (!pb->stop_requested.load(std::memory_order_relaxed)) {
         bool did_work = false;
@@ -273,11 +344,27 @@ static void proxy_thread_func(gda_proxy_barrier_t* pb) {
         int ret;
         while ((ret = fi_cq_read(pb->cq, cq_entries, 64)) > 0) {
             pb->cq_events_drained.fetch_add(ret, std::memory_order_relaxed);
+            did_work = true;  // CQ draining counts as work
         }
 
-        // If no work done, brief sleep to avoid busy spinning
-        if (!did_work) {
-            std::this_thread::sleep_for(std::chrono::microseconds(1));
+        // Low-latency idle strategy:
+        // - If work was done, reset idle counter
+        // - If no work, do short busy-wait with pause instructions
+        // - After BUSY_WAIT_ITERS idle iterations, yield to OS scheduler
+        if (did_work) {
+            idle_count = 0;
+        } else {
+            idle_count++;
+            if (idle_count < BUSY_WAIT_ITERS) {
+                // Short busy-wait with CPU pause instruction
+                for (int i = 0; i < 10; i++) {
+                    cpu_relax();
+                }
+            } else {
+                // Yield to OS after extended idle period
+                std::this_thread::yield();
+                idle_count = 0;  // Reset after yield
+            }
         }
     }
 
