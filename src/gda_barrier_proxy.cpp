@@ -275,9 +275,9 @@ static void proxy_thread_func(gda_proxy_barrier_t* pb) {
             pb->cq_events_drained.fetch_add(ret, std::memory_order_relaxed);
         }
 
-        // If no work done, brief sleep to avoid busy spinning
+        // If no work done, yield to avoid busy spinning while staying responsive
         if (!did_work) {
-            std::this_thread::sleep_for(std::chrono::microseconds(1));
+            std::this_thread::yield();
         }
     }
 

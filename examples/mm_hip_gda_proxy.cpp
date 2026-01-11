@@ -11,11 +11,15 @@
 
 #include <iostream>
 #include <ctime>
+#include <cmath>
 #include <vector>
 
 #include <hip/hip_runtime.h>
+#include <hip/hip_cooperative_groups.h>
 #include "gda.h"
 #include "gda_barrier_proxy.h"
+
+namespace cg = cooperative_groups;
 
 #define HIP_CHECK(cmd) do { \
     hipError_t err = cmd; \
@@ -35,6 +39,86 @@ void print_matrix(const float* mat, const int Is, const int Js)
     }
 }
 
+/**
+ * Reconstruct local As stripe for a given rank from the deterministic pattern.
+ * As is Ns x N (Ns rows, N columns).
+ * As[local_i][j] = (local_i * N + j + mype) % 11 + 7
+ */
+void reconstruct_local_As(float* As, int N, int Ns, int mype)
+{
+    for (int local_i = 0; local_i < Ns; local_i++) {
+        for (int j = 0; j < N; j++) {
+            int idx = local_i * N + j;
+            As[idx] = (idx + mype) % 11 + 7;
+        }
+    }
+}
+
+/**
+ * Reconstruct full matrix B from the deterministic initialization pattern.
+ * B is N x N, stored as vertical stripes across ranks.
+ * B[k][r*Ns + local_j] = (k * Ns + local_j + r) % 13 + 5
+ */
+void reconstruct_full_B(float* B, int N, int Ns, int npes)
+{
+    for (int r = 0; r < npes; r++) {
+        for (int k = 0; k < N; k++) {
+            for (int local_j = 0; local_j < Ns; local_j++) {
+                int global_j = r * Ns + local_j;
+                int idx = k * Ns + local_j;
+                B[k * N + global_j] = (idx + r) % 13 + 5;
+            }
+        }
+    }
+}
+
+/**
+ * Compute reference for local C stripe: Cs = As * B
+ * As is Ns x N, B is N x N, Cs is Ns x N
+ */
+void cpu_matmul_local_reference(const float* As, const float* B, float* Cs, int N, int Ns)
+{
+    for (int i = 0; i < Ns; i++) {
+        for (int j = 0; j < N; j++) {
+            float sum = 0.0f;
+            for (int k = 0; k < N; k++) {
+                sum += As[i * N + k] * B[k * N + j];
+            }
+            Cs[i * N + j] = sum;
+        }
+    }
+}
+
+/**
+ * Compare local C stripe with reference and return max absolute error.
+ */
+float compare_local_stripe(const float* Cs, const float* Cs_ref, int N, int Ns,
+                           int mype, int& num_errors)
+{
+    float max_error = 0.0f;
+    num_errors = 0;
+    const float tolerance = 1e-3f;
+
+    for (int i = 0; i < Ns * N; i++) {
+        float error = std::abs(Cs[i] - Cs_ref[i]);
+        if (error > max_error) {
+            max_error = error;
+        }
+        float rel_error = error / (std::abs(Cs_ref[i]) + 1e-6f);
+        if (rel_error > tolerance && error > tolerance) {
+            num_errors++;
+            if (num_errors <= 3) {
+                int row = i / N;
+                int col = i % N;
+                std::cerr << "  Rank " << mype << " mismatch at [" << row << "][" << col << "]: "
+                          << "got " << Cs[i] << ", expected " << Cs_ref[i]
+                          << ", error=" << error << std::endl;
+            }
+        }
+    }
+    return max_error;
+}
+
 float timediff_us(const timespec& t_start, const timespec& t_end)
 {
     return (t_end.tv_sec - t_start.tv_sec) * 1.0e6 + (t_end.tv_nsec - t_start.tv_nsec) / 1.0e3;
@@ -43,6 +127,9 @@ float timediff_us(const timespec& t_start, const timespec& t_end)
 /**
  * Matrix multiplication kernel with GPU-triggered communication
  * Computes C = A * B using cannon-like algorithm with proxy barrier synchronization.
+ *
+ * Uses HIP Cooperative Groups for efficient grid-wide synchronization.
+ * Must be launched with hipLaunchCooperativeKernel.
  */
 __global__ void mm_kernel_proxy(
     const float* __restrict__ As,
@@ -56,6 +143,10 @@ __global__ void mm_kernel_proxy(
     gda_gpu_handle_t* put_handles,
     gda_proxy_barrier_dev_t* barrier)
 {
+    // Get cooperative groups grid handle for efficient grid-wide sync
+    cg::grid_group grid = cg::this_grid();
+
+    // Check if this is the master thread (global thread 0)
     bool is_master = (threadIdx.x == 0 && threadIdx.y == 0 &&
                       blockIdx.x == 0 && blockIdx.y == 0);
 
@@ -67,9 +158,10 @@ __global__ void mm_kernel_proxy(
         int block_num = (mype + s) % npes;
         float* Cb = Cs + block_num * Ns;
 
-        // Trigger async put to left neighbor
-        gda_gpu_trigger_all(put_handles[s]);
-        __syncthreads();
+        // Master thread triggers async put to left neighbor
+        if (is_master) {
+            gda_gpu_trigger(put_handles[s]);
+        }
 
         // All threads perform matrix multiplication: Cb += As * Bs
         int k = blockIdx.x * blockDim.x + threadIdx.x;
@@ -82,21 +174,22 @@ __global__ void mm_kernel_proxy(
             }
         }
 
-        // Wait for put to complete
-        __syncthreads();
-        if (is_master) {
-            gda_gpu_wait(put_handles[s]);
-        }
-        __syncthreads();
+        // Grid-wide sync using cooperative groups (hardware-optimized)
+        grid.sync();
 
-        // GPU-side proxy barrier - ensures all ranks completed their puts
+        // Master thread handles communication synchronization
         if (is_master) {
+            // Wait for our put to complete
+            gda_gpu_wait(put_handles[s]);
+
+            // Inter-rank barrier
             gda_gpu_proxy_barrier_wait(barrier);
         }
-        __syncthreads();
 
-        // Explicit system fence to invalidate L2 cache and ensure RDMA-written
-        // data is visible to all compute units before we swap and read from it
+        // Grid-wide sync to ensure all threads see RDMA data
+        grid.sync();
+
+        // Memory fence to ensure RDMA-written data is visible to all threads
         __threadfence_system();
 
         // Swap Bs and Bn for next iteration
@@ -138,9 +231,9 @@ int main(int argc, char** argv)
     int N = (argc > 1) ? atoi(argv[1]) : 4096;
     N = (N / npes) * npes;  // Make divisible by npes
 
-    const int Ns = N / npes;
-    const size_t stripe_size = N * Ns * sizeof(float);
-    const size_t total_gpu_needed = 4 * stripe_size;
+    int Ns = N / npes;
+    size_t stripe_size = N * Ns * sizeof(float);
+    size_t total_gpu_needed = 4 * stripe_size;
 
     if (mype == 0) {
         std::cout << "Matrix stripe: " << N << 'x' << Ns << ", " << stripe_size << " bytes\n";
@@ -244,16 +337,52 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    gda_barrier();
+
     clock_gettime(CLOCK_MONOTONIC_RAW, &t0);
 
-    // Launch kernel
+    // Launch cooperative kernel - requires all blocks to run concurrently
     dim3 blockDim(16, 16);
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
                  (Ns + blockDim.y - 1) / blockDim.y);
 
-    hipLaunchKernelGGL(mm_kernel_proxy, gridDim, blockDim, 0, 0,
-                       d_As, d_Bs, d_Cs, d_Bn, N, Ns, mype, npes,
-                       d_put_handles, d_barrier);
+    // Check that cooperative launch is supported and get max blocks
+    int num_blocks_per_sm = 0;
+    HIP_CHECK(hipOccupancyMaxActiveBlocksPerMultiprocessor(
+        &num_blocks_per_sm, mm_kernel_proxy, blockDim.x * blockDim.y, 0));
+
+    hipDeviceProp_t prop;
+    HIP_CHECK(hipGetDeviceProperties(&prop, 0));
+    int max_blocks = num_blocks_per_sm * prop.multiProcessorCount;
+    int requested_blocks = gridDim.x * gridDim.y;
+
+    if (requested_blocks > max_blocks) {
+        // Reduce grid size to fit cooperative launch requirements
+        // Scale down gridDim.x proportionally
+        float scale = (float)max_blocks / requested_blocks;
+        gridDim.x = std::max(1u, (unsigned int)(gridDim.x * scale));
+        gridDim.y = std::max(1u, (unsigned int)(gridDim.y * scale));
+        if (mype == 0) {
+            std::cerr << "Warning: Reduced grid from " << requested_blocks
+                      << " to " << (gridDim.x * gridDim.y)
+                      << " blocks for cooperative launch" << std::endl;
+        }
+    }
+
+    // Prepare kernel arguments for cooperative launch
+    void* kernel_args[] = {
+        &d_As, &d_Bs, &d_Cs, &d_Bn,
+        &N, &Ns, &mype, &npes,
+        &d_put_handles, &d_barrier
+    };
+
+    HIP_CHECK(hipLaunchCooperativeKernel(
+        (void*)mm_kernel_proxy,
+        gridDim, blockDim,
+        kernel_args,
+        0,      // shared memory
+        0       // stream
+    ));
     HIP_CHECK(hipDeviceSynchronize());
 
     clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
@@ -284,23 +413,55 @@ int main(int argc, char** argv)
         std::cout << "  CQ events: " << stats.cq_events_drained << "\n";
     }
 
-    // For verification (only for small matrices)
-    if (N < 32) {
+    // Local correctness verification - each rank verifies its own C stripe
+    const int MAX_VERIFY_N = 512;  // Disabled for performance testing
+    bool do_verify = (N <= MAX_VERIFY_N);
+
+    if (do_verify) {
+        // Copy computed C stripe to host
         auto h_Cs = new float[N * Ns];
         HIP_CHECK(hipMemcpy(h_Cs, d_Cs, stripe_size, hipMemcpyDeviceToHost));
-        if (mype == 0) {
-            auto C = new float[N * N];
-            for (int i = 0; i < Ns * N; i++)
-                C[i] = h_Cs[i];
-            print_matrix(C, N, N);
-            delete[] C;
+
+        // Reconstruct local As and full B on CPU (deterministic, no communication needed)
+        auto h_As = new float[N * Ns];
+        auto h_B = new float[N * N];
+        auto h_Cs_ref = new float[N * Ns];
+
+        reconstruct_local_As(h_As, N, Ns, mype);
+        reconstruct_full_B(h_B, N, Ns, npes);
+
+        // Compute local reference: Cs_ref = As * B
+        cpu_matmul_local_reference(h_As, h_B, h_Cs_ref, N, Ns);
+
+        // Compare local result with reference
+        int num_errors = 0;
+        float max_error = compare_local_stripe(h_Cs, h_Cs_ref, N, Ns, mype, num_errors);
+
+        // Report results (serialize output with barriers)
+        for (int r = 0; r < npes; r++) {
+            if (mype == r) {
+                if (num_errors == 0) {
+                    std::cout << "Rank " << mype << ": VERIFICATION PASSED (max error: " << max_error << ")" << std::endl;
+                } else {
+                    std::cout << "Rank " << mype << ": VERIFICATION FAILED (" << num_errors << " errors, max error: " << max_error << ")" << std::endl;
+                }
+            }
+            gda_barrier();
         }
+
+        delete[] h_Cs_ref;
+        delete[] h_B;
+        delete[] h_As;
         delete[] h_Cs;
+    } else if (mype == 0) {
+        std::cout << "Skipping verification (N=" << N << " > " << MAX_VERIFY_N << ")" << std::endl;
     }
 
     gda_barrier();
     gda_finalize();
 
-    std::cout << "Rank " << mype << ": Done!" << std::endl;
+    if (mype == 0) {
+        std::cout << "All ranks completed successfully!" << std::endl;
+    }
     return 0;
 }
