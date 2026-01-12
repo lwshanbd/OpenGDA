@@ -82,14 +82,19 @@ __global__ void mm_kernel_proxy(
             }
         }
 
-        // Wait for put to complete
+        // Two-barrier pattern (from P1 prototype):
+        // Barrier 1: Ensures all ranks have triggered their puts
+        // This barrier's atomics are sent AFTER the put RMA trigger,
+        // so when barrier completes, all remote puts have been initiated
         __syncthreads();
         if (is_master) {
-            gda_gpu_wait(put_handles[s]);
+            gda_gpu_proxy_barrier_wait(barrier);
         }
         __syncthreads();
 
-        // GPU-side proxy barrier - ensures all ranks completed their puts
+        // Barrier 2: Ensures all puts have completed
+        // By waiting for all ranks to reach this point, we ensure
+        // the network has had time to complete all transfers
         if (is_master) {
             gda_gpu_proxy_barrier_wait(barrier);
         }

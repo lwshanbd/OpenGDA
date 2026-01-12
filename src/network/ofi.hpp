@@ -997,7 +997,7 @@ class Bootstrap;
  */
 class CompletionSignalPool {
 public:
-    static constexpr size_t MAX_SIGNALS = 256;  // Maximum number of signals
+    static constexpr size_t MAX_SIGNALS = 128;  // Maximum number of signals
     static constexpr size_t SIGNAL_SIZE = sizeof(uint64_t);  // 8 bytes each
     static constexpr size_t POOL_SIZE = MAX_SIGNALS * SIGNAL_SIZE;  // 2KB total
 
@@ -1088,7 +1088,7 @@ public:
     // Configuration
     static constexpr int DEFAULT_WINDOW_SIZE = 16;
     static constexpr int MAX_WINDOW_SIZE = 64;
-    static constexpr int RING_BUFFER_SIZE = 256;
+    static constexpr int RING_BUFFER_SIZE = 128;
     static constexpr int PROXY_POLL_INTERVAL_US = 1;  // Polling interval in microseconds
 
     /**

@@ -25,7 +25,7 @@ LIBS = -lfabric -lpmi2
 GPU_ARCH = gfx90a
 
 # Targets
-TARGETS = test test_2 rank rank-amdgpu rank-amdgpu-gda rank-nvidia-gda benchmark-mpi benchmark-mpi-rma amdgpu-test ofi-comp gda-comp gda-multi gda-proxy gda-proxy-barrier barrier-proxy mpi-comp
+TARGETS = test test_2 rank rank-amdgpu rank-amdgpu-gda rank-nvidia-gda benchmark-mpi benchmark-mpi-rma amdgpu-test ofi-comp gda-comp gda-multi gda-proxy gda-proxy-barrier barrier-proxy mpi-comp barrier-put-verify barrier_put_compute_verify
 
 all: $(TARGETS)
 
@@ -85,6 +85,14 @@ gda-proxy-barrier: gda-proxy-barrier.cpp
 
 # Barrier Proxy - All-to-all arrival barrier with CPU proxy for unlimited iterations
 barrier-proxy: barrier_proxy.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) --offload-arch=$(GPU_ARCH) -o $@ $^ $(LIBS) -lpthread
+
+# Barrier + Put verification with CPU proxy
+barrier-put-verify: barrier-put-verify.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) --offload-arch=$(GPU_ARCH) -o $@ $^ $(LIBS) -lpthread
+
+# Full barrier + put + compute verification with statistics
+barrier_put_compute_verify: barrier_put_compute_verify.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LDFLAGS) --offload-arch=$(GPU_ARCH) -o $@ $^ $(LIBS) -lpthread
 
 # CPU-driven RDMA test (comparison baseline)

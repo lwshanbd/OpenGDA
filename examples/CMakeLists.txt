@@ -63,11 +63,6 @@ if(USE_AMDGPU)
     target_compile_definitions(barrier_test PRIVATE USE_AMDGPU)
     set_source_files_properties(barrier_test.cpp PROPERTIES LANGUAGE HIP)
 
-    # proxy_barrier_test - CPU proxy-enabled GPU barrier test (N ranks)
-    add_executable(proxy_barrier_test proxy_barrier_test.cpp)
-    target_link_libraries(proxy_barrier_test PRIVATE opengda)
-    target_compile_definitions(proxy_barrier_test PRIVATE USE_AMDGPU)
-    set_source_files_properties(proxy_barrier_test.cpp PROPERTIES LANGUAGE HIP)
 
     # mm_hip_gda_proxy - Matrix multiplication with HIP + GDA proxy barrier (N ranks)
     add_executable(mm_hip_gda_proxy mm_hip_gda_proxy.cpp)
@@ -80,24 +75,21 @@ if(USE_AMDGPU)
         target_link_libraries(mm_hip_mpi PRIVATE hip::device)
         target_link_libraries(mm_hip_gda PRIVATE hip::device)
         target_link_libraries(barrier_test PRIVATE hip::device)
-        target_link_libraries(proxy_barrier_test PRIVATE hip::device)
         target_link_libraries(mm_hip_gda_proxy PRIVATE hip::device)
     else()
         target_include_directories(mm_hip_mpi PRIVATE ${HIP_INCLUDE_DIR})
         target_include_directories(mm_hip_gda PRIVATE ${HIP_INCLUDE_DIR})
         target_include_directories(barrier_test PRIVATE ${HIP_INCLUDE_DIR})
-        target_include_directories(proxy_barrier_test PRIVATE ${HIP_INCLUDE_DIR})
         target_include_directories(mm_hip_gda_proxy PRIVATE ${HIP_INCLUDE_DIR})
         target_link_libraries(mm_hip_mpi PRIVATE ${HIP_LIBRARY})
         target_link_libraries(mm_hip_gda PRIVATE ${HIP_LIBRARY})
         target_link_libraries(barrier_test PRIVATE ${HIP_LIBRARY})
-        target_link_libraries(proxy_barrier_test PRIVATE ${HIP_LIBRARY})
         target_link_libraries(mm_hip_gda_proxy PRIVATE ${HIP_LIBRARY})
     endif()
 
     # Installation
     install(TARGETS mr_example put_example test_example mm_hip_mpi mm_hip_gda
-            barrier_test proxy_barrier_test mm_hip_gda_proxy
+            barrier_test mm_hip_gda_proxy
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}/examples)
 else()
     message(STATUS "Skipping examples (GPU support required)")

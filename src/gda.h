@@ -292,7 +292,9 @@ void gda_flush(void);
 } while(0)
 
 #define gda_gpu_wait(gpu_handle) do { \
-    while (*(gpu_handle).completion_addr == 0) {} \
+    while (__atomic_load_n((unsigned long long*)(gpu_handle).completion_addr, __ATOMIC_ACQUIRE) == 0) { \
+        /* Use atomic load to ensure visibility of NIC writes */ \
+    } \
     __threadfence_system(); \
 } while(0)
 #endif
@@ -345,7 +347,9 @@ void gda_flush(void);
 } while(0)
 
 #define gda_gpu_wait(gpu_handle) do { \
-    while (*(gpu_handle).completion_addr == 0) {} \
+    while (__atomic_load_n((unsigned long long*)(gpu_handle).completion_addr, __ATOMIC_ACQUIRE) == 0) { \
+        /* Use atomic load to ensure visibility of NIC writes */ \
+    } \
     __threadfence_system(); \
 } while(0)
 #endif
