@@ -55,6 +55,7 @@ OPENGDA_LOG_LEVEL=debug srun -n 2 ./examples/concurrent_put_example
 - `OPENGDA_LOG_LEVEL` - Logging level: error|warn|info|debug|trace
 - `FI_LOG_LEVEL` - LibFabric debug output
 - `FI_PROVIDER=cxi` - Force CXI provider
+- `FI_MR_CACHE_MAX_COUNT=0` - **Required for multi-rank runs** to disable MR cache and free DWQ resources
 
 ## Architecture
 
@@ -117,25 +118,31 @@ gda_gpu_trigger_all(gpu_handle)  // GPU macro to trigger DWQ operation
 
 The standard DWQ operations are one-shot and cannot be reset from GPU code. The **CPU proxy barrier** enables unlimited barrier iterations by having a background CPU thread continuously rearm completed DWQ operations.
 
-### Algorithm: All-to-All Barrier
+### Algorithm: Dissemination Barrier (O(log N))
+
+Uses the classic dissemination algorithm with `ceil(log2(npes))` rounds:
 
 Each barrier epoch performs:
 1. GPU waits for slot to be armed (slot = epoch % window_size)
-2. GPU writes 1 to trigger counter (fires all atomics at once, threshold=1)
-3. Each rank atomically adds +1 to ALL other ranks' `d_arrive` counter
-4. GPU waits for `d_arrive >= (epoch+1) * num_peers`
-5. GPU marks slot as NEED_QUEUE
-6. CPU proxy thread rearms completed slots (queues new DWQ operations)
+2. For each round k = 0 to num_rounds-1:
+   - GPU writes (k+1) to trigger counter (threshold-based, fires round k's DWQ atomic)
+   - Round k sends atomic +1 to peer at distance 2^k: `target = (mype + 2^k) % npes`
+   - GPU waits for `d_round_recv[k] >= epoch+1` (arrival from source peer)
+3. GPU waits for `d_slot_done[slot]` to confirm all outbound ops complete
+4. GPU marks slot as NEED_QUEUE
+5. CPU proxy thread rearms completed slots
+
+**Complexity**: O(log N) DWQ operations per barrier (vs O(N) for all-to-all)
 
 ### DWQ Resource Management
 
 DWQ operations consume queue slots that are shared per NIC:
-- Each barrier slot needs `num_peers` DWQ atomic operations
-- With 4 ranks per node sharing a NIC, total DWQ usage = 4 * window_size * num_peers
-- Window size is automatically adjusted based on peer count to avoid overflow:
-  - `max_window = 200 / num_peers` (budget ~200 DWQ ops per rank for barrier)
-  - Example: 16 ranks (15 peers) → max window = 13 slots
-  - Example: 4 ranks (3 peers) → max window = 66 slots (capped at 16)
+- Each barrier slot needs `(num_rounds + 1)` DWQ atomic operations
+- With 8 ranks per node sharing a NIC, budget ~150 DWQ ops per rank for barrier
+- Window size is automatically adjusted: `max_window = 150 / (num_rounds + 1)`
+  - Example: 32 ranks (5 rounds) → max window = 150/6 = 25 slots
+  - Example: 64 ranks (6 rounds) → max window = 150/7 = 21 slots
+- **Important**: Set `FI_MR_CACHE_MAX_COUNT=0` to free DWQ resources used by MR cache
 
 ### API
 
@@ -249,14 +256,20 @@ for (auto h : put_handles) gda_free(h);
 
 ### Running Matrix Multiplication Example
 
+**Important**: Always set `FI_MR_CACHE_MAX_COUNT=0` to avoid DWQ resource exhaustion.
+
 ```bash
 # 4 nodes, 1 rank per node
-srun -N 4 -n 4 --ntasks-per-node=1 ./examples/mm_hip_gda_proxy 512
-# Expected: ~17ms
+FI_MR_CACHE_MAX_COUNT=0 srun -N 4 -n 4 --ntasks-per-node=1 ./examples/mm_hip_gda_proxy 512
+# Expected: ~20ms
 
 # 4 nodes, 4 ranks per node (16 total)
-srun -N 4 -n 16 --ntasks-per-node=4 ./examples/mm_hip_gda_proxy 512
-# Expected: ~11ms
+FI_MR_CACHE_MAX_COUNT=0 srun -N 4 -n 16 --ntasks-per-node=4 ./examples/mm_hip_gda_proxy 512
+# Expected: ~12ms
+
+# 4 nodes, 8 ranks per node (32 total)
+FI_MR_CACHE_MAX_COUNT=0 srun -N 4 -n 32 --ntasks-per-node=8 ./examples/mm_hip_gda_proxy 512
+# Expected: ~12ms
 ```
 
 ### Statistics Interpretation

@@ -1,8 +1,8 @@
 /**
  * gda_barrier_proxy.cpp - Implementation of CPU Proxy Barrier
  *
- * Based on P1 prototype: All-to-all barrier with single threshold triggering.
- * Each rank atomically adds +1 to all other ranks' d_arrive counter.
+ * Implements the Dissemination barrier with O(log P) rounds using
+ * threshold-based DWQ triggering and CPU proxy for unlimited iterations.
  */
 
 #include "gda_barrier_proxy.h"
@@ -48,11 +48,11 @@ struct ProxySlotCounters {
 };
 
 /**
- * Remote arrive counter info for each peer.
+ * Per-round atomic operation info for remote peer.
  */
-struct RemoteArriveInfo {
-    fi_addr_t fi_addr;                       // Peer's fi_addr
-    uint64_t remote_addr;                    // Remote d_arrive address
+struct RoundAtomicInfo {
+    fi_addr_t peer_fi_addr;                  // Target peer's fi_addr
+    uint64_t remote_addr;                    // Remote d_round_recv[k] address
     uint64_t remote_key;                     // Remote MR key
 };
 
@@ -66,7 +66,7 @@ struct gda_proxy_barrier {
     // Basic info
     int mype;
     int npes;
-    int num_peers;
+    int num_rounds;
     int window_size;
 
     // Fabric resources
@@ -78,25 +78,41 @@ struct gda_proxy_barrier {
     // Slot counters [window_size]
     std::vector<ProxySlotCounters> slots;
 
-    // Remote arrive info [npes] (one per rank, skip self)
-    std::vector<RemoteArriveInfo> peer_arrive_info;
+    // Per-round atomic info [num_rounds]
+    std::vector<RoundAtomicInfo> round_info;
 
     // Local atomic operand (value=1, registered GPU memory)
     uint64_t* d_atomic_operand;
     struct fid_mr* mr_atomic_operand;
     void* desc_atomic_operand;
 
-    // d_arrive registration
-    struct fid_mr* mr_arrive;
-    void* desc_arrive;
-    uint64_t key_arrive;
+    // d_round_recv registration
+    struct fid_mr* mr_round_recv;
+    void* desc_round_recv;
+    uint64_t key_round_recv;
 
-    // DWQ structures per slot per peer: [window_size][num_peers]
+    // d_slot_done registration (for local done atomic)
+    struct fid_mr* mr_slot_done;
+    void* desc_slot_done;
+    uint64_t key_slot_done;
+
+    // Local fi_addr for self-atomics
+    fi_addr_t local_fi_addr;
+
+    // DWQ structures per slot per round: [window_size][num_rounds]
+    // For outgoing atomics to peers
     std::vector<struct fi_deferred_work> atomic_works;
     std::vector<struct fi_op_atomic> atomic_ops;
     std::vector<struct fi_msg_atomic> atomic_msgs;
     std::vector<struct fi_ioc> atomic_iovs;
     std::vector<struct fi_rma_ioc> atomic_rma_iovs;
+
+    // DWQ structures for local done atomics: [window_size]
+    std::vector<struct fi_deferred_work> done_works;
+    std::vector<struct fi_op_atomic> done_ops;
+    std::vector<struct fi_msg_atomic> done_msgs;
+    std::vector<struct fi_ioc> done_iovs;
+    std::vector<struct fi_rma_ioc> done_rma_iovs;
 
     // Proxy thread
     std::thread proxy_thread;
@@ -144,12 +160,18 @@ static int hex_to_bytes(const char* in, uint8_t* out, size_t outlen) {
 }
 
 // ============================================================================
-// Slot Arming (All-to-all: atomics to all peers with threshold=1)
+// Slot Arming
 // ============================================================================
 
 /**
- * Queue DWQ work for a single slot (atomics to all peers).
- * All atomics fire at once when GPU writes 1 to trigger counter.
+ * Queue DWQ work for a single slot (all rounds + done op).
+ * This is called by the proxy thread to rearm a slot.
+ *
+ * DWQ structure:
+ * - For each round k: atomic SUM +1 to round_targets[k]'s d_round_recv[k]
+ *   with threshold = k+1 (so GPU writes 1,2,3... to trigger rounds sequentially)
+ * - Final done op: atomic SUM +1 to local d_slot_done[slot]
+ *   with threshold = num_rounds on completion_cntr
  */
 static int queue_slot_work(gda_proxy_barrier_t* pb, int slot) {
     if (!pb || slot < 0 || slot >= pb->window_size) {
@@ -162,22 +184,24 @@ static int queue_slot_work(gda_proxy_barrier_t* pb, int slot) {
     fi_cntr_set(sc.trigger_cntr, 0);
     fi_cntr_set(sc.completion_cntr, 0);
 
-    int num_peers = pb->num_peers;
-    int idx_base = slot * num_peers;
+    // Note: d_slot_done[slot] is NOT cleared here. It's a monotonic counter
+    // that increments (+1) each time the slot completes. The GPU computes
+    // the expected value based on epoch: expected = (epoch / window_size) + 1
+    // This avoids hipMemcpy in the hot path which would add jitter.
 
-    // Queue atomic add to each peer's d_arrive (threshold=1, all fire at once)
-    int peer_idx = 0;
-    for (int r = 0; r < pb->npes; r++) {
-        if (r == pb->mype) continue;  // Skip self
+    int num_rounds = pb->num_rounds;
+    int base_idx = slot * num_rounds;
 
-        int idx = idx_base + peer_idx;
-        RemoteArriveInfo& ri = pb->peer_arrive_info[r];
+    // Queue atomic work for each round with increasing threshold
+    for (int k = 0; k < num_rounds; k++) {
+        int idx = base_idx + k;
+        RoundAtomicInfo& ri = pb->round_info[k];
 
         // Setup atomic IOV (source operand = 1)
         pb->atomic_iovs[idx].addr = pb->d_atomic_operand;
         pb->atomic_iovs[idx].count = 1;
 
-        // Setup remote RMA IOV (target: peer's d_arrive)
+        // Setup remote RMA IOV (target: peer's d_round_recv[k])
         pb->atomic_rma_iovs[idx].addr = ri.remote_addr;
         pb->atomic_rma_iovs[idx].count = 1;
         pb->atomic_rma_iovs[idx].key = ri.remote_key;
@@ -186,7 +210,7 @@ static int queue_slot_work(gda_proxy_barrier_t* pb, int slot) {
         pb->atomic_msgs[idx].msg_iov = &pb->atomic_iovs[idx];
         pb->atomic_msgs[idx].desc = &pb->desc_atomic_operand;
         pb->atomic_msgs[idx].iov_count = 1;
-        pb->atomic_msgs[idx].addr = ri.fi_addr;
+        pb->atomic_msgs[idx].addr = ri.peer_fi_addr;
         pb->atomic_msgs[idx].rma_iov = &pb->atomic_rma_iovs[idx];
         pb->atomic_msgs[idx].rma_iov_count = 1;
         pb->atomic_msgs[idx].datatype = FI_UINT64;
@@ -197,21 +221,69 @@ static int queue_slot_work(gda_proxy_barrier_t* pb, int slot) {
         pb->atomic_ops[idx].msg = pb->atomic_msgs[idx];
         pb->atomic_ops[idx].flags = 0;
 
-        // Setup deferred work with threshold = 1 (all fire at once)
+        // Setup deferred work with threshold = k+1
         pb->atomic_works[idx].triggering_cntr = sc.trigger_cntr;
         pb->atomic_works[idx].completion_cntr = sc.completion_cntr;
-        pb->atomic_works[idx].threshold = 1;
+        pb->atomic_works[idx].threshold = k + 1;  // Round k triggered when counter >= k+1
         pb->atomic_works[idx].op_type = FI_OP_ATOMIC;
         pb->atomic_works[idx].op.atomic = &pb->atomic_ops[idx];
 
         int ret = fi_control(&pb->domain->fid, FI_QUEUE_WORK, &pb->atomic_works[idx]);
         if (ret) {
-            OPENGDA_Error("proxy_barrier", "fi_control(atomic slot=%d peer=%d) failed: %s",
-                         slot, r, fi_strerror(-ret));
+            OPENGDA_Error("proxy_barrier", "fi_control(atomic slot=%d round=%d) failed: %s",
+                         slot, k, fi_strerror(-ret));
             return ret;
         }
+    }
 
-        peer_idx++;
+    // Queue the "done" atomic to signal when all outbound ops complete
+    // This local atomic SUM (+1) to d_slot_done[slot] is triggered when
+    // completion_cntr reaches num_rounds (all rounds have completed)
+    {
+        // Setup atomic IOV (source operand = 1)
+        pb->done_iovs[slot].addr = pb->d_atomic_operand;
+        pb->done_iovs[slot].count = 1;
+
+        // Setup remote RMA IOV (target: local d_slot_done[slot])
+        uint64_t slot_done_addr;
+        if (pb->info->domain_attr->mr_mode & FI_MR_VIRT_ADDR) {
+            slot_done_addr = (uint64_t)&pb->dev.d_slot_done[slot];
+        } else {
+            slot_done_addr = slot * sizeof(uint64_t);
+        }
+        pb->done_rma_iovs[slot].addr = slot_done_addr;
+        pb->done_rma_iovs[slot].count = 1;
+        pb->done_rma_iovs[slot].key = pb->key_slot_done;
+
+        // Setup atomic message (local atomic to self)
+        pb->done_msgs[slot].msg_iov = &pb->done_iovs[slot];
+        pb->done_msgs[slot].desc = &pb->desc_atomic_operand;
+        pb->done_msgs[slot].iov_count = 1;
+        pb->done_msgs[slot].addr = pb->local_fi_addr;  // Target is self
+        pb->done_msgs[slot].rma_iov = &pb->done_rma_iovs[slot];
+        pb->done_msgs[slot].rma_iov_count = 1;
+        pb->done_msgs[slot].datatype = FI_UINT64;
+        pb->done_msgs[slot].op = FI_SUM;
+
+        // Setup atomic op
+        pb->done_ops[slot].ep = pb->ep;
+        pb->done_ops[slot].msg = pb->done_msgs[slot];
+        pb->done_ops[slot].flags = 0;
+
+        // Setup deferred work: trigger when completion_cntr >= num_rounds
+        // This means all outbound atomic ops have completed
+        pb->done_works[slot].triggering_cntr = sc.completion_cntr;
+        pb->done_works[slot].completion_cntr = nullptr;  // No further completion needed
+        pb->done_works[slot].threshold = num_rounds;
+        pb->done_works[slot].op_type = FI_OP_ATOMIC;
+        pb->done_works[slot].op.atomic = &pb->done_ops[slot];
+
+        int ret = fi_control(&pb->domain->fid, FI_QUEUE_WORK, &pb->done_works[slot]);
+        if (ret) {
+            OPENGDA_Error("proxy_barrier", "fi_control(done slot=%d) failed: %s",
+                         slot, fi_strerror(-ret));
+            return ret;
+        }
     }
 
     return 0;
@@ -221,8 +293,24 @@ static int queue_slot_work(gda_proxy_barrier_t* pb, int slot) {
 // Proxy Thread
 // ============================================================================
 
+// Low-latency pause for busy-wait loops
+static inline void cpu_relax() {
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile("pause" ::: "memory");
+#elif defined(__aarch64__)
+    __asm__ volatile("yield" ::: "memory");
+#else
+    // Fallback: compiler memory barrier
+    __asm__ volatile("" ::: "memory");
+#endif
+}
+
 static void proxy_thread_func(gda_proxy_barrier_t* pb) {
     OPENGDA_Debug("proxy_barrier", "Proxy thread started for rank %d", pb->mype);
+
+    // Consecutive idle iterations before yielding to OS
+    constexpr int BUSY_WAIT_ITERS = 1000;
+    int idle_count = 0;
 
     while (!pb->stop_requested.load(std::memory_order_relaxed)) {
         bool did_work = false;
@@ -250,11 +338,27 @@ static void proxy_thread_func(gda_proxy_barrier_t* pb) {
         int ret;
         while ((ret = fi_cq_read(pb->cq, cq_entries, 64)) > 0) {
             pb->cq_events_drained.fetch_add(ret, std::memory_order_relaxed);
+            did_work = true;  // CQ draining counts as work
         }
 
-        // If no work done, brief sleep to avoid busy spinning
-        if (!did_work) {
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
+        // Low-latency idle strategy:
+        // - If work was done, reset idle counter
+        // - If no work, do short busy-wait with pause instructions
+        // - After BUSY_WAIT_ITERS idle iterations, yield to OS scheduler
+        if (did_work) {
+            idle_count = 0;
+        } else {
+            idle_count++;
+            if (idle_count < BUSY_WAIT_ITERS) {
+                // Short busy-wait with CPU pause instruction
+                for (int i = 0; i < 10; i++) {
+                    cpu_relax();
+                }
+            } else {
+                // Yield to OS after extended idle period
+                std::this_thread::yield();
+                idle_count = 0;  // Reset after yield
+            }
         }
     }
 
@@ -279,30 +383,46 @@ gda_proxy_barrier_t* gda_proxy_barrier_alloc(int window_size) {
         return nullptr;
     }
 
-    // Validate and adjust window size based on peer count
-    // Each slot needs num_peers DWQ ops, so limit window to avoid DWQ overflow
-    // DWQ depth is typically 1024, shared by all ranks on a NIC (typically 4)
-    // Leave room for put/get handles (~64 per rank)
-    // Safe budget per rank: ~200 DWQ ops for barrier
-    int num_peers = npes - 1;
-    int max_window_for_peers = (num_peers > 0) ? (200 / num_peers) : GDA_PROXY_DEFAULT_WINDOW_SIZE;
-    max_window_for_peers = std::max(2, max_window_for_peers);  // At least 2 slots
+    // Calculate number of rounds for dissemination: ceil(log2(npes))
+    int num_rounds = 0;
+    int temp = 1;
+    while (temp < npes) {
+        num_rounds++;
+        temp *= 2;
+    }
 
+    if (num_rounds > GDA_PROXY_MAX_ROUNDS) {
+        OPENGDA_Error("proxy_barrier", "Too many ranks (%d > 2^%d)", npes, GDA_PROXY_MAX_ROUNDS);
+        return nullptr;
+    }
+
+    // Calculate DWQ ops per slot: num_rounds (for peer atomics) + 1 (for done atomic)
+    int dwq_ops_per_slot = num_rounds + 1;
+
+    // DWQ budget per rank for barrier (leave room for put/get handles)
+    // With 8 ranks per node sharing NIC, be conservative
+    int dwq_budget = 150;
+    int max_window_for_rounds = dwq_budget / dwq_ops_per_slot;
+    max_window_for_rounds = std::max(4, max_window_for_rounds);  // At least 4 slots
+
+    // Validate and adjust window size
     if (window_size <= 0) {
-        window_size = std::min(GDA_PROXY_DEFAULT_WINDOW_SIZE, max_window_for_peers);
+        window_size = std::min(GDA_PROXY_DEFAULT_WINDOW_SIZE, max_window_for_rounds);
     }
     if (window_size > GDA_PROXY_MAX_WINDOW_SIZE) {
         window_size = GDA_PROXY_MAX_WINDOW_SIZE;
     }
-    if (window_size > max_window_for_peers) {
-        OPENGDA_Info("proxy_barrier", "Reducing window_size from %d to %d for %d peers (DWQ budget)",
-                    window_size, max_window_for_peers, num_peers);
-        window_size = max_window_for_peers;
+    if (window_size > max_window_for_rounds) {
+        OPENGDA_Info("proxy_barrier", "Reducing window_size from %d to %d for %d rounds (DWQ budget)",
+                    window_size, max_window_for_rounds, num_rounds);
+        window_size = max_window_for_rounds;
     }
-    int initial_arm_count = 0;  // Declared early to avoid goto issues
 
-    OPENGDA_Info("proxy_barrier", "Allocating all-to-all proxy barrier: rank=%d/%d, window=%d, peers=%d",
-                mype, npes, window_size, num_peers);
+    // Declare early to avoid goto crossing initialization
+    int initial_arm_count = 0;
+
+    OPENGDA_Info("proxy_barrier", "Allocating proxy barrier: rank=%d/%d, window=%d, rounds=%d, dwq_per_slot=%d",
+                mype, npes, window_size, num_rounds, dwq_ops_per_slot);
 
     // Allocate barrier structure with zero-initialization
     gda_proxy_barrier_t* pb = new gda_proxy_barrier();
@@ -312,7 +432,7 @@ gda_proxy_barrier_t* gda_proxy_barrier_alloc(int window_size) {
 
     pb->mype = mype;
     pb->npes = npes;
-    pb->num_peers = num_peers;
+    pb->num_rounds = num_rounds;
     pb->window_size = window_size;
     pb->initialized = false;
     pb->running.store(false);
@@ -328,25 +448,34 @@ gda_proxy_barrier_t* gda_proxy_barrier_alloc(int window_size) {
     pb->info = nullptr;
     pb->d_atomic_operand = nullptr;
     pb->mr_atomic_operand = nullptr;
-    pb->mr_arrive = nullptr;
+    pb->mr_round_recv = nullptr;
+    pb->mr_slot_done = nullptr;
 
     // Get fabric resources from OFI
     pb->domain = ofi->get_domain();
     pb->ep = ofi->get_endpoint();
     pb->cq = ofi->get_cq();
     pb->info = ofi->get_info();
+    pb->local_fi_addr = ofi->get_local_fi_addr();
 
     // Initialize device context
     gda_proxy_barrier_dev_t& dev = pb->dev;
     dev.mype = mype;
     dev.npes = npes;
-    dev.num_peers = num_peers;
+    dev.num_rounds = num_rounds;
     dev.window_size = window_size;
 
+    // Calculate dissemination targets and sources
+    for (int k = 0; k < num_rounds; k++) {
+        int distance = 1 << k;  // 2^k
+        dev.round_targets[k] = (mype + distance) % npes;
+        dev.round_sources[k] = (mype - distance + npes) % npes;
+    }
+
+    // Allocate GPU-visible slot_state
 #ifdef USE_AMDGPU
     hipError_t hip_err;
 
-    // Allocate GPU-visible slot_state
     hip_err = hipHostMalloc((void**)&dev.slot_state,
                             sizeof(int) * window_size,
                             hipHostMallocMapped);
@@ -374,24 +503,38 @@ gda_proxy_barrier_t* gda_proxy_barrier_alloc(int window_size) {
         return nullptr;
     }
 
-    // Allocate d_arrive (GPU memory, receives atomic adds from peers)
-    hip_err = hipMalloc((void**)&dev.d_arrive, sizeof(uint64_t));
+    // Allocate d_round_recv (GPU memory, receives atomic adds from peers)
+    hip_err = hipMalloc((void**)&dev.d_round_recv, sizeof(uint64_t) * num_rounds);
     if (hip_err != hipSuccess) {
-        OPENGDA_Error("proxy_barrier", "hipMalloc(d_arrive) failed: %s",
+        OPENGDA_Error("proxy_barrier", "hipMalloc(d_round_recv) failed: %s",
                      hipGetErrorString(hip_err));
         (void)hipHostFree((void*)dev.slot_trigger_addrs);
         (void)hipHostFree((void*)dev.slot_state);
         delete pb;
         return nullptr;
     }
-    (void)hipMemset((void*)dev.d_arrive, 0, sizeof(uint64_t));
+    (void)hipMemset((void*)dev.d_round_recv, 0, sizeof(uint64_t) * num_rounds);
+
+    // Allocate d_slot_done (GPU memory, NIC writes completion signals)
+    hip_err = hipMalloc((void**)&dev.d_slot_done, sizeof(uint64_t) * window_size);
+    if (hip_err != hipSuccess) {
+        OPENGDA_Error("proxy_barrier", "hipMalloc(d_slot_done) failed: %s",
+                     hipGetErrorString(hip_err));
+        (void)hipFree((void*)dev.d_round_recv);
+        (void)hipHostFree((void*)dev.slot_trigger_addrs);
+        (void)hipHostFree((void*)dev.slot_state);
+        delete pb;
+        return nullptr;
+    }
+    (void)hipMemset((void*)dev.d_slot_done, 0, sizeof(uint64_t) * window_size);
 
     // Allocate d_epoch (GPU memory)
     hip_err = hipMalloc((void**)&dev.d_epoch, sizeof(uint64_t));
     if (hip_err != hipSuccess) {
         OPENGDA_Error("proxy_barrier", "hipMalloc(d_epoch) failed: %s",
                      hipGetErrorString(hip_err));
-        (void)hipFree((void*)dev.d_arrive);
+        (void)hipFree((void*)dev.d_slot_done);
+        (void)hipFree((void*)dev.d_round_recv);
         (void)hipHostFree((void*)dev.slot_trigger_addrs);
         (void)hipHostFree((void*)dev.slot_state);
         delete pb;
@@ -399,13 +542,30 @@ gda_proxy_barrier_t* gda_proxy_barrier_alloc(int window_size) {
     }
     (void)hipMemset((void*)dev.d_epoch, 0, sizeof(uint64_t));
 
+    // Allocate d_spin_cycles (GPU memory, for statistics)
+    hip_err = hipMalloc((void**)&dev.d_spin_cycles, sizeof(uint64_t));
+    if (hip_err != hipSuccess) {
+        OPENGDA_Error("proxy_barrier", "hipMalloc(d_spin_cycles) failed: %s",
+                     hipGetErrorString(hip_err));
+        (void)hipFree((void*)dev.d_epoch);
+        (void)hipFree((void*)dev.d_slot_done);
+        (void)hipFree((void*)dev.d_round_recv);
+        (void)hipHostFree((void*)dev.slot_trigger_addrs);
+        (void)hipHostFree((void*)dev.slot_state);
+        delete pb;
+        return nullptr;
+    }
+    (void)hipMemset((void*)dev.d_spin_cycles, 0, sizeof(uint64_t));
+
     // Allocate atomic operand (GPU memory, value = 1)
     hip_err = hipMalloc((void**)&pb->d_atomic_operand, sizeof(uint64_t));
     if (hip_err != hipSuccess) {
         OPENGDA_Error("proxy_barrier", "hipMalloc(atomic_operand) failed: %s",
                      hipGetErrorString(hip_err));
+        (void)hipFree((void*)dev.d_spin_cycles);
         (void)hipFree((void*)dev.d_epoch);
-        (void)hipFree((void*)dev.d_arrive);
+        (void)hipFree((void*)dev.d_slot_done);
+        (void)hipFree((void*)dev.d_round_recv);
         (void)hipHostFree((void*)dev.slot_trigger_addrs);
         (void)hipHostFree((void*)dev.slot_state);
         delete pb;
@@ -419,86 +579,105 @@ gda_proxy_barrier_t* gda_proxy_barrier_alloc(int window_size) {
     return nullptr;
 #endif
 
-    // Register d_arrive as MR for remote atomics
-    pb->mr_arrive = ofi->register_memory((void*)dev.d_arrive, sizeof(uint64_t), true);
-    if (!pb->mr_arrive) {
-        OPENGDA_Error("proxy_barrier", "Failed to register d_arrive MR");
+    // Register d_round_recv as MR for remote atomics
+    pb->mr_round_recv = ofi->register_memory((void*)dev.d_round_recv,
+                                              sizeof(uint64_t) * num_rounds, true);
+    if (!pb->mr_round_recv) {
+        OPENGDA_Error("proxy_barrier", "Failed to register d_round_recv MR");
         goto cleanup_gpu;
     }
-    pb->desc_arrive = fi_mr_desc(pb->mr_arrive);
-    pb->key_arrive = fi_mr_key(pb->mr_arrive);
+    pb->desc_round_recv = fi_mr_desc(pb->mr_round_recv);
+    pb->key_round_recv = fi_mr_key(pb->mr_round_recv);
+
+    // Register d_slot_done as MR for local atomics
+    pb->mr_slot_done = ofi->register_memory((void*)dev.d_slot_done,
+                                             sizeof(uint64_t) * window_size, true);
+    if (!pb->mr_slot_done) {
+        OPENGDA_Error("proxy_barrier", "Failed to register d_slot_done MR");
+        ofi->deregister_memory(pb->mr_round_recv);
+        goto cleanup_gpu;
+    }
+    pb->desc_slot_done = fi_mr_desc(pb->mr_slot_done);
+    pb->key_slot_done = fi_mr_key(pb->mr_slot_done);
 
     // Register atomic operand as MR
-    pb->mr_atomic_operand = ofi->register_memory(pb->d_atomic_operand, sizeof(uint64_t), true);
+    pb->mr_atomic_operand = ofi->register_memory(pb->d_atomic_operand,
+                                                  sizeof(uint64_t), true);
     if (!pb->mr_atomic_operand) {
         OPENGDA_Error("proxy_barrier", "Failed to register atomic_operand MR");
-        ofi->deregister_memory(pb->mr_arrive);
+        ofi->deregister_memory(pb->mr_slot_done);
+        ofi->deregister_memory(pb->mr_round_recv);
         goto cleanup_gpu;
     }
     pb->desc_atomic_operand = fi_mr_desc(pb->mr_atomic_operand);
 
-    // Exchange d_arrive addresses via bootstrap (all-to-all)
+    // Exchange d_round_recv addresses via bootstrap
     {
-        struct ExchangeArriveInfo {
-            uint64_t addr;
+        // Prepare exchange data: [addr, key] for each round
+        // All rounds use same base address with different offsets
+        struct ExchangeRoundRecv {
+            uint64_t base_addr;
             uint64_t key;
         } my_info;
 
         if (pb->info->domain_attr->mr_mode & FI_MR_VIRT_ADDR) {
-            my_info.addr = (uint64_t)dev.d_arrive;
+            my_info.base_addr = (uint64_t)dev.d_round_recv;
         } else {
-            my_info.addr = 0;
+            my_info.base_addr = 0;
         }
-        my_info.key = pb->key_arrive;
+        my_info.key = pb->key_round_recv;
 
         char my_hex[64];
         bytes_to_hex((uint8_t*)&my_info, sizeof(my_info), my_hex);
 
         char key_str[64];
-        snprintf(key_str, sizeof(key_str), "arrive-%d", mype);
+        snprintf(key_str, sizeof(key_str), "round_recv-%d", mype);
         bool rc = bootstrap->bootstrap_kvs_put(key_str, my_hex);
         if (!rc) {
-            OPENGDA_Error("proxy_barrier", "KV put failed for arrive");
+            OPENGDA_Error("proxy_barrier", "KV put failed for round_recv");
             ofi->deregister_memory(pb->mr_atomic_operand);
-            ofi->deregister_memory(pb->mr_arrive);
+            ofi->deregister_memory(pb->mr_slot_done);
+            ofi->deregister_memory(pb->mr_round_recv);
             goto cleanup_gpu;
         }
 
         bootstrap->bootstrap_barrier();
 
-        // Fetch arrive info from all peers
-        pb->peer_arrive_info.resize(npes);
-        for (int r = 0; r < npes; r++) {
-            if (r == mype) continue;
+        // Build round info by fetching from each target peer
+        pb->round_info.resize(num_rounds);
+        for (int k = 0; k < num_rounds; k++) {
+            int target = dev.round_targets[k];
+            snprintf(key_str, sizeof(key_str), "round_recv-%d", target);
 
-            snprintf(key_str, sizeof(key_str), "arrive-%d", r);
             char peer_hex[128];
             int peer_hex_len = 0;
             rc = bootstrap->bootstrap_kvs_get(key_str, peer_hex, &peer_hex_len);
             if (!rc) {
-                OPENGDA_Error("proxy_barrier", "KV get failed for rank %d arrive", r);
+                OPENGDA_Error("proxy_barrier", "KV get failed for rank %d round_recv", target);
                 ofi->deregister_memory(pb->mr_atomic_operand);
-                ofi->deregister_memory(pb->mr_arrive);
+                ofi->deregister_memory(pb->mr_slot_done);
+                ofi->deregister_memory(pb->mr_round_recv);
                 goto cleanup_gpu;
             }
 
-            ExchangeArriveInfo peer_info;
+            ExchangeRoundRecv peer_info;
             hex_to_bytes(peer_hex, (uint8_t*)&peer_info, sizeof(peer_info));
 
-            const PeerInfo* peer = ofi->get_peer_info(r);
+            const PeerInfo* peer = ofi->get_peer_info(target);
             if (!peer || !peer->valid) {
-                OPENGDA_Error("proxy_barrier", "Invalid peer info for rank %d", r);
+                OPENGDA_Error("proxy_barrier", "Invalid peer info for rank %d", target);
                 ofi->deregister_memory(pb->mr_atomic_operand);
-                ofi->deregister_memory(pb->mr_arrive);
+                ofi->deregister_memory(pb->mr_slot_done);
+                ofi->deregister_memory(pb->mr_round_recv);
                 goto cleanup_gpu;
             }
 
-            pb->peer_arrive_info[r].fi_addr = peer->fi_addr;
-            pb->peer_arrive_info[r].remote_addr = peer_info.addr;
-            pb->peer_arrive_info[r].remote_key = peer_info.key;
+            pb->round_info[k].peer_fi_addr = peer->fi_addr;
+            pb->round_info[k].remote_addr = peer_info.base_addr + k * sizeof(uint64_t);
+            pb->round_info[k].remote_key = peer_info.key;
 
-            OPENGDA_Debug("proxy_barrier", "Peer %d: remote_addr=0x%lx, key=0x%lx",
-                         r, pb->peer_arrive_info[r].remote_addr, pb->peer_arrive_info[r].remote_key);
+            OPENGDA_Debug("proxy_barrier", "Round %d: target=%d, remote_addr=0x%lx, key=0x%lx",
+                         k, target, pb->round_info[k].remote_addr, pb->round_info[k].remote_key);
         }
     }
 
@@ -581,21 +760,27 @@ gda_proxy_barrier_t* gda_proxy_barrier_alloc(int window_size) {
         sc.initialized = true;
     }
 
-    // Allocate DWQ structures: [window_size * num_peers]
+    // Allocate DWQ structures
     {
-        int total_ops = window_size * num_peers;
-        pb->atomic_works.resize(total_ops);
-        pb->atomic_ops.resize(total_ops);
-        pb->atomic_msgs.resize(total_ops);
-        pb->atomic_iovs.resize(total_ops);
-        pb->atomic_rma_iovs.resize(total_ops);
+        int total_atomics = window_size * num_rounds;
+        pb->atomic_works.resize(total_atomics);
+        pb->atomic_ops.resize(total_atomics);
+        pb->atomic_msgs.resize(total_atomics);
+        pb->atomic_iovs.resize(total_atomics);
+        pb->atomic_rma_iovs.resize(total_atomics);
+
+        pb->done_works.resize(window_size);
+        pb->done_ops.resize(window_size);
+        pb->done_msgs.resize(window_size);
+        pb->done_iovs.resize(window_size);
+        pb->done_rma_iovs.resize(window_size);
     }
 
     pb->initialized = true;
 
     // Initial arming: only arm first few slots to conserve DWQ resources
     // CPU proxy will arm the rest as needed
-    initial_arm_count = std::min(4, window_size);  // Only arm 4 slots initially
+    initial_arm_count = std::min(4, window_size);
     OPENGDA_Debug("proxy_barrier", "Arming initial %d of %d slots", initial_arm_count, window_size);
     for (int s = 0; s < initial_arm_count; s++) {
         int ret = queue_slot_work(pb, s);
@@ -610,8 +795,8 @@ gda_proxy_barrier_t* gda_proxy_barrier_alloc(int window_size) {
     // Barrier to ensure all ranks have initialized
     bootstrap->bootstrap_barrier();
 
-    OPENGDA_Info("proxy_barrier", "All-to-all proxy barrier allocated: rank=%d, window=%d, peers=%d",
-                mype, window_size, num_peers);
+    OPENGDA_Info("proxy_barrier", "Proxy barrier allocated and initialized: rank=%d, window=%d, rounds=%d",
+                mype, window_size, num_rounds);
 
     return pb;
 
@@ -627,15 +812,18 @@ cleanup_slots:
         }
     }
     ofi->deregister_memory(pb->mr_atomic_operand);
-    ofi->deregister_memory(pb->mr_arrive);
+    ofi->deregister_memory(pb->mr_slot_done);
+    ofi->deregister_memory(pb->mr_round_recv);
 
 cleanup_gpu:
 #ifdef USE_AMDGPU
-    if (dev.d_epoch) (void)hipFree((void*)dev.d_epoch);
-    if (dev.d_arrive) (void)hipFree((void*)dev.d_arrive);
-    if (pb->d_atomic_operand) (void)hipFree(pb->d_atomic_operand);
-    if (dev.slot_trigger_addrs) (void)hipHostFree((void*)dev.slot_trigger_addrs);
-    if (dev.slot_state) (void)hipHostFree((void*)dev.slot_state);
+    (void)hipFree((void*)dev.d_spin_cycles);
+    (void)hipFree((void*)dev.d_epoch);
+    (void)hipFree((void*)dev.d_slot_done);
+    (void)hipFree((void*)dev.d_round_recv);
+    (void)hipFree(pb->d_atomic_operand);
+    (void)hipHostFree((void*)dev.slot_trigger_addrs);
+    (void)hipHostFree((void*)dev.slot_state);
 #endif
     delete pb;
     return nullptr;
@@ -667,15 +855,20 @@ void gda_proxy_barrier_free(gda_proxy_barrier_t* barrier) {
     if (barrier->mr_atomic_operand) {
         ofi->deregister_memory(barrier->mr_atomic_operand);
     }
-    if (barrier->mr_arrive) {
-        ofi->deregister_memory(barrier->mr_arrive);
+    if (barrier->mr_slot_done) {
+        ofi->deregister_memory(barrier->mr_slot_done);
+    }
+    if (barrier->mr_round_recv) {
+        ofi->deregister_memory(barrier->mr_round_recv);
     }
 
     // Cleanup GPU memory
 #ifdef USE_AMDGPU
     gda_proxy_barrier_dev_t& dev = barrier->dev;
+    if (dev.d_spin_cycles) (void)hipFree((void*)dev.d_spin_cycles);
     if (dev.d_epoch) (void)hipFree((void*)dev.d_epoch);
-    if (dev.d_arrive) (void)hipFree((void*)dev.d_arrive);
+    if (dev.d_slot_done) (void)hipFree((void*)dev.d_slot_done);
+    if (dev.d_round_recv) (void)hipFree((void*)dev.d_round_recv);
     if (barrier->d_atomic_operand) (void)hipFree(barrier->d_atomic_operand);
     if (dev.slot_trigger_addrs) (void)hipHostFree((void*)dev.slot_trigger_addrs);
     if (dev.slot_state) (void)hipHostFree((void*)dev.slot_state);
@@ -746,7 +939,17 @@ int gda_proxy_barrier_get_stats(gda_proxy_barrier_t* barrier, gda_proxy_stats_t*
     stats->total_rearms = barrier->total_rearms.load();
     stats->queue_polls = barrier->queue_polls.load();
     stats->cq_events_drained = barrier->cq_events_drained.load();
-    stats->gpu_spin_cycles = 0;  // Not tracked in all-to-all variant
+
+#ifdef USE_AMDGPU
+    if (barrier->dev.d_spin_cycles) {
+        (void)hipMemcpy(&stats->gpu_spin_cycles, (void*)barrier->dev.d_spin_cycles,
+                        sizeof(uint64_t), hipMemcpyDeviceToHost);
+    } else {
+        stats->gpu_spin_cycles = 0;
+    }
+#else
+    stats->gpu_spin_cycles = 0;
+#endif
 
     return 0;
 }
