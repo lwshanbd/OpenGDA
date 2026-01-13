@@ -97,7 +97,7 @@ __global__ void gda_wait_and_barrier_kernel(gda_gpu_handle_t *put_handles,
                                             gda_proxy_barrier_dev_t *barrier,
                                             int s) {
   if (blockIdx.x == 0 && threadIdx.x == 0) {
-    // gda_gpu_wait(put_handles[s]);
+    gda_gpu_wait(put_handles[s]);
     gda_gpu_proxy_barrier_wait(barrier);
   }
 }
@@ -390,7 +390,7 @@ int main(int argc, char **argv) {
   }
 
   // Verify result on each rank locally
-//   bool verify_passed = verify_local_result(d_Cs, N, Ns, mype, npes, true);
+  bool verify_passed = verify_local_result(d_Cs, N, Ns, mype, npes, false);
 
   // Print matrix for small sizes (debugging)
   if (N <= 16 && mype == 0) {
@@ -403,9 +403,9 @@ int main(int argc, char **argv) {
 
   // Collect verification results
   gda_barrier();
-//   if (!verify_passed) {
-//     std::cerr << "Rank " << mype << ": VERIFICATION FAILED\n";
-//   }
+  if (!verify_passed) {
+    std::cerr << "Rank " << mype << ": VERIFICATION FAILED\n";
+  }
 
   gda_barrier();
   gda_finalize();
