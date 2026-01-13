@@ -68,7 +68,7 @@
 class CntrManager {
 public:
     // Number of counter pairs (trigger + completion)
-    static constexpr int NUM_CNTR_PAIRS = 256;
+    static constexpr int NUM_CNTR_PAIRS = 128;
     static constexpr int TOTAL_CNTRS = NUM_CNTR_PAIRS * 2;  // 128 total
 
     /**
@@ -831,6 +831,15 @@ public:
      */
     uint64_t get_trigger_threshold() const { return threshold_; }
 
+    /**
+     * Get the expected completion value for GPU to wait for.
+     * Uses monotonic counter pattern (same as proxy barrier's d_slot_done):
+     * - NIC atomically adds +1 to completion_signal after each operation
+     * - GPU waits for completion_signal >= completion_threshold
+     * - This avoids hipMemset in hot path which causes jitter
+     */
+    uint64_t get_completion_threshold() const { return completion_threshold_; }
+
     // ========================================================================
     // State Management
     // ========================================================================
@@ -919,6 +928,10 @@ private:
     // Threshold for triggering
     uint64_t threshold_;
 
+    // Monotonic completion threshold (incremented each prepare, GPU waits for this)
+    // This avoids hipMemset clearing completion_signal in hot path
+    uint64_t completion_threshold_;
+
     // ========================================================================
     // Deferred Work Structures (must remain valid until completion)
     // ========================================================================
@@ -997,7 +1010,7 @@ class Bootstrap;
  */
 class CompletionSignalPool {
 public:
-    static constexpr size_t MAX_SIGNALS = 128;  // Maximum number of signals
+    static constexpr size_t MAX_SIGNALS = 256;  // Maximum number of signals
     static constexpr size_t SIGNAL_SIZE = sizeof(uint64_t);  // 8 bytes each
     static constexpr size_t POOL_SIZE = MAX_SIGNALS * SIGNAL_SIZE;  // 2KB total
 

@@ -46,11 +46,17 @@ typedef struct gda_mr gda_mr_t;
  * Two modes are supported:
  * - DWQ mode (is_ipc=0): GPU writes to trigger_addr to initiate RDMA via NIC
  * - IPC mode (is_ipc=1): GPU can directly copy to/from ipc_dest_addr for same-node peers
+ *
+ * Completion uses monotonic counter (same as proxy barrier's d_slot_done):
+ * - NIC atomically adds +1 to completion_addr after each operation
+ * - GPU waits for completion_addr >= completion_threshold
+ * - This avoids hipMemset in hot path which causes jitter
  */
 typedef struct gda_gpu_handle {
     volatile uint64_t* trigger_addr;      // Write threshold here to trigger (DWQ mode)
-    volatile uint64_t* completion_addr;   // Poll this until non-zero
+    volatile uint64_t* completion_addr;   // Poll this for completion (GPU memory, NIC atomic adds)
     uint64_t trigger_threshold;           // Value to write to trigger (DWQ mode)
+    uint64_t completion_threshold;        // Wait until completion_addr >= this value (monotonic)
 
     // IPC mode fields (for same-node GPU communication)
     int is_ipc;                           // 1 = IPC mode (direct copy), 0 = DWQ mode (RDMA)
@@ -291,12 +297,25 @@ void gda_flush(void);
     } \
 } while(0)
 
+/**
+ * Wait for DWQ operation to complete.
+ *
+ * Uses monotonic counter pattern (same as proxy barrier's d_slot_done):
+ * - NIC atomically adds +1 to completion_addr after operation completes
+ * - GPU waits until completion_addr >= completion_threshold
+ * - This avoids hipMemset in hot path which causes jitter
+ *
+ * The __threadfence_system() before polling ensures all prior memory operations
+ * (including the trigger write) are visible to the NIC before we start polling.
+ */
 #define gda_gpu_wait(gpu_handle) do { \
-    while (__atomic_load_n((unsigned long long*)(gpu_handle).completion_addr, __ATOMIC_ACQUIRE) == 0) { \
-        /* Use atomic load to ensure visibility of NIC writes */ \
+    __threadfence_system(); /* Ensure trigger is visible to NIC before polling */ \
+    while (__atomic_load_n((unsigned long long*)(gpu_handle).completion_addr, __ATOMIC_ACQUIRE) < (gpu_handle).completion_threshold) { \
+        /* spin - same pattern as proxy barrier's d_slot_done polling */ \
     } \
-    __threadfence_system(); \
+    __threadfence();  /* GPU memory barrier after completion */ \
 } while(0)
+
 #endif
 
 #ifdef __CUDACC__
@@ -346,12 +365,18 @@ void gda_flush(void);
     } \
 } while(0)
 
+/**
+ * Wait for DWQ operation to complete.
+ * Uses monotonic counter pattern (same as proxy barrier's d_slot_done).
+ */
 #define gda_gpu_wait(gpu_handle) do { \
-    while (__atomic_load_n((unsigned long long*)(gpu_handle).completion_addr, __ATOMIC_ACQUIRE) == 0) { \
-        /* Use atomic load to ensure visibility of NIC writes */ \
+    __threadfence_system(); /* Ensure trigger is visible to NIC before polling */ \
+    while (atomicAdd((unsigned long long*)(gpu_handle).completion_addr, 0ULL) < (gpu_handle).completion_threshold) { \
+        /* spin - atomicAdd(x,0) is an atomic read */ \
     } \
-    __threadfence_system(); \
+    __threadfence();  /* GPU memory barrier after completion */ \
 } while(0)
+
 #endif
 
 // ============================================================================

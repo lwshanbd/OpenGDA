@@ -2471,6 +2471,7 @@ DWQOperation::DWQOperation()
     , atomic_operand_mr_(nullptr)
     , uses_shared_operand_(false)
     , threshold_(1)
+    , completion_threshold_(0)
     , op_rma_(nullptr)
     , msg_rma_(nullptr)
     , iov_(nullptr)
@@ -2774,15 +2775,10 @@ bool DWQOperation::prepare_write_explicit(void* local_buf, size_t size,
     fi_cntr_set(cntr_pair_->trigger->cntr, 0);
     fi_cntr_set(cntr_pair_->completion->cntr, 0);
 
-    // Reset completion signal
-#ifdef USE_AMDGPU
-    (void)hipMemset((void*)completion_signal_, 0, sizeof(uint64_t));
-    hipDeviceSynchronize();
-#endif
-#ifdef USE_NVGPU
-    (void)cudaMemset((void*)completion_signal_, 0, sizeof(uint64_t));
-    cudaDeviceSynchronize();
-#endif
+    // Increment completion threshold (monotonic counter pattern)
+    // NIC will atomic SUM +1 to completion_signal_, GPU waits for >= threshold
+    // This avoids hipMemset in hot path which causes jitter
+    ++completion_threshold_;
 
     // Determine remote address mode
     // For CXI (no FI_MR_VIRT_ADDR): remote_addr is treated as offset from MR base
@@ -2953,15 +2949,10 @@ bool DWQOperation::prepare_read_explicit(void* local_buf, size_t size,
     fi_cntr_set(cntr_pair_->trigger->cntr, 0);
     fi_cntr_set(cntr_pair_->completion->cntr, 0);
 
-    // Reset completion signal
-#ifdef USE_AMDGPU
-    (void)hipMemset((void*)completion_signal_, 0, sizeof(uint64_t));
-    hipDeviceSynchronize();
-#endif
-#ifdef USE_NVGPU
-    (void)cudaMemset((void*)completion_signal_, 0, sizeof(uint64_t));
-    cudaDeviceSynchronize();
-#endif
+    // Increment completion threshold (monotonic counter pattern)
+    // NIC will atomic SUM +1 to completion_signal_, GPU waits for >= threshold
+    // This avoids hipMemset in hot path which causes jitter
+    ++completion_threshold_;
 
     // Determine remote address mode
     // For CXI (no FI_MR_VIRT_ADDR): remote_addr is treated as offset from MR base
@@ -3122,19 +3113,12 @@ bool DWQOperation::reset() {
         fi_cntr_set(cntr_pair_->completion->cntr, 0);
     }
 
-    // Reset completion signal
-#ifdef USE_AMDGPU
-    if (completion_signal_) {
-        (void)hipMemset((void*)completion_signal_, 0, sizeof(uint64_t));
-        hipDeviceSynchronize();
-    }
-#endif
-#ifdef USE_NVGPU
-    if (completion_signal_) {
-        (void)cudaMemset((void*)completion_signal_, 0, sizeof(uint64_t));
-        cudaDeviceSynchronize();
-    }
-#endif
+    // NOTE: completion_signal_ is NOT cleared here!
+    // Using monotonic counter pattern (same as proxy barrier's d_slot_done):
+    // - NIC atomically adds +1 to completion_signal_ after each operation
+    // - Each prepare() increments completion_threshold_
+    // - GPU waits for completion_signal_ >= completion_threshold_
+    // This avoids hipMemset/cudaMemset in hot path which causes jitter.
 
     state_ = State::INITIALIZED;
     return true;

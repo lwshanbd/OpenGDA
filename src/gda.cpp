@@ -275,6 +275,7 @@ gda_handle_t* gda_put(void* local_buf, size_t size, int dest_rank, size_t dest_o
             handle->gpu.completion_addr = completion_signal;
             handle->gpu.trigger_addr = nullptr;
             handle->gpu.trigger_threshold = 0;
+            handle->gpu.completion_threshold = 1;  // IPC mode: always wait for >= 1
 
             OPENGDA_Debug("gda", "Created IPC put handle: local=%p -> peer %d offset=%zu size=%zu",
                          local_buf, dest_rank, dest_offset, size);
@@ -321,6 +322,7 @@ dwq_path:
     handle->gpu.trigger_addr = handle->op->dwq_op->get_trigger_addr();
     handle->gpu.completion_addr = handle->op->dwq_op->get_completion_signal();
     handle->gpu.trigger_threshold = handle->op->dwq_op->get_trigger_threshold();
+    handle->gpu.completion_threshold = handle->op->dwq_op->get_completion_threshold();
     handle->gpu.ipc_dest_addr = nullptr;
     handle->gpu.ipc_src_addr = nullptr;
     handle->gpu.ipc_size = 0;
@@ -390,6 +392,7 @@ gda_handle_t* gda_get(void* local_buf, size_t size, int src_rank, size_t src_off
             handle->gpu.completion_addr = completion_signal;
             handle->gpu.trigger_addr = nullptr;
             handle->gpu.trigger_threshold = 0;
+            handle->gpu.completion_threshold = 1;  // IPC mode: always wait for >= 1
 
             OPENGDA_Debug("gda", "Created IPC get handle: peer %d offset=%zu -> local=%p size=%zu",
                          src_rank, src_offset, local_buf, size);
@@ -436,6 +439,7 @@ dwq_path_get:
     handle->gpu.trigger_addr = handle->op->dwq_op->get_trigger_addr();
     handle->gpu.completion_addr = handle->op->dwq_op->get_completion_signal();
     handle->gpu.trigger_threshold = handle->op->dwq_op->get_trigger_threshold();
+    handle->gpu.completion_threshold = handle->op->dwq_op->get_completion_threshold();
     handle->gpu.ipc_dest_addr = nullptr;
     handle->gpu.ipc_src_addr = nullptr;
     handle->gpu.ipc_size = 0;
@@ -624,6 +628,7 @@ int gda_reset(gda_handle_t* handle) {
     handle->gpu.trigger_addr = nullptr;
     handle->gpu.completion_addr = nullptr;
     handle->gpu.trigger_threshold = 0;
+    handle->gpu.completion_threshold = 0;
 
     return 0;
 }
@@ -888,6 +893,7 @@ int gda_gpu_barrier_reset(gda_gpu_barrier_t* barrier) {
                 h->gpu.trigger_addr = h->op->dwq_op->get_trigger_addr();
                 h->gpu.completion_addr = h->op->dwq_op->get_completion_signal();
                 h->gpu.trigger_threshold = h->op->dwq_op->get_trigger_threshold();
+                h->gpu.completion_threshold = h->op->dwq_op->get_completion_threshold();
                 barrier->phase_handles[i] = h->gpu;
             }
         }
