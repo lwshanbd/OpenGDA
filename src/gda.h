@@ -305,14 +305,26 @@ void gda_flush(void);
  * - GPU waits until completion_addr >= completion_threshold
  * - This avoids hipMemset in hot path which causes jitter
  *
- * The __threadfence_system() before polling ensures all prior memory operations
- * (including the trigger write) are visible to the NIC before we start polling.
+ * Uses cache-bypassing loads to avoid L1/L2 cache coherency issues when
+ * polling memory written by NIC. Similar to NVSHMEM's poll_cq approach.
+ *
+ * The inline asm uses glc (globally coherent) and slc (system level coherent)
+ * flags to bypass L1/L2 caches and read directly from memory/LLC.
  */
 #define gda_gpu_wait(gpu_handle) do { \
     __threadfence_system(); /* Ensure trigger is visible to NIC before polling */ \
-    while (__atomic_load_n((unsigned long long*)(gpu_handle).completion_addr, __ATOMIC_ACQUIRE) < (gpu_handle).completion_threshold) { \
-        /* spin - same pattern as proxy barrier's d_slot_done polling */ \
-    } \
+    uint64_t _completion_val; \
+    volatile uint64_t* _completion_ptr = (gpu_handle).completion_addr; \
+    do { \
+        /* Cache-bypassing load for AMD GPUs (MI200/MI300) */ \
+        asm volatile( \
+            "global_load_dwordx2 %0, %1, off glc slc\n" \
+            "s_waitcnt vmcnt(0)" \
+            : "=v"(_completion_val) \
+            : "v"(_completion_ptr) \
+            : "memory" \
+        ); \
+    } while (_completion_val < (gpu_handle).completion_threshold); \
     __threadfence();  /* GPU memory barrier after completion */ \
 } while(0)
 
@@ -368,12 +380,19 @@ void gda_flush(void);
 /**
  * Wait for DWQ operation to complete.
  * Uses monotonic counter pattern (same as proxy barrier's d_slot_done).
+ * Uses cache-bypassing loads for proper coherency with NIC writes.
  */
 #define gda_gpu_wait(gpu_handle) do { \
     __threadfence_system(); /* Ensure trigger is visible to NIC before polling */ \
-    while (atomicAdd((unsigned long long*)(gpu_handle).completion_addr, 0ULL) < (gpu_handle).completion_threshold) { \
-        /* spin - atomicAdd(x,0) is an atomic read */ \
-    } \
+    uint64_t _completion_val; \
+    volatile uint64_t* _completion_ptr = (gpu_handle).completion_addr; \
+    do { \
+        /* Cache-bypassing load for NVIDIA GPUs (Volta+) */ \
+        asm volatile("ld.relaxed.gpu.global.L1::no_allocate.b64 %0, [%1];" \
+                     : "=l"(_completion_val) \
+                     : "l"(_completion_ptr) \
+                     : "memory"); \
+    } while (_completion_val < (gpu_handle).completion_threshold); \
     __threadfence();  /* GPU memory barrier after completion */ \
 } while(0)
 

@@ -1115,7 +1115,8 @@ bool CompletionSignalPool::allocate(volatile uint64_t** signal_out, size_t* offs
             allocated_.set(i);
             allocated_count_++;
 
-            *signal_out = &base_addr_[i];
+            // Each signal is SIGNAL_SIZE (128 bytes) apart for cache-line alignment
+            *signal_out = (volatile uint64_t*)((char*)base_addr_ + i * SIGNAL_SIZE);
             *offset_out = pool_offset_in_mr_ + i * SIGNAL_SIZE;
 
             OPENGDA_Debug("signal_pool", "Allocated signal %zu, offset=%zu, total=%zu",
@@ -1140,14 +1141,14 @@ void CompletionSignalPool::release(volatile uint64_t* signal) {
         return;
     }
 
-    // Calculate index from address
-    ptrdiff_t diff = signal - base_addr_;
-    if (diff < 0 || (size_t)diff >= MAX_SIGNALS) {
+    // Calculate index from address (signals are SIGNAL_SIZE bytes apart)
+    ptrdiff_t byte_diff = (char*)signal - (char*)base_addr_;
+    if (byte_diff < 0 || (size_t)byte_diff >= POOL_SIZE) {
         OPENGDA_Warn("signal_pool", "Signal %p not in pool range", (void*)signal);
         return;
     }
 
-    size_t index = (size_t)diff;
+    size_t index = (size_t)byte_diff / SIGNAL_SIZE;
     if (!allocated_.test(index)) {
         OPENGDA_Warn("signal_pool", "Signal %zu not allocated", index);
         return;

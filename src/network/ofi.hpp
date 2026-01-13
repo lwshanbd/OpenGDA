@@ -1007,12 +1007,18 @@ class Bootstrap;
  *
  * Layout in default GPU MR:
  *   [user data region] ... [completion signal pool (at end)]
+ *
+ * IMPORTANT: Each signal is cache-line aligned (128 bytes for MI200/MI300)
+ * to avoid false sharing between signals and ensure proper cache coherency
+ * when NIC writes to GPU memory.
  */
 class CompletionSignalPool {
 public:
+    // MI200/MI300 use 128-byte cache lines; ensure each signal is isolated
+    static constexpr size_t CACHE_LINE_SIZE = 128;
     static constexpr size_t MAX_SIGNALS = 256;  // Maximum number of signals
-    static constexpr size_t SIGNAL_SIZE = sizeof(uint64_t);  // 8 bytes each
-    static constexpr size_t POOL_SIZE = MAX_SIGNALS * SIGNAL_SIZE;  // 2KB total
+    static constexpr size_t SIGNAL_SIZE = CACHE_LINE_SIZE;  // Each signal gets its own cache line
+    static constexpr size_t POOL_SIZE = MAX_SIGNALS * SIGNAL_SIZE;  // 32KB total
 
     CompletionSignalPool();
     ~CompletionSignalPool();
