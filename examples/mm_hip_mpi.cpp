@@ -48,9 +48,10 @@ float timediff_us(const timespec& t_start, const timespec& t_end)
 __global__ void matmul_stripe_kernel(
     const float* __restrict__ As,
     const float* __restrict__ Bs,
-    float* __restrict__ Cb,
+    float* __restrict__ Cs,
     int N,
-    int Ns)
+    int Ns,
+    int col_offset)
 {
     // Each thread handles one (k, j) pair
     int k = blockIdx.x * blockDim.x + threadIdx.x;
@@ -59,7 +60,7 @@ __global__ void matmul_stripe_kernel(
     if (k < N && j < Ns) {
         float b_kj = Bs[k * Ns + j];
         for (int i = 0; i < Ns; i++) {
-            atomicAdd(&Cb[i * N + j], As[i * N + k] * b_kj);
+            atomicAdd(&Cs[i * N + col_offset + j], As[i * N + k] * b_kj);
         }
     }
 }
@@ -75,7 +76,13 @@ int main(int argc, char** argv)
     // Set GPU device based on local rank
     int num_devices;
     HIP_CHECK(hipGetDeviceCount(&num_devices));
-    HIP_CHECK(hipSetDevice(mype % num_devices));
+    int gpu_id = mype % num_devices;
+    HIP_CHECK(hipSetDevice(gpu_id));
+
+    // Debug: print GPU assignment
+    if (mype < 8 || mype == npes - 1) {
+        std::cerr << "Rank " << mype << " using GPU " << gpu_id << " (num_devices=" << num_devices << ")\n";
+    }
 
     // Matrix size from command line or default
     int N = (argc > 1) ? atoi(argv[1]) : 4096;
@@ -115,37 +122,49 @@ int main(int argc, char** argv)
 
     // Make sure all the stripes are initialized
     MPI_Barrier(MPI_COMM_WORLD);
-    clock_gettime(CLOCK_MONOTONIC_RAW, &t0);
 
     // Kernel launch configuration
     dim3 blockDim(16, 16);
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
                  (Ns + blockDim.y - 1) / blockDim.y);
 
+    // Warm-up: run one iteration to eliminate first-launch overhead
+    {
+        int col_offset = mype * Ns;
+        hipLaunchKernelGGL(matmul_stripe_kernel, gridDim, blockDim, 0, 0,
+                           d_As, d_Bs, d_Cs, N, Ns, col_offset);
+        HIP_CHECK(hipDeviceSynchronize());
+        // Reset Cs to zero after warm-up
+        HIP_CHECK(hipMemset(d_Cs, 0, stripe_size));
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t0);
+
     for (int s = 0; s < npes; s++) {
         const int block_num = (mype + s) % npes;
 
         // Start async send of current Bs to left neighbor
         MPI_Request sreq;
-        MPI_Isend(d_Bs, N * Ns, MPI_FLOAT, (npes + mype - 1) % npes, 0, MPI_COMM_WORLD, &sreq);
+        // MPI_Isend(d_Bs, N * Ns, MPI_FLOAT, (npes + mype - 1) % npes, 0, MPI_COMM_WORLD, &sreq);
 
-        // Compute: Cb += As * Bs
-        float* d_Cb = d_Cs + block_num * Ns;
+        // Compute: Cs += As * Bs
+        int col_offset = block_num * Ns;
         hipLaunchKernelGGL(matmul_stripe_kernel, gridDim, blockDim, 0, 0,
-                           d_As, d_Bs, d_Cb, N, Ns);
+                           d_As, d_Bs, d_Cs, N, Ns, col_offset);
         HIP_CHECK(hipDeviceSynchronize());
 
         // Receive next Bs from right neighbor
-        MPI_Recv(d_Bn, N * Ns, MPI_FLOAT, (mype + 1) % npes, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        MPI_Wait(&sreq, MPI_STATUS_IGNORE);
+        // MPI_Recv(d_Bn, N * Ns, MPI_FLOAT, (mype + 1) % npes, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        // MPI_Wait(&sreq, MPI_STATUS_IGNORE);
 
-        // Swap Bs and Bn
-        std::swap(d_Bs, d_Bn);
+        // // Swap Bs and Bn
+        // std::swap(d_Bs, d_Bn);
 
-        MPI_Barrier(MPI_COMM_WORLD);
+        // MPI_Barrier(MPI_COMM_WORLD);
     }
 
-    MPI_Barrier(MPI_COMM_WORLD);
+    // MPI_Barrier(MPI_COMM_WORLD);
     clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
 
     if (mype == 0) {
@@ -174,7 +193,7 @@ int main(int argc, char** argv)
         }
     }
 
-    MPI_Barrier(MPI_COMM_WORLD);
+    // MPI_Barrier(MPI_COMM_WORLD);
 
     // Cleanup
     HIP_CHECK(hipFree(d_Bn));

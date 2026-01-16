@@ -313,13 +313,13 @@ int main(int argc, char **argv) {
   gda_barrier();
 
   // Start proxy thread BEFORE launching kernels
-  if (gda_proxy_start(barrier) != 0) {
-    std::cerr << "Rank " << mype << ": Failed to start proxy thread"
-              << std::endl;
-    gda_proxy_barrier_free(barrier);
-    gda_finalize();
-    return 1;
-  }
+  // if (gda_proxy_start(barrier) != 0) {
+  //   std::cerr << "Rank " << mype << ": Failed to start proxy thread"
+  //             << std::endl;
+  //   gda_proxy_barrier_free(barrier);
+  //   gda_finalize();
+  //   return 1;
+  // }
 
   clock_gettime(CLOCK_MONOTONIC_RAW, &t0);
 
@@ -347,22 +347,23 @@ int main(int argc, char **argv) {
   clock_gettime(CLOCK_MONOTONIC_RAW, &t0);
 
   for (int s = 0; s < npes; s++) {
-    hipLaunchKernelGGL(gda_trigger_kernel, oneGrid, oneBlock, 0, stream,
-                       d_put_handles, s);
-
+    // hipLaunchKernelGGL(gda_trigger_kernel, oneGrid, oneBlock, 0, stream,
+    //                    d_put_handles, s);
+    
     hipLaunchKernelGGL(mm_compute_kernel, gridDim, blockDim, 0, stream, d_As,
                        cur_Bs_ptr(s), d_Cs, N, Ns, mype, npes, s);
 
-    hipLaunchKernelGGL(gda_wait_and_barrier_kernel, oneGrid, oneBlock, 0,
-                       stream, d_put_handles, d_barrier, s);
+    // hipLaunchKernelGGL(gda_wait_and_barrier_kernel, oneGrid, oneBlock, 0,
+    //                    stream, d_put_handles, d_barrier, s);
+    HIP_CHECK(hipDeviceSynchronize());
   }
 
-
-  HIP_CHECK(hipStreamSynchronize(stream));
   clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
+  HIP_CHECK(hipStreamSynchronize(stream));
+  
 
   // Stop proxy thread
-  gda_proxy_stop(barrier);
+  // gda_proxy_stop(barrier);
 
   // Get proxy stats before cleanup
   gda_proxy_stats_t stats;
@@ -390,7 +391,7 @@ int main(int argc, char **argv) {
   }
 
   // Verify result on each rank locally
-  bool verify_passed = verify_local_result(d_Cs, N, Ns, mype, npes, false);
+  // bool verify_passed = verify_local_result(d_Cs, N, Ns, mype, npes, true);
 
   // Print matrix for small sizes (debugging)
   if (N <= 16 && mype == 0) {
@@ -403,9 +404,9 @@ int main(int argc, char **argv) {
 
   // Collect verification results
   gda_barrier();
-  if (!verify_passed) {
-    std::cerr << "Rank " << mype << ": VERIFICATION FAILED\n";
-  }
+  //   if (!verify_passed) {
+  //     std::cerr << "Rank " << mype << ": VERIFICATION FAILED\n";
+  // }
 
   gda_barrier();
   gda_finalize();

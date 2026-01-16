@@ -49,7 +49,7 @@ if(USE_AMDGPU)
     target_compile_definitions(mm_hip_mpi PRIVATE USE_AMDGPU)
     set_source_files_properties(mm_hip_mpi.cpp PROPERTIES LANGUAGE HIP)
     # Link GTL library for GPU-aware MPI (HSA for AMD GPUs)
-    target_link_libraries(mm_hip_mpi PRIVATE /opt/cray/pe/lib64/libmpi_gtl_hsa.so)
+    # DISABLED for testing: target_link_libraries(mm_hip_mpi PRIVATE /opt/cray/pe/lib64/libmpi_gtl_hsa.so)
 
     # mm_hip_gda - Matrix multiplication with HIP + GDA (N ranks)
     add_executable(mm_hip_gda mm_hip_gda.cpp)
@@ -70,26 +70,56 @@ if(USE_AMDGPU)
     target_compile_definitions(mm_hip_gda_proxy PRIVATE USE_AMDGPU)
     set_source_files_properties(mm_hip_gda_proxy.cpp PROPERTIES LANGUAGE HIP)
 
+    # mm_hip_gda_proxy_repeat - Repeated MM with timing statistics (N ranks)
+    add_executable(mm_hip_gda_proxy_repeat mm_hip_gda_proxy_repeat.cpp)
+    target_link_libraries(mm_hip_gda_proxy_repeat PRIVATE opengda)
+    target_compile_definitions(mm_hip_gda_proxy_repeat PRIVATE USE_AMDGPU)
+    set_source_files_properties(mm_hip_gda_proxy_repeat.cpp PROPERTIES LANGUAGE HIP)
+
+    # gda_put_bw - Put bandwidth benchmark (2 ranks)
+    # Uses raw libfabric DWQ API, needs direct libfabric/PMI2 access
+    add_executable(gda_put_bw gda_put_bw.cpp)
+    target_link_libraries(gda_put_bw PRIVATE ${NETWORK_LIBRARY} ${BOOTSTRAP_LIBRARY})
+    target_include_directories(gda_put_bw PRIVATE ${NETWORK_INCLUDE_DIR} ${BOOTSTRAP_INCLUDE_DIR})
+    target_compile_definitions(gda_put_bw PRIVATE USE_AMDGPU)
+    set_source_files_properties(gda_put_bw.cpp PROPERTIES LANGUAGE HIP)
+
+    # gda_get_bw - Get bandwidth benchmark (2 ranks)
+    add_executable(gda_get_bw gda_get_bw.cpp)
+    target_link_libraries(gda_get_bw PRIVATE opengda)
+    target_compile_definitions(gda_get_bw PRIVATE USE_AMDGPU)
+    set_source_files_properties(gda_get_bw.cpp PROPERTIES LANGUAGE HIP)
+
     # Link HIP runtime to new examples
     if(hip_FOUND)
         target_link_libraries(mm_hip_mpi PRIVATE hip::device)
         target_link_libraries(mm_hip_gda PRIVATE hip::device)
         target_link_libraries(barrier_test PRIVATE hip::device)
         target_link_libraries(mm_hip_gda_proxy PRIVATE hip::device)
+        target_link_libraries(mm_hip_gda_proxy_repeat PRIVATE hip::device)
+        target_link_libraries(gda_put_bw PRIVATE hip::device)
+        target_link_libraries(gda_get_bw PRIVATE hip::device)
     else()
         target_include_directories(mm_hip_mpi PRIVATE ${HIP_INCLUDE_DIR})
         target_include_directories(mm_hip_gda PRIVATE ${HIP_INCLUDE_DIR})
         target_include_directories(barrier_test PRIVATE ${HIP_INCLUDE_DIR})
         target_include_directories(mm_hip_gda_proxy PRIVATE ${HIP_INCLUDE_DIR})
+        target_include_directories(mm_hip_gda_proxy_repeat PRIVATE ${HIP_INCLUDE_DIR})
+        target_include_directories(gda_put_bw PRIVATE ${HIP_INCLUDE_DIR})
+        target_include_directories(gda_get_bw PRIVATE ${HIP_INCLUDE_DIR})
         target_link_libraries(mm_hip_mpi PRIVATE ${HIP_LIBRARY})
         target_link_libraries(mm_hip_gda PRIVATE ${HIP_LIBRARY})
         target_link_libraries(barrier_test PRIVATE ${HIP_LIBRARY})
         target_link_libraries(mm_hip_gda_proxy PRIVATE ${HIP_LIBRARY})
+        target_link_libraries(mm_hip_gda_proxy_repeat PRIVATE ${HIP_LIBRARY})
+        target_link_libraries(gda_put_bw PRIVATE ${HIP_LIBRARY})
+        target_link_libraries(gda_get_bw PRIVATE ${HIP_LIBRARY})
     endif()
 
     # Installation
     install(TARGETS mr_example put_example test_example mm_hip_mpi mm_hip_gda
-            barrier_test mm_hip_gda_proxy
+            barrier_test mm_hip_gda_proxy mm_hip_gda_proxy_repeat
+            gda_put_bw gda_get_bw
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}/examples)
 else()
     message(STATUS "Skipping examples (GPU support required)")

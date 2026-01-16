@@ -20,7 +20,7 @@
  * - NIC: Increment completion counter when done
  *
  * Based on libfabric Deferred Work Queue specification
- */
+*/
 
 #include <cstdint>
 #include <cstdio>
@@ -71,6 +71,23 @@ int myrank = -1;
 // Test parameters
 #define NUM_ITERATIONS 20 // Run 20 iterations, report average of best 10
 const size_t test_sizes[] = {
+  1,
+  2,
+  4,
+  8,
+  16,
+  32,
+  64,
+  128,
+  256,
+  512,
+  1024,
+  2048,
+  4096,
+  8192,
+  16384,
+  32768,
+  65536,
   16 * 1024, // 16KB
                32 * 1024,  // 32KB
                64 * 1024,  // 64KB
@@ -340,7 +357,7 @@ int main(void) {
     }
     
   }
-  exit(0);
+  // exit(0);
   if (!cxi_info) {
     fprintf(stderr, "Rank %d: CXI provider not found!\n", myrank);
     fi_freeinfo(info);
@@ -748,13 +765,15 @@ int main(void) {
           PMI2_Finalize();
           exit(1);
         }
-
+        auto t_start = std::chrono::high_resolution_clock::now();
         // GPU writes trigger counter and waits for atomic_result
         // Timing is done inside GPU kernel using clock64()
         hipLaunchKernelGGL(gpu_write_counter_doorbell, dim3(1), dim3(1), 0, 0,
                            dev_trigger_cntr, atomic_result, work.threshold,
                            d_start_clock, d_end_clock);
+        
         CHECK_HIP(hipDeviceSynchronize(), "hipDeviceSynchronize");
+        auto t_end = std::chrono::high_resolution_clock::now();
 
         // Read GPU timestamps
         uint64_t start_clock, end_clock;
@@ -766,7 +785,8 @@ int main(void) {
                   "hipMemcpy read end_clock");
 
         // Convert GPU cycles to microseconds
-        double elapsed_us = (end_clock - start_clock) / gpu_clock_mhz;
+        // auto t_end = std::chrono::high_resolution_clock::now();
+        double elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
 
         iteration_times[successful_iterations] = elapsed_us;
         successful_iterations++;
