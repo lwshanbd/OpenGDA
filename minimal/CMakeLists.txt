@@ -87,6 +87,12 @@ add_executable(gda_benchmark_batched main_batched.cpp)
 target_include_directories(gda_benchmark_batched PRIVATE ${COMMON_INCLUDES})
 target_link_libraries(gda_benchmark_batched PRIVATE ${COMMON_LIBS})
 
+# Matrix multiplication with DWQ (replaces mm_hip_mpi)
+set_source_files_properties(mm_gda_minimal.cpp PROPERTIES LANGUAGE HIP)
+add_executable(mm_gda_minimal mm_gda_minimal.cpp)
+target_include_directories(mm_gda_minimal PRIVATE ${COMMON_INCLUDES})
+target_link_libraries(mm_gda_minimal PRIVATE ${COMMON_LIBS})
+
 # Print configuration
 message(STATUS "HIP found: ${hip_DIR}")
 message(STATUS "HIP architectures: ${CMAKE_HIP_ARCHITECTURES}")

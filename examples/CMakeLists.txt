@@ -49,7 +49,7 @@ if(USE_AMDGPU)
     target_compile_definitions(mm_hip_mpi PRIVATE USE_AMDGPU)
     set_source_files_properties(mm_hip_mpi.cpp PROPERTIES LANGUAGE HIP)
     # Link GTL library for GPU-aware MPI (HSA for AMD GPUs)
-    # DISABLED for testing: target_link_libraries(mm_hip_mpi PRIVATE /opt/cray/pe/lib64/libmpi_gtl_hsa.so)
+    target_link_libraries(mm_hip_mpi PRIVATE /opt/cray/pe/lib64/libmpi_gtl_hsa.so)
 
     # mm_hip_gda - Matrix multiplication with HIP + GDA (N ranks)
     add_executable(mm_hip_gda mm_hip_gda.cpp)

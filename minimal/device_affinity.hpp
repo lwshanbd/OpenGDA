@@ -29,6 +29,7 @@ public:
     std::string selected_cxi_domain; // CXI domain name (e.g., "cxi0")
     bool affinity_matched;           // True if GPU-NIC affinity was found
 
+    // Auto-detect best GPU-NIC pair
     DeviceAffinityDetector() :
         selected_gpu_id(0),
         affinity_matched(false),
@@ -40,6 +41,20 @@ public:
         hwloc_topology_load(topo_);
 
         detect_affinity();
+    }
+
+    // Use specified GPU and find matching CXI
+    explicit DeviceAffinityDetector(int gpu_id) :
+        selected_gpu_id(gpu_id),
+        affinity_matched(false),
+        topo_(nullptr)
+    {
+        // Initialize hwloc topology
+        hwloc_topology_init(&topo_);
+        hwloc_topology_set_io_types_filter(topo_, HWLOC_TYPE_FILTER_KEEP_ALL);
+        hwloc_topology_load(topo_);
+
+        detect_affinity_for_gpu(gpu_id);
     }
 
     ~DeviceAffinityDetector() {
@@ -238,5 +253,86 @@ private:
         selected_gpu_id = 0;
         affinity_matched = false;
         fprintf(stderr, "Warning: No GPU-NIC affinity match found, using GPU 0\n");
+    }
+
+    // Detect affinity for a specific GPU
+    void detect_affinity_for_gpu(int target_gpu_id) {
+        // Get GPU PCI ID
+        char pci_bus_id[32] = {0};
+        hipError_t hip_err = hipDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), target_gpu_id);
+        if (hip_err != hipSuccess) {
+            fprintf(stderr, "Warning: Cannot get PCI ID for GPU %d\n", target_gpu_id);
+            return;
+        }
+
+        // Find GPU affinity in hwloc
+        DeviceAffinity gpu_aff;
+        bool found_gpu = false;
+
+        hwloc_obj_t osdev = nullptr;
+        while ((osdev = hwloc_get_next_osdev(topo_, osdev)) != nullptr) {
+            if (osdev->attr->osdev.type == HWLOC_OBJ_OSDEV_GPU ||
+                osdev->attr->osdev.type == HWLOC_OBJ_OSDEV_COPROC) {
+
+                DeviceAffinity temp_affinity;
+                if (get_device_affinity(osdev, temp_affinity)) {
+                    if (strcasecmp(temp_affinity.pci_id.c_str(), pci_bus_id) == 0) {
+                        gpu_aff = temp_affinity;
+                        found_gpu = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!found_gpu) {
+            fprintf(stderr, "Warning: Cannot find hwloc affinity for GPU %d\n", target_gpu_id);
+            return;
+        }
+
+        // Build NIC affinities map
+        hwloc_obj_t osdev_nic = nullptr;
+        while ((osdev_nic = hwloc_get_next_osdev(topo_, osdev_nic)) != nullptr) {
+            if (osdev_nic->attr->osdev.type == HWLOC_OBJ_OSDEV_NETWORK ||
+                osdev_nic->attr->osdev.type == HWLOC_OBJ_OSDEV_OPENFABRICS) {
+                DeviceAffinity nic_affinity;
+                if (get_device_affinity(osdev_nic, nic_affinity)) {
+                    std::string nic_name = osdev_nic->name ? osdev_nic->name : "";
+                    if (!nic_name.empty()) {
+                        nic_affinities_[nic_name] = nic_affinity;
+                    }
+                }
+            }
+        }
+
+        // Find matching CXI for this GPU
+        for (int cxi_id = 0; cxi_id < 8; cxi_id++) {
+            char hsi_name[32];
+            snprintf(hsi_name, sizeof(hsi_name), "hsi%d", cxi_id);
+
+            auto it = nic_affinities_.find(hsi_name);
+            if (it != nic_affinities_.end()) {
+                const DeviceAffinity& nic_aff = it->second;
+
+                if (nic_aff.affinity_type == gpu_aff.affinity_type &&
+                    nic_aff.affinity_index == gpu_aff.affinity_index) {
+                    char cxi_domain[32];
+                    snprintf(cxi_domain, sizeof(cxi_domain), "cxi%d", cxi_id);
+                    selected_cxi_domain = cxi_domain;
+                    affinity_matched = true;
+                    gpu_affinity_ = gpu_aff;
+
+                    printf("DeviceAffinity: GPU %d (PCI %s) -> CXI %s "
+                           "(affinity: %s L#%d)\n",
+                           target_gpu_id, gpu_aff.pci_id.c_str(),
+                           selected_cxi_domain.c_str(),
+                           hwloc_obj_type_string(gpu_aff.affinity_type),
+                           gpu_aff.affinity_index);
+                    return;
+                }
+            }
+        }
+
+        fprintf(stderr, "Warning: No matching CXI for GPU %d, using default\n", target_gpu_id);
     }
 };

@@ -67,16 +67,27 @@ __global__ void matmul_stripe_kernel(
 
 int main(int argc, char** argv)
 {
+    // CRITICAL: Unset ROCR_VISIBLE_DEVICES before any HIP/MPI initialization
+    // Flux sets this which causes GPU virtualization issues
+    unsetenv("ROCR_VISIBLE_DEVICES");
+
     MPI_Init(&argc, &argv);
 
     int mype, npes;
     MPI_Comm_rank(MPI_COMM_WORLD, &mype);
     MPI_Comm_size(MPI_COMM_WORLD, &npes);
 
+    // Get local rank for GPU selection
+    int local_rank = 0;
+    const char* local_rank_env = getenv("SLURM_LOCALID");
+    if (local_rank_env) {
+        local_rank = atoi(local_rank_env);
+    }
+
     // Set GPU device based on local rank
     int num_devices;
     HIP_CHECK(hipGetDeviceCount(&num_devices));
-    int gpu_id = mype % num_devices;
+    int gpu_id = local_rank % num_devices;
     HIP_CHECK(hipSetDevice(gpu_id));
 
     // Debug: print GPU assignment
@@ -146,7 +157,7 @@ int main(int argc, char** argv)
 
         // Start async send of current Bs to left neighbor
         MPI_Request sreq;
-        // MPI_Isend(d_Bs, N * Ns, MPI_FLOAT, (npes + mype - 1) % npes, 0, MPI_COMM_WORLD, &sreq);
+        MPI_Isend(d_Bs, N * Ns, MPI_FLOAT, (npes + mype - 1) % npes, 0, MPI_COMM_WORLD, &sreq);
 
         // Compute: Cs += As * Bs
         int col_offset = block_num * Ns;
@@ -155,13 +166,13 @@ int main(int argc, char** argv)
         HIP_CHECK(hipDeviceSynchronize());
 
         // Receive next Bs from right neighbor
-        // MPI_Recv(d_Bn, N * Ns, MPI_FLOAT, (mype + 1) % npes, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        // MPI_Wait(&sreq, MPI_STATUS_IGNORE);
+        MPI_Recv(d_Bn, N * Ns, MPI_FLOAT, (mype + 1) % npes, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Wait(&sreq, MPI_STATUS_IGNORE);
 
-        // // Swap Bs and Bn
-        // std::swap(d_Bs, d_Bn);
+        // Swap Bs and Bn
+        std::swap(d_Bs, d_Bn);
 
-        // MPI_Barrier(MPI_COMM_WORLD);
+        MPI_Barrier(MPI_COMM_WORLD);
     }
 
     // MPI_Barrier(MPI_COMM_WORLD);
@@ -193,7 +204,7 @@ int main(int argc, char** argv)
         }
     }
 
-    // MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Barrier(MPI_COMM_WORLD);
 
     // Cleanup
     HIP_CHECK(hipFree(d_Bn));
