@@ -17,6 +17,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "device_affinity.hpp"
+
 class FabricDwqContext {
 public:
     // Libfabric objects (order matters for cleanup)
@@ -56,7 +58,10 @@ public:
     // For error messages
     int rank;
 
-    FabricDwqContext(int rank_) :
+    // Affinity detector for CXI selection (optional, can be nullptr)
+    DeviceAffinityDetector* affinity_detector_;
+
+    FabricDwqContext(int rank_, DeviceAffinityDetector* affinity_detector = nullptr) :
         info(nullptr), cxi_info(nullptr), fabric(nullptr), domain(nullptr),
         av(nullptr), cq(nullptr), ep(nullptr),
         trigger_cntr(nullptr), completion_cntr(nullptr), atomic_completion_cntr(nullptr),
@@ -66,7 +71,8 @@ public:
         dev_trigger_cntr(nullptr), dev_completion_cntr(nullptr),
         local_addr(nullptr), addrlen(0),
         peer_addr(FI_ADDR_NOTAVAIL), local_addr_in_av(FI_ADDR_NOTAVAIL),
-        rank(rank_)
+        rank(rank_),
+        affinity_detector_(affinity_detector)
     {
         init_fabric();
         init_counters();
@@ -148,16 +154,23 @@ private:
             exit(1);
         }
 
-        // Find CXI provider
-        for (struct fi_info* cur = info; cur; cur = cur->next) {
-            if (cur->fabric_attr && cur->fabric_attr->prov_name &&
-                strcmp(cur->fabric_attr->prov_name, "cxi") == 0) {
-                cxi_info = cur;
-                printf("Rank %d: Using CXI provider %s\n", rank, cxi_info->domain_attr->name);
+        // Find CXI provider - use affinity detector if available
+        if (affinity_detector_) {
+            cxi_info = affinity_detector_->select_cxi_provider(info);
+        } else {
+            // Fallback: use first CXI provider
+            for (struct fi_info* cur = info; cur; cur = cur->next) {
+                if (cur->fabric_attr && cur->fabric_attr->prov_name &&
+                    strcmp(cur->fabric_attr->prov_name, "cxi") == 0) {
+                    cxi_info = cur;
+                    break;
+                }
             }
         }
 
-        if (!cxi_info) {
+        if (cxi_info) {
+            printf("Rank %d: Using CXI provider %s\n", rank, cxi_info->domain_attr->name);
+        } else {
             fprintf(stderr, "Rank %d: CXI provider not found!\n", rank);
             exit(1);
         }

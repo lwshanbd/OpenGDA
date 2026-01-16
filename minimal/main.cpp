@@ -17,6 +17,7 @@
 
 #include "hip_device_context.hpp"
 #include "pmi_session.hpp"
+#include "device_affinity.hpp"
 #include "fabric_dwq_context.hpp"
 #include "benchmark_runner.hpp"
 
@@ -29,11 +30,15 @@ int main() {
     unset_rocr_visible_devices();
 
     // =========================================================================
-    // Initialize GPU (must be early for PCIe topology)
-    // GPU 7 requires cxi3 for direct MMIO access (PCIe locality)
+    // Detect GPU-NIC affinity using hwloc
+    // This selects the best GPU-NIC pair based on NUMA topology
     // =========================================================================
-    constexpr int GPU_ID = 7;
-    HipDeviceContext hip(GPU_ID);
+    DeviceAffinityDetector affinity;
+
+    // =========================================================================
+    // Initialize GPU with affinity-selected device
+    // =========================================================================
+    HipDeviceContext hip(affinity.selected_gpu_id);
 
     // =========================================================================
     // Initialize PMI2
@@ -48,9 +53,9 @@ int main() {
     }
 
     // =========================================================================
-    // Initialize Fabric/DWQ Context
+    // Initialize Fabric/DWQ Context with affinity-selected CXI
     // =========================================================================
-    FabricDwqContext fabric(pmi.rank);
+    FabricDwqContext fabric(pmi.rank, &affinity);
 
     // =========================================================================
     // Run Concurrent Benchmark (N_STREAMS parallel DWQ operations)

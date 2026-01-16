@@ -52,17 +52,27 @@ if(NOT PMI_INCLUDE_DIR OR NOT PMI_LIBRARY)
     message(FATAL_ERROR "Cray PMI not found at ${PMI_ROOT}")
 endif()
 
+# Find hwloc for GPU-NIC affinity detection
+find_path(HWLOC_INCLUDE_DIR hwloc.h)
+find_library(HWLOC_LIBRARY hwloc)
+
+if(NOT HWLOC_INCLUDE_DIR OR NOT HWLOC_LIBRARY)
+    message(FATAL_ERROR "hwloc not found (required for GPU-NIC affinity detection)")
+endif()
+
 # Common include directories and libraries
 set(COMMON_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${LIBFABRIC_INCLUDE_DIR}
     ${PMI_INCLUDE_DIR}
+    ${HWLOC_INCLUDE_DIR}
 )
 
 set(COMMON_LIBS
     hip::device
     ${LIBFABRIC_LIBRARY}
     ${PMI_LIBRARY}
+    ${HWLOC_LIBRARY}
 )
 
 # Original benchmark (6 concurrent streams max)
@@ -84,3 +94,5 @@ message(STATUS "libfabric include: ${LIBFABRIC_INCLUDE_DIR}")
 message(STATUS "libfabric library: ${LIBFABRIC_LIBRARY}")
 message(STATUS "PMI include: ${PMI_INCLUDE_DIR}")
 message(STATUS "PMI library: ${PMI_LIBRARY}")
+message(STATUS "hwloc include: ${HWLOC_INCLUDE_DIR}")
+message(STATUS "hwloc library: ${HWLOC_LIBRARY}")
