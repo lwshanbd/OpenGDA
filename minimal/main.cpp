@@ -18,7 +18,6 @@
 #include "hip_device_context.hpp"
 #include "pmi_session.hpp"
 #include "fabric_dwq_context.hpp"
-#include "dwq_work_builder.hpp"
 #include "benchmark_runner.hpp"
 
 int main() {
@@ -54,14 +53,9 @@ int main() {
     FabricDwqContext fabric(pmi.rank);
 
     // =========================================================================
-    // Initialize DWQ Work Builder
+    // Run Concurrent Benchmark (N_STREAMS parallel DWQ operations)
     // =========================================================================
-    DwqWorkBuilder dwq(pmi.rank);
-
-    // =========================================================================
-    // Run Benchmark
-    // =========================================================================
-    BenchmarkRunner runner(pmi, fabric, dwq);
+    BenchmarkRunner runner(pmi, fabric);
     runner.run();
 
     return 0;

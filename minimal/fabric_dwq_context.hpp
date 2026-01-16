@@ -75,9 +75,9 @@ public:
     }
 
     ~FabricDwqContext() {
-        // Unregister MMIO from GPU first
-        if (trigger_mmio_addr) hipHostUnregister(trigger_mmio_addr);
-        if (completion_mmio_addr) hipHostUnregister(completion_mmio_addr);
+        // Unregister MMIO from GPU first (ignore errors in cleanup)
+        if (trigger_mmio_addr) (void)hipHostUnregister(trigger_mmio_addr);
+        if (completion_mmio_addr) (void)hipHostUnregister(completion_mmio_addr);
 
         // Close libfabric objects in reverse order
         if (trigger_cntr) fi_close(&trigger_cntr->fid);
@@ -243,5 +243,70 @@ private:
         fi_getname(&ep->fid, NULL, &addrlen);
         local_addr = malloc(addrlen);
         check(fi_getname(&ep->fid, local_addr, &addrlen), "fi_getname");
+    }
+
+public:
+    // Helper structure for additional counter pairs (used by concurrent benchmark)
+    struct CounterPair {
+        struct fid_cntr* trigger_cntr;
+        struct fid_cntr* completion_cntr;
+        struct fid_cntr* atomic_completion_cntr;
+        struct fi_cxi_cntr_ops* trigger_ops;
+        void* trigger_mmio_addr;
+        size_t trigger_mmio_len;
+        volatile uint64_t* dev_trigger_cntr;
+
+        CounterPair() : trigger_cntr(nullptr), completion_cntr(nullptr),
+                        atomic_completion_cntr(nullptr), trigger_ops(nullptr),
+                        trigger_mmio_addr(nullptr), trigger_mmio_len(0),
+                        dev_trigger_cntr(nullptr) {}
+    };
+
+    // Create additional counter pair with MMIO mapping for concurrent operations
+    CounterPair create_counter_pair() {
+        CounterPair cp;
+        struct fi_cntr_attr cntr_attr = {};
+        cntr_attr.events = FI_CNTR_EVENTS_COMP;
+
+        // Trigger counter
+        check(fi_cntr_open(domain, &cntr_attr, &cp.trigger_cntr, NULL),
+              "fi_cntr_open(trigger)");
+
+        // Completion counter
+        struct fi_cntr_attr completion_attr = {};
+        completion_attr.events = FI_CNTR_EVENTS_COMP;
+        completion_attr.wait_obj = FI_WAIT_UNSPEC;
+        check(fi_cntr_open(domain, &completion_attr, &cp.completion_cntr, NULL),
+              "fi_cntr_open(completion)");
+
+        // Atomic completion counter
+        check(fi_cntr_open(domain, &cntr_attr, &cp.atomic_completion_cntr, NULL),
+              "fi_cntr_open(atomic_completion)");
+
+        // Get counter ops and MMIO
+        check(fi_open_ops(&cp.trigger_cntr->fid, FI_CXI_COUNTER_OPS, 0,
+                          (void**)&cp.trigger_ops, NULL),
+              "fi_open_ops(trigger)");
+        check(cp.trigger_ops->get_mmio_addr(&cp.trigger_cntr->fid,
+                                             &cp.trigger_mmio_addr, &cp.trigger_mmio_len),
+              "get_mmio_addr(trigger)");
+
+        // Map to GPU
+        check_hip(hipHostRegister(cp.trigger_mmio_addr, cp.trigger_mmio_len,
+                                  hipHostRegisterMapped),
+                  "hipHostRegister(trigger)");
+        check_hip(hipHostGetDevicePointer((void**)&cp.dev_trigger_cntr,
+                                          cp.trigger_mmio_addr, 0),
+                  "hipHostGetDevicePointer(trigger)");
+
+        return cp;
+    }
+
+    // Cleanup counter pair (ignore errors in cleanup)
+    void destroy_counter_pair(CounterPair& cp) {
+        if (cp.trigger_mmio_addr) (void)hipHostUnregister(cp.trigger_mmio_addr);
+        if (cp.trigger_cntr) fi_close(&cp.trigger_cntr->fid);
+        if (cp.completion_cntr) fi_close(&cp.completion_cntr->fid);
+        if (cp.atomic_completion_cntr) fi_close(&cp.atomic_completion_cntr->fid);
     }
 };

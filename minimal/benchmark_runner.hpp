@@ -1,5 +1,8 @@
 /*
- * benchmark_runner.hpp - DWQ benchmark runner with GPU kernel
+ * benchmark_runner.hpp - Concurrent DWQ benchmark runner with GPU kernel
+ *
+ * Each iteration triggers N_STREAMS concurrent RMA transfers,
+ * each from a separate GPU thread with its own DWQ operation chain.
  */
 #pragma once
 
@@ -16,38 +19,58 @@
 #include "dwq_work_builder.hpp"
 
 // =============================================================================
-// GPU Kernel
+// Configuration
 // =============================================================================
 
-// GPU kernel to write counter doorbell (trigger NIC operation)
-// Polls atomic_result until NIC completes the atomic write
-// Records timing inside GPU for accurate latency measurement
-__global__ void gpu_write_counter_doorbell(volatile uint64_t* counter_addr,
-                                           volatile uint64_t* atomic_result,
-                                           uint64_t value,
-                                           uint64_t* start_clock,
-                                           uint64_t* end_clock) {
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        // Record start time (GPU clock cycles)
-        uint64_t t_start = clock64();
+constexpr int N_STREAMS = 6;       // Number of concurrent transfers (max supported by DWQ)
+constexpr int NUM_ITERATIONS = 20;
 
-        // Step 1: Write to trigger counter to initiate RDMA write
-        *counter_addr = value;
+constexpr size_t TEST_SIZES[] = {
+    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
+    16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024, 512 * 1024, 1024 * 1024,
+    2 * 1024 * 1024, 4 * 1024 * 1024, 8 * 1024 * 1024, 16 * 1024 * 1024, 32 * 1024 * 1024
+};
+constexpr int NUM_TEST_SIZES = sizeof(TEST_SIZES) / sizeof(TEST_SIZES[0]);
+constexpr size_t MAX_SIZE = 128 * 1024 * 1024;  // 128MB per stream
 
-        // Step 2: Poll atomic_result until NIC writes to it
-        do {
-            // __threadfence_system();
-        } while (*atomic_result < 1);
+// =============================================================================
+// GPU Kernel - Concurrent multi-stream trigger and poll
+// =============================================================================
 
-        // Record end time (GPU clock cycles)
-        uint64_t t_end = clock64();
-        __threadfence_system();
+// Each thread triggers its own DWQ operation and polls its own atomic_result
+// Thread 0 records timing, all threads must complete before timing ends
+__global__ void gpu_concurrent_write(
+    volatile uint64_t** trigger_addrs,   // Array of trigger counter MMIO addresses
+    volatile uint64_t** atomic_results,  // Array of atomic result addresses
+    int n_streams,
+    uint64_t* start_clock,
+    uint64_t* end_clock)
+{
+    int stream_id = threadIdx.x;
+    if (stream_id >= n_streams) return;
 
-        // Store timestamps
-        if (start_clock) *start_clock = t_start;
-        if (end_clock) *end_clock = t_end;
+    // Thread 0 records start time
+    if (stream_id == 0) {
+        *start_clock = clock64();
     }
     __syncthreads();
+
+    // Each thread triggers its stream's DWQ operation
+    *trigger_addrs[stream_id] = 1;
+
+    // Each thread polls its stream's atomic_result
+    while (*atomic_results[stream_id] < 1) {
+        // Spin wait
+    }
+
+    // Synchronize all threads before recording end time
+    __syncthreads();
+    __threadfence_system();
+
+    // Thread 0 records end time (after ALL streams complete)
+    if (stream_id == 0) {
+        *end_clock = clock64();
+    }
 }
 
 // =============================================================================
@@ -94,18 +117,31 @@ inline int hex_to_bytes(const char* in, uint8_t* out, size_t outlen) {
 }
 
 // =============================================================================
-// Benchmark Configuration
+// Per-stream resources
 // =============================================================================
 
-constexpr int NUM_ITERATIONS = 20;
+struct StreamResources {
+    // Counter pair from fabric context
+    FabricDwqContext::CounterPair counters;
 
-constexpr size_t TEST_SIZES[] = {
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
-    16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024, 512 * 1024, 1024 * 1024,
-    2 * 1024 * 1024, 4 * 1024 * 1024, 8 * 1024 * 1024, 16 * 1024 * 1024, 32 * 1024 * 1024
+    // GPU buffers
+    void* d_local_buf;
+    uint64_t* atomic_result;
+    uint64_t* atomic_operand;
+
+    // Memory regions
+    MemoryRegion* mr_local;
+    MemoryRegion* mr_atomic;
+    MemoryRegion* mr_atomic_operand;
+
+    // DWQ work builder
+    DwqWorkBuilder* dwq;
+
+    StreamResources() : d_local_buf(nullptr), atomic_result(nullptr),
+                        atomic_operand(nullptr), mr_local(nullptr),
+                        mr_atomic(nullptr), mr_atomic_operand(nullptr),
+                        dwq(nullptr) {}
 };
-constexpr int NUM_TEST_SIZES = sizeof(TEST_SIZES) / sizeof(TEST_SIZES[0]);
-constexpr size_t MAX_SIZE = 128 * 1024 * 1024;  // 128MB
 
 // =============================================================================
 // Benchmark Runner
@@ -115,24 +151,26 @@ class BenchmarkRunner {
 public:
     PmiSession& pmi;
     FabricDwqContext& fabric;
-    DwqWorkBuilder& dwq;
 
-    // GPU buffers
-    void* d_local_buf;
+    // Per-stream resources
+    StreamResources streams[N_STREAMS];
+
+    // Shared remote buffer (destination on peer)
     void* d_remote_buf;
-    uint64_t* atomic_result;
-    uint64_t* atomic_operand;
+    MemoryRegion* mr_remote;
+
+    // GPU arrays for kernel
+    volatile uint64_t** d_trigger_addrs;
+    volatile uint64_t** d_atomic_results;
     uint64_t* d_start_clock;
     uint64_t* d_end_clock;
 
+    // Host arrays for setup
+    volatile uint64_t* h_trigger_addrs[N_STREAMS];
+    volatile uint64_t* h_atomic_results[N_STREAMS];
+
     // Host verification buffer
     uint8_t* h_verify_buf;
-
-    // Memory regions
-    MemoryRegion* mr_local;
-    MemoryRegion* mr_remote;
-    MemoryRegion* mr_atomic;
-    MemoryRegion* mr_atomic_operand;
 
     // Peer RMA info
     uint64_t peer_remote_addr;
@@ -143,14 +181,12 @@ public:
     int total_verifications;
     int total_verification_failures;
 
-    BenchmarkRunner(PmiSession& pmi_, FabricDwqContext& fabric_, DwqWorkBuilder& dwq_)
-        : pmi(pmi_), fabric(fabric_), dwq(dwq_),
-          d_local_buf(nullptr), d_remote_buf(nullptr),
-          atomic_result(nullptr), atomic_operand(nullptr),
+    BenchmarkRunner(PmiSession& pmi_, FabricDwqContext& fabric_)
+        : pmi(pmi_), fabric(fabric_),
+          d_remote_buf(nullptr), mr_remote(nullptr),
+          d_trigger_addrs(nullptr), d_atomic_results(nullptr),
           d_start_clock(nullptr), d_end_clock(nullptr),
           h_verify_buf(nullptr),
-          mr_local(nullptr), mr_remote(nullptr),
-          mr_atomic(nullptr), mr_atomic_operand(nullptr),
           peer_remote_addr(0), peer_remote_key(0), remote_addr_for_rma(0),
           total_verifications(0), total_verification_failures(0)
     {
@@ -158,20 +194,31 @@ public:
         register_memory();
         exchange_addresses();
         exchange_rma_info();
+        setup_gpu_arrays();
     }
 
     ~BenchmarkRunner() {
-        delete mr_local;
-        delete mr_remote;
-        delete mr_atomic;
-        delete mr_atomic_operand;
+        // Free GPU arrays (ignore errors in cleanup)
+        if (d_trigger_addrs) (void)hipFree(d_trigger_addrs);
+        if (d_atomic_results) (void)hipFree(d_atomic_results);
+        if (d_start_clock) (void)hipFree(d_start_clock);
+        if (d_end_clock) (void)hipFree(d_end_clock);
 
-        if (d_local_buf) hipFree(d_local_buf);
-        if (d_remote_buf) hipFree(d_remote_buf);
-        if (atomic_result) hipFree(atomic_result);
-        if (atomic_operand) hipFree(atomic_operand);
-        if (d_start_clock) hipFree(d_start_clock);
-        if (d_end_clock) hipFree(d_end_clock);
+        // Free per-stream resources
+        for (int i = 0; i < N_STREAMS; i++) {
+            delete streams[i].mr_local;
+            delete streams[i].mr_atomic;
+            delete streams[i].mr_atomic_operand;
+            delete streams[i].dwq;
+            if (streams[i].d_local_buf) (void)hipFree(streams[i].d_local_buf);
+            if (streams[i].atomic_result) (void)hipFree(streams[i].atomic_result);
+            if (streams[i].atomic_operand) (void)hipFree(streams[i].atomic_operand);
+            fabric.destroy_counter_pair(streams[i].counters);
+        }
+
+        // Free shared resources
+        delete mr_remote;
+        if (d_remote_buf) (void)hipFree(d_remote_buf);
         if (h_verify_buf) free(h_verify_buf);
     }
 
@@ -184,9 +231,9 @@ public:
         usleep(100000);  // 100ms for readiness
 
         if (pmi.rank == 0) {
-            printf("%-8s  %12s  %s\n", "Size", "Latency(us)", "Statistics");
-            printf("========  ============  ===============================================\n");
-            printf("Note: Latency is average of best 10/%d iterations\n", NUM_ITERATIONS);
+            printf("%-8s  %12s  %12s  %s\n", "Size", "Total(us)", "Per-xfer(us)", "Statistics");
+            printf("========  ============  ============  =====================================\n");
+            printf("Note: %d concurrent streams, per-xfer = total/%d\n", N_STREAMS, N_STREAMS);
             printf("      GPU-Direct Async (GDA) with Deferred Work Queue (DWQ)\n\n");
         }
 
@@ -211,20 +258,35 @@ private:
     }
 
     void allocate_buffers() {
-        check_hip(hipMalloc(&d_local_buf, MAX_SIZE), "hipMalloc(local)");
-        check_hip(hipMalloc(&d_remote_buf, MAX_SIZE), "hipMalloc(remote)");
-        check_hip(hipMalloc(&atomic_result, sizeof(uint64_t)), "hipMalloc(atomic_result)");
-        check_hip(hipMalloc(&atomic_operand, sizeof(uint64_t)), "hipMalloc(atomic_operand)");
+        // Shared remote buffer (destination)
+        check_hip(hipMalloc(&d_remote_buf, MAX_SIZE * N_STREAMS), "hipMalloc(remote)");
+
+        // Per-stream buffers
+        for (int i = 0; i < N_STREAMS; i++) {
+            check_hip(hipMalloc(&streams[i].d_local_buf, MAX_SIZE), "hipMalloc(local)");
+            check_hip(hipMalloc(&streams[i].atomic_result, sizeof(uint64_t)), "hipMalloc(atomic_result)");
+            check_hip(hipMalloc(&streams[i].atomic_operand, sizeof(uint64_t)), "hipMalloc(atomic_operand)");
+
+            check_hip(hipMemset(streams[i].atomic_result, 0, sizeof(uint64_t)), "hipMemset(atomic_result)");
+            uint64_t operand_value = 1;
+            check_hip(hipMemcpy(streams[i].atomic_operand, &operand_value, sizeof(uint64_t),
+                                hipMemcpyHostToDevice), "hipMemcpy(atomic_operand)");
+
+            // Create counter pair for this stream
+            streams[i].counters = fabric.create_counter_pair();
+
+            // Create DWQ work builder for this stream
+            streams[i].dwq = new DwqWorkBuilder(pmi.rank);
+        }
+
+        check_hip(hipDeviceSynchronize(), "hipDeviceSynchronize");
+
+        // Timing buffers
         check_hip(hipMalloc(&d_start_clock, sizeof(uint64_t)), "hipMalloc(start_clock)");
         check_hip(hipMalloc(&d_end_clock, sizeof(uint64_t)), "hipMalloc(end_clock)");
 
-        check_hip(hipMemset(atomic_result, 0, sizeof(uint64_t)), "hipMemset(atomic_result)");
-        uint64_t operand_value = 1;
-        check_hip(hipMemcpy(atomic_operand, &operand_value, sizeof(uint64_t),
-                            hipMemcpyHostToDevice), "hipMemcpy(atomic_operand)");
-        check_hip(hipDeviceSynchronize(), "hipDeviceSynchronize");
-
-        h_verify_buf = (uint8_t*)malloc(MAX_SIZE);
+        // Host verification buffer
+        h_verify_buf = (uint8_t*)malloc(MAX_SIZE * N_STREAMS);
         if (!h_verify_buf) {
             fprintf(stderr, "Rank %d: malloc(h_verify_buf) failed\n", pmi.rank);
             exit(1);
@@ -232,14 +294,19 @@ private:
     }
 
     void register_memory() {
-        mr_local = new MemoryRegion(fabric.domain, fabric.ep, fabric.cxi_info,
-                                    d_local_buf, MAX_SIZE, true, 0, pmi.rank);
+        // Shared remote buffer
         mr_remote = new MemoryRegion(fabric.domain, fabric.ep, fabric.cxi_info,
-                                     d_remote_buf, MAX_SIZE, true, 0, pmi.rank);
-        mr_atomic = new MemoryRegion(fabric.domain, fabric.ep, fabric.cxi_info,
-                                     atomic_result, sizeof(uint64_t), true, 0, pmi.rank);
-        mr_atomic_operand = new MemoryRegion(fabric.domain, fabric.ep, fabric.cxi_info,
-                                              atomic_operand, sizeof(uint64_t), true, 0, pmi.rank);
+                                     d_remote_buf, MAX_SIZE * N_STREAMS, true, 0, pmi.rank);
+
+        // Per-stream MRs
+        for (int i = 0; i < N_STREAMS; i++) {
+            streams[i].mr_local = new MemoryRegion(fabric.domain, fabric.ep, fabric.cxi_info,
+                                                   streams[i].d_local_buf, MAX_SIZE, true, 0, pmi.rank);
+            streams[i].mr_atomic = new MemoryRegion(fabric.domain, fabric.ep, fabric.cxi_info,
+                                                    streams[i].atomic_result, sizeof(uint64_t), true, 0, pmi.rank);
+            streams[i].mr_atomic_operand = new MemoryRegion(fabric.domain, fabric.ep, fabric.cxi_info,
+                                                            streams[i].atomic_operand, sizeof(uint64_t), true, 0, pmi.rank);
+        }
     }
 
     void exchange_addresses() {
@@ -334,6 +401,27 @@ private:
         }
     }
 
+    void setup_gpu_arrays() {
+        // Build host arrays
+        for (int i = 0; i < N_STREAMS; i++) {
+            h_trigger_addrs[i] = streams[i].counters.dev_trigger_cntr;
+            h_atomic_results[i] = streams[i].atomic_result;
+        }
+
+        // Allocate and copy to GPU
+        check_hip(hipMalloc(&d_trigger_addrs, N_STREAMS * sizeof(volatile uint64_t*)),
+                  "hipMalloc(d_trigger_addrs)");
+        check_hip(hipMalloc(&d_atomic_results, N_STREAMS * sizeof(volatile uint64_t*)),
+                  "hipMalloc(d_atomic_results)");
+
+        check_hip(hipMemcpy(d_trigger_addrs, h_trigger_addrs,
+                            N_STREAMS * sizeof(volatile uint64_t*), hipMemcpyHostToDevice),
+                  "hipMemcpy(d_trigger_addrs)");
+        check_hip(hipMemcpy(d_atomic_results, h_atomic_results,
+                            N_STREAMS * sizeof(volatile uint64_t*), hipMemcpyHostToDevice),
+                  "hipMemcpy(d_atomic_results)");
+    }
+
     void run_size_test(size_t current_size) {
         pmi.barrier();
 
@@ -341,52 +429,73 @@ private:
         int successful_iterations = 0;
 
         for (int iter = 0; iter < NUM_ITERATIONS; iter++) {
-            // Reset counters
-            fi_cntr_set(fabric.trigger_cntr, 0);
-            fi_cntr_set(fabric.completion_cntr, 0);
-            fi_cntr_set(fabric.atomic_completion_cntr, 0);
+            // Reset all stream counters
+            for (int i = 0; i < N_STREAMS; i++) {
+                fi_cntr_set(streams[i].counters.trigger_cntr, 0);
+                fi_cntr_set(streams[i].counters.completion_cntr, 0);
+                fi_cntr_set(streams[i].counters.atomic_completion_cntr, 0);
+            }
 
-            // Reset atomic_result on rank 0
+            // Reset atomic_results on rank 0
             if (pmi.rank == 0) {
-                uint64_t zero = 0;
-                check_hip(hipMemcpy(atomic_result, &zero, sizeof(uint64_t),
-                                    hipMemcpyHostToDevice), "reset atomic_result");
+                for (int i = 0; i < N_STREAMS; i++) {
+                    uint64_t zero = 0;
+                    check_hip(hipMemcpy(streams[i].atomic_result, &zero, sizeof(uint64_t),
+                                        hipMemcpyHostToDevice), "reset atomic_result");
+                }
                 check_hip(hipDeviceSynchronize(), "sync reset");
             }
 
             // Initialize buffers
             if (pmi.rank == 0) {
-                uint8_t pattern = (iter + 0xA0) & 0xFF;
-                check_hip(hipMemset(d_local_buf, pattern, current_size), "hipMemset(local)");
+                // Each stream gets a different pattern
+                for (int i = 0; i < N_STREAMS; i++) {
+                    uint8_t pattern = (iter + 0xA0 + i) & 0xFF;
+                    check_hip(hipMemset(streams[i].d_local_buf, pattern, current_size),
+                              "hipMemset(local)");
+                }
                 check_hip(hipDeviceSynchronize(), "sync memset");
             } else {
-                check_hip(hipMemset(d_remote_buf, 0xFF, current_size), "hipMemset(remote)");
+                // Clear entire remote buffer
+                check_hip(hipMemset(d_remote_buf, 0xFF, current_size * N_STREAMS),
+                          "hipMemset(remote)");
                 check_hip(hipDeviceSynchronize(), "sync memset");
             }
             pmi.barrier();
 
             if (pmi.rank == 0) {
-                // Queue RMA write
-                dwq.queue_rma_write(
-                    fabric.domain, fabric.ep,
-                    d_local_buf, mr_local->desc, current_size,
-                    fabric.peer_addr, remote_addr_for_rma, peer_remote_key,
-                    fabric.trigger_cntr, fabric.completion_cntr, 1);
+                // Queue DWQ operations for all streams
+                for (int i = 0; i < N_STREAMS; i++) {
+                    // Calculate offset for this stream in remote buffer
+                    uint64_t stream_remote_addr = remote_addr_for_rma + (i * MAX_SIZE);
+                    if (!fabric.is_virt_addr_mode()) {
+                        stream_remote_addr = i * MAX_SIZE;  // Offset mode
+                    }
 
-                // Queue atomic signal
-                uint64_t atomic_result_addr = fabric.is_virt_addr_mode()
-                    ? (uint64_t)atomic_result : 0;
-                dwq.queue_atomic_signal(
-                    fabric.domain, fabric.ep,
-                    atomic_operand, mr_atomic_operand->desc,
-                    atomic_result, mr_atomic->key, atomic_result_addr,
-                    fabric.local_addr_in_av,
-                    fabric.completion_cntr, fabric.atomic_completion_cntr, 1);
+                    // Queue RMA write for this stream
+                    streams[i].dwq->queue_rma_write(
+                        fabric.domain, fabric.ep,
+                        streams[i].d_local_buf, streams[i].mr_local->desc, current_size,
+                        fabric.peer_addr, stream_remote_addr, peer_remote_key,
+                        streams[i].counters.trigger_cntr,
+                        streams[i].counters.completion_cntr, 1);
 
-                // Launch kernel and time
+                    // Queue atomic signal for this stream
+                    uint64_t atomic_result_addr = fabric.is_virt_addr_mode()
+                        ? (uint64_t)streams[i].atomic_result : 0;
+                    streams[i].dwq->queue_atomic_signal(
+                        fabric.domain, fabric.ep,
+                        streams[i].atomic_operand, streams[i].mr_atomic_operand->desc,
+                        streams[i].atomic_result, streams[i].mr_atomic->key, atomic_result_addr,
+                        fabric.local_addr_in_av,
+                        streams[i].counters.completion_cntr,
+                        streams[i].counters.atomic_completion_cntr, 1);
+                }
+
+                // Launch kernel with N_STREAMS threads
                 auto t_start = std::chrono::high_resolution_clock::now();
-                hipLaunchKernelGGL(gpu_write_counter_doorbell, dim3(1), dim3(1), 0, 0,
-                                   fabric.dev_trigger_cntr, atomic_result, 1,
+                hipLaunchKernelGGL(gpu_concurrent_write, dim3(1), dim3(N_STREAMS), 0, 0,
+                                   d_trigger_addrs, d_atomic_results, N_STREAMS,
                                    d_start_clock, d_end_clock);
                 check_hip(hipDeviceSynchronize(), "kernel sync");
                 auto t_end = std::chrono::high_resolution_clock::now();
@@ -394,28 +503,33 @@ private:
                 double elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
                     t_end - t_start).count();
                 iteration_times[successful_iterations++] = elapsed_us;
-
             }
 
             pmi.barrier();
 
-            // Rank 1: Verify data
+            // Rank 1: Verify data for all streams
             if (pmi.rank == 1) {
-                check_hip(hipMemcpy(h_verify_buf, d_remote_buf, current_size,
-                                    hipMemcpyDeviceToHost), "D2H copy");
+                int total_errors = 0;
+                for (int i = 0; i < N_STREAMS; i++) {
+                    // Copy each stream's data from its offset in remote buffer
+                    uint8_t* remote_stream_buf = (uint8_t*)d_remote_buf + (i * MAX_SIZE);
+                    uint8_t* verify_buf = h_verify_buf + (i * current_size);
+                    check_hip(hipMemcpy(verify_buf, remote_stream_buf, current_size,
+                                        hipMemcpyDeviceToHost), "D2H copy");
 
-                uint8_t expected_pattern = (iter + 0xA0) & 0xFF;
-                int errors = 0;
-                for (size_t i = 0; i < current_size && errors < 10; i++) {
-                    if (h_verify_buf[i] != expected_pattern) errors++;
+                    uint8_t expected_pattern = (iter + 0xA0 + i) & 0xFF;
+                    int errors = 0;
+                    for (size_t j = 0; j < current_size && errors < 10; j++) {
+                        if (verify_buf[j] != expected_pattern) errors++;
+                    }
+                    total_errors += errors;
                 }
 
                 total_verifications++;
-                if (errors > 0) {
+                if (total_errors > 0) {
                     total_verification_failures++;
-                    fprintf(stderr, "Rank %d: VERIFICATION FAILED - iter=%d, size=%zu, "
-                            "expected=0x%02X, errors=%d\n",
-                            pmi.rank, iter, current_size, expected_pattern, errors);
+                    fprintf(stderr, "Rank %d: VERIFICATION FAILED - iter=%d, size=%zu, errors=%d\n",
+                            pmi.rank, iter, current_size, total_errors);
                 }
             }
         }
@@ -439,8 +553,9 @@ private:
             double avg = sum / samples;
 
             char size_buf[32];
-            printf("%-8s  %12.2f  (best %d/%d: min=%.2f max=%.2f)\n",
-                   format_size(current_size, size_buf), avg, samples, successful_iterations,
+            double per_xfer = avg / N_STREAMS;
+            printf("%-8s  %12.2f  %12.2f  (min=%.2f max=%.2f)\n",
+                   format_size(current_size, size_buf), avg, per_xfer,
                    iteration_times[0], iteration_times[samples - 1]);
             fflush(stdout);
 
