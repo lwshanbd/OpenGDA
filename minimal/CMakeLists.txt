@@ -52,21 +52,30 @@ if(NOT PMI_INCLUDE_DIR OR NOT PMI_LIBRARY)
     message(FATAL_ERROR "Cray PMI not found at ${PMI_ROOT}")
 endif()
 
-# Create executable (HIP source)
-set_source_files_properties(main.cpp PROPERTIES LANGUAGE HIP)
-add_executable(gda_benchmark main.cpp)
-
-target_include_directories(gda_benchmark PRIVATE
+# Common include directories and libraries
+set(COMMON_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${LIBFABRIC_INCLUDE_DIR}
     ${PMI_INCLUDE_DIR}
 )
 
-target_link_libraries(gda_benchmark PRIVATE
+set(COMMON_LIBS
     hip::device
     ${LIBFABRIC_LIBRARY}
     ${PMI_LIBRARY}
 )
+
+# Original benchmark (6 concurrent streams max)
+set_source_files_properties(main.cpp PROPERTIES LANGUAGE HIP)
+add_executable(gda_benchmark main.cpp)
+target_include_directories(gda_benchmark PRIVATE ${COMMON_INCLUDES})
+target_link_libraries(gda_benchmark PRIVATE ${COMMON_LIBS})
+
+# Batched benchmark (16+ streams via counter pool)
+set_source_files_properties(main_batched.cpp PROPERTIES LANGUAGE HIP)
+add_executable(gda_benchmark_batched main_batched.cpp)
+target_include_directories(gda_benchmark_batched PRIVATE ${COMMON_INCLUDES})
+target_link_libraries(gda_benchmark_batched PRIVATE ${COMMON_LIBS})
 
 # Print configuration
 message(STATUS "HIP found: ${hip_DIR}")
