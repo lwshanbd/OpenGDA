@@ -11,6 +11,7 @@
 #include <iostream>
 #include <utility>
 #include <ctime>
+#include <cstdlib>
 
 #include <mpi.h>
 #include <hip/hip_runtime.h>
@@ -77,17 +78,20 @@ int main(int argc, char** argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &mype);
     MPI_Comm_size(MPI_COMM_WORLD, &npes);
 
-    // Get local rank for GPU selection
-    int local_rank = 0;
-    const char* local_rank_env = getenv("SLURM_LOCALID");
-    if (local_rank_env) {
-        local_rank = atoi(local_rank_env);
+    // Get local rank for GPU selection - try multiple env vars
+    int local_rank = -1;
+    const char* env_vars[] = {"SLURM_LOCALID", "FLUX_TASK_LOCAL_ID", "OMPI_COMM_WORLD_LOCAL_RANK", "MPI_LOCALRANKID", NULL};
+    for (int i = 0; env_vars[i] && local_rank < 0; i++) {
+        const char* val = getenv(env_vars[i]);
+        if (val) local_rank = atoi(val);
     }
 
     // Set GPU device based on local rank
     int num_devices;
     HIP_CHECK(hipGetDeviceCount(&num_devices));
-    int gpu_id = local_rank % num_devices;
+
+    // Fallback: use global rank mod num_devices if no local rank found
+    int gpu_id = (local_rank >= 0) ? (local_rank % num_devices) : (mype % num_devices);
     HIP_CHECK(hipSetDevice(gpu_id));
 
     // Debug: print GPU assignment

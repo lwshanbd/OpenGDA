@@ -168,12 +168,12 @@ private:
             }
         }
 
-        if (cxi_info) {
-            printf("Rank %d: Using CXI provider %s\n", rank, cxi_info->domain_attr->name);
-        } else {
-            fprintf(stderr, "Rank %d: CXI provider not found!\n", rank);
-            exit(1);
-        }
+        // if (cxi_info) {
+        //     printf("Rank %d: Using CXI provider %s\n", rank, cxi_info->domain_attr->name);
+        // } else {
+        //     fprintf(stderr, "Rank %d: CXI provider not found!\n", rank);
+        //     exit(1);
+        // }
 
         // Create fabric and domain
         check(fi_fabric(cxi_info->fabric_attr, &fabric, NULL), "fi_fabric");

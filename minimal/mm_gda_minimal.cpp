@@ -311,65 +311,135 @@ int main(int argc, char** argv)
     // Warm-up: run one iteration to eliminate first-launch overhead
     // =========================================================================
     {
+        // Warmup GPU kernel
         int col_offset = mype * Ns;
         hipLaunchKernelGGL(matmul_stripe_kernel, gridDim, blockDim, 0, 0,
                            d_As, d_B[0], d_Cs, N, Ns, col_offset);
         HIP_CHECK(hipDeviceSynchronize());
         // Reset Cs to zero after warm-up
         HIP_CHECK(hipMemset(d_Cs, 0, stripe_size));
+
+        // Warmup DWQ: do one RMA write to prime NIC and libfabric
+        uint64_t warmup_remote_addr = fabric.is_virt_addr_mode() ? left_rma_info[0].addr : 0;
+        uint64_t warmup_threshold = 1;
+
+        DwqWorkBuilder warmup_dwq(mype);
+        warmup_dwq.queue_rma_write(
+            fabric.domain, fabric.ep,
+            d_B[0], mr_B[0]->desc, stripe_size,
+            fabric.peer_addr, warmup_remote_addr, left_rma_info[0].key,
+            fabric.trigger_cntr, fabric.completion_cntr, warmup_threshold);
+
+        // Trigger and wait for warmup RMA
+        hipLaunchKernelGGL(gpu_trigger_only, dim3(1), dim3(1), 0, 0,
+                           fabric.dev_trigger_cntr, warmup_threshold);
+        HIP_CHECK(hipDeviceSynchronize());
+        while (fi_cntr_read(fabric.completion_cntr) < warmup_threshold) {
+            fi_cq_read(fabric.cq, NULL, 0);
+        }
+
+        // Flush DWQ and reset counters for main loop
+        fabric.flush_dwq();
+        fi_cntr_set(fabric.trigger_cntr, 0);
+        fi_cntr_set(fabric.completion_cntr, 0);
     }
 
     pmi.barrier();
-    clock_gettime(CLOCK_MONOTONIC_RAW, &t0);
 
     // =========================================================================
-    // Main computation loop with ring communication
-    // Double buffering: iteration s uses buf[s%2], writes to left's buf[(s+1)%2]
+    // Run 10 iterations, skip first 3 (warmup), average last 7
     // =========================================================================
-    for (int s = 0; s < npes; s++) {
-        const int block_num = (mype + s) % npes;
-        const uint64_t iter_threshold = s + 1;  // Incremental threshold
-        const int cur_buf = s % 2;              // Current buffer to read/send from
-        const int next_buf = (s + 1) % 2;       // Buffer to receive into (on my side)
+    constexpr int TOTAL_RUNS = 10;
+    constexpr int WARMUP_RUNS = 3;
+    double times[TOTAL_RUNS];
 
-        // Compute target address on left neighbor: left's buf[(s+1)%2]
-        uint64_t remote_addr = fabric.is_virt_addr_mode() ? left_rma_info[next_buf].addr : 0;
-        uint64_t remote_key = left_rma_info[next_buf].key;
+    uint64_t global_threshold = 0;  // Continuous threshold across all runs
 
-        // Queue DWQ operation: send d_B[cur_buf] to left neighbor's d_B[next_buf]
-        DwqWorkBuilder dwq(mype);
-        dwq.queue_rma_write(
-            fabric.domain, fabric.ep,
-            d_B[cur_buf], mr_B[cur_buf]->desc, stripe_size,
-            fabric.peer_addr, remote_addr, remote_key,
-            fabric.trigger_cntr, fabric.completion_cntr, iter_threshold);
+    for (int run = 0; run < TOTAL_RUNS; run++) {
+        // Reset Cs to zero for this run
+        HIP_CHECK(hipMemset(d_Cs, 0, stripe_size));
 
-        // Trigger DWQ (non-blocking) - just write to trigger counter
-        hipLaunchKernelGGL(gpu_trigger_only, dim3(1), dim3(1), 0, 0,
-                           fabric.dev_trigger_cntr, iter_threshold);
+        // Don't reset counters - use continuous thresholds instead
 
-        // Compute while DWQ is in flight: Cs += As * B[cur_buf]
-        int col_offset = block_num * Ns;
-        hipLaunchKernelGGL(matmul_stripe_kernel, gridDim, blockDim, 0, 0,
-                           d_As, d_B[cur_buf], d_Cs, N, Ns, col_offset);
+        // Restore B[0] with original data (it gets overwritten during ring)
+        HIP_CHECK(hipMemcpy(d_B[0], h_Bs, stripe_size, hipMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(d_B[1], h_Bs, stripe_size, hipMemcpyHostToDevice));
 
-        HIP_CHECK(hipDeviceSynchronize());
+        pmi.barrier();
+        clock_gettime(CLOCK_MONOTONIC_RAW, &t0);
 
-        // Wait for RMA completion (CPU-side polling)
-        while (fi_cntr_read(fabric.completion_cntr) < iter_threshold) {
-            fi_cq_read(fabric.cq, NULL, 0);  // Drive progress
+        // Main computation loop with ring communication
+        for (int s = 0; s < npes; s++) {
+            const int block_num = (mype + s) % npes;
+            global_threshold++;  // Continuous across all runs
+            const uint64_t iter_threshold = global_threshold;
+            const int cur_buf = s % 2;
+            const int next_buf = (s + 1) % 2;
+
+            uint64_t remote_addr = fabric.is_virt_addr_mode() ? left_rma_info[next_buf].addr : 0;
+            uint64_t remote_key = left_rma_info[next_buf].key;
+
+            // Queue DWQ operation
+            DwqWorkBuilder dwq(mype);
+            dwq.queue_rma_write(
+                fabric.domain, fabric.ep,
+                d_B[cur_buf], mr_B[cur_buf]->desc, stripe_size,
+                fabric.peer_addr, remote_addr, remote_key,
+                fabric.trigger_cntr, fabric.completion_cntr, iter_threshold);
+
+            // Queue writeback trigger
+            struct fi_deferred_work wb_work = {};
+            struct fi_op_cntr wb_op = {};
+            wb_op.cntr = fabric.completion_cntr;
+            wb_op.value = 1;
+            wb_work.triggering_cntr = fabric.completion_cntr;
+            wb_work.completion_cntr = nullptr;
+            wb_work.threshold = iter_threshold;
+            wb_work.op_type = FI_OP_CNTR_ADD;
+            wb_work.op.cntr = &wb_op;
+            fi_control(&fabric.domain->fid, FI_QUEUE_WORK, &wb_work);
+
+            // Trigger DWQ
+            hipLaunchKernelGGL(gpu_trigger_only, dim3(1), dim3(1), 0, 0,
+                               fabric.dev_trigger_cntr, iter_threshold);
+
+            // Compute while DWQ is in flight
+            int col_offset = block_num * Ns;
+            hipLaunchKernelGGL(matmul_stripe_kernel, gridDim, blockDim, 0, 0,
+                               d_As, d_B[cur_buf], d_Cs, N, Ns, col_offset);
+
+            HIP_CHECK(hipDeviceSynchronize());
+
+            // Wait for RMA completion
+            while (fi_cntr_read(fabric.completion_cntr) < iter_threshold) {
+                fi_cq_read(fabric.cq, NULL, 0);
+            }
+
+            pmi.barrier();
         }
 
-        // Barrier to ensure all ranks have completed their sends
-        pmi.barrier();
+        clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
+        times[run] = timediff_us(t0, t1);
 
-        // No copy needed! Next iteration uses d_B[next_buf] which now has received data
+        // Flush DWQ resources before next run
+        fabric.flush_dwq();
+
+        if (mype == 0) {
+            std::cout << "Run " << run << ": " << times[run] << " us"
+                      << (run < WARMUP_RUNS ? " (warmup)" : "") << "\n";
+        }
     }
 
-    clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
+    // Calculate average of last 7 runs
+    double sum = 0;
+    for (int i = WARMUP_RUNS; i < TOTAL_RUNS; i++) {
+        sum += times[i];
+    }
+    double avg = sum / (TOTAL_RUNS - WARMUP_RUNS);
 
     if (mype == 0) {
-        std::cout << "DWQ + HIP: " << timediff_us(t0, t1) << " us\n";
+        std::cout << "DWQ + HIP average (runs " << WARMUP_RUNS << "-" << (TOTAL_RUNS-1)
+                  << "): " << avg << " us\n";
     }
 
     // =========================================================================

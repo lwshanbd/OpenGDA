@@ -237,12 +237,12 @@ private:
                         affinity_matched = true;
                         gpu_affinity_ = gpu_aff;
 
-                        printf("DeviceAffinity: Selected GPU %d (PCI %s) with CXI %s "
-                               "(affinity: %s L#%d)\n",
-                               selected_gpu_id, gpu_aff.pci_id.c_str(),
-                               selected_cxi_domain.c_str(),
-                               hwloc_obj_type_string(gpu_aff.affinity_type),
-                               gpu_aff.affinity_index);
+                        // printf("DeviceAffinity: Selected GPU %d (PCI %s) with CXI %s "
+                        //        "(affinity: %s L#%d)\n",
+                        //        selected_gpu_id, gpu_aff.pci_id.c_str(),
+                        //        selected_cxi_domain.c_str(),
+                        //        hwloc_obj_type_string(gpu_aff.affinity_type),
+                        //        gpu_aff.affinity_index);
                         return;
                     }
                 }
@@ -322,12 +322,12 @@ private:
                     affinity_matched = true;
                     gpu_affinity_ = gpu_aff;
 
-                    printf("DeviceAffinity: GPU %d (PCI %s) -> CXI %s "
-                           "(affinity: %s L#%d)\n",
-                           target_gpu_id, gpu_aff.pci_id.c_str(),
-                           selected_cxi_domain.c_str(),
-                           hwloc_obj_type_string(gpu_aff.affinity_type),
-                           gpu_aff.affinity_index);
+                    // printf("DeviceAffinity: GPU %d (PCI %s) -> CXI %s "
+                    //        "(affinity: %s L#%d)\n",
+                    //        target_gpu_id, gpu_aff.pci_id.c_str(),
+                    //        selected_cxi_domain.c_str(),
+                    //        hwloc_obj_type_string(gpu_aff.affinity_type),
+                    //        gpu_aff.affinity_index);
                     return;
                 }
             }
