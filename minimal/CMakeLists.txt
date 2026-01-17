@@ -60,6 +60,9 @@ if(NOT HWLOC_INCLUDE_DIR OR NOT HWLOC_LIBRARY)
     message(FATAL_ERROR "hwloc not found (required for GPU-NIC affinity detection)")
 endif()
 
+# MPI is required for fast barrier
+find_package(MPI REQUIRED)
+
 # Common include directories and libraries
 set(COMMON_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -90,8 +93,8 @@ target_link_libraries(gda_benchmark_batched PRIVATE ${COMMON_LIBS})
 # Matrix multiplication with DWQ (replaces mm_hip_mpi)
 set_source_files_properties(mm_gda_minimal.cpp PROPERTIES LANGUAGE HIP)
 add_executable(mm_gda_minimal mm_gda_minimal.cpp)
-target_include_directories(mm_gda_minimal PRIVATE ${COMMON_INCLUDES})
-target_link_libraries(mm_gda_minimal PRIVATE ${COMMON_LIBS})
+target_include_directories(mm_gda_minimal PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(mm_gda_minimal PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
 
 # Print configuration
 message(STATUS "HIP found: ${hip_DIR}")

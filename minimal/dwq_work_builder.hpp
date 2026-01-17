@@ -96,7 +96,7 @@ public:
         // Setup op_rma
         op_rma.ep = ep;
         op_rma.msg = msg_rma;
-        op_rma.flags = FI_COMPLETION | FI_CXI_CNTR_WB;
+        op_rma.flags = FI_COMPLETION;  // No FI_CXI_CNTR_WB - we use atomic signal instead
 
         // Setup deferred work
         work.triggering_cntr = trigger_cntr;

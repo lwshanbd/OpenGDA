@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unistd.h>
 
 #include "device_affinity.hpp"
 
@@ -108,6 +109,21 @@ public:
             fprintf(stderr, "Rank %d: FI_FLUSH_WORK failed: %s (%d)\n",
                     rank, fi_strerror(-ret), ret);
             exit(1);
+        }
+    }
+
+    // Fast flush: aggressively progress CQ without sleep(1)
+    // Only works when all operations complete normally (no cancellation needed)
+    void fast_flush(uint64_t expected_completions) {
+        // Wait for completion counter to reach expected value
+        while (fi_cntr_read(completion_cntr) < expected_completions) {
+            fi_cq_read(cq, NULL, 0);
+        }
+
+        // Extra CQ progress to ensure events are fully processed
+        // and internal resources are released
+        for (int i = 0; i < 100; i++) {
+            fi_cq_read(cq, NULL, 0);
         }
     }
 

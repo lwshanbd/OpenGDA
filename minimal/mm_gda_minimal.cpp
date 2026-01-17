@@ -11,7 +11,10 @@
 #include <iostream>
 #include <ctime>
 #include <cstring>
+#include <unistd.h>
+#include <vector>
 
+#include <mpi.h>
 #include <hip/hip_runtime.h>
 
 #include "hip_device_context.hpp"
@@ -126,6 +129,9 @@ int main(int argc, char** argv)
     // CRITICAL: Unset ROCR_VISIBLE_DEVICES before any initialization
     unset_rocr_visible_devices();
 
+    // Initialize MPI for barrier (much faster than libfabric barrier)
+    MPI_Init(&argc, &argv);
+
     // Initialize PMI2 first to get rank
     PmiSession pmi;
 
@@ -140,16 +146,33 @@ int main(int argc, char** argv)
     }
 
     // Get local rank from environment (SLURM_LOCALID) for GPU selection
-    int local_rank = 0;
-    const char* local_rank_env = getenv("SLURM_LOCALID");
-    if (local_rank_env) {
-        local_rank = atoi(local_rank_env);
-    } else {
+    int local_rank = pmi.local_rank;
+    if (local_rank < 0) {
         // Fallback: use global rank mod num_devices
         int num_devices;
         HIP_CHECK(hipGetDeviceCount(&num_devices));
         local_rank = mype % num_devices;
     }
+
+    // Check if neighbors are on same node
+    int left_neighbor = (npes + mype - 1) % npes;
+    int right_neighbor = (mype + 1) % npes;
+    bool* locality_map = pmi.build_locality_map();
+
+    // Allow disabling IPC for benchmarking (set GDA_DISABLE_IPC=1)
+    bool use_ipc = (getenv("GDA_DISABLE_IPC") == nullptr);
+    bool left_is_local = use_ipc && locality_map[left_neighbor];
+    bool right_is_local = use_ipc && locality_map[right_neighbor];
+
+    // Print locality info (only first few ranks)
+    if (mype < 8) {
+        std::cerr << "Rank " << mype << " on " << pmi.hostname
+                  << ": left=" << left_neighbor << (left_is_local ? "(local)" : "(REMOTE)")
+                  << ", right=" << right_neighbor << (right_is_local ? "(local)" : "(REMOTE)")
+                  << "\n";
+    }
+
+    delete[] locality_map;
 
     // Create affinity detector with specified GPU
     DeviceAffinityDetector affinity(local_rank);
@@ -178,8 +201,10 @@ int main(int argc, char** argv)
     FabricDwqContext fabric(mype, &affinity);
 
     // =========================================================================
-    // Exchange addresses with all ranks
+    // Exchange addresses with ALL ranks (needed for barrier)
     // =========================================================================
+    std::vector<fi_addr_t> all_av_addrs(npes);
+    fi_addr_t left_addr, right_addr;
     {
         char* my_hex = (char*)malloc(2 * fabric.addrlen + 1);
         bytes_to_hex((uint8_t*)fabric.local_addr, fabric.addrlen, my_hex);
@@ -187,47 +212,34 @@ int main(int argc, char** argv)
         char key[PMI2_MAX_KEYLEN];
         snprintf(key, sizeof(key), "addr-%d", mype);
         pmi.kvs_put(key, my_hex);
-        pmi.barrier();
+        pmi.barrier();  // KVS needs PMI barrier
 
-        // Get addresses from left and right neighbors
+        // Get addresses from ALL ranks
+        uint8_t* peer_bin = (uint8_t*)malloc(fabric.addrlen);
+        for (int r = 0; r < npes; r++) {
+            char peer_hex[PMI2_MAX_VALLEN];
+            snprintf(key, sizeof(key), "addr-%d", r);
+            pmi.kvs_get(key, peer_hex, sizeof(peer_hex));
+            hex_to_bytes(peer_hex, peer_bin, fabric.addrlen);
+
+            if (fi_av_insert(fabric.av, peer_bin, 1, &all_av_addrs[r], 0, NULL) != 1) {
+                std::cerr << "Rank " << mype << ": fi_av_insert(rank " << r << ") failed\n";
+                exit(1);
+            }
+        }
+
+        // Store specific peer addresses for MM algorithm
         int left_rank = (npes + mype - 1) % npes;
         int right_rank = (mype + 1) % npes;
-
-        char left_hex[PMI2_MAX_VALLEN], right_hex[PMI2_MAX_VALLEN];
-        snprintf(key, sizeof(key), "addr-%d", left_rank);
-        pmi.kvs_get(key, left_hex, sizeof(left_hex));
-        snprintf(key, sizeof(key), "addr-%d", right_rank);
-        pmi.kvs_get(key, right_hex, sizeof(right_hex));
-
-        // Insert into AV
-        uint8_t* left_bin = (uint8_t*)malloc(fabric.addrlen);
-        uint8_t* right_bin = (uint8_t*)malloc(fabric.addrlen);
-        hex_to_bytes(left_hex, left_bin, fabric.addrlen);
-        hex_to_bytes(right_hex, right_bin, fabric.addrlen);
-
-        fi_addr_t left_addr, right_addr;
-        if (fi_av_insert(fabric.av, left_bin, 1, &left_addr, 0, NULL) != 1) {
-            std::cerr << "Rank " << mype << ": fi_av_insert(left) failed\n";
-            exit(1);
-        }
-        if (fi_av_insert(fabric.av, right_bin, 1, &right_addr, 0, NULL) != 1) {
-            std::cerr << "Rank " << mype << ": fi_av_insert(right) failed\n";
-            exit(1);
-        }
-
-        // Insert own address for self-atomic
-        if (fi_av_insert(fabric.av, fabric.local_addr, 1, &fabric.local_addr_in_av, 0, NULL) != 1) {
-            std::cerr << "Rank " << mype << ": fi_av_insert(local) failed\n";
-            exit(1);
-        }
-
-        // Store peer addresses
+        left_addr = all_av_addrs[left_rank];
+        right_addr = all_av_addrs[right_rank];
         fabric.peer_addr = left_addr;  // We send to left neighbor
+        fabric.local_addr_in_av = all_av_addrs[mype];
 
         free(my_hex);
-        free(left_bin);
-        free(right_bin);
+        free(peer_bin);
     }
+
 
     // =========================================================================
     // Allocate host arrays for initialization
@@ -260,7 +272,52 @@ int main(int argc, char** argv)
     HIP_CHECK(hipMemset(d_B[1], 0, stripe_size));
 
     // =========================================================================
-    // Register memory regions for RDMA - both B buffers
+    // IPC setup for same-node communication
+    // =========================================================================
+    float* right_d_B[2] = {nullptr, nullptr};  // Pointers to right neighbor's buffers
+
+    // If my LEFT neighbor is local, they need my IPC handles to read from me
+    // If my RIGHT neighbor is local, I need their IPC handles to read from them
+    {
+        hipIpcMemHandle_t my_handles[2];
+        char key[PMI2_MAX_KEYLEN];
+
+        // Everyone publishes IPC handles if their left neighbor is local
+        // (because left neighbor will read from us)
+        if (left_is_local) {
+            HIP_CHECK(hipIpcGetMemHandle(&my_handles[0], d_B[0]));
+            HIP_CHECK(hipIpcGetMemHandle(&my_handles[1], d_B[1]));
+
+            char ipc_hex[sizeof(my_handles) * 2 + 1];
+            bytes_to_hex((uint8_t*)&my_handles, sizeof(my_handles), ipc_hex);
+            snprintf(key, sizeof(key), "ipc-%d", mype);
+            pmi.kvs_put(key, ipc_hex);
+        }
+
+        pmi.barrier();  // KVS needs PMI barrier
+
+        // Get right neighbor's IPC handles if they are local
+        if (right_is_local) {
+            hipIpcMemHandle_t right_handles[2];
+            snprintf(key, sizeof(key), "ipc-%d", right_neighbor);
+            char peer_hex[PMI2_MAX_VALLEN];
+            pmi.kvs_get(key, peer_hex, sizeof(peer_hex));
+            hex_to_bytes(peer_hex, (uint8_t*)&right_handles, sizeof(right_handles));
+
+            // Open right neighbor's buffers
+            HIP_CHECK(hipIpcOpenMemHandle((void**)&right_d_B[0], right_handles[0],
+                                           hipIpcMemLazyEnablePeerAccess));
+            HIP_CHECK(hipIpcOpenMemHandle((void**)&right_d_B[1], right_handles[1],
+                                           hipIpcMemLazyEnablePeerAccess));
+
+            if (mype < 8) {
+                std::cerr << "Rank " << mype << ": IPC opened right neighbor's buffers\n";
+            }
+        }
+    }
+
+    // =========================================================================
+    // Register memory regions for RDMA - both B buffers (for cross-node)
     // =========================================================================
     MemoryRegion mr_B0(fabric.domain, fabric.ep, fabric.cxi_info,
                        d_B[0], stripe_size, true, hip.gpu_id, mype);
@@ -287,7 +344,7 @@ int main(int argc, char** argv)
         char key[PMI2_MAX_KEYLEN];
         snprintf(key, sizeof(key), "rma-%d", mype);
         pmi.kvs_put(key, rma_hex);
-        pmi.barrier();
+        pmi.barrier();  // KVS needs PMI barrier
 
         // Get left neighbor's RMA info (we write to left's d_Bn)
         int left_rank = (npes + mype - 1) % npes;
@@ -300,7 +357,7 @@ int main(int argc, char** argv)
     timespec t0, t1;
 
     // Make sure all the stripes are initialized
-    pmi.barrier();
+    MPI_Barrier(MPI_COMM_WORLD);
 
     // Kernel launch configuration
     dim3 blockDim(16, 16);
@@ -344,12 +401,12 @@ int main(int argc, char** argv)
         fi_cntr_set(fabric.completion_cntr, 0);
     }
 
-    pmi.barrier();
+    MPI_Barrier(MPI_COMM_WORLD);
 
     // =========================================================================
     // Run 10 iterations, skip first 3 (warmup), average last 7
     // =========================================================================
-    constexpr int TOTAL_RUNS = 10;
+    constexpr int TOTAL_RUNS = 100;
     constexpr int WARMUP_RUNS = 3;
     double times[TOTAL_RUNS];
 
@@ -365,64 +422,79 @@ int main(int argc, char** argv)
         HIP_CHECK(hipMemcpy(d_B[0], h_Bs, stripe_size, hipMemcpyHostToDevice));
         HIP_CHECK(hipMemcpy(d_B[1], h_Bs, stripe_size, hipMemcpyHostToDevice));
 
-        pmi.barrier();
+        MPI_Barrier(MPI_COMM_WORLD);
         clock_gettime(CLOCK_MONOTONIC_RAW, &t0);
 
         // Main computation loop with ring communication
         for (int s = 0; s < npes; s++) {
             const int block_num = (mype + s) % npes;
-            global_threshold++;  // Continuous across all runs
-            const uint64_t iter_threshold = global_threshold;
             const int cur_buf = s % 2;
             const int next_buf = (s + 1) % 2;
 
-            uint64_t remote_addr = fabric.is_virt_addr_mode() ? left_rma_info[next_buf].addr : 0;
-            uint64_t remote_key = left_rma_info[next_buf].key;
+            // Communication: send d_B[cur_buf] to left, receive into d_B[next_buf] from right
+            bool need_dwq = !left_is_local;  // Only need DWQ for cross-node sends
 
-            // Queue DWQ operation
-            DwqWorkBuilder dwq(mype);
-            dwq.queue_rma_write(
-                fabric.domain, fabric.ep,
-                d_B[cur_buf], mr_B[cur_buf]->desc, stripe_size,
-                fabric.peer_addr, remote_addr, remote_key,
-                fabric.trigger_cntr, fabric.completion_cntr, iter_threshold);
+            if (need_dwq) {
+                // Cross-node: use DWQ RDMA to write to left neighbor
+                global_threshold++;
+                const uint64_t iter_threshold = global_threshold;
 
-            // Queue writeback trigger
-            struct fi_deferred_work wb_work = {};
-            struct fi_op_cntr wb_op = {};
-            wb_op.cntr = fabric.completion_cntr;
-            wb_op.value = 1;
-            wb_work.triggering_cntr = fabric.completion_cntr;
-            wb_work.completion_cntr = nullptr;
-            wb_work.threshold = iter_threshold;
-            wb_work.op_type = FI_OP_CNTR_ADD;
-            wb_work.op.cntr = &wb_op;
-            fi_control(&fabric.domain->fid, FI_QUEUE_WORK, &wb_work);
+                uint64_t remote_addr = fabric.is_virt_addr_mode() ? left_rma_info[next_buf].addr : 0;
+                uint64_t remote_key = left_rma_info[next_buf].key;
 
-            // Trigger DWQ
-            hipLaunchKernelGGL(gpu_trigger_only, dim3(1), dim3(1), 0, 0,
-                               fabric.dev_trigger_cntr, iter_threshold);
+                DwqWorkBuilder dwq(mype);
+                dwq.queue_rma_write(
+                    fabric.domain, fabric.ep,
+                    d_B[cur_buf], mr_B[cur_buf]->desc, stripe_size,
+                    fabric.peer_addr, remote_addr, remote_key,
+                    fabric.trigger_cntr, fabric.completion_cntr, iter_threshold);
 
-            // Compute while DWQ is in flight
+                // Queue writeback trigger
+                struct fi_deferred_work wb_work = {};
+                struct fi_op_cntr wb_op = {};
+                wb_op.cntr = fabric.completion_cntr;
+                wb_op.value = 1;
+                wb_work.triggering_cntr = fabric.completion_cntr;
+                wb_work.completion_cntr = nullptr;
+                wb_work.threshold = iter_threshold;
+                wb_work.op_type = FI_OP_CNTR_ADD;
+                wb_work.op.cntr = &wb_op;
+                fi_control(&fabric.domain->fid, FI_QUEUE_WORK, &wb_work);
+
+                // Trigger DWQ
+                hipLaunchKernelGGL(gpu_trigger_only, dim3(1), dim3(1), 0, 0,
+                                   fabric.dev_trigger_cntr, iter_threshold);
+            }
+
+            // Same-node receive: copy from right neighbor's buffer via IPC
+            if (right_is_local) {
+                HIP_CHECK(hipMemcpyAsync(d_B[next_buf], right_d_B[cur_buf],
+                                         stripe_size, hipMemcpyDeviceToDevice));
+            }
+
+            // Compute while communication is in flight
             int col_offset = block_num * Ns;
             hipLaunchKernelGGL(matmul_stripe_kernel, gridDim, blockDim, 0, 0,
                                d_As, d_B[cur_buf], d_Cs, N, Ns, col_offset);
 
             HIP_CHECK(hipDeviceSynchronize());
 
-            // Wait for RMA completion
-            while (fi_cntr_read(fabric.completion_cntr) < iter_threshold) {
-                fi_cq_read(fabric.cq, NULL, 0);
+            // Wait for cross-node RMA completion (if needed)
+            if (need_dwq) {
+                while (fi_cntr_read(fabric.completion_cntr) < global_threshold) {
+                    fi_cq_read(fabric.cq, NULL, 0);
+                }
             }
 
-            pmi.barrier();
+            MPI_Barrier(MPI_COMM_WORLD);
         }
 
         clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
         times[run] = timediff_us(t0, t1);
 
-        // Flush DWQ resources before next run
-        fabric.flush_dwq();
+        // Fast flush: aggressively progress CQ to release TLE resources
+        // Much faster than flush_dwq() which has sleep(1)
+        fabric.fast_flush(global_threshold);
 
         if (mype == 0) {
             std::cout << "Run " << run << ": " << times[run] << " us"
@@ -480,14 +552,20 @@ int main(int argc, char** argv)
             pmi.kvs_put(key, result_hex);
             delete[] result_hex;
         }
-        pmi.barrier();
+        pmi.barrier();  // KVS needs PMI barrier
     }
 
-    pmi.barrier();
+    MPI_Barrier(MPI_COMM_WORLD);
 
     // =========================================================================
     // Cleanup
     // =========================================================================
+    // Close IPC handles first
+    if (right_is_local) {
+        HIP_CHECK(hipIpcCloseMemHandle(right_d_B[0]));
+        HIP_CHECK(hipIpcCloseMemHandle(right_d_B[1]));
+    }
+
     HIP_CHECK(hipFree(d_B[1]));
     HIP_CHECK(hipFree(d_B[0]));
     HIP_CHECK(hipFree(d_Cs));
@@ -497,5 +575,6 @@ int main(int argc, char** argv)
     delete[] h_Bs;
     delete[] h_As;
 
+    MPI_Finalize();
     return 0;
 }
