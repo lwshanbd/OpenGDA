@@ -145,6 +145,11 @@ int main(int argc, char** argv)
 
     // Warm-up: run one iteration to eliminate first-launch overhead
     {
+        // Warmup MPI communication (GPU-aware MPI needs to register memory, etc.)
+        MPI_Request warmup_req;
+        MPI_Isend(d_Bs, N * Ns, MPI_FLOAT, (npes + mype - 1) % npes, 99, MPI_COMM_WORLD, &warmup_req);
+        MPI_Recv(d_Bn, N * Ns, MPI_FLOAT, (mype + 1) % npes, 99, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Wait(&warmup_req, MPI_STATUS_IGNORE);
         int col_offset = mype * Ns;
         hipLaunchKernelGGL(matmul_stripe_kernel, gridDim, blockDim, 0, 0,
                            d_As, d_Bs, d_Cs, N, Ns, col_offset);
