@@ -17,12 +17,7 @@
 #include <mpi.h>
 #include <hip/hip_runtime.h>
 
-#include "hip_device_context.hpp"
-#include "pmi_session.hpp"
-#include "device_affinity.hpp"
-#include "fabric_dwq_context.hpp"
-#include "memory_region.hpp"
-#include "dwq_work_builder.hpp"
+#include "gda_comm.hpp"
 
 // =============================================================================
 // Utility macros and functions
@@ -132,11 +127,11 @@ int main(int argc, char** argv)
     // Initialize MPI for barrier (much faster than libfabric barrier)
     MPI_Init(&argc, &argv);
 
-    // Initialize PMI2 first to get rank
-    PmiSession pmi;
+    // Initialize GDA communication wrapper
+    GdaComm comm;
 
-    int mype = pmi.rank;
-    int npes = pmi.size;
+    int mype = comm.rank();
+    int npes = comm.size();
 
     if (npes < 2) {
         if (mype == 0) {
@@ -145,19 +140,10 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    // Get local rank from environment (SLURM_LOCALID) for GPU selection
-    int local_rank = pmi.local_rank;
-    if (local_rank < 0) {
-        // Fallback: use global rank mod num_devices
-        int num_devices;
-        HIP_CHECK(hipGetDeviceCount(&num_devices));
-        local_rank = mype % num_devices;
-    }
-
     // Check if neighbors are on same node
     int left_neighbor = (npes + mype - 1) % npes;
     int right_neighbor = (mype + 1) % npes;
-    bool* locality_map = pmi.build_locality_map();
+    bool* locality_map = comm.pmi.build_locality_map();
 
     // Allow disabling IPC for benchmarking (set GDA_DISABLE_IPC=1)
     bool use_ipc = (getenv("GDA_DISABLE_IPC") == nullptr);
@@ -166,7 +152,7 @@ int main(int argc, char** argv)
 
     // Print locality info (only first few ranks)
     if (mype < 8) {
-        std::cerr << "Rank " << mype << " on " << pmi.hostname
+        std::cerr << "Rank " << mype << " on " << comm.pmi.hostname
                   << ": left=" << left_neighbor << (left_is_local ? "(local)" : "(REMOTE)")
                   << ", right=" << right_neighbor << (right_is_local ? "(local)" : "(REMOTE)")
                   << "\n";
@@ -174,16 +160,10 @@ int main(int argc, char** argv)
 
     delete[] locality_map;
 
-    // Create affinity detector with specified GPU
-    DeviceAffinityDetector affinity(local_rank);
-
-    // Initialize GPU with affinity-selected device
-    HipDeviceContext hip(affinity.selected_gpu_id);
-
     // Debug: print GPU assignment
     if (mype < 8 || mype == npes - 1) {
-        std::cerr << "Rank " << mype << " (local " << local_rank << ") using GPU "
-                  << affinity.selected_gpu_id << "\n";
+        std::cerr << "Rank " << mype << " (local " << comm.pmi.local_rank << ") using GPU "
+                  << comm.gpu_id() << "\n";
     }
 
     // Matrix size from command line or default
@@ -194,52 +174,6 @@ int main(int argc, char** argv)
 
     if (mype == 0)
         std::cout << "Matrix stripe: " << N << 'x' << Ns << ", " << stripe_size << " bytes\n";
-
-    // =========================================================================
-    // Initialize Fabric/DWQ Context with affinity-selected CXI
-    // =========================================================================
-    FabricDwqContext fabric(mype, &affinity);
-
-    // =========================================================================
-    // Exchange addresses with ALL ranks (needed for barrier)
-    // =========================================================================
-    std::vector<fi_addr_t> all_av_addrs(npes);
-    fi_addr_t left_addr, right_addr;
-    {
-        char* my_hex = (char*)malloc(2 * fabric.addrlen + 1);
-        bytes_to_hex((uint8_t*)fabric.local_addr, fabric.addrlen, my_hex);
-
-        char key[PMI2_MAX_KEYLEN];
-        snprintf(key, sizeof(key), "addr-%d", mype);
-        pmi.kvs_put(key, my_hex);
-        pmi.barrier();  // KVS needs PMI barrier
-
-        // Get addresses from ALL ranks
-        uint8_t* peer_bin = (uint8_t*)malloc(fabric.addrlen);
-        for (int r = 0; r < npes; r++) {
-            char peer_hex[PMI2_MAX_VALLEN];
-            snprintf(key, sizeof(key), "addr-%d", r);
-            pmi.kvs_get(key, peer_hex, sizeof(peer_hex));
-            hex_to_bytes(peer_hex, peer_bin, fabric.addrlen);
-
-            if (fi_av_insert(fabric.av, peer_bin, 1, &all_av_addrs[r], 0, NULL) != 1) {
-                std::cerr << "Rank " << mype << ": fi_av_insert(rank " << r << ") failed\n";
-                exit(1);
-            }
-        }
-
-        // Store specific peer addresses for MM algorithm
-        int left_rank = (npes + mype - 1) % npes;
-        int right_rank = (mype + 1) % npes;
-        left_addr = all_av_addrs[left_rank];
-        right_addr = all_av_addrs[right_rank];
-        fabric.peer_addr = left_addr;  // We send to left neighbor
-        fabric.local_addr_in_av = all_av_addrs[mype];
-
-        free(my_hex);
-        free(peer_bin);
-    }
-
 
     // =========================================================================
     // Allocate host arrays for initialization
@@ -291,17 +225,17 @@ int main(int argc, char** argv)
             char ipc_hex[sizeof(my_handles) * 2 + 1];
             bytes_to_hex((uint8_t*)&my_handles, sizeof(my_handles), ipc_hex);
             snprintf(key, sizeof(key), "ipc-%d", mype);
-            pmi.kvs_put(key, ipc_hex);
+            comm.pmi.kvs_put(key, ipc_hex);
         }
 
-        pmi.barrier();  // KVS needs PMI barrier
+        comm.pmi.barrier();  // KVS needs PMI barrier
 
         // Get right neighbor's IPC handles if they are local
         if (right_is_local) {
             hipIpcMemHandle_t right_handles[2];
             snprintf(key, sizeof(key), "ipc-%d", right_neighbor);
             char peer_hex[PMI2_MAX_VALLEN];
-            pmi.kvs_get(key, peer_hex, sizeof(peer_hex));
+            comm.pmi.kvs_get(key, peer_hex, sizeof(peer_hex));
             hex_to_bytes(peer_hex, (uint8_t*)&right_handles, sizeof(right_handles));
 
             // Open right neighbor's buffers
@@ -319,11 +253,9 @@ int main(int argc, char** argv)
     // =========================================================================
     // Register memory regions for RDMA - both B buffers (for cross-node)
     // =========================================================================
-    MemoryRegion mr_B0(fabric.domain, fabric.ep, fabric.cxi_info,
-                       d_B[0], stripe_size, true, hip.gpu_id, mype);
-    MemoryRegion mr_B1(fabric.domain, fabric.ep, fabric.cxi_info,
-                       d_B[1], stripe_size, true, hip.gpu_id, mype);
-    MemoryRegion* mr_B[2] = {&mr_B0, &mr_B1};
+    GdaHandle handle_B0 = comm.register_buffer(d_B[0], stripe_size, true);
+    GdaHandle handle_B1 = comm.register_buffer(d_B[1], stripe_size, true);
+    GdaHandle* handle_B[2] = {&handle_B0, &handle_B1};
 
     // =========================================================================
     // Exchange RMA info for BOTH buffers with left neighbor
@@ -332,10 +264,10 @@ int main(int argc, char** argv)
     struct RmaInfo { uint64_t addr; uint64_t key; };
     RmaInfo my_rma_info[2], left_rma_info[2];
 
-    my_rma_info[0].addr = (uint64_t)d_B[0];
-    my_rma_info[0].key = mr_B[0]->key;
-    my_rma_info[1].addr = (uint64_t)d_B[1];
-    my_rma_info[1].key = mr_B[1]->key;
+    my_rma_info[0].addr = handle_B0.rma_addr;
+    my_rma_info[0].key = handle_B0.rma_key;
+    my_rma_info[1].addr = handle_B1.rma_addr;
+    my_rma_info[1].key = handle_B1.rma_key;
 
     {
         char rma_hex[128];
@@ -343,15 +275,19 @@ int main(int argc, char** argv)
 
         char key[PMI2_MAX_KEYLEN];
         snprintf(key, sizeof(key), "rma-%d", mype);
-        pmi.kvs_put(key, rma_hex);
-        pmi.barrier();  // KVS needs PMI barrier
+        comm.pmi.kvs_put(key, rma_hex);
+        comm.pmi.barrier();  // KVS needs PMI barrier
 
         // Get left neighbor's RMA info (we write to left's d_Bn)
         int left_rank = (npes + mype - 1) % npes;
         snprintf(key, sizeof(key), "rma-%d", left_rank);
         char peer_hex[PMI2_MAX_VALLEN];
-        pmi.kvs_get(key, peer_hex, sizeof(peer_hex));
+        comm.pmi.kvs_get(key, peer_hex, sizeof(peer_hex));
         hex_to_bytes(peer_hex, (uint8_t*)&left_rma_info, sizeof(left_rma_info));
+
+        // Set remote info for both buffers using buffer index
+        comm.set_remote_info_by_index(left_rank, 0, left_rma_info[0].addr, left_rma_info[0].key);
+        comm.set_remote_info_by_index(left_rank, 1, left_rma_info[1].addr, left_rma_info[1].key);
     }
 
     timespec t0, t1;
@@ -363,6 +299,10 @@ int main(int argc, char** argv)
     dim3 blockDim(16, 16);
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
                  (Ns + blockDim.y - 1) / blockDim.y);
+
+    // Cache trigger address for advanced usage (compute+trigger overlap)
+    volatile uint64_t* trigger_addr = comm.get_trigger_addr();
+    int left_rank = (npes + mype - 1) % npes;
 
     // =========================================================================
     // Warm-up: run one iteration to eliminate first-launch overhead
@@ -377,28 +317,16 @@ int main(int argc, char** argv)
         HIP_CHECK(hipMemset(d_Cs, 0, stripe_size));
 
         // Warmup DWQ: do one RMA write to prime NIC and libfabric
-        uint64_t warmup_remote_addr = fabric.is_virt_addr_mode() ? left_rma_info[0].addr : 0;
-        uint64_t warmup_threshold = 1;
-
-        DwqWorkBuilder warmup_dwq(mype);
-        warmup_dwq.queue_rma_write(
-            fabric.domain, fabric.ep,
-            d_B[0], mr_B[0]->desc, stripe_size,
-            fabric.peer_addr, warmup_remote_addr, left_rma_info[0].key,
-            fabric.trigger_cntr, fabric.completion_cntr, warmup_threshold);
+        uint64_t warmup_threshold = comm.put(handle_B0, left_rank, 0, stripe_size);
 
         // Trigger and wait for warmup RMA
-        hipLaunchKernelGGL(gpu_trigger_only, dim3(1), dim3(1), 0, 0,
-                           fabric.dev_trigger_cntr, warmup_threshold);
+        comm.trigger(warmup_threshold);
         HIP_CHECK(hipDeviceSynchronize());
-        while (fi_cntr_read(fabric.completion_cntr) < warmup_threshold) {
-            fi_cq_read(fabric.cq, NULL, 0);
-        }
+        comm.wait(warmup_threshold);
 
         // Flush DWQ and reset counters for main loop
-        fabric.flush_dwq();
-        fi_cntr_set(fabric.trigger_cntr, 0);
-        fi_cntr_set(fabric.completion_cntr, 0);
+        comm.flush();
+        comm.reset_counters();
     }
 
     MPI_Barrier(MPI_COMM_WORLD);
@@ -406,7 +334,7 @@ int main(int argc, char** argv)
     // =========================================================================
     // Run 10 iterations, skip first 3 (warmup), average last 7
     // =========================================================================
-    constexpr int TOTAL_RUNS = 100;
+    constexpr int TOTAL_RUNS = 10;
     constexpr int WARMUP_RUNS = 3;
     double times[TOTAL_RUNS];
 
@@ -436,34 +364,14 @@ int main(int argc, char** argv)
 
             if (need_dwq) {
                 // Cross-node: use DWQ RDMA to write to left neighbor
-                global_threshold++;
-                const uint64_t iter_threshold = global_threshold;
+                // put() returns threshold and auto-increments counter
+                uint64_t iter_threshold = comm.put(*handle_B[cur_buf], left_rank,
+                                                    next_buf, stripe_size);
+                global_threshold = iter_threshold;
 
-                uint64_t remote_addr = fabric.is_virt_addr_mode() ? left_rma_info[next_buf].addr : 0;
-                uint64_t remote_key = left_rma_info[next_buf].key;
-
-                DwqWorkBuilder dwq(mype);
-                dwq.queue_rma_write(
-                    fabric.domain, fabric.ep,
-                    d_B[cur_buf], mr_B[cur_buf]->desc, stripe_size,
-                    fabric.peer_addr, remote_addr, remote_key,
-                    fabric.trigger_cntr, fabric.completion_cntr, iter_threshold);
-
-                // Queue writeback trigger
-                struct fi_deferred_work wb_work = {};
-                struct fi_op_cntr wb_op = {};
-                wb_op.cntr = fabric.completion_cntr;
-                wb_op.value = 1;
-                wb_work.triggering_cntr = fabric.completion_cntr;
-                wb_work.completion_cntr = nullptr;
-                wb_work.threshold = iter_threshold;
-                wb_work.op_type = FI_OP_CNTR_ADD;
-                wb_work.op.cntr = &wb_op;
-                fi_control(&fabric.domain->fid, FI_QUEUE_WORK, &wb_work);
-
-                // Trigger DWQ
+                // Trigger DWQ (using trigger_addr for compute overlap)
                 hipLaunchKernelGGL(gpu_trigger_only, dim3(1), dim3(1), 0, 0,
-                                   fabric.dev_trigger_cntr, iter_threshold);
+                                   trigger_addr, iter_threshold);
             }
 
             // Same-node receive: copy from right neighbor's buffer via IPC
@@ -481,11 +389,11 @@ int main(int argc, char** argv)
 
             // Wait for cross-node RMA completion (if needed)
             if (need_dwq) {
-                while (fi_cntr_read(fabric.completion_cntr) < global_threshold) {
-                    fi_cq_read(fabric.cq, NULL, 0);
-                }
+                comm.wait(global_threshold);
             }
 
+            // MPI_Barrier(MPI_COMM_WORLD);
+            // comm.barrier();
             MPI_Barrier(MPI_COMM_WORLD);
         }
 
@@ -494,7 +402,7 @@ int main(int argc, char** argv)
 
         // Fast flush: aggressively progress CQ to release TLE resources
         // Much faster than flush_dwq() which has sleep(1)
-        fabric.fast_flush(global_threshold);
+        comm.fast_flush(global_threshold);
 
         if (mype == 0) {
             std::cout << "Run " << run << ": " << times[run] << " us"
@@ -536,7 +444,7 @@ int main(int argc, char** argv)
                 char key[PMI2_MAX_KEYLEN];
                 snprintf(key, sizeof(key), "result-%d", r);
                 char* result_hex = new char[2 * stripe_size + 1];
-                pmi.kvs_get(key, result_hex, 2 * stripe_size + 1);
+                comm.pmi.kvs_get(key, result_hex, 2 * stripe_size + 1);
                 hex_to_bytes(result_hex, (uint8_t*)(C + r * Ns * N), stripe_size);
                 delete[] result_hex;
             }
@@ -549,10 +457,10 @@ int main(int argc, char** argv)
             bytes_to_hex((uint8_t*)h_Cs, stripe_size, result_hex);
             char key[PMI2_MAX_KEYLEN];
             snprintf(key, sizeof(key), "result-%d", mype);
-            pmi.kvs_put(key, result_hex);
+            comm.pmi.kvs_put(key, result_hex);
             delete[] result_hex;
         }
-        pmi.barrier();  // KVS needs PMI barrier
+        comm.pmi.barrier();  // KVS needs PMI barrier
     }
 
     MPI_Barrier(MPI_COMM_WORLD);

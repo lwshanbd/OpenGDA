@@ -96,6 +96,18 @@ add_executable(mm_gda_minimal mm_gda_minimal.cpp)
 target_include_directories(mm_gda_minimal PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
 target_link_libraries(mm_gda_minimal PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
 
+# Halo exchange with GDA
+set_source_files_properties(halo_gda.cpp PROPERTIES LANGUAGE HIP)
+add_executable(halo_gda halo_gda.cpp)
+target_include_directories(halo_gda PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(halo_gda PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
+
+# Halo exchange with MPI (for comparison)
+set_source_files_properties(halo_mpi.cpp PROPERTIES LANGUAGE HIP)
+add_executable(halo_mpi halo_mpi.cpp)
+target_include_directories(halo_mpi PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(halo_mpi PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
+
 # Print configuration
 message(STATUS "HIP found: ${hip_DIR}")
 message(STATUS "HIP architectures: ${CMAKE_HIP_ARCHITECTURES}")
