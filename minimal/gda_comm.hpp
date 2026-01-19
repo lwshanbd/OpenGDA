@@ -41,11 +41,12 @@ __global__ void gda_trigger_kernel(volatile uint64_t* trigger_addr, uint64_t thr
 
 // Handle to a registered memory region
 struct GdaHandle {
-    void* buf;
-    size_t size;
-    MemoryRegion* mr;
-    uint64_t rma_addr;
-    uint64_t rma_key;
+    void* buf;              // Local buffer pointer
+    size_t size;            // Buffer size
+    MemoryRegion* mr;       // Memory region (may be null for raw handles)
+    void* local_desc;       // Local descriptor for DWQ operations
+    uint64_t rma_addr;      // RMA address
+    uint64_t rma_key;       // RMA key
 };
 
 // Remote RMA info for a specific buffer
@@ -153,6 +154,7 @@ public:
         handle.buf = buf;
         handle.size = size;
         handle.mr = mr;
+        handle.local_desc = mr->desc;
         handle.rma_addr = (uint64_t)buf;
         handle.rma_key = mr->key;
         return handle;
@@ -205,6 +207,38 @@ public:
         pending_ops.push_back(dwq);
 
         // Queue writeback (counter self-increment for stable completion tracking)
+        queue_counter_writeback(threshold);
+
+        return threshold;
+    }
+
+    /**
+     * Queue a raw put operation with explicit remote address and key
+     * @param src_handle Source buffer handle (must have local_desc set)
+     * @param dest_rank Destination rank
+     * @param remote_addr Remote buffer address
+     * @param remote_key Remote buffer key
+     * @param size Transfer size
+     * @return The threshold value to pass to trigger()
+     */
+    uint64_t put_raw(const GdaHandle& src_handle, int dest_rank,
+                     uint64_t remote_addr, uint64_t remote_key, size_t size) {
+        current_threshold++;
+        uint64_t threshold = current_threshold;
+
+        // Use direct remote address for non-virt_addr mode
+        uint64_t rma_addr = fabric->is_virt_addr_mode() ? remote_addr : remote_addr;
+
+        // Queue RMA write
+        auto* dwq = new DwqWorkBuilder(pmi.rank);
+        dwq->queue_rma_write(
+            fabric->domain, fabric->ep,
+            src_handle.buf, src_handle.local_desc, size,
+            av_addrs[dest_rank], rma_addr, remote_key,
+            fabric->trigger_cntr, fabric->completion_cntr, threshold);
+        pending_ops.push_back(dwq);
+
+        // Queue writeback
         queue_counter_writeback(threshold);
 
         return threshold;

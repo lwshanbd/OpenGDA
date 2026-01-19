@@ -96,17 +96,66 @@ add_executable(mm_gda_minimal mm_gda_minimal.cpp)
 target_include_directories(mm_gda_minimal PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
 target_link_libraries(mm_gda_minimal PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
 
-# Halo exchange with GDA
-set_source_files_properties(halo_gda.cpp PROPERTIES LANGUAGE HIP)
-add_executable(halo_gda halo_gda.cpp)
-target_include_directories(halo_gda PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
-target_link_libraries(halo_gda PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
+# Halo exchange with GDA (TODO: implement)
+# set_source_files_properties(halo_gda.cpp PROPERTIES LANGUAGE HIP)
+# add_executable(halo_gda halo_gda.cpp)
+# target_include_directories(halo_gda PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+# target_link_libraries(halo_gda PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
 
-# Halo exchange with MPI (for comparison)
-set_source_files_properties(halo_mpi.cpp PROPERTIES LANGUAGE HIP)
-add_executable(halo_mpi halo_mpi.cpp)
-target_include_directories(halo_mpi PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
-target_link_libraries(halo_mpi PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
+# Halo exchange with MPI (TODO: implement)
+# set_source_files_properties(halo_mpi.cpp PROPERTIES LANGUAGE HIP)
+# add_executable(halo_mpi halo_mpi.cpp)
+# target_include_directories(halo_mpi PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+# target_link_libraries(halo_mpi PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
+
+# GDA Fused kernel benchmark
+set_source_files_properties(gda_fuse.cpp PROPERTIES LANGUAGE HIP)
+add_executable(gda_fuse gda_fuse.cpp)
+target_include_directories(gda_fuse PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(gda_fuse PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
+
+# GDA Fused kernel debug
+set_source_files_properties(gda_fuse_debug.cpp PROPERTIES LANGUAGE HIP)
+add_executable(gda_fuse_debug gda_fuse_debug.cpp)
+target_include_directories(gda_fuse_debug PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(gda_fuse_debug PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
+
+# MPI GPU-aware comparison (requires GTL for GPU-aware MPI)
+# At runtime: MPICH_GPU_SUPPORT_ENABLED=1
+set_source_files_properties(gda_fuse_mpi.cpp PROPERTIES LANGUAGE HIP)
+add_executable(gda_fuse_mpi gda_fuse_mpi.cpp)
+target_include_directories(gda_fuse_mpi PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+# Link GTL for GPU-aware MPI (Cray MPICH)
+find_library(GTL_LIBRARY mpi_gtl_hsa
+    PATHS /opt/cray/pe/mpich/8.1.30/gtl/lib
+    NO_DEFAULT_PATH
+)
+if(GTL_LIBRARY)
+    target_link_libraries(gda_fuse_mpi PRIVATE ${COMMON_LIBS} MPI::MPI_CXX ${GTL_LIBRARY})
+    message(STATUS "GTL library found: ${GTL_LIBRARY}")
+else()
+    # Fallback without GTL (may not have GPU-aware support)
+    target_link_libraries(gda_fuse_mpi PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
+    message(WARNING "GTL library not found - MPI may not be GPU-aware")
+endif()
+
+# Active Message test
+set_source_files_properties(am_test.cpp PROPERTIES LANGUAGE HIP)
+add_executable(am_test am_test.cpp)
+target_include_directories(am_test PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(am_test PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
+
+# Simple AM test for debugging
+set_source_files_properties(am_test_simple.cpp PROPERTIES LANGUAGE HIP)
+add_executable(am_test_simple am_test_simple.cpp)
+target_include_directories(am_test_simple PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(am_test_simple PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
+
+# One-message AM test
+set_source_files_properties(am_test_one.cpp PROPERTIES LANGUAGE HIP)
+add_executable(am_test_one am_test_one.cpp)
+target_include_directories(am_test_one PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(am_test_one PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
 
 # Print configuration
 message(STATUS "HIP found: ${hip_DIR}")
