@@ -139,23 +139,17 @@ else()
     message(WARNING "GTL library not found - MPI may not be GPU-aware")
 endif()
 
-# Active Message test
-set_source_files_properties(am_test.cpp PROPERTIES LANGUAGE HIP)
-add_executable(am_test am_test.cpp)
-target_include_directories(am_test PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
-target_link_libraries(am_test PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
-
-# Simple AM test for debugging
-set_source_files_properties(am_test_simple.cpp PROPERTIES LANGUAGE HIP)
-add_executable(am_test_simple am_test_simple.cpp)
-target_include_directories(am_test_simple PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
-target_link_libraries(am_test_simple PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
-
-# One-message AM test
+# AM throughput test (1000 messages)
 set_source_files_properties(am_test_one.cpp PROPERTIES LANGUAGE HIP)
 add_executable(am_test_one am_test_one.cpp)
 target_include_directories(am_test_one PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
 target_link_libraries(am_test_one PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
+
+# AM ping-pong latency test
+set_source_files_properties(am_pingpong.cpp PROPERTIES LANGUAGE HIP)
+add_executable(am_pingpong am_pingpong.cpp)
+target_include_directories(am_pingpong PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(am_pingpong PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
 
 # Print configuration
 message(STATUS "HIP found: ${hip_DIR}")

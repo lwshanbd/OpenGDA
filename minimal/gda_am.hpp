@@ -107,11 +107,11 @@ public:
         // Prepare slot on host
         memset(&h_slot_temp, 0, sizeof(am_slot_t));
         h_slot_temp.seq = seq;
-        h_slot_temp.hdr.handler_id = handler_id;
+        h_slot_temp.hdr.handler_id = (uint16_t)handler_id;
         h_slot_temp.hdr.flags = AM_FLAG_HANDLE_ONLY;
         h_slot_temp.hdr.payload_len = 0;
-        h_slot_temp.hdr.src_rank = am_ctx.comm.rank();
-        memcpy(&h_slot_temp.args, &args, sizeof(am_args64_t));
+        h_slot_temp.hdr.src_rank = (uint16_t)am_ctx.comm.rank();
+        memcpy(&h_slot_temp.args, &args, sizeof(am_args_t));
 
         // Copy to device staging
         hipMemcpy(d_slot, &h_slot_temp, sizeof(am_slot_t), hipMemcpyHostToDevice);
@@ -123,8 +123,9 @@ public:
         am_ctx.comm.set_remote_info_by_index(dest_rank, staging_idx - 1,
             ss.remote_ring_base, ss.remote_ring_key);
 
-        // Body size: hdr + args
-        size_t body_size = sizeof(am_hdr_t) + sizeof(am_args64_t);
+        // Body size: hdr + args = 8 + 48 = 56 bytes for short AM
+        // Total wire: body(56) + seq(8) = 64 bytes (power of 2)
+        size_t body_size = sizeof(am_hdr_t) + sizeof(am_args_t);
 
         // Calculate offsets for put
         // Source offset: hdr starts at offset 8 in am_slot_t
@@ -206,19 +207,19 @@ public:
         // Prepare slot
         memset(&h_slot_temp, 0, sizeof(am_slot_t));
         h_slot_temp.seq = seq;
-        h_slot_temp.hdr.handler_id = handler_id;
+        h_slot_temp.hdr.handler_id = (uint16_t)handler_id;
         h_slot_temp.hdr.flags = AM_FLAG_HAS_PAYLOAD;
-        h_slot_temp.hdr.payload_len = payload_len;
-        h_slot_temp.hdr.src_rank = am_ctx.comm.rank();
-        memcpy(&h_slot_temp.args, &args, sizeof(am_args64_t));
+        h_slot_temp.hdr.payload_len = (uint16_t)payload_len;
+        h_slot_temp.hdr.src_rank = (uint16_t)am_ctx.comm.rank();
+        memcpy(&h_slot_temp.args, &args, sizeof(am_args_t));
         memcpy(h_slot_temp.payload, payload, payload_len);
 
         hipMemcpy(d_slot, &h_slot_temp, sizeof(am_slot_t), hipMemcpyHostToDevice);
 
         int slot_idx = seq & (ss.nslots - 1);
 
-        // Body size: hdr + args + payload
-        size_t body_size = sizeof(am_hdr_t) + sizeof(am_args64_t) + payload_len;
+        // Body size: hdr + args + payload = 8 + 48 + payload_len
+        size_t body_size = sizeof(am_hdr_t) + sizeof(am_args_t) + payload_len;
         size_t src_body_offset = offsetof(am_slot_t, hdr);
         size_t dst_body_offset = slot_idx * AM_SLOT_SIZE + offsetof(am_slot_t, hdr);
         size_t dst_seq_offset = slot_idx * AM_SLOT_SIZE + offsetof(am_slot_t, seq);
