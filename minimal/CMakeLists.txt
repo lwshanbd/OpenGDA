@@ -151,6 +151,18 @@ add_executable(am_pingpong am_pingpong.cpp)
 target_include_directories(am_pingpong PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
 target_link_libraries(am_pingpong PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
 
+# GPU-triggered dissemination barrier test
+set_source_files_properties(barrier_new_test.cpp PROPERTIES LANGUAGE HIP)
+add_executable(barrier_new_test barrier_new_test.cpp)
+target_include_directories(barrier_new_test PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(barrier_new_test PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
+
+# Continuous barrier test (multiple barriers in single kernel)
+set_source_files_properties(barrier_continuous_test.cpp PROPERTIES LANGUAGE HIP)
+add_executable(barrier_continuous_test barrier_continuous_test.cpp)
+target_include_directories(barrier_continuous_test PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(barrier_continuous_test PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
+
 # Print configuration
 message(STATUS "HIP found: ${hip_DIR}")
 message(STATUS "HIP architectures: ${CMAKE_HIP_ARCHITECTURES}")
