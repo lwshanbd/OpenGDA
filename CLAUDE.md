@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## IMPORTANT: Running Programs on Tioga
+
+**This machine is tioga, an HPC cluster. ALL distributed program execution MUST use the `/tioga-run` skill.**
+
+When the user asks to run, execute, or launch any program (especially with multiple nodes or ranks), you MUST invoke the `tioga-run` skill using the Skill tool. Do NOT run srun commands directly without using this skill.
+
 ## IMPORTANT: Development Focus
 
 **The active development is in the `minimal/` directory.** The `src/` directory contains legacy code and should be ignored for new development.

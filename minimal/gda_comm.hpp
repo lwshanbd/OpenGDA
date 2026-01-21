@@ -52,8 +52,9 @@ struct GdaHandle {
 // Remote RMA info for a specific buffer
 struct GdaRemoteInfo {
     fi_addr_t av_addr;
-    uint64_t rma_addr;
+    uint64_t rma_addr;      // Full address (base + offset) for virt_addr mode
     uint64_t rma_key;
+    uint64_t base_addr;     // MR base address (for computing offset in non-virt_addr mode)
 };
 
 class GdaComm {
@@ -164,13 +165,17 @@ public:
      * Set remote RMA info by buffer index (for double-buffering scenarios)
      * @param dest_rank Destination rank
      * @param buf_index Buffer index (used as map key)
-     * @param remote_addr Remote buffer address
+     * @param remote_addr Remote buffer address (base + offset)
      * @param remote_key Remote buffer key
+     * @param remote_base_addr Remote MR base address (default 0 means remote_addr is the base)
      */
     void set_remote_info_by_index(int dest_rank, int buf_index,
-                                   uint64_t remote_addr, uint64_t remote_key) {
+                                   uint64_t remote_addr, uint64_t remote_key,
+                                   uint64_t remote_base_addr = 0) {
         uint64_t map_key = make_remote_key(dest_rank, buf_index);
-        remote_info[map_key] = {av_addrs[dest_rank], remote_addr, remote_key};
+        // If base_addr is not provided, assume remote_addr is the base (offset = 0)
+        uint64_t base = (remote_base_addr != 0) ? remote_base_addr : remote_addr;
+        remote_info[map_key] = {av_addrs[dest_rank], remote_addr, remote_key, base};
     }
 
     /**
@@ -195,7 +200,16 @@ public:
         }
         const auto& ri = it->second;
 
-        uint64_t remote_addr = fabric->is_virt_addr_mode() ? ri.rma_addr : 0;
+        // Compute remote address based on MR mode:
+        // - VIRT_ADDR mode: use full virtual address (base + offset)
+        // - Non-VIRT_ADDR mode: use offset relative to MR base
+        uint64_t remote_addr;
+        if (fabric->is_virt_addr_mode()) {
+            remote_addr = ri.rma_addr;
+        } else {
+            // Compute offset from base address
+            remote_addr = ri.rma_addr - ri.base_addr;
+        }
 
         // Queue RMA write
         auto* dwq = new DwqWorkBuilder(pmi.rank);
@@ -206,8 +220,10 @@ public:
             fabric->trigger_cntr, fabric->completion_cntr, threshold);
         pending_ops.push_back(dwq);
 
-        // Queue writeback (counter self-increment for stable completion tracking)
-        queue_counter_writeback(threshold);
+        // NOTE: Removed queue_counter_writeback() - it caused a race condition
+        // where completion_cntr grew by 2 per operation (1 from RMA + 1 from writeback),
+        // causing wait() to return early in subsequent iterations.
+        // The RMA completion counter alone is sufficient.
 
         return threshold;
     }
@@ -252,6 +268,15 @@ public:
     void trigger(uint64_t threshold) {
         hipLaunchKernelGGL(gda_trigger_kernel, dim3(1), dim3(1), 0, 0,
                            fabric->dev_trigger_cntr, threshold);
+    }
+
+    /**
+     * Trigger queued DWQ operations from CPU (alternative to GPU trigger)
+     * Uses fi_cntr_set directly - useful for debugging GPU MMIO issues
+     * @param threshold The threshold value returned by put()
+     */
+    void trigger_cpu(uint64_t threshold) {
+        fi_cntr_set(fabric->trigger_cntr, threshold);
     }
 
     /**
