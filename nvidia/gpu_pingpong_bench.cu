@@ -34,7 +34,12 @@ using namespace std::chrono;
 // Test configurations
 constexpr int WARMUP_ITERS = 50;
 constexpr int TEST_ITERS = 1000;
-constexpr size_t MSG_SIZES[] = {8, 64, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536};
+constexpr size_t MSG_SIZES[] = {
+    1, 2, 4, 8, 16, 32, 64, 128, 256, 512,
+    1024, 2048, 4096, 8192, 16384, 32768, 65536,
+    128*1024, 256*1024, 512*1024, 1024*1024,
+    2*1024*1024, 4*1024*1024, 8*1024*1024, 16*1024*1024
+};
 constexpr int NUM_SIZES = sizeof(MSG_SIZES) / sizeof(MSG_SIZES[0]);
 
 //==============================================================================
@@ -58,12 +63,14 @@ struct BufInfo {
 //==============================================================================
 
 // Ping-pong kernel with variable message size
-// Uses last 8 bytes of message as sequence number for synchronization
+// For msg_size >= 8: uses last 8 bytes of message as sequence number
+// For msg_size < 8: uses separate flag buffer at fixed offset
 __global__ void gpu_pingpong_kernel(
     GdaDeviceStateOpt* state,
     uint64_t send_addr,
     uint32_t send_lkey,
-    volatile uint64_t* recv_flag,    // Points to last 8 bytes of recv buffer
+    volatile uint64_t* recv_flag,    // Flag location in recv buffer
+    uint64_t send_flag_addr,         // Flag location in send buffer
     uint32_t msg_size,
     int iterations,
     int is_initiator,
@@ -77,18 +84,22 @@ __global__ void gpu_pingpong_kernel(
     uint64_t local_min = UINT64_MAX;
     uint64_t local_max = 0;
 
+    // For small messages, we transfer 8 bytes (the flag itself)
+    uint32_t actual_size = (msg_size < 8) ? 8 : msg_size;
+    volatile uint64_t* send_flag = (volatile uint64_t*)send_flag_addr;
+
     for (int i = 0; i < iterations; i++) {
         uint64_t iter_start = clock64();
 
         if (is_initiator) {
-            // Write sequence at end of message
-            *((volatile uint64_t*)(send_addr + msg_size - 8)) = i + 1;
+            // Write sequence to send flag location
+            *send_flag = i + 1;
             __threadfence_system();
 
             gda_rdma_write_opt(
                 state, send_addr, send_lkey,
                 state->remote_addr, state->remote_rkey,
-                msg_size, false
+                actual_size, false
             );
 
             // Wait for response
@@ -102,13 +113,13 @@ __global__ void gpu_pingpong_kernel(
             }
 
             // Send response
-            *((volatile uint64_t*)(send_addr + msg_size - 8)) = i + 1;
+            *send_flag = i + 1;
             __threadfence_system();
 
             gda_rdma_write_opt(
                 state, send_addr, send_lkey,
                 state->remote_addr, state->remote_rkey,
-                msg_size, false
+                actual_size, false
             );
         }
 
@@ -131,34 +142,38 @@ __global__ void gpu_pingpong_warmup_kernel(
     uint64_t send_addr,
     uint32_t send_lkey,
     volatile uint64_t* recv_flag,
+    uint64_t send_flag_addr,
     uint32_t msg_size,
     int iterations,
     int is_initiator)
 {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
+    uint32_t actual_size = (msg_size < 8) ? 8 : msg_size;
+    volatile uint64_t* send_flag = (volatile uint64_t*)send_flag_addr;
+
     for (int i = 0; i < iterations; i++) {
         if (is_initiator) {
-            *((volatile uint64_t*)(send_addr + msg_size - 8)) = i + 1;
+            *send_flag = i + 1;
             __threadfence_system();
 
             gda_rdma_write_opt(
                 state, send_addr, send_lkey,
                 state->remote_addr, state->remote_rkey,
-                msg_size, false
+                actual_size, false
             );
 
             while (*recv_flag != (uint64_t)(i + 1)) {}
         } else {
             while (*recv_flag != (uint64_t)(i + 1)) {}
 
-            *((volatile uint64_t*)(send_addr + msg_size - 8)) = i + 1;
+            *send_flag = i + 1;
             __threadfence_system();
 
             gda_rdma_write_opt(
                 state, send_addr, send_lkey,
                 state->remote_addr, state->remote_rkey,
-                msg_size, false
+                actual_size, false
             );
         }
     }
@@ -281,7 +296,7 @@ int main(int argc, char** argv) {
     MPI_Barrier(MPI_COMM_WORLD);
 
     // Allocate test buffers (GPU memory)
-    size_t max_size = 65536;
+    size_t max_size = 16 * 1024 * 1024;  // 16MB
     void* d_send_buf = nullptr;
     void* d_recv_buf = nullptr;
     cuda_check(cudaMalloc(&d_send_buf, max_size), "alloc send");
@@ -367,13 +382,17 @@ int main(int argc, char** argv) {
     }
 
     cuda_check(cudaMemset(d_recv_buf, 0, max_size), "clear recv warmup");
+    cuda_check(cudaMemset(d_send_buf, 0, max_size), "clear send warmup");
     MPI_Barrier(MPI_COMM_WORLD);
 
     int is_initiator = (mpi_rank == 0) ? 1 : 0;
-    volatile uint64_t* warmup_flag = (volatile uint64_t*)((char*)d_recv_buf + 64 - 8);
+
+    // For warmup (64 bytes), flag is at offset 64-8 = 56
+    volatile uint64_t* warmup_recv_flag = (volatile uint64_t*)((char*)d_recv_buf + 56);
+    uint64_t warmup_send_flag_addr = local_addr + 56;
 
     gpu_pingpong_warmup_kernel<<<1, 1>>>(
-        d_state, local_addr, local_lkey, warmup_flag,
+        d_state, local_addr, local_lkey, warmup_recv_flag, warmup_send_flag_addr,
         64, WARMUP_ITERS, is_initiator
     );
     cudaDeviceSynchronize();
@@ -400,14 +419,19 @@ int main(int argc, char** argv) {
     for (int sz_idx = 0; sz_idx < NUM_SIZES; sz_idx++) {
         size_t msg_size = MSG_SIZES[sz_idx];
 
-        // Clear recv buffer
+        // Clear recv and send buffers
         cuda_check(cudaMemset(d_recv_buf, 0, max_size), "clear recv test");
+        cuda_check(cudaMemset(d_send_buf, 0, max_size), "clear send test");
         MPI_Barrier(MPI_COMM_WORLD);
 
-        volatile uint64_t* flag_ptr = (volatile uint64_t*)((char*)d_recv_buf + msg_size - 8);
+        // For small messages (< 8 bytes), we use a fixed 8-byte transfer
+        // Flag is always at offset 0 (first 8 bytes) for simplicity
+        size_t flag_offset = (msg_size < 8) ? 0 : (msg_size - 8);
+        volatile uint64_t* recv_flag_ptr = (volatile uint64_t*)((char*)d_recv_buf + flag_offset);
+        uint64_t send_flag_addr = local_addr + flag_offset;
 
         gpu_pingpong_kernel<<<1, 1>>>(
-            d_state, local_addr, local_lkey, flag_ptr,
+            d_state, local_addr, local_lkey, recv_flag_ptr, send_flag_addr,
             msg_size, TEST_ITERS, is_initiator,
             d_result_cycles, d_min_cycles, d_max_cycles
         );
