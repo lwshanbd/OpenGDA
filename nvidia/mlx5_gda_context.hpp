@@ -155,6 +155,8 @@ public:
     void* d_wqe_buf;                 // GPU pointer to WQE buffer
     volatile uint64_t* d_prod_idx;   // GPU pointer to producer index
     volatile Mlx5Cqe64* d_cqe;       // GPU pointer to CQ entries
+    volatile uint32_t* d_dbrec;      // GPU pointer to doorbell record
+    volatile uint64_t* d_bf_reg;     // GPU pointer to BlueFlame register
 
     // Host resources for GPU mapping
     void* h_wqe_buf;
@@ -170,6 +172,7 @@ public:
         : ctx(nullptr), pd(nullptr), cq(nullptr), qp(nullptr),
           port_num(port), mpi(mpi_), rank(mpi_.rank), size(mpi_.size),
           d_wqe_buf(nullptr), d_prod_idx(nullptr), d_cqe(nullptr),
+          d_dbrec(nullptr), d_bf_reg(nullptr),
           h_wqe_buf(nullptr), h_prod_idx(nullptr), h_cqe(nullptr),
           qp_depth(256), cq_depth(512)
     {
@@ -478,12 +481,47 @@ private:
         // Also register doorbell for GPU access
         // Note: dbrec is a 64-bit region (SQ dbrec + RQ dbrec)
         volatile uint32_t* dbrec_base = qp_ex.dbrec;
-        err = cudaHostRegister((void*)dbrec_base, 64, cudaHostRegisterDefault);
+        err = cudaHostRegister((void*)dbrec_base, 64,
+            cudaHostRegisterPortable | cudaHostRegisterMapped);
         if (err != cudaSuccess) {
             if (rank == 0) {
                 printf("Note: cudaHostRegister for dbrec failed: %s (using direct access)\n",
                        cudaGetErrorString(err));
             }
+            d_dbrec = dbrec_base;  // Fallback to host pointer
+        } else {
+            err = cudaHostGetDevicePointer((void**)&d_dbrec, (void*)dbrec_base, 0);
+            if (err != cudaSuccess) {
+                if (rank == 0) {
+                    printf("Note: cudaHostGetDevicePointer for dbrec failed: %s\n",
+                           cudaGetErrorString(err));
+                }
+                d_dbrec = dbrec_base;
+            }
+        }
+
+        // Register BlueFlame register for GPU access (MMIO address)
+        if (qp_ex.bf.reg && qp_ex.bf.size > 0) {
+            err = cudaHostRegister(qp_ex.bf.reg, qp_ex.bf.size,
+                cudaHostRegisterPortable | cudaHostRegisterMapped | cudaHostRegisterIoMemory);
+            if (err != cudaSuccess) {
+                if (rank == 0) {
+                    printf("Note: cudaHostRegister for BlueFlame failed: %s\n",
+                           cudaGetErrorString(err));
+                }
+                d_bf_reg = (volatile uint64_t*)qp_ex.bf.reg;
+            } else {
+                err = cudaHostGetDevicePointer((void**)&d_bf_reg, qp_ex.bf.reg, 0);
+                if (err != cudaSuccess) {
+                    if (rank == 0) {
+                        printf("Note: cudaHostGetDevicePointer for BlueFlame failed: %s\n",
+                               cudaGetErrorString(err));
+                    }
+                    d_bf_reg = (volatile uint64_t*)qp_ex.bf.reg;
+                }
+            }
+        } else {
+            d_bf_reg = nullptr;
         }
 
         // Allocate producer index
@@ -520,9 +558,11 @@ private:
             printf("  NIC WQE buffer: %p (stride=%u, cnt=%u)\n",
                    qp_ex.sq.buf, qp_ex.sq.stride, qp_ex.sq.wqe_cnt);
             printf("  d_wqe_buf = %p\n", d_wqe_buf);
-            printf("  dbrec = %p\n", (void*)qp_ex.dbrec);
-            printf("  d_prod_idx = %p\n", d_prod_idx);
-            printf("  d_cqe = %p\n", d_cqe);
+            printf("  h_dbrec = %p, d_dbrec = %p\n", (void*)qp_ex.dbrec, (void*)d_dbrec);
+            printf("  h_bf_reg = %p, d_bf_reg = %p (size=%u)\n",
+                   qp_ex.bf.reg, (void*)d_bf_reg, qp_ex.bf.size);
+            printf("  d_prod_idx = %p\n", (void*)d_prod_idx);
+            printf("  d_cqe = %p\n", (void*)d_cqe);
             fflush(stdout);
         }
     }

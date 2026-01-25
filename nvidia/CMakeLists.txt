@@ -19,10 +19,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# Detect CUDA architecture - default to common ones
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES "70;80;90")
-endif()
+# Force CUDA architecture to sm_90 for GPU-triggered RDMA optimizations
+# (relaxed/release memory orderings and L1::no_allocate cache hints)
+set(CMAKE_CUDA_ARCHITECTURES "90" CACHE STRING "CUDA architectures" FORCE)
 
 # Enable separable compilation for device code
 set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
@@ -136,6 +135,24 @@ if(MLX5_LIBRARY)
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
     )
+
+    # GPU-triggered optimized benchmark (compares original vs optimized)
+    add_executable(gpu_benchmark_opt gpu_benchmark_opt.cu)
+    target_link_libraries(gpu_benchmark_opt ${COMMON_LIBS} ${MLX5_LIBRARY})
+    target_compile_options(gpu_benchmark_opt PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+    set_target_properties(gpu_benchmark_opt PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
+
+    # GPU-triggered benchmark using DevX API (correct approach)
+    add_executable(gpu_benchmark_devx gpu_benchmark_devx.cu)
+    target_link_libraries(gpu_benchmark_devx ${COMMON_LIBS} ${MLX5_LIBRARY})
+    target_compile_options(gpu_benchmark_devx PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+    set_target_properties(gpu_benchmark_devx PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
 else()
     message(STATUS "mlx5 library not found - GPU-triggered tests will not be built")
 endif()
@@ -171,6 +188,11 @@ message(STATUS "MPI: ${MPI_CXX_COMPILER}")
 message(STATUS "ibverbs: ${IBVERBS_LIBRARY}")
 message(STATUS "")
 message(STATUS "Build targets:")
-message(STATUS "  gda_pingpong  - RDMA ping-pong latency/bandwidth test")
-message(STATUS "  gda_am_test   - Active Message test")
+message(STATUS "  gda_pingpong      - RDMA ping-pong latency/bandwidth test")
+message(STATUS "  gda_am_test       - Active Message test")
+if(MLX5_LIBRARY)
+message(STATUS "  gpu_pingpong      - GPU-triggered RDMA test")
+message(STATUS "  gpu_benchmark_opt - GPU-triggered optimization benchmark")
+message(STATUS "  gpu_benchmark_devx- GPU-triggered benchmark using DevX API (recommended)")
+endif()
 message(STATUS "")

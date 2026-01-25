@@ -66,7 +66,7 @@ public:
 
     // Device state (GPU-accessible)
     GdaDeviceState* d_state;
-    GdaDeviceState h_state;
+    GdaDeviceState device_state;  // Renamed for public access
 
     // Completion counter (GPU-accessible)
     volatile uint64_t* h_num_completions;
@@ -156,8 +156,8 @@ public:
         if (buf_index == 0) {
             int peer = (mpi.rank == 0) ? 1 : 0;
             if (mpi.size > 1) {
-                h_state.remote_addr = all_info[peer].addr;
-                h_state.remote_rkey = all_info[peer].rkey;
+                device_state.remote_addr = all_info[peer].addr;
+                device_state.remote_rkey = all_info[peer].rkey;
                 update_device_state();
             }
         }
@@ -170,8 +170,8 @@ public:
         uint64_t key = make_key(dest_rank, buf_index);
         auto it = remote_info.find(key);
         if (it != remote_info.end()) {
-            h_state.remote_addr = it->second.addr;
-            h_state.remote_rkey = it->second.rkey;
+            device_state.remote_addr = it->second.addr;
+            device_state.remote_rkey = it->second.rkey;
             update_device_state();
         }
     }
@@ -306,7 +306,7 @@ private:
     }
 
     void setup_device_state() {
-        memset(&h_state, 0, sizeof(h_state));
+        memset(&device_state, 0, sizeof(device_state));
 
         // Allocate completion counter (GPU-accessible)
         cudaError_t err = cudaHostAlloc((void**)&h_num_completions, sizeof(uint64_t),
@@ -323,30 +323,31 @@ private:
             exit(1);
         }
 
-        h_state.qpn = mlx5->qp->qp_num;
-        h_state.nwqes = mlx5->qp_depth;
-        h_state.nwqes_mask = mlx5->qp_depth - 1;
-        h_state.wqe_buf = mlx5->d_wqe_buf;
-        h_state.wqe_lkey = 0;  // TODO: Register WQE buffer with NIC
-        h_state.dbrec = (volatile uint32_t*)mlx5->qp_ex.dbrec;
-        h_state.prod_idx = mlx5->d_prod_idx;
-        h_state.cqe = (volatile GdaCqe64*)mlx5->d_cqe;
-        h_state.ncqes = mlx5->cq_depth;
-        h_state.ncqes_mask = mlx5->cq_depth - 1;
-        h_state.cq_cons_idx = nullptr;
-        h_state.cq_dbrec = (volatile uint32_t*)mlx5->cq_ex.dbrec;
-        h_state.remote_addr = 0;
-        h_state.remote_rkey = 0;
-        h_state.num_completions = d_num_completions;
+        device_state.qpn = mlx5->qp->qp_num;
+        device_state.nwqes = mlx5->qp_depth;
+        device_state.nwqes_mask = mlx5->qp_depth - 1;
+        device_state.wqe_buf = mlx5->d_wqe_buf;
+        device_state.wqe_lkey = 0;  // TODO: Register WQE buffer with NIC
+        // Use GPU-mapped doorbell pointer
+        device_state.dbrec = mlx5->d_dbrec;
+        device_state.prod_idx = mlx5->d_prod_idx;
+        device_state.cqe = (volatile GdaCqe64*)mlx5->d_cqe;
+        device_state.ncqes = mlx5->cq_depth;
+        device_state.ncqes_mask = mlx5->cq_depth - 1;
+        device_state.cq_cons_idx = nullptr;
+        device_state.cq_dbrec = nullptr;  // TODO: map CQ dbrec
+        device_state.remote_addr = 0;
+        device_state.remote_rkey = 0;
+        device_state.num_completions = d_num_completions;
 
         // Allocate device state
         CUDA_CHECK(cudaMalloc(&d_state, sizeof(GdaDeviceState)));
-        CUDA_CHECK(cudaMemcpy(d_state, &h_state, sizeof(GdaDeviceState),
+        CUDA_CHECK(cudaMemcpy(d_state, &device_state, sizeof(GdaDeviceState),
                               cudaMemcpyHostToDevice));
     }
 
     void update_device_state() {
-        CUDA_CHECK(cudaMemcpy(d_state, &h_state, sizeof(GdaDeviceState),
+        CUDA_CHECK(cudaMemcpy(d_state, &device_state, sizeof(GdaDeviceState),
                               cudaMemcpyHostToDevice));
     }
 
