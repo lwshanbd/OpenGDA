@@ -171,6 +171,15 @@ if(MLX5_LIBRARY)
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
     )
+
+    # GPU-triggered concurrent RDMA benchmark (similar to minimal/)
+    add_executable(gpu_concurrent_bench gpu_concurrent_bench.cu)
+    target_link_libraries(gpu_concurrent_bench ${COMMON_LIBS} ${MLX5_LIBRARY})
+    target_compile_options(gpu_concurrent_bench PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+    set_target_properties(gpu_concurrent_bench PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
 else()
     message(STATUS "mlx5 library not found - GPU-triggered tests will not be built")
 endif()

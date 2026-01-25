@@ -149,7 +149,33 @@ GPU-triggered RDMA excels when:
 
 ---
 
-## 6. Batching Effect (GPU-triggered only)
+## 6. Concurrent Streams Benchmark (32 streams)
+
+Similar to minimal/benchmark_runner.hpp for CXI/Slingshot, this test measures
+32 concurrent GPU-triggered RDMA writes with a single doorbell.
+
+| Size | Total (us) | Per-transfer (us) |
+|------|------------|-------------------|
+| 1B-1KB | ~10.8 | **~0.34** |
+| 64KB | 10.9 | 0.34 |
+| 1MB | 11.4 | 0.36 |
+| 16MB | 11.2 | 0.35 |
+
+**Key insight:** With batching (32 concurrent transfers, single doorbell),
+the amortized cost drops from 7.34 us (ping-pong) to **0.34 us per transfer**!
+
+### Comparison with CXI/Slingshot (minimal/)
+
+| Platform | 32 Streams Total (us) | Per-transfer (us) |
+|----------|----------------------|-------------------|
+| **NVIDIA + InfiniBand** | ~11 | **~0.34** |
+| AMD + CXI (Slingshot) | ~31 | ~0.96 |
+
+NVIDIA + InfiniBand achieves **~3x better per-transfer latency** with batching.
+
+---
+
+## 7. Batching Effect (Ping-pong sequential)
 
 | Batch Size | Per-op (us) | Speedup |
 |------------|-------------|---------|
@@ -162,7 +188,7 @@ With batching, GPU-triggered RDMA achieves **0.10 us per operation**, competitiv
 
 ---
 
-## 7. Full Results Table
+## 8. Full Results Table
 
 | Size | MPI Host RTT | MPI GPU RTT | GPU-trig RTT | MPI Host BW | MPI GPU BW | GPU-trig BW |
 |------|-------------|-------------|--------------|-------------|------------|-------------|
@@ -194,7 +220,7 @@ With batching, GPU-triggered RDMA achieves **0.10 us per operation**, competitiv
 
 ---
 
-## 8. Build and Run
+## 9. Build and Run
 
 ```bash
 # Load CUDA-aware MPI modules
@@ -213,11 +239,14 @@ srun -N 2 --gres=gpu:1 ./mpi_pingpong_bench
 
 # Run GPU-triggered RDMA benchmark
 srun -N 2 --gres=gpu:1 ./gpu_pingpong_bench
+
+# Run concurrent streams benchmark (32 streams, like minimal/)
+srun -N 2 --gres=gpu:1 ./gpu_concurrent_bench
 ```
 
 ---
 
-## 9. Conclusions
+## 10. Conclusions
 
 1. **MPI is faster for raw latency**: 1.64 us (host) vs 7.34 us (GPU-triggered)
    - CPU has lower overhead for initiating transfers
