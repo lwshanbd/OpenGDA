@@ -162,6 +162,15 @@ if(MLX5_LIBRARY)
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
     )
+
+    # MPI ping-pong benchmark for comparison
+    add_executable(mpi_pingpong_bench mpi_pingpong_bench.cu)
+    target_link_libraries(mpi_pingpong_bench ${COMMON_LIBS})
+    target_compile_options(mpi_pingpong_bench PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+    set_target_properties(mpi_pingpong_bench PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
 else()
     message(STATUS "mlx5 library not found - GPU-triggered tests will not be built")
 endif()

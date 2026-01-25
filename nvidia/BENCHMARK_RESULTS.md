@@ -6,257 +6,241 @@
 |-----------|---------|
 | **GPU** | NVIDIA GH200 480GB (1.98 GHz) |
 | **Network** | Mellanox ConnectX-7 (mlx5_0) |
-| **Link** | RoCE v2 |
+| **Link** | RoCE v2, ~200 Gbps |
+| **MPI** | OpenMPI 5.0.5 with CUDA-aware support |
 | **API** | MLX5 DevX with GPU-accessible resources |
 | **Nodes** | 2 nodes, 1 GPU per node |
 
-## Implementation Overview
+---
 
-This implementation provides true GPU-initiated RDMA without CPU involvement:
+## Complete Comparison: MPI vs GPU-Triggered RDMA
 
-- **MLX5 DevX API**: GPU-accessible UAR (BlueFlame), WQE buffer, doorbell record
-- **BlueFlame Doorbell**: 64-bit write for low-latency WQE posting
-- **WQE Building**: GPU directly constructs RDMA WRITE WQEs
-- **Completion Detection**: Memory polling (sequence number in message)
+### Small Message Latency (8 bytes)
+
+| Method | RTT (us) | One-way (us) | Notes |
+|--------|----------|--------------|-------|
+| **MPI Host Memory** | 3.28 | **1.64** | CPU initiates, host buffers |
+| **MPI GPU Memory** | 5.44 | **2.72** | CPU initiates, GPU buffers (CUDA-aware) |
+| **GPU-triggered RDMA** | 14.67 | **7.34** | GPU initiates, no CPU involvement |
+
+### Peak Bandwidth (16 MB)
+
+| Method | RTT (us) | Bandwidth (Gbps) |
+|--------|----------|------------------|
+| **MPI Host Memory** | 1368.18 | **196.20** |
+| **MPI GPU Memory** | 1367.48 | **196.30** |
+| **GPU-triggered RDMA** | 2969.79 | **90.39** |
 
 ---
 
-## 1. Ping-Pong Latency Results (Complete)
+## 1. MPI Ping-Pong Results (Host Memory)
 
-True RDMA round-trip latency with GPU-triggered operations on both ends.
-**1000 iterations per message size, 50 warmup iterations**
+CPU-initiated communication using standard MPI_Send/MPI_Recv with host buffers.
 
-| Size | RTT (us) | One-way (us) | Min RTT (us) | Max RTT (us) | Bandwidth (Gbps) |
-|------|----------|--------------|--------------|--------------|------------------|
-| 1 B | 14.71 | 7.35 | 14.53 | 15.91 | 0.00 |
-| 2 B | 14.67 | 7.34 | 14.53 | 15.38 | 0.00 |
-| 4 B | 14.67 | 7.34 | 14.53 | 15.87 | 0.00 |
-| 8 B | 14.67 | 7.34 | 14.53 | 15.93 | 0.01 |
-| 16 B | 14.67 | 7.34 | 14.51 | 15.39 | 0.02 |
-| 32 B | 14.68 | 7.34 | 14.54 | 15.38 | 0.03 |
-| 64 B | 14.70 | 7.35 | 14.56 | 15.42 | 0.07 |
-| 128 B | 14.76 | 7.38 | 14.62 | 15.58 | 0.14 |
-| 256 B | 14.86 | 7.43 | 14.70 | 15.79 | 0.28 |
-| 512 B | 14.95 | 7.48 | 14.81 | 15.69 | 0.55 |
-| 1 KB | 15.30 | 7.65 | 15.15 | 16.71 | 1.07 |
-| 2 KB | 15.36 | 7.68 | 15.21 | 16.67 | 2.13 |
-| 4 KB | 15.76 | 7.88 | 15.62 | 16.22 | 4.16 |
-| 8 KB | 16.97 | 8.48 | 16.83 | 17.58 | 7.73 |
-| 16 KB | 19.05 | 9.53 | 18.90 | 20.73 | 13.76 |
-| 32 KB | 23.13 | 11.56 | 22.98 | 23.85 | 22.67 |
-| 64 KB | 29.55 | 14.77 | 29.39 | 30.40 | 35.49 |
-| 128 KB | 40.98 | 20.49 | 40.83 | 42.68 | 51.17 |
-| 256 KB | 63.59 | 31.79 | 63.45 | 64.45 | 65.96 |
-| 512 KB | 109.62 | 54.81 | 109.44 | 111.01 | 76.52 |
-| 1 MB | 202.77 | 101.39 | 202.30 | 203.40 | 82.74 |
-| 2 MB | 386.98 | 193.49 | 386.80 | 388.43 | 86.71 |
-| 4 MB | 755.46 | 377.73 | 755.22 | 757.23 | 88.83 |
-| 8 MB | 1493.59 | 746.80 | 1493.37 | 1495.16 | 89.86 |
-| 16 MB | 2969.79 | 1484.90 | 2969.42 | 2971.56 | **90.39** |
-
-### Key Observations
-
-1. **Small Message Latency**: ~7.35 us one-way for messages 1B-64B (latency-bound region)
-2. **Latency Transition Point**: ~4KB where bandwidth starts to dominate
-3. **Peak Bandwidth**: **90.39 Gbps** at 16MB (bidirectional)
-4. **Consistency**: Min/Max within ~1.5 us of average for small messages
-5. **Large Message Efficiency**: Near line-rate at 16MB
-
-### Latency Breakdown (estimated for 8B message)
-
-| Component | Time (us) |
-|-----------|-----------|
-| GPU WQE build | ~1.0 |
-| BlueFlame doorbell | ~0.5 |
-| PCIe to NIC | ~0.5 |
-| Network RTT | ~3.0 |
-| PCIe from NIC | ~0.5 |
-| Memory polling | ~1.8 |
-| **Total RTT** | **~14.7** |
+| Size | RTT (us) | One-way (us) | Bandwidth (Gbps) |
+|------|----------|--------------|------------------|
+| 1 B | 3.36 | 1.68 | 0.00 |
+| 8 B | 3.28 | **1.64** | 0.04 |
+| 64 B | 3.60 | 1.80 | 0.28 |
+| 512 B | 4.52 | 2.26 | 1.81 |
+| 1 KB | 4.27 | 2.14 | 3.84 |
+| 4 KB | 6.22 | 3.11 | 10.54 |
+| 16 KB | 9.05 | 4.52 | 28.98 |
+| 64 KB | 14.74 | 7.37 | 71.14 |
+| 256 KB | 34.07 | 17.04 | 123.11 |
+| 1 MB | 97.72 | 48.86 | 171.69 |
+| 4 MB | 352.28 | 176.14 | 190.50 |
+| 16 MB | 1368.18 | 684.09 | **196.20** |
 
 ---
 
-## 2. WQE Posting Overhead (Batching Effect)
+## 2. MPI Ping-Pong Results (GPU Memory, CUDA-aware)
 
-Measures time for GPU to build WQEs and ring doorbell, without waiting for network completion.
+CPU-initiated communication with GPU buffers, using CUDA-aware MPI.
 
-| Batch Size | Per-op (us) | Total (us) | Speedup |
-|------------|-------------|------------|---------|
-| 1 | 1.98 | 1981 | 1.00x |
-| 8 | 0.32 | 316 | 6.26x |
-| 32 | 0.14 | 142 | 13.96x |
-| 128 | **0.10** | 97 | **20.47x** |
-
-### Key Observations
-
-1. **Single Operation**: ~2 us (includes WQE build + BlueFlame doorbell)
-2. **Batched Operations**: As low as **0.10 us** per operation with batch=128
-3. **Speedup**: **20x improvement** with batching due to amortized doorbell cost
-4. **Optimal Batch Size**: 32-128 for best throughput
+| Size | RTT (us) | One-way (us) | Bandwidth (Gbps) |
+|------|----------|--------------|------------------|
+| 1 B | 5.64 | 2.82 | 0.00 |
+| 8 B | 5.44 | **2.72** | 0.02 |
+| 64 B | 5.92 | 2.96 | 0.17 |
+| 512 B | 6.61 | 3.31 | 1.24 |
+| 1 KB | 6.67 | 3.33 | 2.46 |
+| 4 KB | 7.46 | 3.73 | 8.79 |
+| 16 KB | 12.32 | 6.16 | 21.27 |
+| 64 KB | 17.28 | 8.64 | 60.67 |
+| 256 KB | 33.38 | 16.69 | 125.67 |
+| 1 MB | 97.55 | 48.77 | 171.99 |
+| 4 MB | 351.59 | 175.79 | 190.87 |
+| 16 MB | 1367.48 | 683.74 | **196.30** |
 
 ---
 
-## 3. Performance Analysis
+## 3. GPU-Triggered RDMA Results (DevX API)
 
-### Bandwidth vs Message Size
+GPU-initiated communication without CPU involvement using MLX5 DevX.
+
+| Size | RTT (us) | One-way (us) | Bandwidth (Gbps) |
+|------|----------|--------------|------------------|
+| 1 B | 14.71 | 7.35 | 0.00 |
+| 8 B | 14.67 | **7.34** | 0.01 |
+| 64 B | 14.70 | 7.35 | 0.07 |
+| 512 B | 14.95 | 7.48 | 0.55 |
+| 1 KB | 15.30 | 7.65 | 1.07 |
+| 4 KB | 15.76 | 7.88 | 4.16 |
+| 16 KB | 19.05 | 9.53 | 13.76 |
+| 64 KB | 29.55 | 14.77 | 35.49 |
+| 256 KB | 63.59 | 31.79 | 65.96 |
+| 1 MB | 202.77 | 101.39 | 82.74 |
+| 4 MB | 755.46 | 377.73 | 88.83 |
+| 16 MB | 2969.79 | 1484.90 | **90.39** |
+
+---
+
+## 4. Latency Comparison Chart
 
 ```
-Bandwidth (Gbps)
-     |
- 90 -+                                          ********
-     |                                    ******
- 80 -+                              ******
-     |                        ******
- 70 -+                  ******
-     |            ******
- 60 -+      ******
-     |  ****
- 50 -+**
-     |
- 40 -+
-     |
- 30 -+----
-     |    ----
- 20 -+        ----
-     |            ----
- 10 -+                ----
-     |                    --------
-  0 -+------------------------+--------+--------+--------+
-     1B   1KB   16KB  64KB  256KB   1MB   4MB   16MB
+One-way Latency (us) for 8-byte message:
+
+MPI Host     |████ 1.64 us
+MPI GPU      |██████ 2.72 us
+GPU-triggered|██████████████████████ 7.34 us
+             +----+----+----+----+----+----+----+----+
+             0    1    2    3    4    5    6    7    8
 ```
 
-### Latency Regions
-
-| Region | Message Size | Characteristic |
-|--------|-------------|----------------|
-| **Latency-bound** | 1B - 4KB | ~7.3-7.9 us one-way, constant |
-| **Transition** | 4KB - 64KB | Latency increases with size |
-| **Bandwidth-bound** | 64KB - 16MB | Near line-rate throughput |
-
----
-
-## 4. Comparison with Minimal (AMD + CXI DWQ)
-
-The `minimal/` directory implements GPU-triggered RDMA for AMD GPUs with HPE Slingshot (CXI) using DWQ.
-
-| Metric | NVIDIA + InfiniBand (DevX) | AMD + CXI (DWQ) |
-|--------|----------------------------|-----------------|
-| **One-way latency (8B)** | ~7.35 us | ~0.96 us* |
-| **RTT (8B)** | ~14.7 us | ~2 us* |
-| **Peak Bandwidth** | 90.39 Gbps | ~400 Gbps* |
-| **WQE posting (batched)** | 0.10 us | ~0.03 us* |
-
-*Note: AMD + CXI numbers are from previous benchmarks on different hardware (MI250X + Slingshot 11).
-
-### Architecture Differences
-
-| Feature | NVIDIA + InfiniBand | AMD + CXI |
-|---------|---------------------|-----------|
-| **GPU Trigger** | BlueFlame doorbell | MMIO trigger counter |
-| **WQE Location** | GPU-accessible host memory | NIC-managed |
-| **Completion** | Memory polling | NIC atomic to GPU memory |
-| **Network** | RoCE v2 | Native Slingshot |
-| **Link Speed** | ~100 Gbps | ~400 Gbps |
-
-### Why is CXI/DWQ faster?
-
-1. **Native Slingshot**: Purpose-built for HPC, lower protocol overhead than RoCE
-2. **DWQ Design**: NIC executes pre-queued work on trigger, minimal per-op setup
-3. **Atomic Completion**: NIC directly updates GPU memory, no polling needed
-4. **Higher Link Speed**: Slingshot 11 provides 4x the bandwidth
-
----
-
-## 5. Implementation Details
-
-### Files
-
-| File | Description |
-|------|-------------|
-| `mlx5_devx_qp.hpp` | DevX QP with GPU-accessible UAR, WQE buffer, doorbell |
-| `gda_device_opt.cuh` | GPU device functions for WQE building and doorbell |
-| `gpu_pingpong_bench.cu` | Comprehensive ping-pong benchmark (1B-16MB) |
-| `gpu_benchmark_devx.cu` | Full benchmark suite with batching tests |
-
-### Key APIs Used
-
-```cpp
-// DevX UAR allocation (for BlueFlame doorbell)
-mlx5dv_devx_alloc_uar(ctx, MLX5DV_UAR_ALLOC_TYPE_BF);
-
-// DevX memory registration (for WQE buffer)
-mlx5dv_devx_umem_reg(ctx, buffer, size, access_flags);
-
-// CUDA mapping of MMIO regions
-cudaHostRegister(ptr, size, cudaHostRegisterIoMemory);
-cudaHostGetDevicePointer(&d_ptr, h_ptr, 0);
 ```
+Bandwidth (Gbps) at 16MB:
 
-### GPU Kernel Pattern
-
-```cuda
-__global__ void pingpong_kernel(...) {
-    // Build WQE directly from GPU
-    gda_build_rdma_write_wqe_opt(state, ...);
-
-    // Ring BlueFlame doorbell (64-bit MMIO write)
-    gda_ring_doorbell_bf(state, wqe_idx);
-
-    // Poll for response
-    while (*recv_flag != expected) { }
-}
+MPI Host     |████████████████████████████████████████ 196 Gbps
+MPI GPU      |████████████████████████████████████████ 196 Gbps
+GPU-triggered|██████████████████ 90 Gbps
+             +--------+--------+--------+--------+--------+
+             0       50      100      150      200      250
 ```
 
 ---
 
-## 6. Build and Run
+## 5. Analysis
+
+### Why is MPI faster for latency?
+
+| Factor | MPI | GPU-triggered RDMA |
+|--------|-----|-------------------|
+| **Initiator** | CPU (fast, low overhead) | GPU (kernel overhead) |
+| **WQE Build** | Pre-built by driver | GPU builds each WQE (~1 us) |
+| **Doorbell** | CPU MMIO write | GPU BlueFlame write (~0.5 us) |
+| **Completion** | Interrupt/polling on CPU | GPU memory polling (~2 us) |
+| **Total overhead** | ~0.5 us | ~4-5 us |
+
+### Why is MPI faster for bandwidth?
+
+1. **NIC Optimization**: MPI/UCX uses optimized multi-packet protocols
+2. **Pipelining**: CPU can efficiently pipeline multiple transfers
+3. **Single Operation**: GPU-triggered sends one WQE at a time (no pipelining in this test)
+
+### When to use GPU-triggered RDMA?
+
+GPU-triggered RDMA excels when:
+
+1. **Overlap compute and communication**: GPU can trigger RDMA while other SMs compute
+2. **Fine-grained synchronization**: Direct GPU-to-GPU notification without CPU
+3. **Reduce CPU involvement**: Free CPU for other tasks
+4. **Many small messages**: Batching amortizes overhead (0.1 us/op with batch=128)
+
+---
+
+## 6. Batching Effect (GPU-triggered only)
+
+| Batch Size | Per-op (us) | Speedup |
+|------------|-------------|---------|
+| 1 | 1.98 | 1.00x |
+| 8 | 0.32 | 6.26x |
+| 32 | 0.14 | 13.96x |
+| 128 | **0.10** | **20.47x** |
+
+With batching, GPU-triggered RDMA achieves **0.10 us per operation**, competitive with CPU-triggered approaches for bulk transfers.
+
+---
+
+## 7. Full Results Table
+
+| Size | MPI Host RTT | MPI GPU RTT | GPU-trig RTT | MPI Host BW | MPI GPU BW | GPU-trig BW |
+|------|-------------|-------------|--------------|-------------|------------|-------------|
+| 1 B | 3.36 | 5.64 | 14.71 | 0.00 | 0.00 | 0.00 |
+| 2 B | 3.54 | 5.39 | 14.67 | 0.01 | 0.01 | 0.00 |
+| 4 B | 3.28 | 5.45 | 14.67 | 0.02 | 0.01 | 0.00 |
+| 8 B | 3.28 | 5.44 | 14.67 | 0.04 | 0.02 | 0.01 |
+| 16 B | 3.36 | 5.78 | 14.67 | 0.08 | 0.04 | 0.02 |
+| 32 B | 3.38 | 5.62 | 14.68 | 0.15 | 0.09 | 0.03 |
+| 64 B | 3.60 | 5.92 | 14.70 | 0.28 | 0.17 | 0.07 |
+| 128 B | 3.58 | 6.48 | 14.76 | 0.57 | 0.32 | 0.14 |
+| 256 B | 4.05 | 6.67 | 14.86 | 1.01 | 0.61 | 0.28 |
+| 512 B | 4.52 | 6.61 | 14.95 | 1.81 | 1.24 | 0.55 |
+| 1 KB | 4.27 | 6.67 | 15.30 | 3.84 | 2.46 | 1.07 |
+| 2 KB | 5.65 | 6.94 | 15.36 | 5.80 | 4.72 | 2.13 |
+| 4 KB | 6.22 | 7.46 | 15.76 | 10.54 | 8.79 | 4.16 |
+| 8 KB | 8.07 | 10.20 | 16.97 | 16.25 | 12.85 | 7.73 |
+| 16 KB | 9.05 | 12.32 | 19.05 | 28.98 | 21.27 | 13.76 |
+| 32 KB | 11.10 | 17.06 | 23.13 | 47.25 | 30.72 | 22.67 |
+| 64 KB | 14.74 | 17.28 | 29.55 | 71.14 | 60.67 | 35.49 |
+| 128 KB | 21.37 | 22.63 | 40.98 | 98.13 | 92.69 | 51.17 |
+| 256 KB | 34.07 | 33.38 | 63.59 | 123.11 | 125.67 | 65.96 |
+| 512 KB | 55.13 | 54.93 | 109.62 | 152.17 | 152.73 | 76.52 |
+| 1 MB | 97.72 | 97.55 | 202.77 | 171.69 | 171.99 | 82.74 |
+| 2 MB | 183.02 | 182.51 | 386.98 | 183.34 | 183.85 | 86.71 |
+| 4 MB | 352.28 | 351.59 | 755.46 | 190.50 | 190.87 | 88.83 |
+| 8 MB | 690.92 | 690.23 | 1493.59 | 194.26 | 194.45 | 89.86 |
+| 16 MB | 1368.18 | 1367.48 | 2969.79 | 196.20 | 196.30 | 90.39 |
+
+---
+
+## 8. Build and Run
 
 ```bash
-# Load modules (Maple cluster)
-module load genesis common cuda/12.4.131 gcc/12.2.0 openmpi-gcc/5.0.5/cuda.12.4
+# Load CUDA-aware MPI modules
+module purge
+module load genesis common proxy slurm gcc/11.4.1 cuda/12.4.131
+module use /shared/data1/Projects/CSE_HPC/apps/modules/aarch64/maple
+module load openmpi-gcc/5.0.5/cuda.12.4
 
 # Build
-cd nvidia
-mkdir -p build && cd build
+cd nvidia/build
 cmake ..
 make -j
 
-# Run comprehensive ping-pong benchmark (2 nodes)
-srun -N 2 --gres=gpu:1 ./gpu_pingpong_bench
+# Run MPI benchmark (host + GPU memory)
+srun -N 2 --gres=gpu:1 ./mpi_pingpong_bench
 
-# Run full benchmark suite with batching tests
-srun -N 2 --gres=gpu:1 ./gpu_benchmark_devx
+# Run GPU-triggered RDMA benchmark
+srun -N 2 --gres=gpu:1 ./gpu_pingpong_bench
 ```
 
 ---
 
-## 7. Conclusions
+## 9. Conclusions
 
-1. **GPU-Triggered RDMA Works**: Successfully implemented true GPU-initiated RDMA for NVIDIA + InfiniBand using DevX API.
+1. **MPI is faster for raw latency**: 1.64 us (host) vs 7.34 us (GPU-triggered)
+   - CPU has lower overhead for initiating transfers
+   - GPU-triggered adds WQE build + doorbell + polling overhead
 
-2. **Latency**: ~7.35 us one-way for small messages (1B-64B), dominated by:
-   - WQE building and doorbell (~1.5 us)
-   - PCIe round-trip (~1 us)
-   - Network latency (~3 us)
-   - Memory polling overhead (~1.8 us)
+2. **MPI achieves higher bandwidth**: 196 Gbps vs 90 Gbps at 16MB
+   - MPI/UCX uses optimized multi-packet protocols
+   - GPU-triggered implementation doesn't pipeline transfers
 
-3. **Bandwidth**: Reaches **90.39 Gbps** at 16MB (near line-rate for 100G link).
+3. **GPU-triggered RDMA benefits**:
+   - **Compute-communication overlap**: GPU can transfer while computing
+   - **No CPU involvement**: Frees CPU for other work
+   - **Batching**: 0.10 us/op with batch=128 (20x speedup)
+   - **Direct GPU notification**: No CPU wake-up needed
 
-4. **Batching Benefit**: **20x throughput improvement** with batched operations (0.10 us per op vs 2 us single op).
-
-5. **Comparison with DWQ**: Higher latency than AMD/CXI due to:
-   - RoCE vs native Slingshot (protocol overhead)
-   - BlueFlame vs MMIO trigger (different mechanisms)
-   - Memory polling vs atomic completion
-   - Lower link speed (100G vs 400G)
-
-6. **Use Cases**: Best suited for:
-   - Bulk data transfers (>64KB) where bandwidth matters
-   - Batched small messages where posting overhead is amortized
-   - Applications that can tolerate ~7us one-way latency
+4. **Use case recommendations**:
+   - **Bulk transfers**: Use MPI for maximum bandwidth
+   - **Latency-sensitive**: Use MPI Host for lowest latency
+   - **GPU-centric workloads**: Use GPU-triggered for overlap and autonomy
+   - **Many small messages**: Use GPU-triggered with batching
 
 ---
 
 *Generated: 2025-01-25*
 *Platform: NVIDIA GH200 480GB + Mellanox ConnectX-7 (RoCE v2)*
-*Test: 1000 iterations per message size, 50 warmup iterations*
+*MPI: OpenMPI 5.0.5 with CUDA-aware support*
