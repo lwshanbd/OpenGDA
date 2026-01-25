@@ -164,14 +164,18 @@ Similar to minimal/benchmark_runner.hpp for CXI/Slingshot, this test measures
 **Key insight:** With batching (32 concurrent transfers, single doorbell),
 the amortized cost drops from 7.34 us (ping-pong) to **0.34 us per transfer**!
 
-### Comparison with CXI/Slingshot (minimal/)
+### Comparison: MPI vs GPU-triggered vs CXI
 
-| Platform | 32 Streams Total (us) | Per-transfer (us) |
-|----------|----------------------|-------------------|
-| **NVIDIA + InfiniBand** | ~11 | **~0.34** |
-| AMD + CXI (Slingshot) | ~31 | ~0.96 |
+| Platform | 32 Streams Total (us) | Per-transfer (us) | Notes |
+|----------|----------------------|-------------------|-------|
+| **MPI Host (CPU-initiated)** | ~5.4 | **~0.17** | Small messages only |
+| **GPU-triggered (NVIDIA+IB)** | ~11 | **~0.34** | Constant time |
+| AMD + CXI (Slingshot) | ~31 | ~0.96 | DWQ-based |
 
-NVIDIA + InfiniBand achieves **~3x better per-transfer latency** with batching.
+**Key observations:**
+- MPI is 2x faster for small messages (lower CPU overhead)
+- GPU-triggered has **constant latency** regardless of message size
+- For large messages, GPU-triggered wins due to compute-communication overlap
 
 ---
 

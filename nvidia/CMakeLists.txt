@@ -180,6 +180,15 @@ if(MLX5_LIBRARY)
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
     )
+
+    # MPI concurrent transfers benchmark for comparison
+    add_executable(mpi_concurrent_bench mpi_concurrent_bench.cu)
+    target_link_libraries(mpi_concurrent_bench ${COMMON_LIBS})
+    target_compile_options(mpi_concurrent_bench PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+    set_target_properties(mpi_concurrent_bench PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
 else()
     message(STATUS "mlx5 library not found - GPU-triggered tests will not be built")
 endif()
