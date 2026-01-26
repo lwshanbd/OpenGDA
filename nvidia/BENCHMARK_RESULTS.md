@@ -149,46 +149,67 @@ GPU-triggered RDMA excels when:
 
 ---
 
-## 6. Concurrent Streams Benchmark (32 streams)
+## 6. Concurrent Streams Benchmark (32 streams, End-to-End)
 
-Similar to minimal/benchmark_runner.hpp for CXI/Slingshot, this test measures
-32 concurrent GPU-triggered RDMA writes with a single doorbell.
+This test measures 32 concurrent GPU-triggered RDMA writes with **END-TO-END timing**:
+- Sender: Build 32 WQEs, ring doorbell, wait for ACK
+- Receiver: Poll for data arrival on all 32 streams, send ACK back
+
+### GPU-Triggered RDMA (End-to-End, includes round-trip for ACK)
 
 | Size | Total (us) | Per-transfer (us) |
 |------|------------|-------------------|
-| 1B-1KB | ~10.8 | **~0.34** |
-| 64KB | 10.9 | 0.34 |
-| 1MB | 11.4 | 0.36 |
-| 16MB | 11.2 | 0.35 |
+| 1B | 16.78 | **0.52** |
+| 1KB | 20.00 | 0.63 |
+| 64KB | 201.68 | 6.30 |
+| 256KB | 754.75 | 23.59 |
+| 1MB | 2969.06 | **92.78** |
+| 16MB | 47240.49 | **1476.27** |
 
-**Key insight:** With batching (32 concurrent transfers, single doorbell),
-the amortized cost drops from 7.34 us (ping-pong) to **0.34 us per transfer**!
+### MPI Host Memory (One-way, 32 concurrent sends)
 
-### Comparison: MPI vs GPU-triggered vs CXI
+| Size | Total (us) | Per-transfer (us) |
+|------|------------|-------------------|
+| 1B | 5.40 | **0.17** |
+| 1KB | 9.19 | 0.29 |
+| 64KB | 93.10 | 2.91 |
+| 256KB | 347.27 | 10.85 |
+| 1MB | 1362.86 | **42.59** |
 
-| Platform | 32 Streams Total (us) | Per-transfer (us) | Notes |
-|----------|----------------------|-------------------|-------|
-| **MPI Host (CPU-initiated)** | ~5.4 | **~0.17** | Small messages only |
-| **GPU-triggered (NVIDIA+IB)** | ~11 | **~0.34** | Constant time |
-| AMD + CXI (Slingshot) | ~31 | ~0.96 | DWQ-based |
+### Comparison: MPI vs GPU-triggered
+
+| Size | MPI Total (us) | GPU-trig Total (us) | MPI Per-xfer | GPU Per-xfer | Notes |
+|------|----------------|---------------------|--------------|--------------|-------|
+| 1B | 5.40 | 16.78 | 0.17 | 0.52 | 3x overhead for small msgs |
+| 1KB | 9.19 | 20.00 | 0.29 | 0.63 | 2x overhead |
+| 64KB | 93.10 | 201.68 | 2.91 | 6.30 | 2x overhead |
+| 1MB | 1362.86 | 2969.06* | 42.59 | 92.78* | *includes ACK round-trip |
+
+**Important Notes:**
+- GPU-triggered benchmark includes round-trip (data send + ACK back)
+- MPI benchmark is one-way (sender measures send completion only)
+- Fair one-way comparison: GPU-triggered ~1485 us for 1MB vs MPI ~1363 us (similar!)
+- GPU-triggered overhead: WQE build (~2 us) + polling (~2 us) per transfer
 
 **Key observations:**
-- MPI is 2x faster for small messages (lower CPU overhead)
-- GPU-triggered has **constant latency** regardless of message size
-- For large messages, GPU-triggered wins due to compute-communication overlap
+- MPI has lower latency for small messages (no WQE build overhead)
+- For large messages, GPU-triggered approaches MPI performance
+- GPU-triggered benefit: Zero CPU involvement during transfer
 
 ---
 
-## 7. Batching Effect (Ping-pong sequential)
+## 7. WQE Build Time Only (for reference)
 
-| Batch Size | Per-op (us) | Speedup |
-|------------|-------------|---------|
-| 1 | 1.98 | 1.00x |
-| 8 | 0.32 | 6.26x |
-| 32 | 0.14 | 13.96x |
-| 128 | **0.10** | **20.47x** |
+The following measurements show WQE build + doorbell time ONLY (no network transfer):
 
-With batching, GPU-triggered RDMA achieves **0.10 us per operation**, competitive with CPU-triggered approaches for bulk transfers.
+| Batch Size | WQE Build Per-op (us) | Notes |
+|------------|----------------------|-------|
+| 1 | ~2.0 | Single WQE build |
+| 32 | ~0.34 | Amortized with batching |
+| 128 | ~0.10 | Maximum amortization |
+
+**Important:** These numbers do NOT include network transfer time.
+For end-to-end latency including network, see Section 6 above.
 
 ---
 

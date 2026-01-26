@@ -189,6 +189,24 @@ if(MLX5_LIBRARY)
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
     )
+
+    # GPU-triggered concurrent benchmark v2 (optimized with globaltimer)
+    add_executable(gpu_concurrent_bench_v2 gpu_concurrent_bench_v2.cu)
+    target_link_libraries(gpu_concurrent_bench_v2 ${COMMON_LIBS} ${MLX5_LIBRARY})
+    target_compile_options(gpu_concurrent_bench_v2 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+    set_target_properties(gpu_concurrent_bench_v2 PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
+
+    # nvshmem-style benchmark (compares original vs nvshmem optimizations)
+    add_executable(gpu_bench_nvshmem gpu_bench_nvshmem.cu)
+    target_link_libraries(gpu_bench_nvshmem ${COMMON_LIBS} ${MLX5_LIBRARY})
+    target_compile_options(gpu_bench_nvshmem PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+    set_target_properties(gpu_bench_nvshmem PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
 else()
     message(STATUS "mlx5 library not found - GPU-triggered tests will not be built")
 endif()

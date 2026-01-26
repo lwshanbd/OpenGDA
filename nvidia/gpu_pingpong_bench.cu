@@ -243,15 +243,29 @@ int main(int argc, char** argv) {
     cudaGetDeviceProperties(&props, gpu_id);
     double clock_rate_khz = props.clockRate;
 
-    // Open InfiniBand device
-    struct ibv_device** dev_list = ibv_get_device_list(nullptr);
-    if (!dev_list || !dev_list[0]) {
+    // Open InfiniBand device - prefer mlx5_1 (IB) over mlx5_0 (RoCE)
+    int num_devices = 0;
+    struct ibv_device** dev_list = ibv_get_device_list(&num_devices);
+    if (!dev_list || num_devices == 0) {
         fprintf(stderr, "Rank %d: No IB devices found\n", mpi_rank);
         MPI_Finalize();
         return 1;
     }
 
-    struct ibv_context* ctx = ibv_open_device(dev_list[0]);
+    // Find mlx5_1 device (IB), fallback to first device
+    struct ibv_device* target_dev = nullptr;
+    for (int i = 0; i < num_devices; i++) {
+        const char* name = ibv_get_device_name(dev_list[i]);
+        if (name && strcmp(name, "mlx5_1") == 0) {
+            target_dev = dev_list[i];
+            break;
+        }
+    }
+    if (!target_dev) {
+        target_dev = dev_list[0];  // Fallback
+    }
+
+    struct ibv_context* ctx = ibv_open_device(target_dev);
     if (!ctx) {
         fprintf(stderr, "Rank %d: Failed to open IB device\n", mpi_rank);
         MPI_Finalize();
@@ -268,17 +282,18 @@ int main(int argc, char** argv) {
     // Create DevX QP with GPU-accessible resources
     DevxQp* devx_qp = new DevxQp(ctx, pd, mpi_rank, 1, 256, 512);
 
-    // Exchange connection info
-    ConnInfo my_conn_info;
-    my_conn_info.qpn = devx_qp->qpn;
-    my_conn_info.lid = 0;
-    my_conn_info.psn = 0;
-
+    // Query port attributes
     struct ibv_port_attr port_attr;
     ibv_query_port(ctx, 1, &port_attr);
 
+    // Exchange connection info
+    ConnInfo my_conn_info;
+    my_conn_info.qpn = devx_qp->qpn;
+    my_conn_info.lid = port_attr.lid;  // Use actual LID for IB
+    my_conn_info.psn = 0;
+
     union ibv_gid my_gid;
-    ibv_query_gid(ctx, 1, 1, &my_gid);
+    ibv_query_gid(ctx, 1, 0, &my_gid);  // Use GID index 0 for IB
     memcpy(my_conn_info.gid, &my_gid, 16);
 
     ConnInfo peer_conn_info;
@@ -365,7 +380,7 @@ int main(int argc, char** argv) {
         printf("   (NVIDIA + InfiniBand with DevX API)\n");
         printf("=======================================================\n");
         printf("GPU: %s (%.2f GHz)\n", props.name, clock_rate_khz / 1e6);
-        printf("IB Device: %s\n", ibv_get_device_name(dev_list[0]));
+        printf("IB Device: %s\n", ibv_get_device_name(target_dev));
         printf("Warmup: %d iterations\n", WARMUP_ITERS);
         printf("Test: %d iterations per message size\n", TEST_ITERS);
         printf("-------------------------------------------------------\n\n");
