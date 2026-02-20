@@ -207,9 +207,105 @@ if(MLX5_LIBRARY)
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
     )
+
+    # GPU put bandwidth benchmark (thread/warp/block scope)
+    add_executable(gpu_put_bw gpu_put_bw.cu)
+    target_link_libraries(gpu_put_bw ${COMMON_LIBS} ${MLX5_LIBRARY})
+    target_compile_options(gpu_put_bw PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+    set_target_properties(gpu_put_bw PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
+
+    # GPU put latency benchmark (matches nvshmem shmem_put_latency)
+    add_executable(gpu_put_latency gpu_put_latency.cu)
+    target_link_libraries(gpu_put_latency ${COMMON_LIBS} ${MLX5_LIBRARY})
+    target_compile_options(gpu_put_latency PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+    set_target_properties(gpu_put_latency PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
+
+    # NVIB AM ping-pong latency benchmark (matches minimal/am_pingpong)
+    add_executable(nvib_am_pingpong nvib_am_pingpong.cu)
+    target_link_libraries(nvib_am_pingpong ${COMMON_LIBS} ${MLX5_LIBRARY})
+    target_compile_options(nvib_am_pingpong PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+    set_target_properties(nvib_am_pingpong PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
+
+    # NVIB AM ping-pong ReqRep mode (lightweight reply)
+    add_executable(nvib_am_pingpong_reqrep nvib_am_pingpong_reqrep.cu)
+    target_link_libraries(nvib_am_pingpong_reqrep ${COMMON_LIBS} ${MLX5_LIBRARY})
+    target_compile_options(nvib_am_pingpong_reqrep PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+    set_target_properties(nvib_am_pingpong_reqrep PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
+
+    # Distributed Matrix Multiplication with GPU-initiated RDMA
+    add_executable(mm_gda_nv mm_gda_nv.cu)
+    target_link_libraries(mm_gda_nv ${COMMON_LIBS} ${MLX5_LIBRARY})
+    target_compile_options(mm_gda_nv PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+    set_target_properties(mm_gda_nv PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
 else()
     message(STATUS "mlx5 library not found - GPU-triggered tests will not be built")
 endif()
+
+# ============================================================================
+# CUDA-aware MPI Matrix Multiplication (no MLX5 dependency)
+# ============================================================================
+
+# Distributed Matrix Multiplication with CUDA-aware MPI
+add_executable(mm_mpi_cuda mm_mpi_cuda.cu)
+target_link_libraries(mm_mpi_cuda ${COMMON_LIBS})
+target_compile_options(mm_mpi_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+set_target_properties(mm_mpi_cuda PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+)
+
+# ============================================================================
+# NVSHMEM Matrix Multiplication (optional - requires NVSHMEM)
+# ============================================================================
+
+# Find NVSHMEM
+find_path(NVSHMEM_INCLUDE_DIR nvshmem.h
+    HINTS
+        $ENV{NVSHMEM_HOME}/include
+        /usr/local/nvshmem/include
+        /opt/nvidia/hpc_sdk/Linux_*/24.*/comm_libs/nvshmem/include
+)
+
+find_library(NVSHMEM_LIBRARY nvshmem
+    HINTS
+        $ENV{NVSHMEM_HOME}/lib
+        /usr/local/nvshmem/lib
+        /opt/nvidia/hpc_sdk/Linux_*/24.*/comm_libs/nvshmem/lib
+)
+
+if(NVSHMEM_INCLUDE_DIR AND NVSHMEM_LIBRARY)
+    message(STATUS "Found NVSHMEM: ${NVSHMEM_LIBRARY}")
+    message(STATUS "NVSHMEM include: ${NVSHMEM_INCLUDE_DIR}")
+
+    # Distributed Matrix Multiplication with NVSHMEM
+    add_executable(mm_nvshmem mm_nvshmem.cu)
+    target_include_directories(mm_nvshmem PRIVATE ${NVSHMEM_INCLUDE_DIR})
+    target_link_libraries(mm_nvshmem ${NVSHMEM_LIBRARY} ${COMMON_LIBS} CUDA::cuda_driver)
+    target_compile_options(mm_nvshmem PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
+    set_target_properties(mm_nvshmem PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
+else()
+    message(STATUS "NVSHMEM not found - mm_nvshmem will not be built")
+    message(STATUS "  Set NVSHMEM_HOME environment variable to enable")
+endif()
+
 
 # ============================================================================
 # Installation (optional)
@@ -244,9 +340,14 @@ message(STATUS "")
 message(STATUS "Build targets:")
 message(STATUS "  gda_pingpong      - RDMA ping-pong latency/bandwidth test")
 message(STATUS "  gda_am_test       - Active Message test")
+message(STATUS "  mm_mpi_cuda       - Matrix multiplication with CUDA-aware MPI")
 if(MLX5_LIBRARY)
 message(STATUS "  gpu_pingpong      - GPU-triggered RDMA test")
 message(STATUS "  gpu_benchmark_opt - GPU-triggered optimization benchmark")
 message(STATUS "  gpu_benchmark_devx- GPU-triggered benchmark using DevX API (recommended)")
+message(STATUS "  mm_gda_nv         - Matrix multiplication with GPU-initiated RDMA")
+endif()
+if(NVSHMEM_LIBRARY)
+message(STATUS "  mm_nvshmem        - Matrix multiplication with NVSHMEM")
 endif()
 message(STATUS "")

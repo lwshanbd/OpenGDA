@@ -5,6 +5,8 @@
  * Unlike the CPU-triggered version (gda_comm.hpp), this allows
  * GPU kernels to directly trigger RDMA without CPU involvement.
  *
+ * MULTI-QP SUPPORT: Creates one QP per neighbor for ring topology.
+ *
  * Usage:
  *   GdaGpuComm comm;
  *   auto handle = comm.register_buffer(gpu_buf, size);
@@ -64,17 +66,26 @@ public:
     };
     std::unordered_map<uint64_t, RemoteInfo> remote_info;
 
-    // Device state (GPU-accessible)
+    // Device state (GPU-accessible) - per peer
+    std::unordered_map<int, GdaDeviceState*> d_state_per_peer;
+    std::unordered_map<int, GdaDeviceState> h_state_per_peer;
+
+    // Legacy: single device state (for backward compatibility)
     GdaDeviceState* d_state;
-    GdaDeviceState device_state;  // Renamed for public access
+    GdaDeviceState device_state;
 
     // Completion counter (GPU-accessible)
     volatile uint64_t* h_num_completions;
     volatile uint64_t* d_num_completions;
 
+    // Neighbor ranks (for ring topology)
+    int top_neighbor;
+    int bottom_neighbor;
+
     explicit GdaGpuComm(int local_rank = -1)
         : mlx5(nullptr), gpu_id(0), d_state(nullptr),
-          h_num_completions(nullptr), d_num_completions(nullptr)
+          h_num_completions(nullptr), d_num_completions(nullptr),
+          top_neighbor(-1), bottom_neighbor(-1)
     {
         // Determine GPU to use
         gpu_id = (local_rank >= 0) ? local_rank : mpi.local_rank;
@@ -91,22 +102,36 @@ public:
         // Initialize MLX5 context
         mlx5 = new Mlx5GdaContext(mpi);
 
+        // Determine neighbors (ring topology)
+        top_neighbor = (mpi.rank > 0) ? mpi.rank - 1 : (mpi.size - 1);
+        bottom_neighbor = (mpi.rank + 1) % mpi.size;
+
+        // Create QPs for neighbors
+        create_neighbor_qps();
+
         // Exchange connection info and connect
         exchange_and_connect();
 
-        // Setup device state
-        setup_device_state();
+        // Setup device state for each neighbor
+        setup_device_states();
+
+        // Allocate completion counter
+        allocate_completion_counter();
 
         if (mpi.rank == 0) {
             printf("GdaGpuComm initialized:\n");
             printf("  GPU: %s\n", props.name);
             printf("  IB device: %s\n", mlx5->dev_name.c_str());
             printf("  Rank %d of %d\n", mpi.rank, mpi.size);
+            printf("  Neighbors: top=%d, bottom=%d\n", top_neighbor, bottom_neighbor);
             fflush(stdout);
         }
     }
 
     ~GdaGpuComm() {
+        for (auto& kv : d_state_per_peer) {
+            if (kv.second) cudaFree(kv.second);
+        }
         if (d_state) cudaFree(d_state);
         if (h_num_completions) cudaFreeHost((void*)h_num_completions);
         for (auto* mr : registered_mrs) delete mr;
@@ -152,14 +177,10 @@ public:
             remote_info[key] = {all_info[r].addr, all_info[r].rkey};
         }
 
-        // Update device state with first remote info
+        // Update device state with neighbor's remote info
         if (buf_index == 0) {
-            int peer = (mpi.rank == 0) ? 1 : 0;
-            if (mpi.size > 1) {
-                device_state.remote_addr = all_info[peer].addr;
-                device_state.remote_rkey = all_info[peer].rkey;
-                update_device_state();
-            }
+            update_device_state_remote_info(top_neighbor, all_info[top_neighbor].addr, all_info[top_neighbor].rkey);
+            update_device_state_remote_info(bottom_neighbor, all_info[bottom_neighbor].addr, all_info[bottom_neighbor].rkey);
         }
     }
 
@@ -170,14 +191,23 @@ public:
         uint64_t key = make_key(dest_rank, buf_index);
         auto it = remote_info.find(key);
         if (it != remote_info.end()) {
-            device_state.remote_addr = it->second.addr;
-            device_state.remote_rkey = it->second.rkey;
-            update_device_state();
+            update_device_state_remote_info(dest_rank, it->second.addr, it->second.rkey);
         }
     }
 
     /**
-     * Get device state pointer for GPU kernels
+     * Get device state pointer for a specific peer
+     */
+    GdaDeviceState* get_device_state_for_peer(int peer) {
+        auto it = d_state_per_peer.find(peer);
+        if (it != d_state_per_peer.end()) {
+            return it->second;
+        }
+        return nullptr;
+    }
+
+    /**
+     * Get device state pointer for GPU kernels (legacy - uses first peer)
      */
     GdaDeviceState* get_device_state() {
         return d_state;
@@ -218,7 +248,13 @@ public:
             return;
         }
 
-        // Use standard ibv_post_send for CPU-triggered operation
+        // Get the QP for this peer
+        auto qp_it = mlx5->peer_qps.find(dest_rank);
+        if (qp_it == mlx5->peer_qps.end()) {
+            fprintf(stderr, "No QP for peer %d\n", dest_rank);
+            return;
+        }
+
         struct ibv_sge sge = {};
         sge.addr = (uint64_t)handle.buf;
         sge.length = size;
@@ -235,7 +271,7 @@ public:
         wr.wr.rdma.rkey = it->second.rkey;
 
         struct ibv_send_wr* bad_wr = nullptr;
-        int ret = ibv_post_send(mlx5->qp, &wr, &bad_wr);
+        int ret = ibv_post_send(qp_it->second.qp, &wr, &bad_wr);
         if (ret) {
             fprintf(stderr, "ibv_post_send failed: %s\n", strerror(ret));
             return;
@@ -263,52 +299,135 @@ public:
     int size() const { return mpi.size; }
 
 private:
-    void exchange_and_connect() {
-        // Get local connection info
-        GdaConnInfo my_info = mlx5->get_local_info();
+    void create_neighbor_qps() {
+        // Create QPs for top and bottom neighbors
+        if (top_neighbor != mpi.rank) {
+            mlx5->create_qp_for_peer(top_neighbor);
+        }
+        if (bottom_neighbor != mpi.rank && bottom_neighbor != top_neighbor) {
+            mlx5->create_qp_for_peer(bottom_neighbor);
+        }
+    }
 
-        // Exchange with all peers
-        for (int peer = 0; peer < mpi.size; peer++) {
-            if (peer == mpi.rank) continue;
+    void exchange_and_connect() {
+        // Exchange connection info with neighbors
+        struct ConnExchange {
+            uint32_t qpn;
+            uint16_t lid;
+            uint8_t gid[16];
+            uint32_t psn;
+        };
+
+        // Exchange with top neighbor
+        if (top_neighbor != mpi.rank) {
+            GdaConnInfo my_info = mlx5->get_local_info_for_peer(top_neighbor);
+            ConnExchange my_ex = {my_info.qpn, my_info.lid, {}, my_info.psn};
+            memcpy(my_ex.gid, my_info.gid, 16);
+
+            ConnExchange peer_ex;
+            mpi.exchange(&my_ex, &peer_ex, sizeof(ConnExchange), top_neighbor);
 
             GdaConnInfo peer_info;
-            mpi.exchange(&my_info, &peer_info, sizeof(GdaConnInfo), peer);
+            peer_info.qpn = peer_ex.qpn;
+            peer_info.lid = peer_ex.lid;
+            memcpy(peer_info.gid, peer_ex.gid, 16);
+            peer_info.psn = peer_ex.psn;
+            peer_info.buf_addr = 0;
+            peer_info.rkey = 0;
 
-            // Store peer info
-            mlx5->remote_peers[peer].qpn = peer_info.qpn;
-            mlx5->remote_peers[peer].lid = peer_info.lid;
-            memcpy(mlx5->remote_peers[peer].gid, peer_info.gid, 16);
+            mlx5->connect_to_peer(top_neighbor, peer_info);
         }
 
-        mpi.barrier();
+        // Exchange with bottom neighbor
+        if (bottom_neighbor != mpi.rank && bottom_neighbor != top_neighbor) {
+            GdaConnInfo my_info = mlx5->get_local_info_for_peer(bottom_neighbor);
+            ConnExchange my_ex = {my_info.qpn, my_info.lid, {}, my_info.psn};
+            memcpy(my_ex.gid, my_info.gid, 16);
 
-        // Connect to first peer for initial testing
-        // In full implementation, we'd use DC or create multiple QPs
-        if (mpi.size == 2) {
-            int peer = (mpi.rank == 0) ? 1 : 0;
+            ConnExchange peer_ex;
+            mpi.exchange(&my_ex, &peer_ex, sizeof(ConnExchange), bottom_neighbor);
 
             GdaConnInfo peer_info;
-            peer_info.qpn = mlx5->remote_peers[peer].qpn;
-            peer_info.lid = mlx5->remote_peers[peer].lid;
-            memcpy(peer_info.gid, mlx5->remote_peers[peer].gid, 16);
-            peer_info.psn = 0;  // Use 0 for simplicity
+            peer_info.qpn = peer_ex.qpn;
+            peer_info.lid = peer_ex.lid;
+            memcpy(peer_info.gid, peer_ex.gid, 16);
+            peer_info.psn = peer_ex.psn;
+            peer_info.buf_addr = 0;
+            peer_info.rkey = 0;
 
-            // Re-exchange PSN
-            uint32_t my_psn = mlx5->psn;
-            uint32_t peer_psn;
-            mpi.exchange(&my_psn, &peer_psn, sizeof(uint32_t), peer);
-            peer_info.psn = peer_psn;
-
-            mlx5->connect_to_peer(peer, peer_info);
+            mlx5->connect_to_peer(bottom_neighbor, peer_info);
         }
 
         mpi.barrier();
     }
 
-    void setup_device_state() {
-        memset(&device_state, 0, sizeof(device_state));
+    void setup_device_states() {
+        // Setup device state for each neighbor
+        for (auto& kv : mlx5->peer_qps) {
+            int peer = kv.first;
+            setup_device_state_for_peer(peer);
+        }
 
-        // Allocate completion counter (GPU-accessible)
+        // Set legacy d_state to point to first neighbor's state
+        if (!d_state_per_peer.empty()) {
+            d_state = d_state_per_peer.begin()->second;
+            device_state = h_state_per_peer.begin()->second;
+        }
+
+        // Also update mlx5 legacy pointers
+        if (!mlx5->peer_qps.empty()) {
+            mlx5->set_active_peer(mlx5->peer_qps.begin()->first);
+        }
+    }
+
+    void setup_device_state_for_peer(int peer) {
+        auto it = mlx5->peer_qps.find(peer);
+        if (it == mlx5->peer_qps.end()) return;
+
+        GdaDeviceState state;
+        memset(&state, 0, sizeof(state));
+
+        const PerPeerQp& pqp = it->second;
+        state.qpn = pqp.qp->qp_num;
+        state.nwqes = mlx5->qp_depth;
+        state.nwqes_mask = mlx5->qp_depth - 1;
+        state.wqe_buf = pqp.d_wqe_buf;
+        state.wqe_lkey = 0;
+        state.dbrec = pqp.d_dbrec;
+        state.prod_idx = pqp.d_prod_idx;
+        state.cqe = (volatile GdaCqe64*)mlx5->d_cqe;
+        state.ncqes = mlx5->cq_depth;
+        state.ncqes_mask = mlx5->cq_depth - 1;
+        state.cq_cons_idx = nullptr;
+        state.cq_dbrec = nullptr;
+        state.remote_addr = 0;
+        state.remote_rkey = 0;
+        state.num_completions = d_num_completions;
+
+        h_state_per_peer[peer] = state;
+
+        GdaDeviceState* d_state_ptr;
+        CUDA_CHECK(cudaMalloc(&d_state_ptr, sizeof(GdaDeviceState)));
+        CUDA_CHECK(cudaMemcpy(d_state_ptr, &state, sizeof(GdaDeviceState),
+                              cudaMemcpyHostToDevice));
+        d_state_per_peer[peer] = d_state_ptr;
+    }
+
+    void update_device_state_remote_info(int peer, uint64_t addr, uint32_t rkey) {
+        auto it = h_state_per_peer.find(peer);
+        if (it == h_state_per_peer.end()) return;
+
+        it->second.remote_addr = addr;
+        it->second.remote_rkey = rkey;
+
+        auto d_it = d_state_per_peer.find(peer);
+        if (d_it != d_state_per_peer.end()) {
+            CUDA_CHECK(cudaMemcpy(d_it->second, &it->second, sizeof(GdaDeviceState),
+                                  cudaMemcpyHostToDevice));
+        }
+    }
+
+    void allocate_completion_counter() {
         cudaError_t err = cudaHostAlloc((void**)&h_num_completions, sizeof(uint64_t),
                                         cudaHostAllocMapped);
         if (err != cudaSuccess) {
@@ -322,33 +441,6 @@ private:
             fprintf(stderr, "Rank %d: cudaHostGetDevicePointer for num_completions failed\n", mpi.rank);
             exit(1);
         }
-
-        device_state.qpn = mlx5->qp->qp_num;
-        device_state.nwqes = mlx5->qp_depth;
-        device_state.nwqes_mask = mlx5->qp_depth - 1;
-        device_state.wqe_buf = mlx5->d_wqe_buf;
-        device_state.wqe_lkey = 0;  // TODO: Register WQE buffer with NIC
-        // Use GPU-mapped doorbell pointer
-        device_state.dbrec = mlx5->d_dbrec;
-        device_state.prod_idx = mlx5->d_prod_idx;
-        device_state.cqe = (volatile GdaCqe64*)mlx5->d_cqe;
-        device_state.ncqes = mlx5->cq_depth;
-        device_state.ncqes_mask = mlx5->cq_depth - 1;
-        device_state.cq_cons_idx = nullptr;
-        device_state.cq_dbrec = nullptr;  // TODO: map CQ dbrec
-        device_state.remote_addr = 0;
-        device_state.remote_rkey = 0;
-        device_state.num_completions = d_num_completions;
-
-        // Allocate device state
-        CUDA_CHECK(cudaMalloc(&d_state, sizeof(GdaDeviceState)));
-        CUDA_CHECK(cudaMemcpy(d_state, &device_state, sizeof(GdaDeviceState),
-                              cudaMemcpyHostToDevice));
-    }
-
-    void update_device_state() {
-        CUDA_CHECK(cudaMemcpy(d_state, &device_state, sizeof(GdaDeviceState),
-                              cudaMemcpyHostToDevice));
     }
 
     uint64_t make_key(int rank, int buf_index) const {

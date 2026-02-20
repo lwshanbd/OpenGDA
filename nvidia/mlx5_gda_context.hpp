@@ -7,6 +7,8 @@
  *   - Poll CQ for completions
  *
  * This enables true GPU-initiated RDMA without CPU intervention.
+ *
+ * MULTI-QP SUPPORT: Creates one QP per peer for ring topology communication.
  */
 #pragma once
 
@@ -18,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <map>
 
 #include "mpi_bootstrap.hpp"
 
@@ -68,6 +71,8 @@ struct Mlx5DataSeg {
 } __attribute__((packed));
 
 // MLX5 CQE structure (64 bytes)
+#ifndef MLX5_CQE64_DEFINED
+#define MLX5_CQE64_DEFINED
 struct Mlx5Cqe64 {
     uint8_t  rsvd0[2];
     uint16_t wqe_id;
@@ -82,6 +87,7 @@ struct Mlx5Cqe64 {
     uint8_t  signature;
     uint8_t  op_own;
 } __attribute__((packed));
+#endif
 
 // GPU-accessible QP state
 struct GdaDeviceQp {
@@ -125,14 +131,37 @@ struct GdaConnInfo {
     uint32_t rkey;
 };
 
+// Per-peer QP resources (for multi-QP support)
+struct PerPeerQp {
+    struct ibv_qp* qp;
+    struct mlx5dv_qp qp_ex;
+    uint32_t psn;
+    bool connected;
+
+    // GPU-mapped resources for this QP
+    void* d_wqe_buf;
+    volatile uint32_t* d_dbrec;
+    volatile uint64_t* d_bf_reg;
+    volatile uint64_t* d_prod_idx;
+    uint64_t* h_prod_idx;
+
+    // Remote peer info
+    GdaRemotePeer remote;
+
+    PerPeerQp() : qp(nullptr), psn(0), connected(false),
+                  d_wqe_buf(nullptr), d_dbrec(nullptr), d_bf_reg(nullptr),
+                  d_prod_idx(nullptr), h_prod_idx(nullptr) {
+        memset(&qp_ex, 0, sizeof(qp_ex));
+        memset(&remote, 0, sizeof(remote));
+    }
+};
+
 class Mlx5GdaContext {
 public:
     // IB objects
     struct ibv_context* ctx;
     struct ibv_pd* pd;
     struct ibv_cq* cq;
-    struct ibv_qp* qp;
-    struct mlx5dv_qp qp_ex;          // Extended QP info from mlx5dv
     struct mlx5dv_cq cq_ex;          // Extended CQ info from mlx5dv
 
     // Device info
@@ -142,8 +171,8 @@ public:
     int port_num;
     std::string dev_name;
 
-    // Per-peer state
-    std::vector<GdaDeviceQp> peer_qps;
+    // Per-peer QPs (multi-QP support)
+    std::map<int, PerPeerQp> peer_qps;
     std::vector<GdaRemotePeer> remote_peers;
 
     // MPI bootstrap
@@ -151,52 +180,58 @@ public:
     int rank;
     int size;
 
-    // GPU-mapped resources
-    void* d_wqe_buf;                 // GPU pointer to WQE buffer
-    volatile uint64_t* d_prod_idx;   // GPU pointer to producer index
+    // Shared CQ GPU resources
     volatile Mlx5Cqe64* d_cqe;       // GPU pointer to CQ entries
-    volatile uint32_t* d_dbrec;      // GPU pointer to doorbell record
-    volatile uint64_t* d_bf_reg;     // GPU pointer to BlueFlame register
-
-    // Host resources for GPU mapping
-    void* h_wqe_buf;
-    uint64_t* h_prod_idx;
-    Mlx5Cqe64* h_cqe;
 
     // QP parameters
-    uint32_t psn;
     uint32_t qp_depth;
     uint32_t cq_depth;
 
+    // Legacy single-QP pointers (for backward compatibility)
+    struct ibv_qp* qp;               // Points to first peer's QP
+    struct mlx5dv_qp qp_ex;          // Points to first peer's qp_ex
+    void* d_wqe_buf;
+    volatile uint64_t* d_prod_idx;
+    volatile uint32_t* d_dbrec;
+    volatile uint64_t* d_bf_reg;
+    void* h_wqe_buf;
+    uint64_t* h_prod_idx;
+    uint32_t psn;
+
     Mlx5GdaContext(MpiBootstrap& mpi_, const char* device_name = nullptr, int port = 1)
-        : ctx(nullptr), pd(nullptr), cq(nullptr), qp(nullptr),
+        : ctx(nullptr), pd(nullptr), cq(nullptr),
           port_num(port), mpi(mpi_), rank(mpi_.rank), size(mpi_.size),
-          d_wqe_buf(nullptr), d_prod_idx(nullptr), d_cqe(nullptr),
+          d_cqe(nullptr),
+          qp_depth(256), cq_depth(512),
+          qp(nullptr), d_wqe_buf(nullptr), d_prod_idx(nullptr),
           d_dbrec(nullptr), d_bf_reg(nullptr),
-          h_wqe_buf(nullptr), h_prod_idx(nullptr), h_cqe(nullptr),
-          qp_depth(256), cq_depth(512)
+          h_wqe_buf(nullptr), h_prod_idx(nullptr), psn(0)
     {
         memset(&dev_attr, 0, sizeof(dev_attr));
         memset(&port_attr, 0, sizeof(port_attr));
         memset(&gid, 0, sizeof(gid));
-        memset(&qp_ex, 0, sizeof(qp_ex));
         memset(&cq_ex, 0, sizeof(cq_ex));
+        memset(&qp_ex, 0, sizeof(qp_ex));
 
-        peer_qps.resize(size);
         remote_peers.resize(size);
-
-        psn = (rand() & 0xFFFFFF);
 
         init_device(device_name);
         init_pd_cq();
-        init_qp();
-        query_mlx5dv_objects();
-        allocate_gpu_resources();
+        allocate_cq_gpu_resources();
     }
 
     ~Mlx5GdaContext() {
-        free_gpu_resources();
-        if (qp) ibv_destroy_qp(qp);
+        // Free per-peer QP resources
+        for (auto& kv : peer_qps) {
+            free_peer_qp_gpu_resources(kv.second);
+            if (kv.second.qp) ibv_destroy_qp(kv.second.qp);
+        }
+
+        // Free shared CQ resources
+        if (d_cqe && cq_ex.buf) {
+            cudaHostUnregister(cq_ex.buf);
+        }
+
         if (cq) ibv_destroy_cq(cq);
         if (pd) ibv_dealloc_pd(pd);
         if (ctx) ibv_close_device(ctx);
@@ -206,28 +241,134 @@ public:
     Mlx5GdaContext(const Mlx5GdaContext&) = delete;
     Mlx5GdaContext& operator=(const Mlx5GdaContext&) = delete;
 
-    // Get local connection info
-    GdaConnInfo get_local_info() const {
+    /**
+     * Create a QP for communicating with a specific peer
+     */
+    void create_qp_for_peer(int peer_rank) {
+        if (peer_rank == rank) return;
+        if (peer_qps.find(peer_rank) != peer_qps.end()) return;  // Already created
+
+        PerPeerQp& pqp = peer_qps[peer_rank];
+        pqp.psn = (rand() & 0xFFFFFF);
+
+        // Create QP
+        struct ibv_qp_init_attr qp_init_attr = {};
+        qp_init_attr.send_cq = cq;
+        qp_init_attr.recv_cq = cq;
+        qp_init_attr.qp_type = IBV_QPT_RC;
+        qp_init_attr.sq_sig_all = 0;
+        qp_init_attr.cap.max_send_wr = qp_depth;
+        qp_init_attr.cap.max_recv_wr = qp_depth;
+        qp_init_attr.cap.max_send_sge = 1;
+        qp_init_attr.cap.max_recv_sge = 1;
+        qp_init_attr.cap.max_inline_data = 64;
+
+        pqp.qp = ibv_create_qp(pd, &qp_init_attr);
+        if (!pqp.qp) {
+            fprintf(stderr, "Rank %d: Failed to create QP for peer %d: %s\n",
+                    rank, peer_rank, strerror(errno));
+            exit(1);
+        }
+
+        // Transition to INIT
+        struct ibv_qp_attr attr = {};
+        attr.qp_state = IBV_QPS_INIT;
+        attr.pkey_index = 0;
+        attr.port_num = port_num;
+        attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE |
+                               IBV_ACCESS_REMOTE_WRITE |
+                               IBV_ACCESS_REMOTE_READ |
+                               IBV_ACCESS_REMOTE_ATOMIC;
+
+        int flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS;
+        int ret = ibv_modify_qp(pqp.qp, &attr, flags);
+        if (ret) {
+            fprintf(stderr, "Rank %d: Failed to modify QP to INIT for peer %d: %s\n",
+                    rank, peer_rank, strerror(ret));
+            exit(1);
+        }
+
+        // Query mlx5dv extended info
+        struct mlx5dv_obj obj = {};
+        obj.qp.in = pqp.qp;
+        obj.qp.out = &pqp.qp_ex;
+
+        ret = mlx5dv_init_obj(&obj, MLX5DV_OBJ_QP);
+        if (ret) {
+            fprintf(stderr, "Rank %d: Failed to query mlx5dv QP for peer %d: %s\n",
+                    rank, peer_rank, strerror(ret));
+            exit(1);
+        }
+
+        // Allocate GPU resources for this QP
+        allocate_peer_qp_gpu_resources(pqp);
+
+        if (rank == 0) {
+            printf("Created QP for peer %d: QPN=%u\n", peer_rank, pqp.qp->qp_num);
+        }
+    }
+
+    /**
+     * Get local connection info for a specific peer's QP
+     */
+    GdaConnInfo get_local_info_for_peer(int peer_rank) {
+        auto it = peer_qps.find(peer_rank);
+        if (it == peer_qps.end()) {
+            fprintf(stderr, "Rank %d: No QP for peer %d\n", rank, peer_rank);
+            exit(1);
+        }
+
         GdaConnInfo info;
-        info.qpn = qp->qp_num;
+        info.qpn = it->second.qp->qp_num;
         info.lid = port_attr.lid;
         memcpy(info.gid, gid.raw, 16);
-        info.psn = psn;
-        info.buf_addr = 0;  // Will be set after buffer registration
+        info.psn = it->second.psn;
+        info.buf_addr = 0;
         info.rkey = 0;
         return info;
     }
 
-    // Connect to peer
+    // Legacy: Get local connection info (uses first QP)
+    GdaConnInfo get_local_info() const {
+        if (peer_qps.empty()) {
+            GdaConnInfo info = {};
+            info.lid = port_attr.lid;
+            memcpy(info.gid, gid.raw, 16);
+            return info;
+        }
+
+        auto it = peer_qps.begin();
+        GdaConnInfo info;
+        info.qpn = it->second.qp->qp_num;
+        info.lid = port_attr.lid;
+        memcpy(info.gid, gid.raw, 16);
+        info.psn = it->second.psn;
+        info.buf_addr = 0;
+        info.rkey = 0;
+        return info;
+    }
+
+    /**
+     * Connect QP to a specific peer
+     */
     void connect_to_peer(int peer_rank, const GdaConnInfo& peer_info) {
         if (peer_rank == rank) return;
 
+        auto it = peer_qps.find(peer_rank);
+        if (it == peer_qps.end()) {
+            fprintf(stderr, "Rank %d: No QP for peer %d, create it first\n", rank, peer_rank);
+            exit(1);
+        }
+
+        PerPeerQp& pqp = it->second;
+        if (pqp.connected) return;
+
         // Store peer info
-        remote_peers[peer_rank].qpn = peer_info.qpn;
-        remote_peers[peer_rank].lid = peer_info.lid;
-        memcpy(remote_peers[peer_rank].gid, peer_info.gid, 16);
-        remote_peers[peer_rank].buf_addr = peer_info.buf_addr;
-        remote_peers[peer_rank].rkey = peer_info.rkey;
+        pqp.remote.qpn = peer_info.qpn;
+        pqp.remote.lid = peer_info.lid;
+        memcpy(pqp.remote.gid, peer_info.gid, 16);
+        pqp.remote.buf_addr = peer_info.buf_addr;
+        pqp.remote.rkey = peer_info.rkey;
 
         // Transition QP to RTR
         struct ibv_qp_attr attr = {};
@@ -257,10 +398,10 @@ public:
                     IBV_QP_DEST_QPN | IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC |
                     IBV_QP_MIN_RNR_TIMER;
 
-        int ret = ibv_modify_qp(qp, &attr, flags);
+        int ret = ibv_modify_qp(pqp.qp, &attr, flags);
         if (ret) {
-            fprintf(stderr, "Rank %d: Failed to modify QP to RTR: %s\n",
-                    rank, strerror(ret));
+            fprintf(stderr, "Rank %d: Failed to modify QP to RTR for peer %d: %s\n",
+                    rank, peer_rank, strerror(ret));
             exit(1);
         }
 
@@ -270,18 +411,20 @@ public:
         attr.timeout = 14;
         attr.retry_cnt = 7;
         attr.rnr_retry = 7;
-        attr.sq_psn = psn;
+        attr.sq_psn = pqp.psn;
         attr.max_rd_atomic = 16;
 
         flags = IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
                 IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC;
 
-        ret = ibv_modify_qp(qp, &attr, flags);
+        ret = ibv_modify_qp(pqp.qp, &attr, flags);
         if (ret) {
-            fprintf(stderr, "Rank %d: Failed to modify QP to RTS: %s\n",
-                    rank, strerror(ret));
+            fprintf(stderr, "Rank %d: Failed to modify QP to RTS for peer %d: %s\n",
+                    rank, peer_rank, strerror(ret));
             exit(1);
         }
+
+        pqp.connected = true;
 
         if (rank == 0) {
             printf("Rank %d: Connected to peer %d (QPN=%u)\n",
@@ -289,21 +432,66 @@ public:
         }
     }
 
-    // Get GPU-accessible device QP info
+    /**
+     * Get GPU-accessible state for a specific peer's QP
+     */
+    bool get_peer_gpu_state(int peer_rank, void** wqe_buf, volatile uint32_t** dbrec,
+                            volatile uint64_t** bf_reg, volatile uint64_t** prod_idx,
+                            uint32_t* qpn, uint32_t* depth) {
+        auto it = peer_qps.find(peer_rank);
+        if (it == peer_qps.end()) return false;
+
+        const PerPeerQp& pqp = it->second;
+        *wqe_buf = pqp.d_wqe_buf;
+        *dbrec = pqp.d_dbrec;
+        *bf_reg = pqp.d_bf_reg;
+        *prod_idx = pqp.d_prod_idx;
+        *qpn = pqp.qp->qp_num;
+        *depth = qp_depth;
+        return true;
+    }
+
+    // Legacy: Get GPU-accessible device QP info (uses first QP)
     GdaDeviceQp get_device_qp() const {
         GdaDeviceQp dqp;
-        dqp.qpn = qp->qp_num;
-        dqp.nwqes = qp_depth;
-        dqp.wqe_buf = d_wqe_buf;
-        dqp.wqe_lkey = 0;  // TODO: Register WQE buffer
-        dqp.dbrec = (volatile uint32_t*)qp_ex.dbrec;
-        dqp.prod_idx = d_prod_idx;
+        memset(&dqp, 0, sizeof(dqp));
+
+        if (!peer_qps.empty()) {
+            auto it = peer_qps.begin();
+            const PerPeerQp& pqp = it->second;
+            dqp.qpn = pqp.qp->qp_num;
+            dqp.nwqes = qp_depth;
+            dqp.wqe_buf = pqp.d_wqe_buf;
+            dqp.wqe_lkey = 0;
+            dqp.dbrec = pqp.d_dbrec;
+            dqp.prod_idx = pqp.d_prod_idx;
+        }
+
         dqp.cqe = d_cqe;
         dqp.cqn = cq_ex.cqn;
         dqp.ncqes = cq_depth;
-        dqp.cq_cons_idx = nullptr;  // TODO
+        dqp.cq_cons_idx = nullptr;
         dqp.cq_dbrec = (volatile uint32_t*)cq_ex.dbrec;
         return dqp;
+    }
+
+    /**
+     * Update legacy pointers to point to a specific peer's QP
+     */
+    void set_active_peer(int peer_rank) {
+        auto it = peer_qps.find(peer_rank);
+        if (it == peer_qps.end()) return;
+
+        PerPeerQp& pqp = it->second;
+        qp = pqp.qp;
+        qp_ex = pqp.qp_ex;
+        d_wqe_buf = pqp.d_wqe_buf;
+        d_dbrec = pqp.d_dbrec;
+        d_bf_reg = pqp.d_bf_reg;
+        d_prod_idx = pqp.d_prod_idx;
+        h_prod_idx = pqp.h_prod_idx;
+        h_wqe_buf = pqp.qp_ex.sq.buf;
+        psn = pqp.psn;
     }
 
 private:
@@ -320,6 +508,12 @@ private:
         if (!dev_list || num_devices == 0) {
             fprintf(stderr, "Rank %d: No IB devices found\n", rank);
             exit(1);
+        }
+
+        // Check environment variable for device name override
+        const char* env_dev = getenv("GDA_IB_DEV");
+        if (env_dev) {
+            device_name = env_dev;
         }
 
         struct ibv_device* dev = nullptr;
@@ -364,7 +558,7 @@ private:
             exit(1);
         }
 
-        // Create CQ with mlx5dv for GPU access
+        // Create CQ with mlx5dv for GPU access (shared by all QPs)
         struct ibv_cq_init_attr_ex cq_attr = {};
         cq_attr.cqe = cq_depth;
         cq_attr.channel = nullptr;
@@ -380,168 +574,22 @@ private:
             exit(1);
         }
         cq = ibv_cq_ex_to_cq(cq_ex_ptr);
-    }
 
-    void init_qp() {
-        // Create QP - standard ibv for compatibility
-        // We'll use mlx5dv_init_obj later to query internal structures
-        struct ibv_qp_init_attr qp_init_attr = {};
-        qp_init_attr.send_cq = cq;
-        qp_init_attr.recv_cq = cq;
-        qp_init_attr.qp_type = IBV_QPT_RC;
-        qp_init_attr.sq_sig_all = 0;
-        qp_init_attr.cap.max_send_wr = qp_depth;
-        qp_init_attr.cap.max_recv_wr = qp_depth;
-        qp_init_attr.cap.max_send_sge = 1;
-        qp_init_attr.cap.max_recv_sge = 1;
-        qp_init_attr.cap.max_inline_data = 64;
-
-        qp = ibv_create_qp(pd, &qp_init_attr);
-        if (!qp) {
-            fprintf(stderr, "Rank %d: Failed to create QP: %s\n",
-                    rank, strerror(errno));
-            exit(1);
-        }
-
-        // Transition to INIT
-        struct ibv_qp_attr attr = {};
-        attr.qp_state = IBV_QPS_INIT;
-        attr.pkey_index = 0;
-        attr.port_num = port_num;
-        attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE |
-                               IBV_ACCESS_REMOTE_WRITE |
-                               IBV_ACCESS_REMOTE_READ |
-                               IBV_ACCESS_REMOTE_ATOMIC;
-
-        int flags = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS;
-        int ret = ibv_modify_qp(qp, &attr, flags);
-        if (ret) {
-            fprintf(stderr, "Rank %d: Failed to modify QP to INIT: %s\n",
-                    rank, strerror(ret));
-            exit(1);
-        }
-    }
-
-    void query_mlx5dv_objects() {
-        // Query extended QP and CQ info
+        // Query CQ extended info
         struct mlx5dv_obj obj = {};
-        obj.qp.in = qp;
-        obj.qp.out = &qp_ex;
         obj.cq.in = cq;
         obj.cq.out = &cq_ex;
-
-        int ret = mlx5dv_init_obj(&obj, MLX5DV_OBJ_QP | MLX5DV_OBJ_CQ);
+        int ret = mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ);
         if (ret) {
-            fprintf(stderr, "Rank %d: Failed to query mlx5dv objects: %s\n",
-                    rank, strerror(ret));
+            fprintf(stderr, "Rank %d: Failed to query mlx5dv CQ: %s\n", rank, strerror(ret));
             exit(1);
-        }
-
-        if (rank == 0) {
-            printf("MLX5 QP info:\n");
-            printf("  sq.buf = %p\n", qp_ex.sq.buf);
-            printf("  sq.wqe_cnt = %u\n", qp_ex.sq.wqe_cnt);
-            printf("  sq.stride = %u\n", qp_ex.sq.stride);
-            printf("  dbrec = %p\n", qp_ex.dbrec);
-            printf("  bf.reg = %p\n", qp_ex.bf.reg);
-            printf("  bf.size = %u\n", qp_ex.bf.size);
-            printf("MLX5 CQ info:\n");
-            printf("  buf = %p\n", cq_ex.buf);
-            printf("  cqe_cnt = %u\n", cq_ex.cqe_cnt);
-            printf("  cqn = %u\n", cq_ex.cqn);
-            printf("  dbrec = %p\n", cq_ex.dbrec);
-            fflush(stdout);
         }
     }
 
-    void allocate_gpu_resources() {
-        // Map NIC's WQE buffer (qp_ex.sq.buf) to GPU
-        // This is the key for GPU-triggered RDMA: GPU writes WQEs directly to NIC's buffer
-        size_t wqe_buf_size = qp_ex.sq.wqe_cnt * qp_ex.sq.stride;
-
-        h_wqe_buf = qp_ex.sq.buf;  // Use NIC's WQE buffer directly
-
-        // Register NIC's WQE buffer with CUDA for GPU access
-        cudaError_t err = cudaHostRegister(h_wqe_buf, wqe_buf_size, cudaHostRegisterDefault);
-        if (err != cudaSuccess) {
-            fprintf(stderr, "Rank %d: cudaHostRegister for NIC WQE buffer failed: %s\n",
-                    rank, cudaGetErrorString(err));
-            fprintf(stderr, "  WQE buffer address: %p, size: %zu\n", h_wqe_buf, wqe_buf_size);
-            // Try without registration - direct access might work on some systems
-            d_wqe_buf = h_wqe_buf;
-        } else {
-            err = cudaHostGetDevicePointer(&d_wqe_buf, h_wqe_buf, 0);
-            if (err != cudaSuccess) {
-                fprintf(stderr, "Rank %d: cudaHostGetDevicePointer for WQE failed: %s\n",
-                        rank, cudaGetErrorString(err));
-                d_wqe_buf = h_wqe_buf;  // Fallback to host pointer
-            }
-        }
-
-        // Also register doorbell for GPU access
-        // Note: dbrec is a 64-bit region (SQ dbrec + RQ dbrec)
-        volatile uint32_t* dbrec_base = qp_ex.dbrec;
-        err = cudaHostRegister((void*)dbrec_base, 64,
-            cudaHostRegisterPortable | cudaHostRegisterMapped);
-        if (err != cudaSuccess) {
-            if (rank == 0) {
-                printf("Note: cudaHostRegister for dbrec failed: %s (using direct access)\n",
-                       cudaGetErrorString(err));
-            }
-            d_dbrec = dbrec_base;  // Fallback to host pointer
-        } else {
-            err = cudaHostGetDevicePointer((void**)&d_dbrec, (void*)dbrec_base, 0);
-            if (err != cudaSuccess) {
-                if (rank == 0) {
-                    printf("Note: cudaHostGetDevicePointer for dbrec failed: %s\n",
-                           cudaGetErrorString(err));
-                }
-                d_dbrec = dbrec_base;
-            }
-        }
-
-        // Register BlueFlame register for GPU access (MMIO address)
-        if (qp_ex.bf.reg && qp_ex.bf.size > 0) {
-            err = cudaHostRegister(qp_ex.bf.reg, qp_ex.bf.size,
-                cudaHostRegisterPortable | cudaHostRegisterMapped | cudaHostRegisterIoMemory);
-            if (err != cudaSuccess) {
-                if (rank == 0) {
-                    printf("Note: cudaHostRegister for BlueFlame failed: %s\n",
-                           cudaGetErrorString(err));
-                }
-                d_bf_reg = (volatile uint64_t*)qp_ex.bf.reg;
-            } else {
-                err = cudaHostGetDevicePointer((void**)&d_bf_reg, qp_ex.bf.reg, 0);
-                if (err != cudaSuccess) {
-                    if (rank == 0) {
-                        printf("Note: cudaHostGetDevicePointer for BlueFlame failed: %s\n",
-                               cudaGetErrorString(err));
-                    }
-                    d_bf_reg = (volatile uint64_t*)qp_ex.bf.reg;
-                }
-            }
-        } else {
-            d_bf_reg = nullptr;
-        }
-
-        // Allocate producer index
-        err = cudaHostAlloc((void**)&h_prod_idx, sizeof(uint64_t),
-                            cudaHostAllocMapped);
-        if (err != cudaSuccess) {
-            fprintf(stderr, "Rank %d: cudaHostAlloc for prod_idx failed\n", rank);
-            exit(1);
-        }
-        *h_prod_idx = 0;
-
-        err = cudaHostGetDevicePointer((void**)&d_prod_idx, (void*)h_prod_idx, 0);
-        if (err != cudaSuccess) {
-            fprintf(stderr, "Rank %d: cudaHostGetDevicePointer for prod_idx failed\n", rank);
-            exit(1);
-        }
-
-        // Map CQ buffer to GPU
+    void allocate_cq_gpu_resources() {
+        // Map CQ buffer to GPU (shared by all QPs)
         size_t cqe_buf_size = cq_ex.cqe_cnt * cq_ex.cqe_size;
-        err = cudaHostRegister(cq_ex.buf, cqe_buf_size, cudaHostRegisterDefault);
+        cudaError_t err = cudaHostRegister(cq_ex.buf, cqe_buf_size, cudaHostRegisterDefault);
         if (err != cudaSuccess) {
             fprintf(stderr, "Rank %d: cudaHostRegister for CQ buffer failed: %s\n",
                     rank, cudaGetErrorString(err));
@@ -554,29 +602,71 @@ private:
         }
 
         if (rank == 0) {
-            printf("GPU resources:\n");
-            printf("  NIC WQE buffer: %p (stride=%u, cnt=%u)\n",
-                   qp_ex.sq.buf, qp_ex.sq.stride, qp_ex.sq.wqe_cnt);
-            printf("  d_wqe_buf = %p\n", d_wqe_buf);
-            printf("  h_dbrec = %p, d_dbrec = %p\n", (void*)qp_ex.dbrec, (void*)d_dbrec);
-            printf("  h_bf_reg = %p, d_bf_reg = %p (size=%u)\n",
-                   qp_ex.bf.reg, (void*)d_bf_reg, qp_ex.bf.size);
-            printf("  d_prod_idx = %p\n", (void*)d_prod_idx);
-            printf("  d_cqe = %p\n", (void*)d_cqe);
-            fflush(stdout);
+            printf("Shared CQ: cqn=%u, cqe_cnt=%u, d_cqe=%p\n",
+                   cq_ex.cqn, cq_ex.cqe_cnt, (void*)d_cqe);
         }
     }
 
-    void free_gpu_resources() {
-        if (d_cqe && cq_ex.buf) {
-            cudaHostUnregister(cq_ex.buf);
+    void allocate_peer_qp_gpu_resources(PerPeerQp& pqp) {
+        // Map NIC's WQE buffer to GPU
+        size_t wqe_buf_size = pqp.qp_ex.sq.wqe_cnt * pqp.qp_ex.sq.stride;
+        void* h_wqe = pqp.qp_ex.sq.buf;
+
+        cudaError_t err = cudaHostRegister(h_wqe, wqe_buf_size, cudaHostRegisterDefault);
+        if (err != cudaSuccess) {
+            pqp.d_wqe_buf = h_wqe;  // Fallback
+        } else {
+            err = cudaHostGetDevicePointer(&pqp.d_wqe_buf, h_wqe, 0);
+            if (err != cudaSuccess) {
+                pqp.d_wqe_buf = h_wqe;
+            }
         }
-        if (h_prod_idx) cudaFreeHost((void*)h_prod_idx);
-        // Don't free h_wqe_buf - it's the NIC's buffer (qp_ex.sq.buf)
-        // Just unregister it
-        if (h_wqe_buf && h_wqe_buf == qp_ex.sq.buf) {
-            cudaHostUnregister(h_wqe_buf);
+
+        // Map doorbell
+        volatile uint32_t* dbrec_base = pqp.qp_ex.dbrec;
+        err = cudaHostRegister((void*)dbrec_base, 64,
+            cudaHostRegisterPortable | cudaHostRegisterMapped);
+        if (err != cudaSuccess) {
+            pqp.d_dbrec = dbrec_base;
+        } else {
+            err = cudaHostGetDevicePointer((void**)&pqp.d_dbrec, (void*)dbrec_base, 0);
+            if (err != cudaSuccess) {
+                pqp.d_dbrec = dbrec_base;
+            }
         }
+
+        // Map BlueFlame register
+        if (pqp.qp_ex.bf.reg && pqp.qp_ex.bf.size > 0) {
+            err = cudaHostRegister(pqp.qp_ex.bf.reg, pqp.qp_ex.bf.size,
+                cudaHostRegisterPortable | cudaHostRegisterMapped | cudaHostRegisterIoMemory);
+            if (err != cudaSuccess) {
+                pqp.d_bf_reg = (volatile uint64_t*)pqp.qp_ex.bf.reg;
+            } else {
+                err = cudaHostGetDevicePointer((void**)&pqp.d_bf_reg, pqp.qp_ex.bf.reg, 0);
+                if (err != cudaSuccess) {
+                    pqp.d_bf_reg = (volatile uint64_t*)pqp.qp_ex.bf.reg;
+                }
+            }
+        }
+
+        // Allocate producer index
+        err = cudaHostAlloc((void**)&pqp.h_prod_idx, sizeof(uint64_t), cudaHostAllocMapped);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "Rank %d: cudaHostAlloc for prod_idx failed\n", rank);
+            exit(1);
+        }
+        *pqp.h_prod_idx = 0;
+
+        err = cudaHostGetDevicePointer((void**)&pqp.d_prod_idx, (void*)pqp.h_prod_idx, 0);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "Rank %d: cudaHostGetDevicePointer for prod_idx failed\n", rank);
+            exit(1);
+        }
+    }
+
+    void free_peer_qp_gpu_resources(PerPeerQp& pqp) {
+        if (pqp.h_prod_idx) cudaFreeHost((void*)pqp.h_prod_idx);
+        if (pqp.qp_ex.sq.buf) cudaHostUnregister(pqp.qp_ex.sq.buf);
     }
 };
 

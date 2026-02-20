@@ -157,18 +157,6 @@ public:
 
         // Allocate producer index
         allocate_prod_idx();
-
-        if (rank == 0) {
-            printf("DevxQp created:\n");
-            printf("  QPN = %u\n", qpn);
-            printf("  CQN = %u\n", cqn);
-            printf("  UAR page_id = %u\n", uar->page_id);
-            printf("  d_uar_reg = %p\n", d_uar_reg);
-            printf("  d_wq_buf = %p (size=%zu)\n", d_wq_buf, wq_buf_size);
-            printf("  d_dbrec = %p\n", (void*)d_dbrec);
-            printf("  d_prod_idx = %p\n", (void*)d_prod_idx);
-            fflush(stdout);
-        }
     }
 
     ~DevxQp() {
@@ -251,7 +239,17 @@ public:
 
     // Transition QP INIT -> RTR (InfiniBand)
     void init2rtr_ib(uint32_t dest_qpn, uint16_t dest_lid, uint8_t* dest_gid,
-                     uint32_t remote_psn, int mtu = 5 /* 4096 */) {
+                     uint32_t remote_psn, int mtu = -1) {
+        // Auto-detect MTU from port if not specified
+        if (mtu < 0) {
+            struct ibv_port_attr port_attr;
+            if (ibv_query_port(ctx, port_num, &port_attr) == 0) {
+                mtu = port_attr.active_mtu;
+            } else {
+                mtu = 3;  // Default to 1024 if query fails
+            }
+        }
+
         uint8_t cmd_in[DEVX_ST_SZ_BYTES(init2rtr_qp_in)] = {0};
         uint8_t cmd_out[DEVX_ST_SZ_BYTES(init2rtr_qp_out)] = {0};
 
@@ -311,7 +309,6 @@ public:
                     fclose(f);
                     // Look for RoCE v2 (preferred) or RoCE v1
                     if (strstr(buf, "RoCE v2") || strstr(buf, "ROCEv2")) {
-                        fprintf(stderr, "Rank %d: Found RoCE v2 GID at index %d\n", rank, i);
                         return i;
                     }
                 } else {
@@ -325,7 +322,6 @@ public:
             union ibv_gid gid;
             if (ibv_query_gid(ctx, port_num, i, &gid)) continue;
             if (gid.global.subnet_prefix != 0 || gid.global.interface_id != 0) {
-                fprintf(stderr, "Rank %d: Using GID index %d (fallback)\n", rank, i);
                 return i;
             }
         }
@@ -334,11 +330,45 @@ public:
 
     // Transition QP INIT -> RTR (RoCE - following nvshmem's minimal approach)
     void init2rtr(uint32_t dest_qpn, uint16_t dest_lid, uint8_t* dest_gid,
-                  uint32_t remote_psn, int mtu = 5, int gid_index = -1) {
+                  uint32_t remote_psn, int mtu = -1, int gid_index = -1) {
         // Auto-detect GID index if not specified
         if (gid_index < 0) {
             gid_index = find_roce_gid_index();
         }
+
+        // Query port to get active MTU
+        struct ibv_port_attr port_attr;
+        if (ibv_query_port(ctx, port_num, &port_attr)) {
+            fprintf(stderr, "Rank %d: ibv_query_port failed\n", rank);
+            exit(1);
+        }
+
+        // Auto-detect MTU from port if not specified
+        if (mtu < 0) {
+            // Use active_mtu from port (what the network actually supports)
+            mtu = port_attr.active_mtu;  // ibv_mtu enum: 1=256, 2=512, 3=1024, 4=2048, 5=4096
+
+            // Check for environment override
+            const char* mtu_env = getenv("GDA_MTU");
+            if (mtu_env) {
+                int mtu_bytes = atoi(mtu_env);
+                int requested_mtu;
+                if (mtu_bytes <= 256) requested_mtu = 1;
+                else if (mtu_bytes <= 512) requested_mtu = 2;
+                else if (mtu_bytes <= 1024) requested_mtu = 3;
+                else if (mtu_bytes <= 2048) requested_mtu = 4;
+                else requested_mtu = 5;
+
+                // Cap at active MTU
+                if (requested_mtu <= (int)port_attr.active_mtu) {
+                    mtu = requested_mtu;
+                } else {
+                    fprintf(stderr, "Rank %d: Requested MTU %d bytes exceeds active MTU, using active MTU %d\n",
+                            rank, mtu_bytes, 256 << (port_attr.active_mtu - 1));
+                }
+            }
+        }
+
         uint8_t cmd_in[DEVX_ST_SZ_BYTES(init2rtr_qp_in)] = {0};
         uint8_t cmd_out[DEVX_ST_SZ_BYTES(init2rtr_qp_out)] = {0};
 
@@ -353,12 +383,7 @@ public:
         DEVX_SET(qpc, qpc, log_rra_max, 4);
         // Note: nvshmem does NOT set next_rcv_psn
 
-        // Query port to determine IB vs RoCE
-        struct ibv_port_attr port_attr;
-        if (ibv_query_port(ctx, port_num, &port_attr)) {
-            fprintf(stderr, "Rank %d: ibv_query_port failed\n", rank);
-            exit(1);
-        }
+        // port_attr was already queried above for MTU detection
 
         if (port_attr.link_layer == IBV_LINK_LAYER_INFINIBAND) {
             // InfiniBand path
@@ -380,12 +405,6 @@ public:
             // nvshmem: ah_attr.dlid = port_attr->lid | IBGDA_ROCE_V2_UDP_SPORT_BASE
             ah_attr.dlid = port_attr.lid | 0xC000;  // RoCE v2 UDP sport
 
-            fprintf(stderr, "Rank %d: RoCE path, port_attr.lid=%u, ah_attr.dlid=0x%x\n",
-                    rank, port_attr.lid, ah_attr.dlid);
-            fprintf(stderr, "Rank %d: dgid=", rank);
-            for (int i = 0; i < 16; i++) fprintf(stderr, "%02x", dest_gid[i]);
-            fprintf(stderr, ", gid_index=%d\n", gid_index);
-
             struct ibv_ah* ah = ibv_create_ah(pd, &ah_attr);
             if (!ah) {
                 fprintf(stderr, "Rank %d: ibv_create_ah failed: %s\n",
@@ -403,9 +422,6 @@ public:
                 fprintf(stderr, "Rank %d: mlx5dv_init_obj for AH failed: %d\n", rank, dv_ret);
                 exit(1);
             }
-            fprintf(stderr, "Rank %d: rmac=%02x:%02x:%02x:%02x:%02x:%02x\n",
-                    rank, dah.av->rmac[0], dah.av->rmac[1], dah.av->rmac[2],
-                    dah.av->rmac[3], dah.av->rmac[4], dah.av->rmac[5]);
 
             // Set RoCE address path - ONLY these fields per nvshmem
             memcpy(DEVX_ADDR_OF(qpc, qpc, primary_address_path.rmac_47_32),
@@ -431,7 +447,6 @@ public:
                     dest_qpn, mtu, port_attr.link_layer);
             exit(1);
         }
-        fprintf(stderr, "Rank %d: INIT2RTR succeeded\n", rank);
     }
 
     // Transition QP RTR -> RTS
@@ -651,8 +666,9 @@ private:
         void* cqc = DEVX_ADDR_OF(create_cq_in, cmd_in, cq_context);
         DEVX_SET(cqc, cqc, dbr_umem_valid, 1);
         DEVX_SET(cqc, cqc, cqe_sz, 0);  // 64 byte CQEs
-        DEVX_SET(cqc, cqc, cc, 1);      // Collapsed CQ
+        DEVX_SET(cqc, cqc, cc, 0);      // Non-collapsed CQ (each WQE gets its own CQE slot)
         DEVX_SET(cqc, cqc, oi, 1);      // Overrun ignore
+        DEVX_SET(cqc, cqc, scqe_break_moderation_en, 0);  // Disable moderation
         DEVX_SET(cqc, cqc, dbr_umem_id, cq_dbr_umem->umem_id);
         DEVX_SET(cqc, cqc, log_cq_size, log_cq_size);
         DEVX_SET(cqc, cqc, uar_page, uar->page_id);
@@ -705,9 +721,6 @@ private:
             exit(1);
         }
         srqn = dvsrq.srqn;
-
-        fprintf(stderr, "Rank %d: SRQ created: srqn=%u, stride=%u, head=%u, tail=%u\n",
-                rank, srqn, dvsrq.stride, dvsrq.head, dvsrq.tail);
     }
 
     void create_devx_qp() {

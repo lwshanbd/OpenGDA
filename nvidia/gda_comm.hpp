@@ -14,6 +14,7 @@
 #include <vector>
 #include <unordered_map>
 #include <atomic>
+#include <arpa/inet.h>
 
 #include "cuda_device_context.hpp"
 #include "mpi_bootstrap.hpp"
@@ -177,6 +178,14 @@ public:
         }
 
         uint64_t op_id = ++op_counter;
+
+        if (getenv("GDA_DEBUG")) {
+            printf("Rank %d: RDMA PUT to rank %d buf %d: local=%p (lkey=0x%x), "
+                   "remote=0x%lx (rkey=0x%x), size=%zu, op_id=%lu\n",
+                   mpi.rank, dest_rank, buf_index,
+                   handle.buf, handle.mr->lkey,
+                   it->second.addr, it->second.rkey, size, op_id);
+        }
 
         int ret = ibv->post_rdma_write(
             dest_rank,
@@ -375,6 +384,17 @@ private:
 
             // Store peer's info
             ibv->set_peer_info(peer, peer_info);
+
+            // Debug output
+            if (getenv("GDA_DEBUG")) {
+                char local_gid[64], peer_gid[64];
+                inet_ntop(AF_INET6, local_info.gid, local_gid, sizeof(local_gid));
+                inet_ntop(AF_INET6, peer_info.gid, peer_gid, sizeof(peer_gid));
+                printf("Rank %d: QP to peer %d - local(qp=%u, lid=%u, psn=%u, gid=%s) -> "
+                       "peer(qp=%u, lid=%u, psn=%u, gid=%s)\n",
+                       mpi.rank, peer, local_info.qp_num, local_info.lid, local_info.psn, local_gid,
+                       peer_info.qp_num, peer_info.lid, peer_info.psn, peer_gid);
+            }
         }
 
         mpi.barrier();

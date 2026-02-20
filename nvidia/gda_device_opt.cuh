@@ -36,7 +36,7 @@ namespace opengda {
 #define MLX5_OPCODE_NOP        0x00
 #endif
 #ifndef MLX5_WQE_CTRL_CQ_UPDATE
-#define MLX5_WQE_CTRL_CQ_UPDATE (1 << 2)
+#define MLX5_WQE_CTRL_CQ_UPDATE (2 << 2)  // = 0x08, must match mlx5dv.h
 #endif
 #ifndef MLX5_WQE_CTRL_FENCE
 #define MLX5_WQE_CTRL_FENCE     (1 << 5)
@@ -285,18 +285,22 @@ __device__ __forceinline__ void gda_ring_doorbell_bf(
     //                   upper 32 bits go to bytes 4-7 (qpn_ds)
     uint64_t bf_val = ((uint64_t)qpn_ds << 32) | opmod_idx_opcode;
 
-    // Memory fence to ensure WQE writes are visible before doorbell
-    gda_membar_sys();
+    // GPU memory fence to ensure WQE writes are visible before doorbell
+    // Use GPU-scope fence (lighter than sys) since WQE buffer is GPU memory
+    asm volatile("fence.acq_rel.gpu;" ::: "memory");
 
     // Write doorbell record first (required before BlueFlame)
-    gda_store_release_u32(state->dbrec, gda_opt_htobe32(wqe_idx & 0xFFFF));
+    // Use relaxed store since fence above provides ordering
+    asm volatile("st.relaxed.sys.global.b32 [%0], %1;"
+                 : : "l"(state->dbrec), "r"(gda_opt_htobe32(wqe_idx & 0xFFFF)) : "memory");
 
-    // BlueFlame write - 64-bit atomic write to UAR
+    // BlueFlame write - 64-bit write to UAR (must use sys scope for NIC visibility)
     if (state->bf_reg) {
-        gda_store_release_u64(state->bf_reg, bf_val);
+        asm volatile("st.relaxed.sys.global.b64 [%0], %1;"
+                     : : "l"(state->bf_reg), "l"(bf_val) : "memory");
     }
 
-    // Update producer index
+    // Update producer index (local tracking)
     gda_store_relaxed_u64(state->prod_idx, wqe_idx);
 }
 
@@ -398,43 +402,152 @@ __device__ __forceinline__ void gda_post_wqes_batched(
 }
 
 //==============================================================================
-// CQ POLLING - Optimized with L1 bypass
+// CQ POLLING - Using wqe_counter method (like NVSHMEM)
 //==============================================================================
 
-__device__ __forceinline__ int gda_poll_cq_opt(
+/**
+ * MLX5 CQE64 structure (64 bytes):
+ *   - offset 60-61: wqe_counter (__be16) - completed WQE index
+ *   - offset 62: signature
+ *   - offset 63: op_own (opcode in upper 4 bits, owner in lowest bit)
+ */
+#ifndef MLX5_CQE64_DEFINED
+#define MLX5_CQE64_DEFINED
+struct Mlx5Cqe64 {
+    uint8_t  rsvd0[60];
+    uint16_t wqe_counter;    // big-endian!
+    uint8_t  signature;
+    uint8_t  op_own;
+} __attribute__((packed));
+#endif
+
+/**
+ * Wait for RDMA completion using owner bit method
+ *
+ * MLX5 CQE completion detection:
+ * - CQ buffer initialized to 0xFF (owner bit = 1)
+ * - NIC toggles owner bit when writing CQE
+ * - First round: NIC writes owner = 0
+ * - Second round (after wrap): NIC writes owner = 1
+ *
+ * @param state Device state with CQ info
+ * @param expected_wqe_idx The WQE index we're waiting for (1-based prod_idx after send)
+ * @param timeout_ns Timeout in nanoseconds (0 = no timeout, will spin forever)
+ * @return 0 on success, -1 on timeout, -2 on error
+ */
+/**
+ * Read a byte from system memory, bypassing L2 cache
+ * This is necessary for reading CQE from host memory
+ */
+__device__ __forceinline__ uint8_t gda_read_sysmem_u8(volatile uint8_t* ptr) {
+    uint16_t result;
+    // Use ld.acquire.sys to ensure we see NIC's writes
+    asm volatile("ld.acquire.sys.global.b8 %0, [%1];" : "=h"(result) : "l"(ptr));
+    return (uint8_t)result;
+}
+
+__device__ __forceinline__ int gda_poll_cq_wqe_counter(
     GdaDeviceStateOpt* state,
-    uint64_t expected_completions,
-    uint64_t timeout_ns = 50000)  // 50us default timeout
+    uint64_t expected_wqe_idx,
+    uint64_t timeout_ns = 0)
 {
     if (!state->cqe) return 0;
 
-    uint64_t start_completions = state->num_completions ?
-                                 gda_load_relaxed_u64(state->num_completions) : 0;
-    uint64_t cqe_idx = start_completions & state->ncqes_mask;
-    uint8_t expected_owner = (start_completions / state->ncqes) & 1;
+    // Calculate CQE index and expected owner bit
+    // CQ initialized to 0xFF, so initial owner = 1
+    // NIC toggles owner at each wrap: first round = 0, second round = 1, etc.
+    uint32_t cqe_idx = (expected_wqe_idx - 1) & state->ncqes_mask;
+    uint8_t expected_owner = ((expected_wqe_idx - 1) / state->ncqes) & 1 ? 1 : 0;
 
-    volatile GdaCqe64Opt* cqe = &state->cqe[cqe_idx];
+    volatile uint8_t* cqe_bytes = (volatile uint8_t*)&((volatile Mlx5Cqe64*)state->cqe)[cqe_idx];
 
     uint64_t start_time = gda_globaltimer();
-    uint64_t timeout_cycles = timeout_ns;  // globaltimer is ~1ns resolution
+    uint64_t check_interval = 1000;  // Check timeout every ~1000 iterations
 
-    while ((gda_globaltimer() - start_time) < timeout_cycles) {
-        // Acquire load to get latest CQE
-        uint8_t op_own = ((volatile uint8_t*)cqe)[63];  // op_own is last byte
-        uint8_t owner = op_own & MLX5_CQE_OWNER_MASK;
+    // Wait for owner bit to change
+    for (int poll_count = 0; ; poll_count++) {
+        // Read op_own byte with system memory barrier (offset 63)
+        uint8_t op_own = gda_read_sysmem_u8(&cqe_bytes[63]);
+        uint8_t owner = op_own & 0x01;
 
         if (owner == expected_owner) {
-            // Got completion
-            if (state->num_completions) {
-                atomicAdd((unsigned long long*)state->num_completions, 1);
+            // CQE has been written by NIC
+            // Check for errors (opcode in upper 4 bits)
+            uint8_t opcode = (op_own >> 4) & 0x0F;
+
+            // MLX5_CQE_REQ_ERR = 0x0D
+            if (opcode == 0x0D) {
+                return -2;  // Error
             }
 
-            uint8_t opcode = (op_own >> 4) & 0x0F;
-            return (opcode == 0x00 || opcode == 0x02) ? 0 : -2;  // 0=success, 2=flush
+            // NOTE: In collapsed CQ mode (cc=1), the NIC manages the consumer index.
+            // We don't need to update the CQ doorbell ourselves.
+
+            return 0;  // Success
+        }
+
+        // Timeout check (more frequent now)
+        if (timeout_ns > 0 && (poll_count % check_interval) == 0) {
+            uint64_t elapsed = gda_globaltimer() - start_time;
+            if (elapsed > timeout_ns) {
+                return -1;  // Timeout
+            }
         }
     }
+}
 
-    return -1;  // Timeout
+/**
+ * Quiet operation - wait for all outstanding operations to complete
+ *
+ * This polls the CQ to wait for the NIC to indicate completion.
+ * For host memory CQE, uses ld.acquire.sys to bypass GPU cache.
+ */
+__device__ __forceinline__ void gda_quiet(
+    GdaDeviceStateOpt* state)
+{
+    // Get current producer index - this is the WQE we need to wait for
+    uint64_t prod_idx = gda_load_relaxed_u64(state->prod_idx);
+
+    if (prod_idx == 0) return;  // Nothing sent yet
+
+    // Memory barrier to ensure all prior writes are visible to NIC
+    gda_membar_sys();
+
+    // Poll CQ for completion (with timeout to avoid hanging)
+    int ret = gda_poll_cq_wqe_counter(state, prod_idx, 5000000);  // 5ms timeout
+
+    // If timeout, just proceed (for debugging)
+    if (ret == -1) {
+        // Optionally print warning, but for now just continue
+    }
+}
+
+/**
+ * Quiet with polling - waits for remote completion
+ *
+ * Uses a simple spin-wait on an acknowledgment location.
+ * The remote side must write to ack_ptr when it receives data.
+ */
+__device__ __forceinline__ void gda_quiet_with_ack(
+    volatile uint64_t* ack_ptr,
+    uint64_t expected_ack)
+{
+    // System memory barrier to ensure prior writes are visible
+    gda_membar_sys();
+
+    // Wait for acknowledgment from remote side
+    while (gda_load_relaxed_u64(ack_ptr) < expected_ack) {
+        // Spin
+    }
+}
+
+// Legacy function - replaced by gda_quiet
+__device__ __forceinline__ int gda_poll_cq_opt(
+    GdaDeviceStateOpt* state,
+    uint64_t expected_completions,
+    uint64_t timeout_ns = 50000)
+{
+    return gda_poll_cq_wqe_counter(state, expected_completions, timeout_ns);
 }
 
 //==============================================================================

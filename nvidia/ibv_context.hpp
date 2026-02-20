@@ -16,6 +16,7 @@
 #include <cstring>
 #include <vector>
 #include <string>
+#include <arpa/inet.h>
 
 // Connection info exchanged between peers
 struct IbvConnInfo {
@@ -47,6 +48,7 @@ public:
     struct ibv_port_attr port_attr;
     union ibv_gid gid;
     int port_num;
+    int gid_index;  // Selected GID index (for RoCE)
 
     // Device info
     struct ibv_device_attr dev_attr;
@@ -61,7 +63,7 @@ public:
 
     IbvContext(int rank_, int size_, const char* device_name = nullptr, int port = 1)
         : ctx(nullptr), pd(nullptr), send_cq(nullptr), recv_cq(nullptr),
-          port_num(port), rank(rank_), size(size_)
+          port_num(port), gid_index(0), rank(rank_), size(size_)
     {
         memset(&port_attr, 0, sizeof(port_attr));
         memset(&gid, 0, sizeof(gid));
@@ -78,6 +80,7 @@ public:
                 create_qp_for_peer(i);
             }
         }
+
     }
 
     ~IbvContext() {
@@ -101,6 +104,12 @@ public:
         info.lid = port_attr.lid;
         memcpy(info.gid, gid.raw, 16);
         info.psn = peer_qps[peer_rank].psn;
+
+        // Warn if LID is 0 on InfiniBand (indicates SM not running)
+        if (port_attr.link_layer == IBV_LINK_LAYER_INFINIBAND && info.lid == 0) {
+            fprintf(stderr, "Warning: Rank %d: LID is 0 on InfiniBand - is the subnet manager running?\n", rank);
+        }
+
         return info;
     }
 
@@ -119,7 +128,28 @@ public:
         // Transition to RTR
         struct ibv_qp_attr attr = {};
         attr.qp_state = IBV_QPS_RTR;
-        attr.path_mtu = IBV_MTU_4096;
+
+        // Use the port's active MTU (what the network actually supports)
+        // Don't try to exceed this - it will cause "transport retry exceeded" errors
+        attr.path_mtu = port_attr.active_mtu;
+
+        // Allow override via environment variable (but cap at active_mtu)
+        const char* mtu_env = getenv("GDA_MTU");
+        if (mtu_env) {
+            int mtu_val = atoi(mtu_env);
+            enum ibv_mtu requested_mtu;
+            if (mtu_val <= 256) requested_mtu = IBV_MTU_256;
+            else if (mtu_val <= 512) requested_mtu = IBV_MTU_512;
+            else if (mtu_val <= 1024) requested_mtu = IBV_MTU_1024;
+            else if (mtu_val <= 2048) requested_mtu = IBV_MTU_2048;
+            else requested_mtu = IBV_MTU_4096;
+
+            // Cap at active MTU
+            if (requested_mtu <= port_attr.active_mtu) {
+                attr.path_mtu = requested_mtu;
+            }
+        }
+
         attr.dest_qp_num = peer.qp_num;
         attr.rq_psn = peer.psn;
         attr.max_dest_rd_atomic = 16;
@@ -136,7 +166,7 @@ public:
             memcpy(&attr.ah_attr.grh.dgid, peer.gid, 16);
             attr.ah_attr.grh.flow_label = 0;
             attr.ah_attr.grh.hop_limit = 64;
-            attr.ah_attr.grh.sgid_index = 0;
+            attr.ah_attr.grh.sgid_index = gid_index;  // Use selected GID index
             attr.ah_attr.grh.traffic_class = 0;
         }
 
@@ -154,9 +184,9 @@ public:
         // Transition to RTS
         memset(&attr, 0, sizeof(attr));
         attr.qp_state = IBV_QPS_RTS;
-        attr.timeout = 14;
-        attr.retry_cnt = 7;
-        attr.rnr_retry = 7;
+        attr.timeout = 18;      // Increased timeout (~1 second per retry)
+        attr.retry_cnt = 7;     // Max retries
+        attr.rnr_retry = 7;     // Max RNR retries
         attr.sq_psn = pqp.psn;
         attr.max_rd_atomic = 16;
 
@@ -265,6 +295,12 @@ private:
             exit(1);
         }
 
+        // Check environment variable for device name override
+        const char* env_dev = getenv("GDA_IB_DEV");
+        if (env_dev) {
+            device_name = env_dev;
+        }
+
         struct ibv_device* dev = nullptr;
         if (device_name) {
             for (int i = 0; i < num_devices; i++) {
@@ -297,7 +333,69 @@ private:
 
         check(ibv_query_device(ctx, &dev_attr), "ibv_query_device");
         check(ibv_query_port(ctx, port_num, &port_attr), "ibv_query_port");
-        check(ibv_query_gid(ctx, port_num, 0, &gid), "ibv_query_gid");
+
+        // Verify port is active
+        if (port_attr.state != IBV_PORT_ACTIVE) {
+            fprintf(stderr, "Rank %d: IB port %d is not active (state=%d)\n",
+                    rank, port_num, port_attr.state);
+            // Try other ports
+            for (int p = 1; p <= 2; p++) {
+                if (p == port_num) continue;
+                struct ibv_port_attr test_port;
+                if (ibv_query_port(ctx, p, &test_port) == 0 &&
+                    test_port.state == IBV_PORT_ACTIVE) {
+                    port_num = p;
+                    port_attr = test_port;
+                    break;
+                }
+            }
+            if (port_attr.state != IBV_PORT_ACTIVE) {
+                fprintf(stderr, "Rank %d: No active IB port found\n", rank);
+            }
+        }
+
+        // For RoCE, try to find a valid GID (prefer RoCEv2)
+        // Check GID_INDEX env var first
+        const char* gid_env = getenv("GDA_GID_INDEX");
+        if (gid_env) {
+            gid_index = atoi(gid_env);
+        } else if (port_attr.link_layer == IBV_LINK_LAYER_ETHERNET) {
+            // For RoCE, scan GIDs to find a valid one (skip link-local)
+            gid_index = find_best_gid();
+        }
+
+        check(ibv_query_gid(ctx, port_num, gid_index, &gid), "ibv_query_gid");
+    }
+
+    // Find best GID index for RoCE (prefer RoCEv2, avoid link-local)
+    int find_best_gid() {
+        union ibv_gid test_gid;
+        int best_idx = 0;
+
+        // Scan up to 16 GIDs looking for a valid one
+        for (int i = 0; i < 16; i++) {
+            if (ibv_query_gid(ctx, port_num, i, &test_gid) != 0) continue;
+
+            // Skip all-zero GID
+            bool all_zero = true;
+            for (int j = 0; j < 16; j++) {
+                if (test_gid.raw[j] != 0) { all_zero = false; break; }
+            }
+            if (all_zero) continue;
+
+            // For RoCE, GIDs starting with fe80 are link-local (less preferred)
+            // GIDs with ::ffff: prefix are IPv4-mapped (RoCEv2)
+            if (test_gid.raw[0] == 0xfe && test_gid.raw[1] == 0x80) {
+                // Link-local, use as fallback
+                if (best_idx == 0) best_idx = i;
+            } else {
+                // Prefer non-link-local GIDs
+                best_idx = i;
+                break;
+            }
+        }
+
+        return best_idx;
     }
 
     void init_pd_cq() {
