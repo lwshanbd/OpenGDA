@@ -43,6 +43,10 @@ public:
     std::vector<uint64_t*> d_tail_seqs;
     std::vector<MemoryRegion*> mr_tail_seqs;
 
+    // Per-peer ack buffer: device memory for lightweight Reply (receiver writes here)
+    std::vector<uint64_t*> d_ack_bufs;
+    std::vector<MemoryRegion*> mr_ack_bufs;
+
     // Device-side context
     am_context_t* d_context;
     am_context_t h_context;
@@ -102,8 +106,10 @@ public:
         // Cleanup per-peer buffers
         for (auto* mr : mr_inbox_slots) delete mr;
         for (auto* mr : mr_tail_seqs) delete mr;
+        for (auto* mr : mr_ack_bufs) delete mr;
         for (auto* p : d_inbox_slots) if (p) hipFree(p);
         for (auto* p : d_tail_seqs) if (p) hipFree(p);
+        for (auto* p : d_ack_bufs) if (p) hipFree(p);
     }
 
     // No copy
@@ -130,6 +136,7 @@ private:
 
         d_inbox_slots.resize(npeers, nullptr);
         d_tail_seqs.resize(npeers, nullptr);
+        d_ack_bufs.resize(npeers, nullptr);
 
         for (int p = 0; p < npeers; p++) {
             // Allocate inbox slot array on device
@@ -139,6 +146,10 @@ private:
             // Allocate tail_seq on device (for sender to read our progress)
             check_hip(hipMalloc(&d_tail_seqs[p], sizeof(uint64_t)), "hipMalloc(tail_seq)");
             check_hip(hipMemset(d_tail_seqs[p], 0, sizeof(uint64_t)), "hipMemset(tail_seq)");
+
+            // Allocate ack buffer on device (for receiver to write Reply acks)
+            check_hip(hipMalloc(&d_ack_bufs[p], sizeof(uint64_t)), "hipMalloc(ack_buf)");
+            check_hip(hipMemset(d_ack_bufs[p], 0, sizeof(uint64_t)), "hipMemset(ack_buf)");
         }
 
         check_hip(hipDeviceSynchronize(), "hipDeviceSynchronize");
@@ -150,6 +161,7 @@ private:
 
         mr_inbox_slots.resize(npeers, nullptr);
         mr_tail_seqs.resize(npeers, nullptr);
+        mr_ack_bufs.resize(npeers, nullptr);
 
         for (int p = 0; p < npeers; p++) {
             // Register inbox MR
@@ -161,6 +173,11 @@ private:
             mr_tail_seqs[p] = new MemoryRegion(
                 comm.fabric->domain, comm.fabric->ep, comm.fabric->cxi_info,
                 d_tail_seqs[p], sizeof(uint64_t), true, comm.gpu_id(), comm.rank());
+
+            // Register ack buffer MR
+            mr_ack_bufs[p] = new MemoryRegion(
+                comm.fabric->domain, comm.fabric->ep, comm.fabric->cxi_info,
+                d_ack_bufs[p], sizeof(uint64_t), true, comm.gpu_id(), comm.rank());
         }
     }
 
@@ -174,6 +191,9 @@ private:
             my_infos[p].ring_key = mr_inbox_slots[p]->key;
             my_infos[p].tail_seq_addr = (uint64_t)d_tail_seqs[p];
             my_infos[p].tail_seq_key = mr_tail_seqs[p]->key;
+            // Ack buffer: peer p will write Reply acks here (to my ack buffer for peer p)
+            my_infos[p].ack_addr = (uint64_t)d_ack_bufs[p];
+            my_infos[p].ack_key = mr_ack_bufs[p]->key;
             my_infos[p].nslots = nslots;
         }
 
@@ -212,6 +232,8 @@ private:
             h_send_states[p].remote_ring_key = info_for_me.ring_key;
             h_send_states[p].remote_tail_seq_addr = info_for_me.tail_seq_addr;
             h_send_states[p].remote_tail_seq_key = info_for_me.tail_seq_key;
+            // Local ack buffer where peer p will write Reply acks to me
+            h_send_states[p].local_ack = d_ack_bufs[p];
 
             // Setup recv state for peer p (where I receive FROM peer p)
             h_recv_states[p].peer_rank = p;
@@ -219,6 +241,9 @@ private:
             h_recv_states[p].expected_seq = 1;
             h_recv_states[p].tail_seq = 0;
             h_recv_states[p].inbox_slots = d_inbox_slots[p];
+            // Remote ack buffer where I write Reply acks to peer p
+            h_recv_states[p].remote_ack_addr = info_for_me.ack_addr;
+            h_recv_states[p].remote_ack_key = info_for_me.ack_key;
         }
     }
 

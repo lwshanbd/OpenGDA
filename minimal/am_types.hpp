@@ -165,6 +165,9 @@ struct am_peer_send_state_t {
     // Remote tail_seq address (for DWQ read to check progress)
     uint64_t remote_tail_seq_addr;    // Receiver's tail_seq address
     uint64_t remote_tail_seq_key;     // MR key for tail_seq
+
+    // Local ack buffer for lightweight Reply (receiver writes here)
+    volatile uint64_t* local_ack;     // Pointer to my ack buffer for this peer
 };
 
 /**
@@ -179,6 +182,11 @@ struct am_recv_state_t {
 
     // Local inbox ring (device memory)
     am_slot_t* inbox_slots;           // Pointer to local slot array
+
+    // Remote ack buffer address for lightweight Reply
+    // (when I receive a Request from this peer, I reply to this address)
+    uint64_t remote_ack_addr;         // Sender's ack buffer address
+    uint64_t remote_ack_key;          // MR key for ack buffer
 };
 
 /**
@@ -215,6 +223,8 @@ struct am_exchange_info_t {
     uint64_t ring_key;                // MR key for ring buffer
     uint64_t tail_seq_addr;           // Address of receiver's tail_seq
     uint64_t tail_seq_key;            // MR key for tail_seq
+    uint64_t ack_addr;                // Address of sender's ack buffer
+    uint64_t ack_key;                 // MR key for ack buffer
     int nslots;                       // Number of slots
 };
 
