@@ -151,6 +151,12 @@ add_executable(flush_benchmark flush_benchmark.cpp)
 target_include_directories(flush_benchmark PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
 target_link_libraries(flush_benchmark PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
 
+# OpenGDA API test
+set_source_files_properties(test_opengda.cpp PROPERTIES LANGUAGE HIP)
+add_executable(test_opengda test_opengda.cpp)
+target_include_directories(test_opengda PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(test_opengda PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
+
 # Print configuration
 message(STATUS "HIP found: ${hip_DIR}")
 message(STATUS "HIP architectures: ${CMAKE_HIP_ARCHITECTURES}")
