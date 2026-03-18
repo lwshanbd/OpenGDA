@@ -16,35 +16,9 @@
  */
 #pragma once
 
-#include <cstdint>
-#include <cstddef>
+#include "gicc_types.hpp"
 
 namespace gicc {
-
-//==============================================================================
-// Public types (platform-neutral)
-//==============================================================================
-
-/**
- * Handle to a registered memory buffer.
- * Returned by Runtime::register_buffer().
- */
-struct Buffer {
-    void*    ptr;       // User buffer pointer
-    size_t   size;      // Buffer size in bytes
-    uint64_t addr;      // = (uint64_t)ptr, for passing to GPU kernels
-    uint32_t lkey;      // Local key (for RDMA operations)
-    uint32_t rkey;      // Remote key (for sharing with peers)
-    int      index;     // Index in Runtime's buffer list
-};
-
-/**
- * Remote buffer information (received from a peer via exchange()).
- */
-struct RemoteBufferInfo {
-    uint64_t addr;
-    uint32_t rkey;
-};
 
 //==============================================================================
 // Runtime class declaration (platform-neutral interface)

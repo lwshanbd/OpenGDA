@@ -625,7 +625,11 @@ __device__ __forceinline__ bool gda_rdma_write_batched(
 
 //==============================================================================
 // OPTIMIZED KERNELS
+// Guard with GDA_DEVICE_OPT_SUPPRESS_KERNELS to avoid multiple-definition
+// errors when this header is included from multiple translation units.
 //==============================================================================
+
+#ifndef GDA_DEVICE_OPT_SUPPRESS_KERNELS
 
 /**
  * Optimized burst kernel - single thread, maximum throughput
@@ -758,5 +762,7 @@ __global__ void gda_multi_wqe_kernel(
         }
     }
 }
+
+#endif  // GDA_DEVICE_OPT_SUPPRESS_KERNELS
 
 }  // namespace opengda

@@ -23,13 +23,21 @@
 #include <vector>
 #include <unordered_map>
 
+#include "gicc_types.hpp"
 #include "mlx5_devx_qp.hpp"
 #include "memory_region.hpp"
 #include "mpi_bootstrap.hpp"
 
-#include "mlx5_device.cuh"
+// Include gda_device_opt.cuh for GdaDeviceStateOpt struct definition.
+// Must come AFTER mlx5dv.h (included by mlx5_devx_qp.hpp) to avoid
+// macro conflicts with MLX5 enum constants.
+#include "gda_device_opt.cuh"
 
 namespace gicc {
+
+// DeviceCtx alias (same as in mlx5_device.cuh, repeated here so
+// mlx5_runtime.hpp can be used without including device headers)
+using DeviceCtx = opengda::GdaDeviceStateOpt;
 
 class Runtime {
 public:

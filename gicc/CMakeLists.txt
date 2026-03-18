@@ -69,6 +69,24 @@ set_target_properties(gicc_pingpong_bench PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 
+# Matrix multiplication (rewrite of nvidia/mm_gda_nv.cu)
+add_executable(gicc_mm gicc_mm.cu)
+target_link_libraries(gicc_mm ${GICC_LIBS})
+target_compile_options(gicc_mm PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:${GICC_CUDA_FLAGS}>)
+set_target_properties(gicc_mm PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+
+# Jacobi solver (rewrite of nvgda/jacobi_gpu_init.cu)
+add_executable(gicc_jacobi gicc_jacobi.cu)
+target_link_libraries(gicc_jacobi ${GICC_LIBS})
+target_compile_options(gicc_jacobi PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:${GICC_CUDA_FLAGS}>)
+set_target_properties(gicc_jacobi PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+
 # ===========================================================================
 # Summary
 # ===========================================================================
@@ -82,5 +100,7 @@ message(STATUS "ibverbs: ${IBVERBS_LIBRARY}")
 message(STATUS "mlx5: ${MLX5_LIBRARY}")
 message(STATUS "")
 message(STATUS "Targets:")
-message(STATUS "  gicc_pingpong_bench - Ping-pong latency/bandwidth benchmark")
+message(STATUS "  gicc_pingpong_bench - Ping-pong latency/bandwidth")
+message(STATUS "  gicc_mm             - Distributed matrix multiplication")
+message(STATUS "  gicc_jacobi         - Jacobi solver with fused RDMA")
 message(STATUS "")
