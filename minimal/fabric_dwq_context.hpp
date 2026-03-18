@@ -17,6 +17,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
+#include <thread>
+#include <atomic>
 
 #include "device_affinity.hpp"
 
@@ -62,6 +64,10 @@ public:
     // Affinity detector for CXI selection (optional, can be nullptr)
     DeviceAffinityDetector* affinity_detector_;
 
+    // Background CQ progress thread
+    std::thread cq_progress_thread_;
+    std::atomic<bool> cq_progress_stop_{false};
+
     FabricDwqContext(int rank_, DeviceAffinityDetector* affinity_detector = nullptr) :
         info(nullptr), cxi_info(nullptr), fabric(nullptr), domain(nullptr),
         av(nullptr), cq(nullptr), ep(nullptr),
@@ -79,9 +85,13 @@ public:
         init_counters();
         init_mmio_mapping();
         get_local_address();
+        start_cq_progress_thread();
     }
 
     ~FabricDwqContext() {
+        // Stop background CQ progress thread first
+        stop_cq_progress_thread();
+
         // Unregister MMIO from GPU first (ignore errors in cleanup)
         if (trigger_mmio_addr) (void)hipHostUnregister(trigger_mmio_addr);
         if (completion_mmio_addr) (void)hipHostUnregister(completion_mmio_addr);
@@ -112,19 +122,27 @@ public:
         }
     }
 
-    // Fast flush: aggressively progress CQ without sleep(1)
-    // Only works when all operations complete normally (no cancellation needed)
-    void fast_flush(uint64_t expected_completions) {
-        // Wait for completion counter to reach expected value
-        while (fi_cntr_read(completion_cntr) < expected_completions) {
-            fi_cq_read(cq, NULL, 0);
-        }
+    // Start background CQ progress thread
+    void start_cq_progress_thread() {
+        cq_progress_stop_.store(false, std::memory_order_relaxed);
+        cq_progress_thread_ = std::thread([this]() {
+            while (!cq_progress_stop_.load(std::memory_order_relaxed)) {
+                fi_cq_read(cq, NULL, 0);
+            }
+        });
+    }
 
-        // Extra CQ progress to ensure events are fully processed
-        // and internal resources are released
-        for (int i = 0; i < 100; i++) {
-            fi_cq_read(cq, NULL, 0);
+    // Stop background CQ progress thread
+    void stop_cq_progress_thread() {
+        cq_progress_stop_.store(true, std::memory_order_relaxed);
+        if (cq_progress_thread_.joinable()) {
+            cq_progress_thread_.join();
         }
+    }
+
+    // fast_flush is now a no-op since background thread handles CQ progress
+    void fast_flush(uint64_t /*expected_completions*/) {
+        // No-op: background thread continuously progresses CQ
     }
 
     bool is_virt_addr_mode() const {

@@ -55,6 +55,12 @@ public:
     // Max threshold used in current batch
     uint64_t max_threshold;
 
+    // Reply staging: device memory for 8-byte ack values
+    std::vector<uint64_t*> d_reply_staging;
+    std::vector<MemoryRegion*> reply_mrs;
+    size_t reply_staging_idx;
+    size_t reply_staging_size;
+
     /**
      * Initialize AM subsystem
      * @param comm Reference to initialized GdaComm
@@ -65,14 +71,19 @@ public:
         : am_ctx(comm, nslots),
           staging_idx(0),
           staging_size(staging_pool_size),
-          max_threshold(0)
+          max_threshold(0),
+          reply_staging_idx(0),
+          reply_staging_size(staging_pool_size)
     {
         allocate_staging(staging_pool_size);
+        allocate_reply_staging(staging_pool_size);
     }
 
     ~GdaAm() {
         for (auto* mr : staging_mrs) delete mr;
         for (auto* p : d_staging) if (p) hipFree(p);
+        for (auto* mr : reply_mrs) delete mr;
+        for (auto* p : d_reply_staging) if (p) hipFree(p);
     }
 
     // No copy
@@ -270,6 +281,7 @@ public:
 
         // Reset for next batch
         staging_idx = 0;
+        reply_staging_idx = 0;
         max_threshold = 0;
     }
 
@@ -292,6 +304,56 @@ public:
         hipFree(d_result);
 
         return result;
+    }
+
+    /**
+     * Queue a lightweight Reply (8 bytes only).
+     * This is more efficient than sending a full AM for simple ack responses.
+     *
+     * Reply writes a single uint64_t to the sender's ack buffer.
+     *
+     * @param dest_rank Rank to reply to (original sender)
+     * @param ack_value Value to write (typically a sequence/counter)
+     * @return 0 on success, -1 on error
+     */
+    int reply(int dest_rank, uint64_t ack_value) {
+        if (reply_staging_idx >= reply_staging_size) {
+            fprintf(stderr, "Reply staging pool exhausted (used %zu/%zu)\n",
+                    reply_staging_idx, reply_staging_size);
+            return -1;
+        }
+
+        // Get staging slot for the 8-byte ack value
+        uint64_t* d_ack = d_reply_staging[reply_staging_idx];
+        MemoryRegion* mr = reply_mrs[reply_staging_idx];
+        reply_staging_idx++;
+
+        // Copy ack value to device staging
+        hipMemcpy(d_ack, &ack_value, sizeof(uint64_t), hipMemcpyHostToDevice);
+
+        // Get recv state to find where to send the reply
+        am_recv_state_t& rs = am_ctx.h_recv_states[dest_rank];
+
+        // Calculate remote address based on addressing mode
+        uint64_t rma_addr = am_ctx.comm.is_virt_addr_mode()
+            ? rs.remote_ack_addr
+            : 0;  // offset 0 within the MR
+
+        // Queue the 8-byte put
+        GdaHandle ack_handle;
+        ack_handle.buf = d_ack;
+        ack_handle.local_desc = mr->desc;
+        ack_handle.rma_key = mr->key;
+
+        uint64_t thresh = am_ctx.comm.put_raw(
+            ack_handle, dest_rank,
+            rma_addr,
+            rs.remote_ack_key,
+            sizeof(uint64_t));
+
+        if (thresh > max_threshold) max_threshold = thresh;
+
+        return 0;
     }
 
     /**
@@ -329,6 +391,25 @@ private:
                 am_ctx.comm.fabric->ep,
                 am_ctx.comm.fabric->cxi_info,
                 d_staging[i], sizeof(am_slot_t),
+                true, am_ctx.comm.gpu_id(), am_ctx.comm.rank());
+        }
+
+        hipDeviceSynchronize();
+    }
+
+    void allocate_reply_staging(size_t pool_size) {
+        d_reply_staging.resize(pool_size, nullptr);
+        reply_mrs.resize(pool_size, nullptr);
+
+        for (size_t i = 0; i < pool_size; i++) {
+            hipMalloc(&d_reply_staging[i], sizeof(uint64_t));
+            hipMemset(d_reply_staging[i], 0, sizeof(uint64_t));
+
+            reply_mrs[i] = new MemoryRegion(
+                am_ctx.comm.fabric->domain,
+                am_ctx.comm.fabric->ep,
+                am_ctx.comm.fabric->cxi_info,
+                d_reply_staging[i], sizeof(uint64_t),
                 true, am_ctx.comm.gpu_id(), am_ctx.comm.rank());
         }
 

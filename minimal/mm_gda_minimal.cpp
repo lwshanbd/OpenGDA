@@ -334,7 +334,7 @@ int main(int argc, char** argv)
     // =========================================================================
     // Run 10 iterations, skip first 3 (warmup), average last 7
     // =========================================================================
-    constexpr int TOTAL_RUNS = 10;
+    constexpr int TOTAL_RUNS = 1000;
     constexpr int WARMUP_RUNS = 3;
     double times[TOTAL_RUNS];
 
@@ -400,11 +400,9 @@ int main(int argc, char** argv)
         clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
         times[run] = timediff_us(t0, t1);
 
-        // Fast flush: aggressively progress CQ to release TLE resources
-        // Much faster than flush_dwq() which has sleep(1)
-        comm.fast_flush(global_threshold);
+        // CQ progress is handled by background thread in FabricDwqContext
 
-        if (mype == 0) {
+        if (mype == 0 && run % 100 == 0) {
             std::cout << "Run " << run << ": " << times[run] << " us"
                       << (run < WARMUP_RUNS ? " (warmup)" : "") << "\n";
         }

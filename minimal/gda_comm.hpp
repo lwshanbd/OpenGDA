@@ -52,8 +52,9 @@ struct GdaHandle {
 // Remote RMA info for a specific buffer
 struct GdaRemoteInfo {
     fi_addr_t av_addr;
-    uint64_t rma_addr;
+    uint64_t rma_addr;      // Full address (base + offset) for virt_addr mode
     uint64_t rma_key;
+    uint64_t base_addr;     // MR base address (for computing offset in non-virt_addr mode)
 };
 
 class GdaComm {
@@ -83,13 +84,23 @@ public:
     // Current threshold counter
     uint64_t current_threshold;
 
+    // GPU-accessible completion signaling (for fused kernel wait)
+    uint64_t* atomic_result;        // GPU memory - incremented when operations complete
+    uint64_t* atomic_operand;       // GPU memory - value to add (always 1)
+    MemoryRegion* mr_atomic_result;
+    MemoryRegion* mr_atomic_operand;
+    struct fid_cntr* atomic_completion_cntr;  // Counter for atomic ops
+
     /**
      * Initialize GDA communication
      * @param local_rank Local rank for GPU selection (e.g., SLURM_LOCALID)
      */
     explicit GdaComm(int local_rank = -1)
         : affinity(nullptr), hip(nullptr), fabric(nullptr), ofi_barrier(nullptr),
-          current_threshold(0)
+          current_threshold(0),
+          atomic_result(nullptr), atomic_operand(nullptr),
+          mr_atomic_result(nullptr), mr_atomic_operand(nullptr),
+          atomic_completion_cntr(nullptr)
     {
         // Get local rank from PMI if not provided
         if (local_rank < 0) {
@@ -111,6 +122,9 @@ public:
 
         // Initialize OFI barrier
         init_barrier();
+
+        // Initialize GPU-accessible atomic signaling
+        init_atomic_signaling();
     }
 
     ~GdaComm() {
@@ -125,6 +139,13 @@ public:
         // Cleanup registered memory regions
         for (auto* mr : registered_mrs) delete mr;
         registered_mrs.clear();
+
+        // Cleanup atomic signaling resources
+        delete mr_atomic_result;
+        delete mr_atomic_operand;
+        if (atomic_completion_cntr) fi_close(&atomic_completion_cntr->fid);
+        if (atomic_result) (void)hipFree(atomic_result);
+        if (atomic_operand) (void)hipFree(atomic_operand);
 
         // Cleanup components (reverse order)
         delete ofi_barrier;
@@ -164,13 +185,17 @@ public:
      * Set remote RMA info by buffer index (for double-buffering scenarios)
      * @param dest_rank Destination rank
      * @param buf_index Buffer index (used as map key)
-     * @param remote_addr Remote buffer address
+     * @param remote_addr Remote buffer address (base + offset)
      * @param remote_key Remote buffer key
+     * @param remote_base_addr Remote MR base address (default 0 means remote_addr is the base)
      */
     void set_remote_info_by_index(int dest_rank, int buf_index,
-                                   uint64_t remote_addr, uint64_t remote_key) {
+                                   uint64_t remote_addr, uint64_t remote_key,
+                                   uint64_t remote_base_addr = 0) {
         uint64_t map_key = make_remote_key(dest_rank, buf_index);
-        remote_info[map_key] = {av_addrs[dest_rank], remote_addr, remote_key};
+        // If base_addr is not provided, assume remote_addr is the base (offset = 0)
+        uint64_t base = (remote_base_addr != 0) ? remote_base_addr : remote_addr;
+        remote_info[map_key] = {av_addrs[dest_rank], remote_addr, remote_key, base};
     }
 
     /**
@@ -195,7 +220,24 @@ public:
         }
         const auto& ri = it->second;
 
-        uint64_t remote_addr = fabric->is_virt_addr_mode() ? ri.rma_addr : 0;
+        // Compute remote address based on MR mode:
+        // - VIRT_ADDR mode: use full virtual address (base + offset)
+        // - Non-VIRT_ADDR mode: use offset relative to MR base
+        uint64_t remote_addr;
+        if (fabric->is_virt_addr_mode()) {
+            remote_addr = ri.rma_addr;
+        } else {
+            // Compute offset from base address
+            remote_addr = ri.rma_addr - ri.base_addr;
+        }
+
+        // Debug: print addresses for first few operations (disabled for performance)
+        // static int put_debug_count = 0;
+        // if (put_debug_count < 5) {
+        //     printf("Rank %d put(): virt_addr=%d, ri.rma_addr=0x%lx, ri.base_addr=0x%lx, computed remote_addr=0x%lx, key=0x%lx\n",
+        //            pmi.rank, fabric->is_virt_addr_mode(), ri.rma_addr, ri.base_addr, remote_addr, ri.rma_key);
+        //     put_debug_count++;
+        // }
 
         // Queue RMA write
         auto* dwq = new DwqWorkBuilder(pmi.rank);
@@ -206,8 +248,10 @@ public:
             fabric->trigger_cntr, fabric->completion_cntr, threshold);
         pending_ops.push_back(dwq);
 
-        // Queue writeback (counter self-increment for stable completion tracking)
-        queue_counter_writeback(threshold);
+        // NOTE: Removed queue_counter_writeback() - it caused a race condition
+        // where completion_cntr grew by 2 per operation (1 from RMA + 1 from writeback),
+        // causing wait() to return early in subsequent iterations.
+        // The RMA completion counter alone is sufficient.
 
         return threshold;
     }
@@ -252,6 +296,15 @@ public:
     void trigger(uint64_t threshold) {
         hipLaunchKernelGGL(gda_trigger_kernel, dim3(1), dim3(1), 0, 0,
                            fabric->dev_trigger_cntr, threshold);
+    }
+
+    /**
+     * Trigger queued DWQ operations from CPU (alternative to GPU trigger)
+     * Uses fi_cntr_set directly - useful for debugging GPU MMIO issues
+     * @param threshold The threshold value returned by put()
+     */
+    void trigger_cpu(uint64_t threshold) {
+        fi_cntr_set(fabric->trigger_cntr, threshold);
     }
 
     /**
@@ -306,6 +359,17 @@ public:
     }
 
     /**
+     * Cleanup pending ops without resetting counters
+     * Use this to free memory while keeping counter state
+     */
+    void cleanup_pending_ops() {
+        for (auto* op : pending_ops) delete op;
+        pending_ops.clear();
+        for (auto* wb : pending_wb_ops) delete wb;
+        pending_wb_ops.clear();
+    }
+
+    /**
      * Flush DWQ (slower, use fast_flush when possible)
      */
     void flush() {
@@ -317,6 +381,88 @@ public:
     int size() const { return pmi.size; }
     int gpu_id() const { return hip->gpu_id; }
     bool is_virt_addr_mode() const { return fabric->is_virt_addr_mode(); }
+    uint64_t get_current_threshold() const { return current_threshold; }
+
+    /**
+     * Get remote RMA info for debugging
+     */
+    GdaRemoteInfo get_remote_info(int dest_rank, int buf_index) const {
+        uint64_t map_key = make_remote_key(dest_rank, buf_index);
+        auto it = remote_info.find(map_key);
+        if (it != remote_info.end()) {
+            return it->second;
+        }
+        return {0, 0, 0, 0};
+    }
+
+    /**
+     * Get GPU-accessible atomic result pointer (for fused kernel wait)
+     * GPU polls this value to know when operations complete
+     */
+    volatile uint64_t* get_atomic_result() const {
+        return atomic_result;
+    }
+
+    /**
+     * Reset atomic result counter (call before each batch of operations)
+     */
+    void reset_atomic_result() {
+        uint64_t zero = 0;
+        (void)hipMemcpy(atomic_result, &zero, sizeof(uint64_t), hipMemcpyHostToDevice);
+    }
+
+    /**
+     * Queue a put operation with GPU-signaled completion
+     * When RMA completes, atomic_result is incremented (GPU can poll this)
+     * @param src_handle Source buffer handle
+     * @param dest_rank Destination rank
+     * @param dest_buf_index Destination buffer index
+     * @param size Transfer size
+     * @return The threshold value to pass to trigger()
+     */
+    uint64_t put_with_signal(const GdaHandle& src_handle, int dest_rank,
+                              int dest_buf_index, size_t size) {
+        current_threshold++;
+        uint64_t threshold = current_threshold;
+
+        uint64_t map_key = make_remote_key(dest_rank, dest_buf_index);
+        auto it = remote_info.find(map_key);
+        if (it == remote_info.end()) {
+            fprintf(stderr, "Rank %d: RMA info not set for rank %d buf %d\n",
+                    pmi.rank, dest_rank, dest_buf_index);
+            exit(1);
+        }
+        const auto& ri = it->second;
+
+        uint64_t remote_addr;
+        if (fabric->is_virt_addr_mode()) {
+            remote_addr = ri.rma_addr;
+        } else {
+            remote_addr = ri.rma_addr - ri.base_addr;
+        }
+
+        // Queue RMA write
+        auto* dwq = new DwqWorkBuilder(pmi.rank);
+        dwq->queue_rma_write(
+            fabric->domain, fabric->ep,
+            src_handle.buf, src_handle.mr->desc, size,
+            ri.av_addr, remote_addr, ri.rma_key,
+            fabric->trigger_cntr, fabric->completion_cntr, threshold);
+
+        // Queue atomic signal to increment atomic_result when RMA completes
+        uint64_t atomic_result_addr = fabric->is_virt_addr_mode()
+            ? (uint64_t)atomic_result : 0;
+        dwq->queue_atomic_signal(
+            fabric->domain, fabric->ep,
+            atomic_operand, mr_atomic_operand->desc,
+            atomic_result, mr_atomic_result->key, atomic_result_addr,
+            fabric->local_addr_in_av,
+            fabric->completion_cntr,
+            atomic_completion_cntr, threshold);
+
+        pending_ops.push_back(dwq);
+        return threshold;
+    }
 
 private:
     void queue_counter_writeback(uint64_t threshold) {
@@ -366,6 +512,35 @@ private:
         fabric->local_addr_in_av = av_addrs[pmi.rank];
         free(my_hex);
         free(peer_bin);
+    }
+
+    void init_atomic_signaling() {
+        // Allocate GPU memory for atomic signaling
+        (void)hipMalloc(&atomic_result, sizeof(uint64_t));
+        (void)hipMalloc(&atomic_operand, sizeof(uint64_t));
+
+        // Initialize values
+        uint64_t zero = 0;
+        uint64_t one = 1;
+        (void)hipMemcpy(atomic_result, &zero, sizeof(uint64_t), hipMemcpyHostToDevice);
+        (void)hipMemcpy(atomic_operand, &one, sizeof(uint64_t), hipMemcpyHostToDevice);
+
+        // Register as memory regions for RDMA
+        mr_atomic_result = new MemoryRegion(fabric->domain, fabric->ep, fabric->cxi_info,
+                                             atomic_result, sizeof(uint64_t), true, hip->gpu_id, pmi.rank);
+        mr_atomic_operand = new MemoryRegion(fabric->domain, fabric->ep, fabric->cxi_info,
+                                              atomic_operand, sizeof(uint64_t), true, hip->gpu_id, pmi.rank);
+
+        // Create completion counter for atomic operations
+        struct fi_cntr_attr cntr_attr = {};
+        cntr_attr.events = FI_CNTR_EVENTS_COMP;
+        cntr_attr.wait_obj = FI_WAIT_UNSPEC;
+        int ret = fi_cntr_open(fabric->domain, &cntr_attr, &atomic_completion_cntr, NULL);
+        if (ret) {
+            fprintf(stderr, "Rank %d: fi_cntr_open(atomic) failed: %s\n",
+                    pmi.rank, fi_strerror(-ret));
+            exit(1);
+        }
     }
 
     void init_barrier() {

@@ -108,36 +108,6 @@ target_link_libraries(mm_gda_minimal PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
 # target_include_directories(halo_mpi PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
 # target_link_libraries(halo_mpi PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
 
-# GDA Fused kernel benchmark
-set_source_files_properties(gda_fuse.cpp PROPERTIES LANGUAGE HIP)
-add_executable(gda_fuse gda_fuse.cpp)
-target_include_directories(gda_fuse PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
-target_link_libraries(gda_fuse PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
-
-# GDA Fused kernel debug
-set_source_files_properties(gda_fuse_debug.cpp PROPERTIES LANGUAGE HIP)
-add_executable(gda_fuse_debug gda_fuse_debug.cpp)
-target_include_directories(gda_fuse_debug PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
-target_link_libraries(gda_fuse_debug PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
-
-# MPI GPU-aware comparison (requires GTL for GPU-aware MPI)
-# At runtime: MPICH_GPU_SUPPORT_ENABLED=1
-set_source_files_properties(gda_fuse_mpi.cpp PROPERTIES LANGUAGE HIP)
-add_executable(gda_fuse_mpi gda_fuse_mpi.cpp)
-target_include_directories(gda_fuse_mpi PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
-# Link GTL for GPU-aware MPI (Cray MPICH)
-find_library(GTL_LIBRARY mpi_gtl_hsa
-    PATHS /opt/cray/pe/mpich/8.1.30/gtl/lib
-    NO_DEFAULT_PATH
-)
-if(GTL_LIBRARY)
-    target_link_libraries(gda_fuse_mpi PRIVATE ${COMMON_LIBS} MPI::MPI_CXX ${GTL_LIBRARY})
-    message(STATUS "GTL library found: ${GTL_LIBRARY}")
-else()
-    # Fallback without GTL (may not have GPU-aware support)
-    target_link_libraries(gda_fuse_mpi PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
-    message(WARNING "GTL library not found - MPI may not be GPU-aware")
-endif()
 
 # AM throughput test (1000 messages)
 set_source_files_properties(am_test_one.cpp PROPERTIES LANGUAGE HIP)
@@ -149,7 +119,7 @@ target_link_libraries(am_test_one PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
 set_source_files_properties(am_pingpong.cpp PROPERTIES LANGUAGE HIP)
 add_executable(am_pingpong am_pingpong.cpp)
 target_include_directories(am_pingpong PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
-target_link_libraries(am_pingpong PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
+target_link_libraries(am_pingpong PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
 
 # GPU-triggered dissemination barrier test
 set_source_files_properties(barrier_new_test.cpp PROPERTIES LANGUAGE HIP)
@@ -162,6 +132,30 @@ set_source_files_properties(barrier_continuous_test.cpp PROPERTIES LANGUAGE HIP)
 add_executable(barrier_continuous_test barrier_continuous_test.cpp)
 target_include_directories(barrier_continuous_test PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
 target_link_libraries(barrier_continuous_test PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
+
+# Counter and DWQ limits test
+set_source_files_properties(limits_test.cpp PROPERTIES LANGUAGE HIP)
+add_executable(limits_test limits_test.cpp)
+target_include_directories(limits_test PRIVATE ${COMMON_INCLUDES})
+target_link_libraries(limits_test PRIVATE ${COMMON_LIBS})
+
+# Simple limits test
+set_source_files_properties(simple_limits_test.cpp PROPERTIES LANGUAGE HIP)
+add_executable(simple_limits_test simple_limits_test.cpp)
+target_include_directories(simple_limits_test PRIVATE ${COMMON_INCLUDES})
+target_link_libraries(simple_limits_test PRIVATE ${COMMON_LIBS})
+
+# Flush strategy benchmark (compares sync flush, background thread, no flush)
+set_source_files_properties(flush_benchmark.cpp PROPERTIES LANGUAGE HIP)
+add_executable(flush_benchmark flush_benchmark.cpp)
+target_include_directories(flush_benchmark PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(flush_benchmark PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
+
+# OpenGDA API test
+set_source_files_properties(test_opengda.cpp PROPERTIES LANGUAGE HIP)
+add_executable(test_opengda test_opengda.cpp)
+target_include_directories(test_opengda PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_link_libraries(test_opengda PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
 
 # Print configuration
 message(STATUS "HIP found: ${hip_DIR}")
