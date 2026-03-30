@@ -1,247 +1,129 @@
-# ============================================================================
-# OpenGDA Library - Source Directory
-# ============================================================================
+cmake_minimum_required(VERSION 3.18)
+project(gicc LANGUAGES CXX CUDA)
 
-# ============================================================================
-# Source Files
-# ============================================================================
-set(OPENGDA_SOURCES
-    gda.cpp
-    gda_barrier_proxy.cpp
-    common/log.cpp
-    bootstrap/common.cpp
-)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_ARCHITECTURES "90" CACHE STRING "CUDA architectures")
+set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 
-# Add bootstrap source files based on type
-if(BOOTSTRAP_TYPE STREQUAL "PMI2")
-    list(APPEND OPENGDA_SOURCES bootstrap/pmi2.cpp)
-elseif(BOOTSTRAP_TYPE STREQUAL "PMIX")
-    list(APPEND OPENGDA_SOURCES bootstrap/pmix.cpp)
+# ===========================================================================
+# Dependencies
+# ===========================================================================
+
+find_package(MPI REQUIRED)
+find_package(CUDAToolkit REQUIRED)
+
+find_library(IBVERBS_LIBRARY ibverbs)
+if(NOT IBVERBS_LIBRARY)
+    message(FATAL_ERROR "libibverbs not found")
 endif()
 
-# Add network source files based on type
-if(NETWORK_TYPE STREQUAL "OFI")
-    list(APPEND OPENGDA_SOURCES network/ofi.cpp)
-elseif(NETWORK_TYPE STREQUAL "OFI_PROXY")
-    list(APPEND OPENGDA_SOURCES network/ofi-proxy.cpp)
-elseif(NETWORK_TYPE STREQUAL "IBV")
-    list(APPEND OPENGDA_SOURCES network/ibv.cpp)
+find_library(MLX5_LIBRARY mlx5)
+if(NOT MLX5_LIBRARY)
+    message(FATAL_ERROR "libmlx5 not found")
 endif()
 
-set(OPENGDA_PUBLIC_HEADERS
-    gda.h
-    gda_barrier_proxy.h
+find_library(PMIX_LIBRARY pmix HINTS $ENV{MPI_ROOT}/lib)
+
+# ===========================================================================
+# GICC Shared Library
+# ===========================================================================
+
+add_library(gicc SHARED
+    gicc_lib.cu
 )
 
-set(OPENGDA_PRIVATE_HEADERS
-    common/log.hpp
-    bootstrap/common.hpp
-)
-
-# Add bootstrap headers based on type
-if(BOOTSTRAP_TYPE STREQUAL "PMI2")
-    list(APPEND OPENGDA_PRIVATE_HEADERS bootstrap/pmi2.hpp)
-elseif(BOOTSTRAP_TYPE STREQUAL "PMIX")
-    list(APPEND OPENGDA_PRIVATE_HEADERS bootstrap/pmix.hpp)
-endif()
-
-# Add network headers based on type
-if(NETWORK_TYPE STREQUAL "OFI")
-    list(APPEND OPENGDA_PRIVATE_HEADERS network/ofi.hpp)
-elseif(NETWORK_TYPE STREQUAL "IBV")
-    list(APPEND OPENGDA_PRIVATE_HEADERS network/ibv.hpp)
-endif()
-
-# ============================================================================
-# Build Library Target
-# ============================================================================
-add_library(opengda ${OPENGDA_SOURCES})
-
-# Set library properties
-set_target_properties(opengda PROPERTIES
-    OUTPUT_NAME "opengda"
-    VERSION ${PROJECT_VERSION}
-    SOVERSION ${PROJECT_VERSION_MAJOR}
-    PUBLIC_HEADER "${OPENGDA_PUBLIC_HEADERS}"
-)
-
-# ============================================================================
-# Include Directories
-# ============================================================================
-target_include_directories(opengda
+# Include directories: src/ is the root so includes work as <gicc/...>
+target_include_directories(gicc
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<INSTALL_INTERFACE:include>
     PRIVATE
-        ${NETWORK_INCLUDE_DIR}
-        ${BOOTSTRAP_INCLUDE_DIR}
-        ${HWLOC_INCLUDE_DIR}
+        ${MPI_CXX_INCLUDE_DIRS}
+        ${CUDAToolkit_INCLUDE_DIRS}
 )
 
-# ============================================================================
-# Link Libraries
-# ============================================================================
-target_link_libraries(opengda
-    PRIVATE
-        ${NETWORK_LIBRARY}
-        ${BOOTSTRAP_LIBRARY}
-        ${HWLOC_LIBRARY}
-        pthread
+target_compile_definitions(gicc PUBLIC GICC_PLATFORM_MLX5)
+
+target_link_libraries(gicc
+    PUBLIC
+        ${MPI_CXX_LIBRARIES}
+        ${IBVERBS_LIBRARY}
+        ${MLX5_LIBRARY}
+        CUDA::cudart
 )
-
-# ============================================================================
-# Compiler Options
-# ============================================================================
-target_compile_options(opengda PRIVATE
-    -Wall
-    -Wextra
-    -Wno-unused-parameter
-)
-
-# ============================================================================
-# Compile Definitions (Macros)
-# ============================================================================
-
-# Bootstrap type macro
-target_compile_definitions(opengda PRIVATE ${BOOTSTRAP_COMPILE_DEF})
-
-# Network type macro
-target_compile_definitions(opengda PRIVATE ${NETWORK_COMPILE_DEF})
-
-# AMD GPU Support
-if(USE_AMDGPU)
-    target_compile_definitions(opengda PRIVATE USE_AMDGPU=1)
-    target_include_directories(opengda PRIVATE ${HIP_INCLUDE_DIR})
-
-    if(hip_FOUND)
-        target_link_libraries(opengda PRIVATE hip::host)
-    else()
-        target_link_libraries(opengda PRIVATE ${HIP_LIBRARY})
-    endif()
+if(PMIX_LIBRARY)
+    target_link_libraries(gicc PUBLIC ${PMIX_LIBRARY})
 endif()
 
-# NVIDIA GPU Support
-if(USE_NVGPU)
-    target_compile_definitions(opengda PRIVATE USE_NVGPU=1)
-    target_include_directories(opengda PRIVATE ${CUDA_INCLUDE_DIR})
-
-    if(CUDAToolkit_FOUND)
-        target_link_libraries(opengda PRIVATE CUDA::cudart)
-    else()
-        target_link_libraries(opengda PRIVATE ${CUDA_RUNTIME_LIBRARY})
-    endif()
-endif()
-
-# Debug Support
-if(DEBUG_OFI)
-    target_compile_definitions(opengda PRIVATE DEBUG_OFI=1)
-    message(STATUS "Debug logging: ENABLED (DEBUG/TRACE compiled in)")
-else()
-    message(STATUS "Debug logging: DISABLED (DEBUG/TRACE optimized out, INFO/WARN/ERROR always available)")
-endif()
-
-# Default MR sizes (compile-time defaults, can be overridden by environment variables)
-target_compile_definitions(opengda PRIVATE
-    DEFAULT_HOST_MR_SIZE=${DEFAULT_HOST_MR_SIZE}ULL
-    DEFAULT_GPU_MR_SIZE=${DEFAULT_GPU_MR_SIZE}ULL
+target_compile_options(gicc PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:
+        -lineinfo
+        -Xcompiler -Wall
+        --expt-relaxed-constexpr
+    >
 )
 
-# ============================================================================
-# Copy Headers to Build Directory (for development)
-# ============================================================================
-
-# Create include directory in build
-set(BUILD_INCLUDE_DIR ${CMAKE_BINARY_DIR}/include)
-file(MAKE_DIRECTORY ${BUILD_INCLUDE_DIR})
-
-# Copy public headers
-add_custom_command(
-    TARGET opengda POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_CURRENT_SOURCE_DIR}/gda.h
-        ${BUILD_INCLUDE_DIR}/gda.h
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_CURRENT_SOURCE_DIR}/gda_barrier_proxy.h
-        ${BUILD_INCLUDE_DIR}/gda_barrier_proxy.h
-    COMMENT "Copying public headers to build directory"
+set_target_properties(gicc PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    POSITION_INDEPENDENT_CODE ON
+    VERSION 1.0.0
+    SOVERSION 1
 )
 
-# Copy bootstrap headers
-add_custom_command(
-    TARGET opengda POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        ${BUILD_INCLUDE_DIR}/opengda/bootstrap
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_CURRENT_SOURCE_DIR}/bootstrap/common.hpp
-        ${BUILD_INCLUDE_DIR}/opengda/bootstrap/common.hpp
+# ===========================================================================
+# Header-only interface target (for users who only need headers)
+# ===========================================================================
+
+add_library(gicc_headers INTERFACE)
+target_include_directories(gicc_headers
+    INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<INSTALL_INTERFACE:include>
+)
+target_compile_definitions(gicc_headers INTERFACE GICC_PLATFORM_MLX5)
+
+# ===========================================================================
+# Install
+# ===========================================================================
+
+install(TARGETS gicc gicc_headers
+    EXPORT gicc-targets
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+    INCLUDES DESTINATION include
 )
 
-# Copy bootstrap-specific headers
-if(BOOTSTRAP_TYPE STREQUAL "PMI2")
-    add_custom_command(
-        TARGET opengda POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_CURRENT_SOURCE_DIR}/bootstrap/pmi2.hpp
-            ${BUILD_INCLUDE_DIR}/opengda/bootstrap/pmi2.hpp
-    )
-elseif(BOOTSTRAP_TYPE STREQUAL "PMIX")
-    add_custom_command(
-        TARGET opengda POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_CURRENT_SOURCE_DIR}/bootstrap/pmix.hpp
-            ${BUILD_INCLUDE_DIR}/opengda/bootstrap/pmix.hpp
-    )
-endif()
-
-# Copy network headers
-add_custom_command(
-    TARGET opengda POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        ${BUILD_INCLUDE_DIR}/opengda/network
+install(DIRECTORY gicc/
+    DESTINATION include/gicc
+    FILES_MATCHING
+        PATTERN "*.hpp"
+        PATTERN "*.cuh"
+        PATTERN "*.h"
 )
 
-if(NETWORK_TYPE STREQUAL "OFI")
-    add_custom_command(
-        TARGET opengda POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_CURRENT_SOURCE_DIR}/network/ofi.hpp
-            ${BUILD_INCLUDE_DIR}/opengda/network/ofi.hpp
-    )
-elseif(NETWORK_TYPE STREQUAL "OFI_PROXY")
-    add_custom_command(
-        TARGET opengda POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_CURRENT_SOURCE_DIR}/network/ofi-proxy.hpp
-            ${BUILD_INCLUDE_DIR}/opengda/network/ofi-proxy.hpp
-    )
-elseif(NETWORK_TYPE STREQUAL "IBV")
-    add_custom_command(
-        TARGET opengda POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_CURRENT_SOURCE_DIR}/network/ibv.hpp
-            ${BUILD_INCLUDE_DIR}/opengda/network/ibv.hpp
-    )
-endif()
-
-message(STATUS "Headers will be copied to: ${BUILD_INCLUDE_DIR}")
-
-# ============================================================================
-# Installation
-# ============================================================================
-include(GNUInstallDirs)
-
-# Install library
-install(TARGETS opengda
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+install(EXPORT gicc-targets
+    FILE gicc-config.cmake
+    NAMESPACE gicc::
+    DESTINATION lib/cmake/gicc
 )
 
-# Install private headers (for C++ API users)
-install(DIRECTORY
-    bootstrap
-    network
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/opengda
-    FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h"
-)
+# ===========================================================================
+# Summary
+# ===========================================================================
+
+message(STATUS "")
+message(STATUS "=== GICC Library Build Configuration ===")
+message(STATUS "Platform:   MLX5 / InfiniBand")
+message(STATUS "CUDA:       ${CUDAToolkit_VERSION}")
+message(STATUS "CUDA arch:  ${CMAKE_CUDA_ARCHITECTURES}")
+message(STATUS "ibverbs:    ${IBVERBS_LIBRARY}")
+message(STATUS "mlx5:       ${MLX5_LIBRARY}")
+message(STATUS "")
+message(STATUS "Targets:")
+message(STATUS "  gicc          - Shared library (libgicc.so)")
+message(STATUS "  gicc_headers  - Header-only interface")
+message(STATUS "")
