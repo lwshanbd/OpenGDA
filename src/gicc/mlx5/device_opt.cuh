@@ -513,13 +513,9 @@ __device__ __forceinline__ void gda_quiet(
     // Memory barrier to ensure all prior writes are visible to NIC
     gda_membar_sys();
 
-    // Poll CQ for completion (with timeout to avoid hanging)
-    int ret = gda_poll_cq_wqe_counter(state, prod_idx, 5000000);  // 5ms timeout
-
-    // If timeout, just proceed (for debugging)
-    if (ret == -1) {
-        // Optionally print warning, but for now just continue
-    }
+    // Poll CQ for completion (no timeout — must wait for NIC to finish).
+    // A timeout would silently allow send_buf reuse while NIC still reads.
+    gda_poll_cq_wqe_counter(state, prod_idx, 0);
 }
 
 /**
