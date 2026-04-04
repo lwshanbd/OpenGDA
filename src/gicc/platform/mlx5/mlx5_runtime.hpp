@@ -33,6 +33,9 @@
 // macro conflicts with MLX5 enum constants.
 #include "gicc/mlx5/device_opt.cuh"
 
+// Simplified GPU context (NVSHMEM-style API)
+#include "gicc/gicc_context.cuh"
+
 namespace gicc {
 
 // DeviceCtx alias (same as in mlx5_device.cuh, repeated here so
@@ -169,6 +172,51 @@ public:
         cudaMemcpy(d_ctx, &h_ctx, sizeof(DeviceCtx), cudaMemcpyHostToDevice);
         device_ctxs_.push_back(d_ctx);
 
+        return d_ctx;
+    }
+
+    /**
+     * Build a simplified GiccContext for NVSHMEM-style device API.
+     *
+     * Call AFTER exchange().  Creates per-peer DeviceCtxs and populates the
+     * buffer registry so GPU kernels can use gicc::put(ctx, dst, src, size, peer).
+     *
+     * @return GPU-allocated GiccContext pointer (pass to kernels)
+     */
+    GiccContext* build_context() {
+        GiccContext h_ctx;
+        memset(&h_ctx, 0, sizeof(h_ctx));
+        h_ctx.my_rank = mpi_->rank;
+        h_ctx.num_peers = mpi_->size;
+
+        // Fill local buffer registry
+        h_ctx.num_local_bufs = (int)local_bufs_.size();
+        for (int i = 0; i < h_ctx.num_local_bufs && i < GICC_MAX_BUFS; i++) {
+            h_ctx.local_bufs[i].addr = (uint64_t)local_bufs_[i]->buf;
+            h_ctx.local_bufs[i].size = local_bufs_[i]->size;
+            h_ctx.local_bufs[i].lkey = local_bufs_[i]->lkey;
+            h_ctx.local_bufs[i].rkey = local_bufs_[i]->rkey;
+        }
+
+        // Fill remote buffer info and per-peer DeviceCtxs
+        for (int peer = 0; peer < mpi_->size && peer < GICC_MAX_PEERS; peer++) {
+            // Remote buffer entries
+            for (int b = 0; b < h_ctx.num_local_bufs && b < GICC_MAX_BUFS; b++) {
+                h_ctx.remote_bufs[peer][b].addr = remote_bufs_[peer][b].addr;
+                h_ctx.remote_bufs[peer][b].rkey = remote_bufs_[peer][b].rkey;
+            }
+
+            // Per-peer DeviceCtx (reuse prepare() logic, pass buf 0 for default remote)
+            if (peer == mpi_->rank) {
+                h_ctx.peer_ctxs[peer] = nullptr;
+            } else {
+                h_ctx.peer_ctxs[peer] = prepare(peer, 0);
+            }
+        }
+
+        GiccContext* d_ctx = nullptr;
+        cudaMalloc(&d_ctx, sizeof(GiccContext));
+        cudaMemcpy(d_ctx, &h_ctx, sizeof(GiccContext), cudaMemcpyHostToDevice);
         return d_ctx;
     }
 

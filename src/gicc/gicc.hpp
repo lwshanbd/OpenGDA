@@ -1,18 +1,22 @@
 /**
  * gicc.hpp - GICC (GPU-Initiated Communication and Coordination) Host API
  *
- * Platform-neutral public API for GPU-triggered RDMA operations.
- * The actual implementation is selected at compile time via platform macros.
+ * Simplified NVSHMEM-style API:
  *
- * Usage:
- *   gicc::Runtime rt;
- *   auto send_buf = rt.register_buffer(d_send, size, true);
- *   auto recv_buf = rt.register_buffer(d_recv, size, true);
- *   rt.exchange();
- *   auto* ctx = rt.prepare(peer_rank, recv_buf.index);
- *   my_kernel<<<1,1>>>(ctx, send_buf.addr, send_buf.lkey, ...);
- *   cudaDeviceSynchronize();
- *   rt.reset();
+ *   gicc::init(MPI_COMM_WORLD);
+ *   void* send = gicc::malloc(size);              // collective
+ *   void* recv = gicc::malloc(size);              // collective
+ *   auto* ctx  = gicc::context();                 // GPU-accessible context
+ *   void* peer_recv = gicc::remote_ptr(recv, 1);  // remote address on PE 1
+ *   my_kernel<<<...>>>(ctx, peer_recv, send, size, 1);
+ *   gicc::finalize();
+ *
+ * Device-side (in kernel):
+ *   gicc::put(ctx, dst, src, size, peer);         // one-line RDMA
+ *   gicc::flush(ctx, peer);
+ *   gicc::quiet(ctx, peer);
+ *
+ * Legacy Runtime API is still available for advanced use.
  */
 #pragma once
 
@@ -52,3 +56,9 @@ namespace gicc {
 #else
 #error "No GICC platform defined. Define GICC_PLATFORM_MLX5 or GICC_PLATFORM_CXI."
 #endif
+
+//==============================================================================
+// Simplified NVSHMEM-style API (gicc::init, gicc::malloc, gicc::context, etc.)
+//==============================================================================
+
+#include "gicc_api.hpp"

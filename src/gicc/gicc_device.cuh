@@ -1,12 +1,14 @@
 /**
  * gicc_device.cuh - GICC Device-Side API
  *
- * Platform-neutral GPU-callable functions for RDMA operations.
- * The actual implementation is selected at compile time via platform macros.
+ * Simplified API (use with GiccContext from gicc::context()):
+ *   gicc::put(ctx, dst, src, size, peer);     // one-line RDMA
+ *   gicc::put_no_db(ctx, dst, src, size, peer);
+ *   gicc::flush(ctx, peer);
+ *   gicc::quiet(ctx, peer);
  *
- * Usage in GPU kernel:
+ * Legacy API (use with DeviceCtx from rt.prepare()):
  *   gicc::put(ctx, local_addr, local_lkey, remote_addr, remote_rkey, size);
- *   gicc::put(ctx, local_addr, local_lkey, size);  // uses default remote
  *   gicc::quiet(ctx);
  */
 #pragma once
@@ -22,3 +24,6 @@
 #else
 #error "No GICC platform defined. Define GICC_PLATFORM_MLX5 or GICC_PLATFORM_CXI."
 #endif
+
+// Simplified GiccContext-based API (gicc::put(ctx, dst, src, size, peer))
+#include "gicc_context.cuh"
