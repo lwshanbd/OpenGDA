@@ -165,6 +165,20 @@ target_include_directories(test_gicc PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUD
 target_compile_definitions(test_gicc PRIVATE GICC_PLATFORM_CXI)
 target_link_libraries(test_gicc PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
 
+# 32-stream micro benchmark, ported to gicc:: high-level API
+set_source_files_properties(gda_benchmark_gicc.cpp PROPERTIES LANGUAGE HIP)
+add_executable(gda_benchmark_gicc gda_benchmark_gicc.cpp)
+target_include_directories(gda_benchmark_gicc PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_compile_definitions(gda_benchmark_gicc PRIVATE GICC_PLATFORM_CXI)
+target_link_libraries(gda_benchmark_gicc PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
+
+# Distributed matrix multiply, ported to gicc:: high-level API
+set_source_files_properties(mm_gda_minimal_gicc.cpp PROPERTIES LANGUAGE HIP)
+add_executable(mm_gda_minimal_gicc mm_gda_minimal_gicc.cpp)
+target_include_directories(mm_gda_minimal_gicc PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_compile_definitions(mm_gda_minimal_gicc PRIVATE GICC_PLATFORM_CXI)
+target_link_libraries(mm_gda_minimal_gicc PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
+
 # Print configuration
 message(STATUS "HIP found: ${hip_DIR}")
 message(STATUS "HIP architectures: ${CMAKE_HIP_ARCHITECTURES}")
