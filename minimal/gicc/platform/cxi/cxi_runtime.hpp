@@ -3,37 +3,30 @@
  *
  * Wraps the existing minimal/ gda::Runtime for setup (PMI bootstrap, fabric
  * init, MR registration, address exchange) but bypasses gda::Runtime::put /
- * prepare / reset to implement an OPTIMIZED batched-put path:
+ * prepare / reset to implement a per-stream completion+atomic pool that
+ * mirrors the proven-correct benchmark_runner.hpp design while keeping the
+ * unified gicc:: API contract.
  *
- *   - put_no_db queues only the RDMA write (no per-op chained atomic).
- *   - prepare() queues a SINGLE chained atomic at the end of the batch
- *     whose threshold = total ops queued. The atomic fires once after every
- *     RMA in the batch has completed and increments atomic_result by 1.
- *   - The kernel polls atomic_result >= 1 instead of >= N.
+ *   - put_no_db queues only the RDMA write. Each op consumes one slot from
+ *     a pre-allocated pool of N libfabric completion counters. The op's
+ *     trigger threshold is its 1-based index within the current batch (so
+ *     the kernel only needs to write `n_ops` to the shared trigger MMIO to
+ *     fire all queued ops in one shot, exactly as benchmark_runner does).
+ *   - prepare() queues a chained atomic_signal per op targeting that op's
+ *     own GPU-resident atomic_result slot. The slot pool is reset to 0
+ *     before kernel launch. The kernel polls all n_ops slots in parallel.
+ *   - prepare_trigger(Token) (overlap pattern) skips queueing atomics and
+ *     leaves completion_=nullptr; the host calls wait(Token) which polls
+ *     the per-op completion counter directly.
+ *   - reset() drains every used slot's RMA and atomic counters, frees the
+ *     batch's DwqWorkBuilders, fi_cntr_sets per-slot counters AND the
+ *     shared trigger counter to zero, and recycles the slots.
  *
- * This eliminates the N-way serialization at the GPU memory atomic_result
- * cacheline that the per-op chained-atomic design suffers from on small
- * messages, while preserving the unified gicc:: API contract.
- *
- * Two patterns are supported, distinguished by which preparer is used:
- *
- *   1. Batched (kernel does flush + quiet):
- *        for (i) rt.put_no_db(...);
- *        auto* ctx = rt.prepare();
- *        kernel<<<>>>(ctx);          // gicc::flush(ctx); gicc::quiet(ctx);
- *        rt.reset();
- *
- *   2. Overlap (kernel only triggers, host waits):
- *        auto tok = rt.put_no_db(...);
- *        auto* tctx = rt.prepare_trigger(tok);
- *        trigger_kernel<<<>>>(tctx); // gicc::flush(tctx)
- *        compute_kernel<<<>>>(...);  // overlap
- *        hipDeviceSynchronize();
- *        rt.wait(tok);
- *
- * In pattern (1), prepare() queues the single batched atomic. In pattern (2),
- * no atomic is queued — the host polls the libfabric RMA completion counter
- * directly via wait(tok).
+ * The key insight matching baseline is that NO shared completion counter is
+ * ever fi_cntr_set across batches with stale per-threshold deferred-work
+ * metadata. Each slot's counter is independent, the trigger counter is
+ * shared but always reset cleanly, and per-stream resets are confirmed safe
+ * by benchmark_runner.hpp on this exact provider.
  */
 #pragma once
 
@@ -41,13 +34,13 @@
 #include <hip/hip_runtime.h>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 #include "gicc/gicc_types.hpp"
 #include "gicc/platform/cxi/cxi_device.cuh"
 
-// opengda.hpp brings in gda::Runtime, GdaComm, DwqWorkBuilder, MemoryRegion
-// and the libfabric headers for fi_cntr_read / fi_cntr_set.
 #include "opengda.hpp"
 
 namespace gicc {
@@ -56,49 +49,123 @@ static_assert(sizeof(DeviceCtx) == sizeof(gda::DeviceCtx),
               "gicc::DeviceCtx and gda::DeviceCtx must have identical layout");
 
 /**
- * Token returned by put_no_db. Identifies a specific queued op by its
- * monotonically-increasing trigger threshold. Used by prepare_trigger() and
- * wait() for the overlap pattern. Pattern (1) callers can ignore it.
+ * Token returned by put_no_db. Identifies a specific queued op by its slot
+ * index in the per-runtime completion-counter pool. wait(Token) polls that
+ * slot's completion counter on the host. The simple "queue many → prepare()
+ * → kernel does flush+quiet" pattern can ignore the return value.
  */
 struct Token {
-    uint64_t threshold;
+    int slot_idx;
 };
 
 class Runtime {
 public:
+    static constexpr int POOL_SIZE = 64;   // max ops per batch
+
     explicit Runtime(MPI_Comm comm = MPI_COMM_WORLD)
         : impl_(), mpi_comm_(comm),
           h_dev_ctx_(nullptr), d_dev_ctx_(nullptr),
-          my_threshold_(0), my_n_ops_(0)
+          d_atomic_results_array_(nullptr), d_atomic_results_array_dev_(nullptr),
+          my_n_ops_(0), atomic_signals_queued_(false)
     {
-        (void)mpi_comm_;  // currently unused; PMI2 drives bootstrap inside GdaComm
+        (void)mpi_comm_;
+        auto& c = impl_.comm();
 
-        // Single device context (zero-copy pinned), reused by both prepare()
-        // and prepare_trigger(). The trigger MMIO address is fixed at fabric
-        // init; only completion_/trigger_val_/n_ops_ change per batch.
+        // Allocate POOL_SIZE per-stream resources, mirroring baseline
+        // benchmark_runner.hpp exactly:
+        //   - One uint64_t atomic_result on its OWN GPU buffer
+        //   - One MR per atomic_result (so the chained atomic targets
+        //     offset 0 of a dedicated MR, never offset N within a shared MR)
+        //   - One uint64_t atomic_operand=1 on its own GPU buffer + MR
+        //   - One per-stream completion_cntr
+        //   - One per-stream atomic_completion_cntr
+        struct fi_cntr_attr cntr_attr = {};
+        cntr_attr.events = FI_CNTR_EVENTS_COMP;
+
+        const uint64_t one = 1;
+        for (int i = 0; i < POOL_SIZE; i++) {
+            // atomic_result GPU buffer + MR
+            if (hipMalloc(&slots_[i].d_atomic_result, sizeof(uint64_t)) != hipSuccess) {
+                fprintf(stderr, "hipMalloc(atomic_result %d) failed\n", i);
+                exit(1);
+            }
+            (void)hipMemset(slots_[i].d_atomic_result, 0, sizeof(uint64_t));
+            slots_[i].mr_atomic_result = new MemoryRegion(
+                c.fabric->domain, c.fabric->ep, c.fabric->cxi_info,
+                slots_[i].d_atomic_result, sizeof(uint64_t), true,
+                c.gpu_id(), c.rank());
+
+            // atomic_operand GPU buffer + MR (always holds value 1)
+            if (hipMalloc(&slots_[i].d_atomic_operand, sizeof(uint64_t)) != hipSuccess) {
+                fprintf(stderr, "hipMalloc(atomic_operand %d) failed\n", i);
+                exit(1);
+            }
+            (void)hipMemcpy(slots_[i].d_atomic_operand, &one, sizeof(uint64_t),
+                            hipMemcpyHostToDevice);
+            slots_[i].mr_atomic_operand = new MemoryRegion(
+                c.fabric->domain, c.fabric->ep, c.fabric->cxi_info,
+                slots_[i].d_atomic_operand, sizeof(uint64_t), true,
+                c.gpu_id(), c.rank());
+
+            // Per-stream counters
+            int ret = fi_cntr_open(c.fabric->domain, &cntr_attr,
+                                    &slots_[i].completion_cntr, NULL);
+            if (ret) { fprintf(stderr, "fi_cntr_open(%d c) failed\n", i); exit(1); }
+            ret = fi_cntr_open(c.fabric->domain, &cntr_attr,
+                                &slots_[i].atomic_completion_cntr, NULL);
+            if (ret) { fprintf(stderr, "fi_cntr_open(%d a) failed\n", i); exit(1); }
+        }
+        (void)hipDeviceSynchronize();
+
+        // GPU-resident array of pointers to each slot's atomic_result, so
+        // the kernel can index ctx->completion_[i] (= the i-th slot's
+        // atomic_result address). This array is itself in pinned/mapped
+        // host memory so we can populate it from the host without an
+        // extra hipMemcpy on the hot path.
+        (void)hipHostMalloc(&h_atomic_results_array_,
+                            POOL_SIZE * sizeof(uint64_t*),
+                            hipHostMallocMapped);
+        (void)hipHostGetDevicePointer((void**)&d_atomic_results_array_,
+                                      h_atomic_results_array_, 0);
+        for (int i = 0; i < POOL_SIZE; i++) {
+            h_atomic_results_array_[i] = (uint64_t*)slots_[i].d_atomic_result;
+        }
+        // Note: d_atomic_results_array_dev_ retained as a separate GPU device
+        // pointer to the same mapping (currently identical to
+        // d_atomic_results_array_); kept for symmetry with potential future
+        // designs where the array lives in device memory directly.
+        d_atomic_results_array_dev_ = d_atomic_results_array_;
+
         (void)hipHostMalloc(&h_dev_ctx_, sizeof(DeviceCtx), hipHostMallocMapped);
         (void)hipHostGetDevicePointer((void**)&d_dev_ctx_, h_dev_ctx_, 0);
-        h_dev_ctx_->trigger_addr_ = impl_.comm().get_trigger_addr();
+        h_dev_ctx_->trigger_addr_ = c.get_trigger_addr();
         h_dev_ctx_->completion_   = nullptr;
         h_dev_ctx_->trigger_val_  = 0;
         h_dev_ctx_->n_ops_        = 0;
     }
 
     ~Runtime() {
-        // Free any leftover queued work (mm-style continuous-threshold pattern
-        // accumulates pending DwqWorkBuilders that reset() never collected).
         for (auto* op : my_pending_) delete op;
         my_pending_.clear();
-        if (h_dev_ctx_) (void)hipHostFree(h_dev_ctx_);
+        for (int i = 0; i < POOL_SIZE; i++) {
+            delete slots_[i].mr_atomic_result;
+            delete slots_[i].mr_atomic_operand;
+            if (slots_[i].d_atomic_result)  (void)hipFree(slots_[i].d_atomic_result);
+            if (slots_[i].d_atomic_operand) (void)hipFree(slots_[i].d_atomic_operand);
+            if (slots_[i].completion_cntr)
+                fi_close(&slots_[i].completion_cntr->fid);
+            if (slots_[i].atomic_completion_cntr)
+                fi_close(&slots_[i].atomic_completion_cntr->fid);
+        }
+        if (h_atomic_results_array_) (void)hipHostFree(h_atomic_results_array_);
+        if (h_dev_ctx_)              (void)hipHostFree(h_dev_ctx_);
     }
 
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
 
     //--------------------------------------------------------------------------
-    // Buffer registration (delegates to gda::Runtime — uses GdaComm's MR
-    // bookkeeping). The returned gicc::Buffer also stashes the underlying
-    // gda::Buffer in gda_bufs_[index] so put_no_db can recover the local desc.
+    // Buffer registration (delegates to gda::Runtime)
     //--------------------------------------------------------------------------
     Buffer register_buffer(void* buf, size_t size, bool is_device) {
         gda::Buffer gb = impl_.register_buffer(buf, size, is_device);
@@ -107,10 +174,6 @@ public:
         b.ptr   = gb.ptr;
         b.size  = gb.size;
         b.addr  = (uint64_t)gb.ptr;
-        // CXI: lkey/rkey have no direct ibv equivalent. We surface the
-        // libfabric remote key as rkey, and use the buffer index as a
-        // stand-in for lkey (the actual local descriptor lives in the gda
-        // buffer table and is looked up by index in put_no_db).
         b.lkey  = (uint32_t)gb.index;
         b.rkey  = (uint32_t)(gb.key_ & 0xFFFFFFFFu);
         b.index = gb.index;
@@ -132,9 +195,9 @@ public:
     }
 
     //--------------------------------------------------------------------------
-    // put_no_db — queue an RMA WRITE only (no chained atomic). The atomic
-    // for the whole batch is queued lazily by prepare(). For the overlap
-    // pattern (prepare_trigger + host wait), no atomic is needed at all.
+    // put_no_db — queue an RMA WRITE only. Consumes one slot from the pool.
+    // The slot's per-stream libfabric completion counter is the RMA's target
+    // (no shared completion_cntr → no cache staleness across batches).
     //--------------------------------------------------------------------------
     Token put_no_db(const Buffer& src, int dest_rank, int dest_buf_index,
                     size_t size, size_t src_offset = 0, size_t dst_offset = 0)
@@ -142,9 +205,17 @@ public:
         const gda::Buffer& gb = gda_bufs_.at(src.index);
         auto& c = impl_.comm();
 
-        my_threshold_++;
+        if ((int)my_n_ops_ >= POOL_SIZE) {
+            fprintf(stderr,
+                "gicc::Runtime::put_no_db: batch exceeds POOL_SIZE=%d. "
+                "Call rt.reset() between batches or raise POOL_SIZE.\n",
+                POOL_SIZE);
+            exit(1);
+        }
+
+        const int      slot_idx           = (int)my_n_ops_;
+        const uint64_t trigger_threshold  = my_n_ops_ + 1;  // 1-based
         my_n_ops_++;
-        const uint64_t threshold = my_threshold_;
 
         GdaRemoteInfo ri = c.get_remote_info(dest_rank, dest_buf_index);
         if (ri.rma_key == 0 && ri.rma_addr == 0) {
@@ -152,115 +223,147 @@ public:
                     "buf %d (call exchange() first)\n", dest_rank, dest_buf_index);
             exit(1);
         }
-
         const uint64_t remote_addr = c.is_virt_addr_mode()
             ? (ri.rma_addr + dst_offset)
             : (ri.rma_addr - ri.base_addr) + dst_offset;
 
+        // EXACTLY mirror benchmark_runner.hpp's queueing order: each
+        // DwqWorkBuilder holds both the RMA and the chained atomic_signal,
+        // and the two fi_control(FI_QUEUE_WORK) calls happen back-to-back
+        // for stream i before stream i+1. The CXI provider appears to have
+        // an ordering constraint that breaks if atomics for streams 0..N-1
+        // are queued AFTER all RMAs are queued.
         auto* dwq = new DwqWorkBuilder(c.rank());
         dwq->queue_rma_write(
             c.fabric->domain, c.fabric->ep,
             (char*)gb.ptr + src_offset, gb.desc_, size,
             c.av_addrs[dest_rank], remote_addr, ri.rma_key,
-            c.fabric->trigger_cntr, c.fabric->completion_cntr,
-            threshold);
-        my_pending_.push_back(dwq);
+            c.fabric->trigger_cntr,                 // shared trigger
+            slots_[slot_idx].completion_cntr,       // per-stream completion
+            trigger_threshold);
 
-        return Token{ threshold };
+        // Chained atomic_signal targeting THIS stream's own atomic_result MR.
+        // Each stream owns a dedicated MR with one uint64_t at offset 0,
+        // exactly mirroring benchmark_runner.hpp's per-stream layout.
+        const uint64_t result_addr = c.is_virt_addr_mode()
+            ? (uint64_t)slots_[slot_idx].d_atomic_result : 0;
+        dwq->queue_atomic_signal(
+            c.fabric->domain, c.fabric->ep,
+            slots_[slot_idx].d_atomic_operand,
+            slots_[slot_idx].mr_atomic_operand->desc,
+            slots_[slot_idx].d_atomic_result,
+            slots_[slot_idx].mr_atomic_result->key,
+            result_addr,
+            c.fabric->local_addr_in_av,
+            slots_[slot_idx].completion_cntr,        // wait for this RMA
+            slots_[slot_idx].atomic_completion_cntr, // signal channel
+            1);
+
+        my_pending_.push_back(dwq);
+        atomic_signals_queued_ = true;
+
+        return Token{ slot_idx };
     }
 
     //--------------------------------------------------------------------------
-    // prepare — finalize a batched put_no_db sequence by queuing ONE chained
-    // atomic that fires after all queued RMAs complete, and return a
-    // DeviceCtx the kernel will use for {flush; quiet}.
-    //
-    // n_ops_ is set to 1 (not the RMA count) because the kernel polls the
-    // atomic_result counter, not per-op completion targets.
-    //
-    // The peer_rank / remote_buf_index parameters are accepted for source
-    // compatibility with mlx5_runtime.hpp::prepare(int, int) but ignored:
-    // the CXI batched DeviceCtx is global to the runtime.
+    // prepare — finalize a batched put_no_db sequence. The chained atomics
+    // were already queued by put_no_db (one per call). We just reset the
+    // slot pool to 0 and configure the DeviceCtx for the kernel to poll.
     //--------------------------------------------------------------------------
     DeviceCtx* prepare(int peer_rank = -1, int remote_buf_index = -1) {
         (void)peer_rank;
         (void)remote_buf_index;
-
         auto& c = impl_.comm();
 
-        // Reset atomic_result to 0 BEFORE queueing the new atomic.
-        uint64_t zero = 0;
-        (void)hipMemcpy(c.atomic_result, &zero, sizeof(uint64_t),
-                        hipMemcpyHostToDevice);
+        // Reset every used slot's atomic_result to 0 BEFORE the kernel reads
+        // it. Each slot is its own GPU buffer (per-stream MR), exactly like
+        // baseline benchmark_runner.hpp lines 437-442.
+        const uint64_t zero = 0;
+        for (uint64_t i = 0; i < my_n_ops_; i++) {
+            (void)hipMemcpy(slots_[i].d_atomic_result, &zero, sizeof(uint64_t),
+                            hipMemcpyHostToDevice);
+        }
         (void)hipDeviceSynchronize();
 
-        // Queue a single batched atomic_signal. Triggers when the libfabric
-        // completion_cntr reaches my_threshold_ (i.e. all RMAs have drained).
-        if (my_n_ops_ > 0) {
-            const uint64_t atomic_result_addr = c.is_virt_addr_mode()
-                ? (uint64_t)c.atomic_result : 0;
-
-            auto* dwq = new DwqWorkBuilder(c.rank());
-            dwq->queue_atomic_signal(
-                c.fabric->domain, c.fabric->ep,
-                c.atomic_operand, c.mr_atomic_operand->desc,
-                c.atomic_result, c.mr_atomic_result->key,
-                atomic_result_addr,
-                c.fabric->local_addr_in_av,
-                c.fabric->completion_cntr,        // wait for all RMAs
-                c.atomic_completion_cntr,         // signal channel
-                my_threshold_);                   // fire after the LAST RMA
-            my_pending_.push_back(dwq);
-        }
-
-        h_dev_ctx_->completion_  = c.atomic_result;
-        h_dev_ctx_->trigger_val_ = my_threshold_;
-        h_dev_ctx_->n_ops_       = 1;             // one batched atomic
+        h_dev_ctx_->trigger_addr_ = c.get_trigger_addr();
+        h_dev_ctx_->trigger_val_  = my_n_ops_;
+        // completion_ is the BASE of the per-runtime atomic_results_array
+        // (an array of POOL_SIZE pointers, one per slot). The device-side
+        // gicc::quiet polls each pointed-to uint64_t until it reaches 1.
+        h_dev_ctx_->completion_   = (volatile uint64_t*)d_atomic_results_array_dev_;
+        h_dev_ctx_->n_ops_        = my_n_ops_;
         return d_dev_ctx_;
     }
 
     //--------------------------------------------------------------------------
     // prepare_trigger — overlap pattern. Returns a DeviceCtx whose flush()
-    // writes exactly tok.threshold to the trigger MMIO. completion_ is
-    // nulled and n_ops_=0 so a kernel that calls gicc::quiet(ctx) returns
-    // immediately. The caller is expected to call rt.wait(tok) on the host
-    // after compute completes.
+    // fires all currently queued put_no_db ops. completion_ is nulled and
+    // n_ops_=0 so a kernel that calls gicc::quiet(ctx) returns immediately.
+    // The host calls wait(Token) afterwards to drain the per-op counter.
+    //
+    // The Token argument is accepted for API symmetry with prepare(Token);
+    // the trigger value is computed from the current my_n_ops_ accumulator.
     //--------------------------------------------------------------------------
-    DeviceCtx* prepare_trigger(Token tok) {
-        h_dev_ctx_->completion_  = nullptr;
-        h_dev_ctx_->trigger_val_ = tok.threshold;
-        h_dev_ctx_->n_ops_       = 0;
+    DeviceCtx* prepare_trigger(Token /*tok*/) {
+        auto& c = impl_.comm();
+        h_dev_ctx_->trigger_addr_ = c.get_trigger_addr();
+        h_dev_ctx_->trigger_val_  = my_n_ops_;
+        h_dev_ctx_->completion_   = nullptr;
+        h_dev_ctx_->n_ops_        = 0;
         return d_dev_ctx_;
     }
 
     //--------------------------------------------------------------------------
-    // Host-side wait for a specific token: poll the libfabric RMA completion
-    // counter. The background CQ progress thread inside FabricDwqContext
+    // Host-side wait for a specific token (poll its per-stream completion
+    // counter). The background CQ progress thread inside FabricDwqContext
     // drives provider progress.
     //--------------------------------------------------------------------------
     void wait(Token tok) {
-        auto& c = impl_.comm();
-        while (fi_cntr_read(c.fabric->completion_cntr) < tok.threshold) {}
+        while (fi_cntr_read(slots_[tok.slot_idx].completion_cntr) < 1) {}
     }
 
     //--------------------------------------------------------------------------
-    // reset — drain the current batch and zero the hardware counters.
+    // reset — drain the current batch and recycle the slots.
     //--------------------------------------------------------------------------
     void reset() {
         auto& c = impl_.comm();
-        // Wait for all RMAs (and the batched atomic, if prepare() queued one)
-        // to drain on the libfabric side before freeing the work descriptors.
-        while (fi_cntr_read(c.fabric->completion_cntr) < my_threshold_) {}
 
+        // Drain per-slot RMA completions. Drive progress synchronously
+        // with fi_cq_read in the poll loop, exactly like
+        // benchmark_runner.hpp lines 507-518. Relying solely on the
+        // background CQ progress thread is NOT sufficient — there is a
+        // small window where the host returns from polling before the
+        // provider has actually applied incoming completion events.
+        for (uint64_t i = 0; i < my_n_ops_; i++) {
+            while (fi_cntr_read(slots_[i].completion_cntr) < 1) {
+                fi_cq_read(c.fabric->cq, NULL, 0);
+            }
+        }
+        if (atomic_signals_queued_) {
+            for (uint64_t i = 0; i < my_n_ops_; i++) {
+                while (fi_cntr_read(slots_[i].atomic_completion_cntr) < 1) {
+                    fi_cq_read(c.fabric->cq, NULL, 0);
+                }
+            }
+        }
+
+        // Now safe to free the DwqWorkBuilders.
         for (auto* op : my_pending_) delete op;
         my_pending_.clear();
 
+        // Reset the SHARED trigger counter and per-slot counters.
+        // Per-slot resets are confirmed safe by benchmark_runner.hpp on
+        // this CXI provider — the cache-staleness bug is specific to a
+        // shared completion counter being reset across batches.
         fi_cntr_set(c.fabric->trigger_cntr, 0);
-        fi_cntr_set(c.fabric->completion_cntr, 0);
-        if (c.atomic_completion_cntr)
-            fi_cntr_set(c.atomic_completion_cntr, 0);
+        for (uint64_t i = 0; i < my_n_ops_; i++) {
+            fi_cntr_set(slots_[i].completion_cntr, 0);
+            if (atomic_signals_queued_)
+                fi_cntr_set(slots_[i].atomic_completion_cntr, 0);
+        }
 
-        my_threshold_ = 0;
-        my_n_ops_     = 0;
+        my_n_ops_              = 0;
+        atomic_signals_queued_ = false;
     }
 
     void barrier() { impl_.barrier(); }
@@ -269,18 +372,35 @@ public:
     int size()   const { return impl_.size(); }
     int gpu_id() const { return impl_.gpu_id(); }
 
-    // Escape hatch for advanced users that need the underlying gda::Runtime.
     gda::Runtime& gda_runtime() { return impl_; }
 
 private:
+    struct Slot {
+        struct fid_cntr* completion_cntr        = nullptr;
+        struct fid_cntr* atomic_completion_cntr = nullptr;
+        void*            d_atomic_result        = nullptr;
+        void*            d_atomic_operand       = nullptr;
+        MemoryRegion*    mr_atomic_result       = nullptr;
+        MemoryRegion*    mr_atomic_operand      = nullptr;
+    };
+
     gda::Runtime                  impl_;
     MPI_Comm                      mpi_comm_;
-    DeviceCtx*                    h_dev_ctx_;   // pinned host (mapped)
-    DeviceCtx*                    d_dev_ctx_;   // device pointer (zero-copy)
+    DeviceCtx*                    h_dev_ctx_;
+    DeviceCtx*                    d_dev_ctx_;
 
-    uint64_t                      my_threshold_;  // monotonic trigger threshold
-    uint64_t                      my_n_ops_;      // ops queued in current batch
-    std::vector<DwqWorkBuilder*>  my_pending_;    // work builders awaiting reset
+    Slot                          slots_[POOL_SIZE];
+
+    // Pinned/mapped array of per-slot atomic_result pointers, indexed by
+    // gicc::quiet on the device (ctx->completion_[i] yields slot i's slot
+    // base address). The device sees this through the mapped pointer.
+    uint64_t**                    h_atomic_results_array_   = nullptr;
+    uint64_t**                    d_atomic_results_array_;
+    uint64_t**                    d_atomic_results_array_dev_;
+
+    uint64_t                      my_n_ops_;
+    bool                          atomic_signals_queued_;
+    std::vector<DwqWorkBuilder*>  my_pending_;
 
     std::vector<gda::Buffer>      gda_bufs_;
 };

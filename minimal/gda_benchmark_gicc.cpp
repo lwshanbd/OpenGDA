@@ -55,6 +55,20 @@ __global__ void verify_copy_kernel(const uint8_t* src, uint8_t* dst, size_t n) {
     }
 }
 
+// Kernel-based memset with explicit system fence. Bypasses the
+// hipMemset(<16KB) → kernel-memset path whose L2 writeback can race with
+// subsequent NIC PCIe writes to the same address. The threadfence_system
+// at the end forces all preceding writes to be visible in HBM before
+// the kernel exits, so MPI_Barrier afterwards is a true memory ordering
+// boundary.
+__global__ void memset_fenced_kernel(uint8_t* dst, uint8_t value, size_t n) {
+    for (size_t i = threadIdx.x + blockIdx.x * blockDim.x; i < n;
+         i += blockDim.x * gridDim.x) {
+        dst[i] = value;
+    }
+    __threadfence_system();
+}
+
 static const char* fmt_size(size_t s, char* buf) {
     if      (s < 1024)        snprintf(buf, 32, "%zuB",  s);
     else if (s < 1024 * 1024) snprintf(buf, 32, "%zuKB", s / 1024);
@@ -123,7 +137,12 @@ int main(int argc, char** argv) {
                 }
                 (void)hipDeviceSynchronize();
             } else {
-                (void)hipMemset(d_dst, 0xFF, cur * (size_t)N_STREAMS);
+                for (int i = 0; i < N_STREAMS; i++) {
+                    hipLaunchKernelGGL(memset_fenced_kernel,
+                        dim3((cur + 255) / 256), dim3(256), 0, 0,
+                        (uint8_t*)d_dst + (size_t)i * MAX_SIZE,
+                        (uint8_t)0xFF, cur);
+                }
                 (void)hipDeviceSynchronize();
             }
             MPI_Barrier(MPI_COMM_WORLD);
@@ -160,8 +179,16 @@ int main(int argc, char** argv) {
                     (void)hipDeviceSynchronize();
                     uint8_t pat = (uint8_t)((iter + 0xA0 + i) & 0xFF);
                     int errs = 0;
-                    for (size_t j = 0; j < cur && errs < 10; j++) {
-                        if (h_verify[j] != pat) errs++;
+                    for (size_t j = 0; j < cur; j++) {
+                        if (h_verify[j] != pat) {
+                            if (errs < 5) {
+                                fprintf(stderr,
+                                    "FAIL size=%zu iter=%d stream=%d off=%zu "
+                                    "got=0x%02x expected=0x%02x\n",
+                                    cur, iter, i, j, h_verify[j], pat);
+                            }
+                            errs++;
+                        }
                     }
                     total_errors += errs;
                 }
