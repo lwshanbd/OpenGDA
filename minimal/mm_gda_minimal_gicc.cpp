@@ -254,7 +254,10 @@ int main(int argc, char** argv)
                                d_As, d_B[cur_buf], d_Cs, N, Ns, col_offset);
 
             HIP_CHECK(hipDeviceSynchronize());
-            if (need_dwq) rt.wait(tok);
+            if (need_dwq) {
+                rt.wait(tok);
+                rt.reset();   // recycle the slot used by this ring step
+            }
 
             MPI_Barrier(MPI_COMM_WORLD);
         }

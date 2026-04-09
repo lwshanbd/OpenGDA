@@ -65,12 +65,12 @@ void flush(DeviceCtx* ctx) {
 __device__ __forceinline__
 void quiet(DeviceCtx* ctx) {
     if (ctx->completion_ == nullptr) return;   // overlap pattern, no quiet
-    // ctx->completion_ is actually a (volatile uint64_t**) — the host laid
-    // out an array of per-stream atomic_result pointers. Each thread polls
-    // a stride of slots and waits for its slot's atomic_result to reach 1.
-    volatile uint64_t* const* slots = (volatile uint64_t* const*)ctx->completion_;
+    // ctx->completion_ is the base of a contiguous pool of n_ops_ × uint64_t
+    // atomic_result slots. Each thread polls a stride of slots until each
+    // reaches 1. With 1 thread, polling is sequential; with N threads each
+    // thread polls one slot in its own cacheline.
     for (uint64_t i = threadIdx.x; i < ctx->n_ops_; i += blockDim.x) {
-        while (*slots[i] < 1) {}
+        while (ctx->completion_[i] < 1) {}
     }
 }
 

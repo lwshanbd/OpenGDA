@@ -65,49 +65,43 @@ public:
     explicit Runtime(MPI_Comm comm = MPI_COMM_WORLD)
         : impl_(), mpi_comm_(comm),
           h_dev_ctx_(nullptr), d_dev_ctx_(nullptr),
-          d_atomic_results_array_(nullptr), d_atomic_results_array_dev_(nullptr),
+          d_slot_pool_(nullptr), mr_slot_pool_(nullptr),
+          d_operand_pool_(nullptr), mr_operand_pool_(nullptr),
           my_n_ops_(0), atomic_signals_queued_(false)
     {
         (void)mpi_comm_;
         auto& c = impl_.comm();
 
-        // Allocate POOL_SIZE per-stream resources, mirroring baseline
-        // benchmark_runner.hpp exactly:
-        //   - One uint64_t atomic_result on its OWN GPU buffer
-        //   - One MR per atomic_result (so the chained atomic targets
-        //     offset 0 of a dedicated MR, never offset N within a shared MR)
-        //   - One uint64_t atomic_operand=1 on its own GPU buffer + MR
-        //   - One per-stream completion_cntr
-        //   - One per-stream atomic_completion_cntr
+        // ONE shared GPU buffer holds POOL_SIZE × uint64_t atomic_result
+        // slots, registered with ONE MemoryRegion. The chained atomic for
+        // slot i targets offset i*8 within this MR (in non-virt mode) or
+        // the absolute address of slot i (in virt mode).
+        const size_t POOL_BYTES = POOL_SIZE * sizeof(uint64_t);
+        if (hipMalloc(&d_slot_pool_, POOL_BYTES) != hipSuccess) {
+            fprintf(stderr, "hipMalloc(slot pool) failed\n"); exit(1);
+        }
+        (void)hipMemset(d_slot_pool_, 0, POOL_BYTES);
+        mr_slot_pool_ = new MemoryRegion(
+            c.fabric->domain, c.fabric->ep, c.fabric->cxi_info,
+            d_slot_pool_, POOL_BYTES, true, c.gpu_id(), c.rank());
+
+        // Single shared atomic operand (value 1) and its MR. Reused by
+        // every chained atomic_signal. The provider only reads from it.
+        if (hipMalloc(&d_operand_pool_, sizeof(uint64_t)) != hipSuccess) {
+            fprintf(stderr, "hipMalloc(operand) failed\n"); exit(1);
+        }
+        const uint64_t one = 1;
+        (void)hipMemcpy(d_operand_pool_, &one, sizeof(uint64_t),
+                        hipMemcpyHostToDevice);
+        mr_operand_pool_ = new MemoryRegion(
+            c.fabric->domain, c.fabric->ep, c.fabric->cxi_info,
+            d_operand_pool_, sizeof(uint64_t), true, c.gpu_id(), c.rank());
+
+        // Per-slot libfabric counters (no GPU buffers — those live in
+        // d_slot_pool_ via offset).
         struct fi_cntr_attr cntr_attr = {};
         cntr_attr.events = FI_CNTR_EVENTS_COMP;
-
-        const uint64_t one = 1;
         for (int i = 0; i < POOL_SIZE; i++) {
-            // atomic_result GPU buffer + MR
-            if (hipMalloc(&slots_[i].d_atomic_result, sizeof(uint64_t)) != hipSuccess) {
-                fprintf(stderr, "hipMalloc(atomic_result %d) failed\n", i);
-                exit(1);
-            }
-            (void)hipMemset(slots_[i].d_atomic_result, 0, sizeof(uint64_t));
-            slots_[i].mr_atomic_result = new MemoryRegion(
-                c.fabric->domain, c.fabric->ep, c.fabric->cxi_info,
-                slots_[i].d_atomic_result, sizeof(uint64_t), true,
-                c.gpu_id(), c.rank());
-
-            // atomic_operand GPU buffer + MR (always holds value 1)
-            if (hipMalloc(&slots_[i].d_atomic_operand, sizeof(uint64_t)) != hipSuccess) {
-                fprintf(stderr, "hipMalloc(atomic_operand %d) failed\n", i);
-                exit(1);
-            }
-            (void)hipMemcpy(slots_[i].d_atomic_operand, &one, sizeof(uint64_t),
-                            hipMemcpyHostToDevice);
-            slots_[i].mr_atomic_operand = new MemoryRegion(
-                c.fabric->domain, c.fabric->ep, c.fabric->cxi_info,
-                slots_[i].d_atomic_operand, sizeof(uint64_t), true,
-                c.gpu_id(), c.rank());
-
-            // Per-stream counters
             int ret = fi_cntr_open(c.fabric->domain, &cntr_attr,
                                     &slots_[i].completion_cntr, NULL);
             if (ret) { fprintf(stderr, "fi_cntr_open(%d c) failed\n", i); exit(1); }
@@ -116,25 +110,6 @@ public:
             if (ret) { fprintf(stderr, "fi_cntr_open(%d a) failed\n", i); exit(1); }
         }
         (void)hipDeviceSynchronize();
-
-        // GPU-resident array of pointers to each slot's atomic_result, so
-        // the kernel can index ctx->completion_[i] (= the i-th slot's
-        // atomic_result address). This array is itself in pinned/mapped
-        // host memory so we can populate it from the host without an
-        // extra hipMemcpy on the hot path.
-        (void)hipHostMalloc(&h_atomic_results_array_,
-                            POOL_SIZE * sizeof(uint64_t*),
-                            hipHostMallocMapped);
-        (void)hipHostGetDevicePointer((void**)&d_atomic_results_array_,
-                                      h_atomic_results_array_, 0);
-        for (int i = 0; i < POOL_SIZE; i++) {
-            h_atomic_results_array_[i] = (uint64_t*)slots_[i].d_atomic_result;
-        }
-        // Note: d_atomic_results_array_dev_ retained as a separate GPU device
-        // pointer to the same mapping (currently identical to
-        // d_atomic_results_array_); kept for symmetry with potential future
-        // designs where the array lives in device memory directly.
-        d_atomic_results_array_dev_ = d_atomic_results_array_;
 
         (void)hipHostMalloc(&h_dev_ctx_, sizeof(DeviceCtx), hipHostMallocMapped);
         (void)hipHostGetDevicePointer((void**)&d_dev_ctx_, h_dev_ctx_, 0);
@@ -148,17 +123,16 @@ public:
         for (auto* op : my_pending_) delete op;
         my_pending_.clear();
         for (int i = 0; i < POOL_SIZE; i++) {
-            delete slots_[i].mr_atomic_result;
-            delete slots_[i].mr_atomic_operand;
-            if (slots_[i].d_atomic_result)  (void)hipFree(slots_[i].d_atomic_result);
-            if (slots_[i].d_atomic_operand) (void)hipFree(slots_[i].d_atomic_operand);
             if (slots_[i].completion_cntr)
                 fi_close(&slots_[i].completion_cntr->fid);
             if (slots_[i].atomic_completion_cntr)
                 fi_close(&slots_[i].atomic_completion_cntr->fid);
         }
-        if (h_atomic_results_array_) (void)hipHostFree(h_atomic_results_array_);
-        if (h_dev_ctx_)              (void)hipHostFree(h_dev_ctx_);
+        delete mr_slot_pool_;
+        delete mr_operand_pool_;
+        if (d_slot_pool_)    (void)hipFree(d_slot_pool_);
+        if (d_operand_pool_) (void)hipFree(d_operand_pool_);
+        if (h_dev_ctx_)      (void)hipHostFree(h_dev_ctx_);
     }
 
     Runtime(const Runtime&) = delete;
@@ -242,21 +216,19 @@ public:
             slots_[slot_idx].completion_cntr,       // per-stream completion
             trigger_threshold);
 
-        // Chained atomic_signal targeting THIS stream's own atomic_result MR.
-        // Each stream owns a dedicated MR with one uint64_t at offset 0,
-        // exactly mirroring benchmark_runner.hpp's per-stream layout.
+        // Chained atomic_signal targeting slot_idx's offset in the shared
+        // pool MR. The shared operand MR provides the value-to-add (=1).
+        uint64_t* slot_addr = (uint64_t*)d_slot_pool_ + slot_idx;
         const uint64_t result_addr = c.is_virt_addr_mode()
-            ? (uint64_t)slots_[slot_idx].d_atomic_result : 0;
+            ? (uint64_t)slot_addr : ((uint64_t)slot_idx * sizeof(uint64_t));
         dwq->queue_atomic_signal(
             c.fabric->domain, c.fabric->ep,
-            slots_[slot_idx].d_atomic_operand,
-            slots_[slot_idx].mr_atomic_operand->desc,
-            slots_[slot_idx].d_atomic_result,
-            slots_[slot_idx].mr_atomic_result->key,
+            d_operand_pool_, mr_operand_pool_->desc,
+            slot_addr, mr_slot_pool_->key,
             result_addr,
             c.fabric->local_addr_in_av,
-            slots_[slot_idx].completion_cntr,        // wait for this RMA
-            slots_[slot_idx].atomic_completion_cntr, // signal channel
+            slots_[slot_idx].completion_cntr,
+            slots_[slot_idx].atomic_completion_cntr,
             1);
 
         my_pending_.push_back(dwq);
@@ -275,22 +247,19 @@ public:
         (void)remote_buf_index;
         auto& c = impl_.comm();
 
-        // Reset every used slot's atomic_result to 0 BEFORE the kernel reads
-        // it. Each slot is its own GPU buffer (per-stream MR), exactly like
-        // baseline benchmark_runner.hpp lines 437-442.
-        const uint64_t zero = 0;
-        for (uint64_t i = 0; i < my_n_ops_; i++) {
-            (void)hipMemcpy(slots_[i].d_atomic_result, &zero, sizeof(uint64_t),
-                            hipMemcpyHostToDevice);
+        // Reset just the used slots in the shared pool to 0 with one
+        // hipMemset of n_ops_ × 8 bytes — far cheaper than n_ops_
+        // separate hipMemcpy(0) calls.
+        if (my_n_ops_ > 0) {
+            (void)hipMemset(d_slot_pool_, 0, my_n_ops_ * sizeof(uint64_t));
+            (void)hipDeviceSynchronize();
         }
-        (void)hipDeviceSynchronize();
 
         h_dev_ctx_->trigger_addr_ = c.get_trigger_addr();
         h_dev_ctx_->trigger_val_  = my_n_ops_;
-        // completion_ is the BASE of the per-runtime atomic_results_array
-        // (an array of POOL_SIZE pointers, one per slot). The device-side
-        // gicc::quiet polls each pointed-to uint64_t until it reaches 1.
-        h_dev_ctx_->completion_   = (volatile uint64_t*)d_atomic_results_array_dev_;
+        // completion_ is the base of the contiguous slot pool. The
+        // device-side gicc::quiet polls completion_[i] for i in [0, n_ops_).
+        h_dev_ctx_->completion_   = (volatile uint64_t*)d_slot_pool_;
         h_dev_ctx_->n_ops_        = my_n_ops_;
         return d_dev_ctx_;
     }
@@ -378,10 +347,6 @@ private:
     struct Slot {
         struct fid_cntr* completion_cntr        = nullptr;
         struct fid_cntr* atomic_completion_cntr = nullptr;
-        void*            d_atomic_result        = nullptr;
-        void*            d_atomic_operand       = nullptr;
-        MemoryRegion*    mr_atomic_result       = nullptr;
-        MemoryRegion*    mr_atomic_operand      = nullptr;
     };
 
     gda::Runtime                  impl_;
@@ -391,12 +356,11 @@ private:
 
     Slot                          slots_[POOL_SIZE];
 
-    // Pinned/mapped array of per-slot atomic_result pointers, indexed by
-    // gicc::quiet on the device (ctx->completion_[i] yields slot i's slot
-    // base address). The device sees this through the mapped pointer.
-    uint64_t**                    h_atomic_results_array_   = nullptr;
-    uint64_t**                    d_atomic_results_array_;
-    uint64_t**                    d_atomic_results_array_dev_;
+    // Single shared GPU pool of POOL_SIZE × uint64_t atomic_result slots.
+    void*                         d_slot_pool_;
+    MemoryRegion*                 mr_slot_pool_;
+    void*                         d_operand_pool_;
+    MemoryRegion*                 mr_operand_pool_;
 
     uint64_t                      my_n_ops_;
     bool                          atomic_signals_queued_;
