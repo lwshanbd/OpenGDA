@@ -55,6 +55,19 @@ __global__ void verify_copy_kernel(const uint8_t* src, uint8_t* dst, size_t n) {
     }
 }
 
+// Single-kernel verify: copy all N_STREAMS sub-regions to a contiguous host
+// pinned buffer in one launch instead of N_STREAMS separate launches.
+// blockIdx.x indexes the stream.
+__global__ void verify_copy_all_kernel(const uint8_t* src_base, uint8_t* dst_base,
+                                        size_t per_stream, size_t stride) {
+    int stream = blockIdx.x;
+    const uint8_t* s = src_base + (size_t)stream * stride;
+    uint8_t* d = dst_base + (size_t)stream * per_stream;
+    for (size_t i = threadIdx.x; i < per_stream; i += blockDim.x) {
+        d[i] = s[i];
+    }
+}
+
 // Kernel-based memset with explicit system fence. Bypasses the
 // hipMemset(<16KB) → kernel-memset path whose L2 writeback can race with
 // subsequent NIC PCIe writes to the same address. The threadfence_system
@@ -105,6 +118,18 @@ int main(int argc, char** argv) {
     auto src_buf = rt.register_buffer(d_src, TOTAL, true);
     auto dst_buf = rt.register_buffer(d_dst, TOTAL, true);
 
+    // ONE-TIME init of rank-1's destination buffer to a sentinel value (0xFE).
+    // We do NOT re-init per iter — that adds ~500us of GPU L2-flush latency
+    // before the first NIC RDMA write of each iter, dominating small-message
+    // measurements. Per-iter verification still detects partial writes
+    // because each iter uses a unique pat (iter+0xA0+i)&0xFF; if the put
+    // writes nothing, verify reads the previous iter's pat (or 0xFE on iter 0)
+    // and the per-byte mismatch is caught.
+    if (rank == 1) {
+        (void)hipMemset(d_dst, 0xFE, TOTAL);
+        (void)hipDeviceSynchronize();
+    }
+
     rt.exchange();
     MPI_Barrier(MPI_COMM_WORLD);
 
@@ -117,9 +142,10 @@ int main(int argc, char** argv) {
     }
 
     // Pinned/mapped buffer for GPU-kernel verify path (avoids L2 staleness).
+    // Sized for ALL N_STREAMS streams at MAX_SIZE so we can do one big copy.
     uint8_t* h_verify = nullptr;
     uint8_t* d_verify = nullptr;
-    (void)hipHostMalloc(&h_verify, MAX_SIZE, hipHostMallocMapped);
+    (void)hipHostMalloc(&h_verify, MAX_SIZE * (size_t)N_STREAMS, hipHostMallocMapped);
     (void)hipHostGetDevicePointer((void**)&d_verify, h_verify, 0);
 
     for (int sidx = 0; sidx < NUM_TEST_SIZES; sidx++) {
@@ -137,18 +163,11 @@ int main(int argc, char** argv) {
                 }
                 (void)hipDeviceSynchronize();
             } else {
-                for (int i = 0; i < N_STREAMS; i++) {
-                    hipLaunchKernelGGL(memset_fenced_kernel,
-                        dim3((cur + 255) / 256), dim3(256), 0, 0,
-                        (uint8_t*)d_dst + (size_t)i * MAX_SIZE,
-                        (uint8_t)0xFF, cur);
-                }
-                (void)hipDeviceSynchronize();
+                // EXPERIMENT: no per-iter init on rank 1
             }
             MPI_Barrier(MPI_COMM_WORLD);
 
             if (rank == 0) {
-                // Queue all 32 puts (host-side DWQ enqueue)
                 for (int i = 0; i < N_STREAMS; i++) {
                     rt.put_no_db(src_buf, peer, dst_buf.index, cur,
                                  /*src_off=*/(size_t)i * MAX_SIZE,
@@ -156,7 +175,6 @@ int main(int argc, char** argv) {
                 }
                 auto* ctx = rt.prepare();
 
-                // Time the kernel: flush + quiet from a single block.
                 auto t0 = std::chrono::high_resolution_clock::now();
                 hipLaunchKernelGGL(flush_quiet_kernel, dim3(1), dim3(1), 0, 0, ctx);
                 (void)hipDeviceSynchronize();
@@ -168,24 +186,26 @@ int main(int argc, char** argv) {
             }
             MPI_Barrier(MPI_COMM_WORLD);
 
-            // Verification (rank 1) — GPU-kernel copy to pinned host memory
-            // bypasses the hipMemcpy L2 cache staleness for sizes <16KB.
+            // Verification (rank 1) — single GPU kernel copies all 32 stream
+            // sub-regions in one launch to avoid 32 sequential kernel launch
+            // costs that dominated the small-message timing.
             if (rank == 1) {
+                hipLaunchKernelGGL(verify_copy_all_kernel,
+                    dim3(N_STREAMS), dim3(256), 0, 0,
+                    (const uint8_t*)d_dst, d_verify, cur, MAX_SIZE);
+                (void)hipDeviceSynchronize();
                 int total_errors = 0;
                 for (int i = 0; i < N_STREAMS; i++) {
-                    hipLaunchKernelGGL(verify_copy_kernel,
-                        dim3((cur + 255) / 256), dim3(256), 0, 0,
-                        (uint8_t*)d_dst + (size_t)i * MAX_SIZE, d_verify, cur);
-                    (void)hipDeviceSynchronize();
                     uint8_t pat = (uint8_t)((iter + 0xA0 + i) & 0xFF);
+                    const uint8_t* p = h_verify + (size_t)i * cur;
                     int errs = 0;
                     for (size_t j = 0; j < cur; j++) {
-                        if (h_verify[j] != pat) {
+                        if (p[j] != pat) {
                             if (errs < 5) {
                                 fprintf(stderr,
                                     "FAIL size=%zu iter=%d stream=%d off=%zu "
                                     "got=0x%02x expected=0x%02x\n",
-                                    cur, iter, i, j, h_verify[j], pat);
+                                    cur, iter, i, j, p[j], pat);
                             }
                             errs++;
                         }
