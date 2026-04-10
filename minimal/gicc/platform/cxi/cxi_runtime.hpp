@@ -60,7 +60,7 @@ struct Token {
 
 class Runtime {
 public:
-    static constexpr int POOL_SIZE = 64;   // max ops per batch
+    static constexpr int POOL_SIZE = 32;   // max ops per batch
 
     explicit Runtime(MPI_Comm comm = MPI_COMM_WORLD)
         : impl_(), mpi_comm_(comm),
