@@ -27,5 +27,5 @@
 
 // Simplified GiccContext-based API — mlx5-only (depends on CUDA)
 #if defined(GICC_PLATFORM_MLX5)
-#include "gicc_context.cuh"
+#include "platform/mlx5/gicc_context.cuh"
 #endif

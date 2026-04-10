@@ -62,5 +62,5 @@ namespace gicc {
 //==============================================================================
 
 #if defined(GICC_PLATFORM_MLX5)
-#include "gicc_api.hpp"
+#include "platform/mlx5/gicc_api.hpp"
 #endif
