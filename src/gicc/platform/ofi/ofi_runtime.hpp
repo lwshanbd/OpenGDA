@@ -1,5 +1,5 @@
 /**
- * cxi_runtime.hpp - libfabric/CXI implementation of gicc::Runtime
+ * ofi_runtime.hpp - libfabric (CXI/OFI) implementation of gicc::Runtime
  *
  * Wraps the existing minimal/ gda::Runtime for setup (PMI bootstrap, fabric
  * init, MR registration, address exchange) but bypasses gda::Runtime::put /
@@ -39,9 +39,9 @@
 #include <vector>
 
 #include "gicc/gicc_types.hpp"
-#include "gicc/platform/cxi/cxi_device.cuh"
+#include "gicc/platform/ofi/ofi_device.cuh"
 
-#include "opengda.hpp"
+#include "internal/opengda.hpp"
 
 namespace gicc {
 

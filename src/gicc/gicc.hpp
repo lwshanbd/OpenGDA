@@ -51,14 +51,16 @@ namespace gicc {
 
 #if defined(GICC_PLATFORM_MLX5)
 #include "platform/mlx5/mlx5_runtime.hpp"
-#elif defined(GICC_PLATFORM_CXI)
-#include "platform/cxi/cxi_runtime.hpp"
+#elif defined(GICC_PLATFORM_OFI)
+#include "platform/ofi/ofi_runtime.hpp"
 #else
-#error "No GICC platform defined. Define GICC_PLATFORM_MLX5 or GICC_PLATFORM_CXI."
+#error "No GICC platform defined. Define GICC_PLATFORM_MLX5 or GICC_PLATFORM_OFI."
 #endif
 
 //==============================================================================
-// Simplified NVSHMEM-style API (gicc::init, gicc::malloc, gicc::context, etc.)
+// Simplified NVSHMEM-style API — currently mlx5-only (depends on CUDA)
 //==============================================================================
 
+#if defined(GICC_PLATFORM_MLX5)
 #include "gicc_api.hpp"
+#endif

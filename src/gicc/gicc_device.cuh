@@ -19,11 +19,13 @@
 
 #if defined(GICC_PLATFORM_MLX5)
 #include "platform/mlx5/mlx5_device.cuh"
-#elif defined(GICC_PLATFORM_CXI)
-#include "platform/cxi/cxi_device.cuh"
+#elif defined(GICC_PLATFORM_OFI)
+#include "platform/ofi/ofi_device.cuh"
 #else
-#error "No GICC platform defined. Define GICC_PLATFORM_MLX5 or GICC_PLATFORM_CXI."
+#error "No GICC platform defined. Define GICC_PLATFORM_MLX5 or GICC_PLATFORM_OFI."
 #endif
 
-// Simplified GiccContext-based API (gicc::put(ctx, dst, src, size, peer))
+// Simplified GiccContext-based API — mlx5-only (depends on CUDA)
+#if defined(GICC_PLATFORM_MLX5)
 #include "gicc_context.cuh"
+#endif

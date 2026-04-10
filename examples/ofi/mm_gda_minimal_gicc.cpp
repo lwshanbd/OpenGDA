@@ -30,7 +30,7 @@
 
 // For unset_rocr_visible_devices() — must run before MPI_Init on Tioga/Flux,
 // otherwise multi-rank-per-node jobs see "invalid device ordinal".
-#include "hip_device_context.hpp"
+#include "gicc/platform/ofi/internal/hip_device_context.hpp"
 
 #define HIP_CHECK(cmd) do {                                                    \
     hipError_t err = cmd;                                                      \
