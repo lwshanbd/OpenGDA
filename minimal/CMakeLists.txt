@@ -76,6 +76,7 @@ set(COMMON_LIBS
     ${LIBFABRIC_LIBRARY}
     ${PMI_LIBRARY}
     ${HWLOC_LIBRARY}
+    pthread
 )
 
 # Original benchmark (6 concurrent streams max)
@@ -113,7 +114,7 @@ target_link_libraries(mm_gda_minimal PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
 set_source_files_properties(am_test_one.cpp PROPERTIES LANGUAGE HIP)
 add_executable(am_test_one am_test_one.cpp)
 target_include_directories(am_test_one PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
-target_link_libraries(am_test_one PRIVATE ${COMMON_LIBS} MPI::MPI_CXX)
+target_link_libraries(am_test_one PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
 
 # AM ping-pong latency test
 set_source_files_properties(am_pingpong.cpp PROPERTIES LANGUAGE HIP)
@@ -156,6 +157,27 @@ set_source_files_properties(test_opengda.cpp PROPERTIES LANGUAGE HIP)
 add_executable(test_opengda test_opengda.cpp)
 target_include_directories(test_opengda PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
 target_link_libraries(test_opengda PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
+
+# Unified GICC API test (CXI backend) - mirrors src/gicc/ on the nvib branch
+set_source_files_properties(test_gicc.cpp PROPERTIES LANGUAGE HIP)
+add_executable(test_gicc test_gicc.cpp)
+target_include_directories(test_gicc PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_compile_definitions(test_gicc PRIVATE GICC_PLATFORM_CXI)
+target_link_libraries(test_gicc PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
+
+# 32-stream micro benchmark, ported to gicc:: high-level API
+set_source_files_properties(gda_benchmark_gicc.cpp PROPERTIES LANGUAGE HIP)
+add_executable(gda_benchmark_gicc gda_benchmark_gicc.cpp)
+target_include_directories(gda_benchmark_gicc PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_compile_definitions(gda_benchmark_gicc PRIVATE GICC_PLATFORM_CXI)
+target_link_libraries(gda_benchmark_gicc PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
+
+# Distributed matrix multiply, ported to gicc:: high-level API
+set_source_files_properties(mm_gda_minimal_gicc.cpp PROPERTIES LANGUAGE HIP)
+add_executable(mm_gda_minimal_gicc mm_gda_minimal_gicc.cpp)
+target_include_directories(mm_gda_minimal_gicc PRIVATE ${COMMON_INCLUDES} ${MPI_CXX_INCLUDE_DIRS})
+target_compile_definitions(mm_gda_minimal_gicc PRIVATE GICC_PLATFORM_CXI)
+target_link_libraries(mm_gda_minimal_gicc PRIVATE ${COMMON_LIBS} MPI::MPI_CXX pthread)
 
 # Print configuration
 message(STATUS "HIP found: ${hip_DIR}")
