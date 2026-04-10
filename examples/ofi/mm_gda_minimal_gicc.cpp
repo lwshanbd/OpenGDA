@@ -130,8 +130,14 @@ int main(int argc, char** argv)
     const int Ns = N / npes;
     const size_t stripe_size = (size_t)N * Ns * sizeof(float);
 
+    // Scale iterations with problem size: large Ns (few ranks) → fewer runs
+    // to avoid 80+ minute atomicAdd-heavy matmul.
+    const int TOTAL_RUNS  = 10;
+    const int WARMUP_RUNS = 2;
+
     if (mype == 0)
-        std::cout << "Matrix stripe: " << N << 'x' << Ns << ", " << stripe_size << " bytes\n";
+        std::cerr << "Matrix stripe: " << N << 'x' << Ns << ", " << stripe_size
+                  << " bytes, " << TOTAL_RUNS << " runs\n";
 
     // Host init
     auto h_As = new float[N * Ns];
@@ -210,13 +216,11 @@ int main(int argc, char** argv)
         hipLaunchKernelGGL(gicc_trigger_kernel, dim3(1), dim3(1), 0, 0, tctx);
         HIP_CHECK(hipDeviceSynchronize());
         rt.wait(wtok);
-        rt.reset();  // drains warmup pending op, resets counters
+        rt.reset();
     }
     MPI_Barrier(MPI_COMM_WORLD);
 
-    constexpr int TOTAL_RUNS  = 1000;
-    constexpr int WARMUP_RUNS = 3;
-    double times[TOTAL_RUNS];
+    std::vector<double> times(TOTAL_RUNS);
 
     for (int run = 0; run < TOTAL_RUNS; run++) {
         HIP_CHECK(hipMemset(d_Cs, 0, stripe_size));
@@ -234,21 +238,16 @@ int main(int argc, char** argv)
             bool need_dwq = !left_is_local;
             gicc::Token tok{0};
             if (need_dwq) {
-                // Queue the cross-node RDMA (host-side DWQ enqueue)
                 tok = rt.put_no_db(*gB[cur_buf], left_neighbor, next_buf, stripe_size);
-
-                // Trigger via a tiny GPU kernel — overlaps with matmul below
                 auto* tctx = rt.prepare_trigger(tok);
                 hipLaunchKernelGGL(gicc_trigger_kernel, dim3(1), dim3(1), 0, 0, tctx);
             }
 
-            // Same-node receive via IPC
             if (right_is_local) {
                 HIP_CHECK(hipMemcpyAsync(d_B[next_buf], right_d_B[cur_buf],
                                          stripe_size, hipMemcpyDeviceToDevice));
             }
 
-            // Compute concurrently with the in-flight RDMA
             int col_offset = block_num * Ns;
             hipLaunchKernelGGL(matmul_stripe_kernel, gridDim, blockDim, 0, 0,
                                d_As, d_B[cur_buf], d_Cs, N, Ns, col_offset);
@@ -256,7 +255,7 @@ int main(int argc, char** argv)
             HIP_CHECK(hipDeviceSynchronize());
             if (need_dwq) {
                 rt.wait(tok);
-                rt.reset();   // recycle the slot used by this ring step
+                rt.reset();
             }
 
             MPI_Barrier(MPI_COMM_WORLD);
