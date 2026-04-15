@@ -34,7 +34,7 @@
 #include "gicc/mlx5/device_opt.cuh"
 
 // Simplified GPU context (NVSHMEM-style API)
-#include "gicc/gicc_context.cuh"
+#include "gicc/platform/mlx5/gicc_context.cuh"
 
 namespace gicc {
 
