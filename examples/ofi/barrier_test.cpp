@@ -7,9 +7,9 @@
  */
 #include <cstdio>
 #include <cstdlib>
-#include <mpi.h>
 #include <hip/hip_runtime.h>
 
+#include "gicc/bootstrap/bootstrap.hpp"
 #include "gicc/platform/ofi/ofi_barrier_device.cuh"
 #include "gicc/platform/ofi/internal/gicc_barrier.hpp"
 
@@ -41,16 +41,16 @@ __global__ void continuous_barrier_kernel(gicc::BarrierCtx* bctx,
 }
 
 int main(int argc, char** argv) {
-    MPI_Init(&argc, &argv);
-
-    GdaComm comm;
+    (void)argc; (void)argv;
+    gicc::Bootstrap boot;
+    GdaComm comm(boot);
     int rank = comm.rank();
     int nranks = comm.size();
 
     if (rank == 0)
         printf("barrier_test: %d ranks, GPU %d\n", nranks, comm.gpu_id());
 
-    MPI_Barrier(MPI_COMM_WORLD);
+    boot.barrier();
 
     // =========================================================================
     // Test 1: Single barrier mode (no monitor thread needed)
@@ -70,25 +70,24 @@ int main(int argc, char** argv) {
             *h_flag = 0;
             barrier.setup();
 
-            MPI_Barrier(MPI_COMM_WORLD);
+            boot.barrier();
 
             hipLaunchKernelGGL(single_barrier_kernel, dim3(1), dim3(1), 0, 0,
                                barrier.device_ctx(), (volatile uint64_t*)h_flag);
             hipDeviceSynchronize();
             barrier.reset();
 
-            MPI_Barrier(MPI_COMM_WORLD);
+            boot.barrier();
 
             if (*h_flag != 42) {
                 printf("FAILED at iteration %d (flag=%lu)\n", i, (unsigned long)*h_flag);
                 hipHostFree((void*)h_flag);
-                MPI_Finalize();
                 return 1;
             }
         }
 
         hipHostFree((void*)h_flag);
-        MPI_Barrier(MPI_COMM_WORLD);
+        boot.barrier();
         if (rank == 0) printf("PASSED\n");
         fflush(stdout);
     }
@@ -100,7 +99,7 @@ int main(int argc, char** argv) {
         gicc::Barrier barrier(comm);
         barrier.init();
 
-        MPI_Barrier(MPI_COMM_WORLD);
+        boot.barrier();
 
         volatile uint64_t* h_counter = nullptr;
         hipHostMalloc((void**)&h_counter, sizeof(uint64_t), hipHostMallocDefault);
@@ -122,18 +121,16 @@ int main(int argc, char** argv) {
                    (unsigned long)*h_counter, N_CONTINUOUS);
             hipHostFree((void*)h_counter);
             barrier.finalize();
-            MPI_Finalize();
             return 1;
         }
 
         hipHostFree((void*)h_counter);
         barrier.finalize();
-        MPI_Barrier(MPI_COMM_WORLD);
+        boot.barrier();
         if (rank == 0) printf("PASSED\n");
         fflush(stdout);
     }
 
     if (rank == 0) printf("All barrier tests PASSED\n");
-    MPI_Finalize();
     return 0;
 }
