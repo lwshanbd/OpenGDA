@@ -9,7 +9,6 @@
 #include <pmi2.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
