@@ -4,12 +4,11 @@
  * This file provides host-side AM context management:
  *   - Allocation of per-peer inbox rings in GPU device memory
  *   - Registration of memory regions for RDMA
- *   - Address exchange via MPI
+ *   - Address exchange via Bootstrap collective
  */
 #pragma once
 
 #include <cuda_runtime.h>
-#include <mpi.h>
 #include <infiniband/verbs.h>
 #include <cstdio>
 #include <cstdlib>
@@ -17,6 +16,7 @@
 #include <vector>
 
 #include "am_types.hpp"
+#include "gicc/bootstrap/bootstrap.hpp"
 #include "gicc/util/memory_region.hpp"
 #include "devx_qp.hpp"
 #include "device_opt.cuh"
@@ -41,9 +41,8 @@ struct QpConnInfo {
 
 class NvibAmContext {
 public:
-    // MPI info
-    int rank_;
-    int size_;
+    // Bootstrap handle (provides rank/size and collectives)
+    gicc::Bootstrap& boot;
 
     // IB context
     struct ibv_context* ib_ctx;
@@ -79,11 +78,13 @@ public:
      * @param qp_ DevX QP for RDMA
      * @param nslots_ Number of slots per inbox ring (power of 2)
      */
-    NvibAmContext(struct ibv_context* ib_ctx_,
+    NvibAmContext(gicc::Bootstrap& boot_,
+                  struct ibv_context* ib_ctx_,
                   struct ibv_pd* pd_,
                   DevxQp* qp_,
                   int nslots_ = AM_DEFAULT_RING_SLOTS)
-        : ib_ctx(ib_ctx_),
+        : boot(boot_),
+          ib_ctx(ib_ctx_),
           pd(pd_),
           qp(qp_),
           nslots(nslots_),
@@ -91,12 +92,10 @@ public:
           d_recv_states(nullptr),
           d_gda_state(nullptr)
     {
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank_);
-        MPI_Comm_size(MPI_COMM_WORLD, &size_);
 
         // Validate parameters
         if ((nslots & (nslots - 1)) != 0) {
-            fprintf(stderr, "Rank %d: AM nslots must be power of 2\n", rank_);
+            fprintf(stderr, "Rank %d: AM nslots must be power of 2\n", boot.rank());
             exit(1);
         }
 
@@ -115,9 +114,9 @@ public:
         // Setup device state
         setup_device_state();
 
-        if (rank_ == 0) {
+        if (boot.rank() == 0) {
             printf("NVIB AM Context initialized: %d peers, %d slots/peer\n",
-                   size_, nslots);
+                   boot.size(), nslots);
             printf("  Slot size: %zu bytes, Ring size per peer: %zu bytes\n",
                    sizeof(am_slot_t), nslots * sizeof(am_slot_t));
         }
@@ -136,8 +135,8 @@ public:
     NvibAmContext(const NvibAmContext&) = delete;
     NvibAmContext& operator=(const NvibAmContext&) = delete;
 
-    int rank() const { return rank_; }
-    int size() const { return size_; }
+    int rank() const { return boot.rank(); }
+    int size() const { return boot.size(); }
 
     am_context_t* get_device_context() const { return d_context; }
     GdaDeviceStateOpt* get_gda_state() const { return d_gda_state; }
@@ -148,14 +147,14 @@ public:
     // Update device recv states after modifying host copies
     void sync_recv_states_to_device() {
         cudaMemcpy(d_recv_states, h_recv_states.data(),
-                   size_ * sizeof(am_recv_state_t), cudaMemcpyHostToDevice);
+                   boot.size() * sizeof(am_recv_state_t), cudaMemcpyHostToDevice);
     }
 
 private:
     void check_cuda(cudaError_t err, const char* msg) {
         if (err != cudaSuccess) {
             fprintf(stderr, "Rank %d: %s failed: %s\n",
-                    rank_, msg, cudaGetErrorString(err));
+                    boot.rank(), msg, cudaGetErrorString(err));
             exit(1);
         }
     }
@@ -163,9 +162,9 @@ private:
     void allocate_buffers() {
         size_t slots_size = nslots * sizeof(am_slot_t);
 
-        d_inbox_slots.resize(size_, nullptr);
+        d_inbox_slots.resize(boot.size(), nullptr);
 
-        for (int p = 0; p < size_; p++) {
+        for (int p = 0; p < boot.size(); p++) {
             check_cuda(cudaMalloc(&d_inbox_slots[p], slots_size), "cudaMalloc(inbox)");
             check_cuda(cudaMemset(d_inbox_slots[p], 0, slots_size), "cudaMemset(inbox)");
         }
@@ -176,10 +175,10 @@ private:
     void register_memory() {
         size_t slots_size = nslots * sizeof(am_slot_t);
 
-        mr_inbox_slots.resize(size_, nullptr);
+        mr_inbox_slots.resize(boot.size(), nullptr);
 
-        for (int p = 0; p < size_; p++) {
-            mr_inbox_slots[p] = new MemoryRegion(pd, d_inbox_slots[p], slots_size, true, rank_);
+        for (int p = 0; p < boot.size(); p++) {
+            mr_inbox_slots[p] = new MemoryRegion(pd, d_inbox_slots[p], slots_size, true, boot.rank());
         }
     }
 
@@ -199,14 +198,11 @@ private:
         memcpy(my_conn.gid, &my_gid, 16);
 
         // Gather all connection info
-        std::vector<QpConnInfo> all_conns(size_);
-        MPI_Allgather(&my_conn, sizeof(QpConnInfo), MPI_BYTE,
-                      all_conns.data(), sizeof(QpConnInfo), MPI_BYTE,
-                      MPI_COMM_WORLD);
+        auto all_conns = boot.template allgather_fixed<QpConnInfo>(my_conn);
 
         // For 2-rank case, connect to peer
-        if (size_ == 2) {
-            int peer = (rank_ == 0) ? 1 : 0;
+        if (boot.size() == 2) {
+            int peer = (boot.rank() == 0) ? 1 : 0;
             QpConnInfo& peer_conn = all_conns[peer];
 
             qp->rst2init();
@@ -214,31 +210,34 @@ private:
             qp->rtr2rts(my_conn.psn);
         }
 
-        MPI_Barrier(MPI_COMM_WORLD);
+        boot.barrier();
     }
 
     void exchange_addresses() {
         // Prepare my exchange info for each peer
-        std::vector<am_exchange_info_t> my_infos(size_);
-        for (int p = 0; p < size_; p++) {
+        std::vector<am_exchange_info_t> my_infos(boot.size());
+        for (int p = 0; p < boot.size(); p++) {
             my_infos[p].ring_base = (uint64_t)d_inbox_slots[p];
             my_infos[p].ring_rkey = mr_inbox_slots[p]->rkey;
             my_infos[p].nslots = nslots;
         }
 
         // All-to-all exchange
-        std::vector<am_exchange_info_t> all_infos(size_ * size_);
-        MPI_Allgather(my_infos.data(), size_ * sizeof(am_exchange_info_t), MPI_BYTE,
-                      all_infos.data(), size_ * sizeof(am_exchange_info_t), MPI_BYTE,
-                      MPI_COMM_WORLD);
+        auto raw_all = boot.allgather(my_infos.data(),
+                                      boot.size() * (int)sizeof(am_exchange_info_t));
+        std::vector<am_exchange_info_t> all_infos(boot.size() * boot.size());
+        for (int r = 0; r < boot.size(); ++r) {
+            std::memcpy(&all_infos[r * boot.size()], raw_all[r].data(),
+                        boot.size() * sizeof(am_exchange_info_t));
+        }
 
         // Setup states
-        h_send_states.resize(size_);
-        h_recv_states.resize(size_);
+        h_send_states.resize(boot.size());
+        h_recv_states.resize(boot.size());
 
-        for (int p = 0; p < size_; p++) {
-            // Get peer p's info for ME (peer p published info at index [p * size_ + my_rank])
-            am_exchange_info_t& info_for_me = all_infos[p * size_ + rank_];
+        for (int p = 0; p < boot.size(); p++) {
+            // Get peer p's info for ME (peer p published info at index [p * size + my_rank])
+            am_exchange_info_t& info_for_me = all_infos[p * boot.size() + boot.rank()];
 
             // Setup send state for peer p
             h_send_states[p].peer_rank = p;
@@ -258,15 +257,15 @@ private:
 
     void setup_device_state() {
         // Allocate device recv states
-        check_cuda(cudaMalloc(&d_recv_states, size_ * sizeof(am_recv_state_t)),
+        check_cuda(cudaMalloc(&d_recv_states, boot.size() * sizeof(am_recv_state_t)),
                    "cudaMalloc(d_recv_states)");
         check_cuda(cudaMemcpy(d_recv_states, h_recv_states.data(),
-                              size_ * sizeof(am_recv_state_t), cudaMemcpyHostToDevice),
+                              boot.size() * sizeof(am_recv_state_t), cudaMemcpyHostToDevice),
                    "cudaMemcpy(d_recv_states)");
 
         // Setup context structure
-        h_context.rank = rank_;
-        h_context.size = size_;
+        h_context.rank = boot.rank();
+        h_context.size = boot.size();
         h_context.nslots = nslots;
         h_context.recv_states = d_recv_states;
 
