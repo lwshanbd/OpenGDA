@@ -13,8 +13,10 @@
  *   - rt.wait(tok)                        // host wait for that specific op
  *
  * Run:
- *   PMI_MAX_KVS_ENTRIES=2000 FI_MR_CACHE_MAX_COUNT=0 \
+ *   FI_MR_CACHE_MAX_COUNT=0 \
  *     srun -N <nodes> -n <ranks> --ntasks-per-node=8 ./mm_gda_minimal_gicc <N>
+ *
+ *   (If GICC_BOOTSTRAP=pmi2, also export PMI_MAX_KVS_ENTRIES=2000.)
  */
 #include <iostream>
 #include <ctime>
