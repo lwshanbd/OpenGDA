@@ -5,7 +5,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/build"
+SOURCE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BUILD_DIR="$SOURCE_DIR/build"
 
 # ============================================================================
 # MAPLE environment setup
@@ -42,7 +43,7 @@ cmake \
     -DCMAKE_CXX_COMPILER=g++ \
     -DCMAKE_CUDA_COMPILER=$(which nvcc) \
     -DCMAKE_CUDA_ARCHITECTURES=90 \
-    "$SCRIPT_DIR"
+    "$SOURCE_DIR"
 
 echo ""
 echo "Building..."
