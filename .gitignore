@@ -25,3 +25,7 @@ prototype/docs/
 .claude.local.md
 .claude/settings.local.json
 build_ofi/
+build_*/
+
+# Worktrees
+.worktrees/
