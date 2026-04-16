@@ -22,14 +22,13 @@
 #include <unistd.h>
 #include <vector>
 
-#include <mpi.h>
 #include <hip/hip_runtime.h>
 
 #include "gicc/gicc.hpp"
 #include "gicc/gicc_device.cuh"
 
-// For unset_rocr_visible_devices() — must run before MPI_Init on Tioga/Flux,
-// otherwise multi-rank-per-node jobs see "invalid device ordinal".
+// For unset_rocr_visible_devices() — must run before Bootstrap init on
+// Tioga/Flux, otherwise multi-rank-per-node jobs see "invalid device ordinal".
 #include "gicc/platform/ofi/internal/hip_device_context.hpp"
 
 #define HIP_CHECK(cmd) do {                                                    \
@@ -74,49 +73,26 @@ __global__ void gicc_trigger_kernel(gicc::DeviceCtx* ctx) {
 // =============================================================================
 int main(int argc, char** argv)
 {
-    // CRITICAL: must precede MPI_Init on Tioga/Flux multi-rank-per-node jobs.
+    // CRITICAL: must precede Bootstrap init on Tioga/Flux multi-rank-per-node jobs.
     unset_rocr_visible_devices();
-    MPI_Init(&argc, &argv);
 
     gicc::Runtime rt;
     int mype = rt.rank();
     int npes = rt.size();
     if (npes < 2) {
         if (mype == 0) std::cerr << "Need at least 2 processes\n";
-        MPI_Finalize();
         return 1;
     }
 
     int left_neighbor  = (npes + mype - 1) % npes;
     int right_neighbor = (mype + 1) % npes;
 
-    // Detect on-node neighbors via MPI shared communicator (replaces the
-    // PMI-based locality map used by the original mm).
-    bool* locality_map = nullptr;
-    {
-        MPI_Comm shm;
-        MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, mype,
-                            MPI_INFO_NULL, &shm);
-        int shm_size = 0;
-        MPI_Comm_size(shm, &shm_size);
-        std::vector<int> shm_world_ranks(shm_size);
-        MPI_Allgather(&mype, 1, MPI_INT,
-                      shm_world_ranks.data(), 1, MPI_INT, shm);
-        // Build a global locality map by allgathering shm membership.
-        std::vector<int> my_shm_set(npes, 0);
-        for (int r : shm_world_ranks) my_shm_set[r] = 1;
-        std::vector<int> all_shm(npes * npes, 0);
-        MPI_Allgather(my_shm_set.data(), npes, MPI_INT,
-                      all_shm.data(),    npes, MPI_INT, MPI_COMM_WORLD);
-        locality_map = new bool[npes];
-        for (int r = 0; r < npes; r++) locality_map[r] = (all_shm[mype * npes + r] != 0);
-        MPI_Comm_free(&shm);
-    }
+    // On-node neighbor detection via Bootstrap's locality map.
+    std::vector<bool> locality_map = rt.boot().locality_map();
 
     bool use_ipc = (getenv("GDA_DISABLE_IPC") == nullptr);
     bool left_is_local  = use_ipc && locality_map[left_neighbor];
     bool right_is_local = use_ipc && locality_map[right_neighbor];
-    delete[] locality_map;
 
     if (mype < 8) {
         std::cerr << "Rank " << mype << " gpu " << rt.gpu_id()
@@ -161,25 +137,21 @@ int main(int argc, char** argv)
     HIP_CHECK(hipMemcpy(d_Cs,   h_Cs, stripe_size, hipMemcpyHostToDevice));
     HIP_CHECK(hipMemset(d_B[1], 0, stripe_size));
 
-    // Same-node IPC setup (unchanged from baseline; uses MPI Sendrecv for
-    // handle exchange instead of PMI KVS so it doesn't collide with
-    // gicc::Runtime::exchange()'s key namespace).
+    // Same-node IPC setup: exchange HIP IPC handles with the right neighbor
+    // through Bootstrap (point-to-point), separate from the Bootstrap's
+    // own KVS namespace.
     float* right_d_B[2] = {nullptr, nullptr};
     {
         hipIpcMemHandle_t my_handles[2];
         HIP_CHECK(hipIpcGetMemHandle(&my_handles[0], d_B[0]));
         HIP_CHECK(hipIpcGetMemHandle(&my_handles[1], d_B[1]));
 
-        // Send our handles to right neighbor (so they can read from us if
-        // they're our left neighbor and we're local). Receive from left
-        // neighbor for the symmetric case... actually we want our right
-        // neighbor's handles, so do a Sendrecv to the right.
+        // Send to left, receive from right — we want our RIGHT neighbor's
+        // handles. Bootstrap::sendrecv targets a single peer, so we split
+        // into two half-exchanges.
         hipIpcMemHandle_t right_handles[2];
-        MPI_Sendrecv(my_handles,    sizeof(my_handles), MPI_BYTE,
-                     left_neighbor, 0,
-                     right_handles, sizeof(right_handles), MPI_BYTE,
-                     right_neighbor, 0,
-                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        rt.boot().send(my_handles, (int)sizeof(my_handles), left_neighbor, 0);
+        rt.boot().recv(right_handles, (int)sizeof(right_handles), right_neighbor, 0);
 
         if (right_is_local) {
             HIP_CHECK(hipIpcOpenMemHandle((void**)&right_d_B[0], right_handles[0],
@@ -195,7 +167,7 @@ int main(int argc, char** argv)
     gicc::Buffer* gB[2] = { &gB0, &gB1 };
 
     rt.exchange();
-    MPI_Barrier(MPI_COMM_WORLD);
+    rt.boot().barrier();
 
     timespec t0, t1;
     dim3 blockDim(16, 16);
@@ -218,7 +190,7 @@ int main(int argc, char** argv)
         rt.wait(wtok);
         rt.reset();
     }
-    MPI_Barrier(MPI_COMM_WORLD);
+    rt.boot().barrier();
 
     std::vector<double> times(TOTAL_RUNS);
 
@@ -227,7 +199,7 @@ int main(int argc, char** argv)
         HIP_CHECK(hipMemcpy(d_B[0], h_Bs, stripe_size, hipMemcpyHostToDevice));
         HIP_CHECK(hipMemcpy(d_B[1], h_Bs, stripe_size, hipMemcpyHostToDevice));
 
-        MPI_Barrier(MPI_COMM_WORLD);
+        rt.boot().barrier();
         clock_gettime(CLOCK_MONOTONIC_RAW, &t0);
 
         for (int s = 0; s < npes; s++) {
@@ -258,7 +230,7 @@ int main(int argc, char** argv)
                 rt.reset();
             }
 
-            MPI_Barrier(MPI_COMM_WORLD);
+            rt.boot().barrier();
         }
 
         clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
@@ -291,6 +263,5 @@ int main(int argc, char** argv)
     HIP_CHECK(hipFree(d_As));
     delete[] h_Cs; delete[] h_Bs; delete[] h_As;
 
-    MPI_Finalize();
     return 0;
 }
