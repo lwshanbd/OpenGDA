@@ -22,7 +22,7 @@
 #include <vector>
 #include <map>
 
-#include "gicc/util/mpi_bootstrap.hpp"
+#include "gicc/bootstrap/bootstrap.hpp"
 
 namespace gicc::mlx5 {
 
@@ -175,8 +175,8 @@ public:
     std::map<int, PerPeerQp> peer_qps;
     std::vector<GdaRemotePeer> remote_peers;
 
-    // MPI bootstrap
-    MpiBootstrap& mpi;
+    // Bootstrap (MPI or PMI2, selected at build time)
+    gicc::Bootstrap& boot;
     int rank;
     int size;
 
@@ -198,9 +198,9 @@ public:
     uint64_t* h_prod_idx;
     uint32_t psn;
 
-    Mlx5GdaContext(MpiBootstrap& mpi_, const char* device_name = nullptr, int port = 1)
+    Mlx5GdaContext(gicc::Bootstrap& boot_, const char* device_name = nullptr, int port = 1)
         : ctx(nullptr), pd(nullptr), cq(nullptr),
-          port_num(port), mpi(mpi_), rank(mpi_.rank), size(mpi_.size),
+          port_num(port), boot(boot_), rank(boot_.rank()), size(boot_.size()),
           d_cqe(nullptr),
           qp_depth(256), cq_depth(512),
           qp(nullptr), d_wqe_buf(nullptr), d_prod_idx(nullptr),
