@@ -13,7 +13,9 @@ GICC supports multiple network backends:
 
 > **GICC: A High-Performance Runtime for GPU-Initiated Communication and Coordination in Modern HPC Systems**
 >
-> HPDC 2026
+> The 35th International Symposium on High-Performance Parallel and Distributed Computing (HPDC '26), July 13--16, 2026, Cleveland, OH, USA
+>
+> DOI: [10.1145/3806645.3807576](https://doi.org/10.1145/3806645.3807576)
 >
 > Paper will be available soon.
 
@@ -108,4 +110,6 @@ examples/
 
 ## License
 
-Copyright (c) Stony Brook University. All rights reserved.
+This work is licensed under a [Creative Commons Attribution-NonCommercial-NoDerivs 4.0 International License](https://creativecommons.org/licenses/by-nc-nd/4.0/).
+
+Copyright (c) 2026 Stony Brook University.
