@@ -12,7 +12,12 @@ set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 # Dependencies
 # ===========================================================================
 
-find_package(MPI REQUIRED)
+# Independent build knobs. Each has a fixed default; no cross-option inference.
+set(GICC_BACKEND   "ofi" CACHE STRING "Network backend: mlx5 | ofi")
+set(GICC_BOOTSTRAP "mpi" CACHE STRING "Bootstrap backend: mpi | pmi2")
+set_property(CACHE GICC_BACKEND   PROPERTY STRINGS "mlx5" "ofi")
+set_property(CACHE GICC_BOOTSTRAP PROPERTY STRINGS "mpi"  "pmi2")
+
 find_package(CUDAToolkit REQUIRED)
 
 find_library(IBVERBS_LIBRARY ibverbs)
@@ -24,8 +29,6 @@ find_library(MLX5_LIBRARY mlx5)
 if(NOT MLX5_LIBRARY)
     message(FATAL_ERROR "libmlx5 not found")
 endif()
-
-find_library(PMIX_LIBRARY pmix HINTS $ENV{MPI_ROOT}/lib)
 
 # ===========================================================================
 # GICC Shared Library
@@ -41,7 +44,6 @@ target_include_directories(gicc
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<INSTALL_INTERFACE:include>
     PRIVATE
-        ${MPI_CXX_INCLUDE_DIRS}
         ${CUDAToolkit_INCLUDE_DIRS}
 )
 
@@ -49,13 +51,35 @@ target_compile_definitions(gicc PUBLIC GICC_PLATFORM_MLX5)
 
 target_link_libraries(gicc
     PUBLIC
-        ${MPI_CXX_LIBRARIES}
         ${IBVERBS_LIBRARY}
         ${MLX5_LIBRARY}
         CUDA::cudart
 )
-if(PMIX_LIBRARY)
-    target_link_libraries(gicc PUBLIC ${PMIX_LIBRARY})
+
+# ===========================================================================
+# Bootstrap backend
+# ===========================================================================
+
+if(GICC_BOOTSTRAP STREQUAL "mpi")
+    find_package(MPI REQUIRED)
+    target_compile_definitions(gicc PUBLIC GICC_BOOTSTRAP_MPI=1)
+    target_link_libraries     (gicc PUBLIC MPI::MPI_CXX)
+elseif(GICC_BOOTSTRAP STREQUAL "pmi2")
+    find_path   (PMI2_INCLUDE_DIR pmi2.h
+                 PATHS ${PMI_ROOT} /opt/cray/pe/pmi/6.1.15
+                 PATH_SUFFIXES include)
+    find_library(PMI2_LIBRARY pmi2
+                 PATHS ${PMI_ROOT} /opt/cray/pe/pmi/6.1.15
+                 PATH_SUFFIXES lib lib64)
+    if(NOT PMI2_INCLUDE_DIR OR NOT PMI2_LIBRARY)
+        message(FATAL_ERROR "PMI2 not found (set PMI_ROOT=/path/to/pmi)")
+    endif()
+    target_compile_definitions(gicc PUBLIC GICC_BOOTSTRAP_PMI2=1)
+    target_include_directories(gicc PUBLIC ${PMI2_INCLUDE_DIR})
+    target_link_libraries     (gicc PUBLIC ${PMI2_LIBRARY})
+else()
+    message(FATAL_ERROR
+        "GICC_BOOTSTRAP must be 'mpi' or 'pmi2' (got '${GICC_BOOTSTRAP}').")
 endif()
 
 target_compile_options(gicc PRIVATE
@@ -117,7 +141,8 @@ install(EXPORT gicc-targets
 
 message(STATUS "")
 message(STATUS "=== GICC Library Build Configuration ===")
-message(STATUS "Platform:   MLX5 / InfiniBand")
+message(STATUS "Backend:    ${GICC_BACKEND}")
+message(STATUS "Bootstrap:  ${GICC_BOOTSTRAP}")
 message(STATUS "CUDA:       ${CUDAToolkit_VERSION}")
 message(STATUS "CUDA arch:  ${CMAKE_CUDA_ARCHITECTURES}")
 message(STATUS "ibverbs:    ${IBVERBS_LIBRARY}")
