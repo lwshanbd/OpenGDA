@@ -27,7 +27,7 @@
 #include <unordered_map>
 
 #include "hip_device_context.hpp"
-#include "pmi_session.hpp"
+#include "gicc/bootstrap/bootstrap.hpp"
 #include "device_affinity.hpp"
 #include "fabric_dwq_context.hpp"
 #include "memory_region.hpp"
@@ -60,7 +60,7 @@ struct GdaRemoteInfo {
 class GdaComm {
 public:
     // Core components (public for advanced usage)
-    PmiSession pmi;
+    gicc::Bootstrap& boot;
     DeviceAffinityDetector* affinity;
     HipDeviceContext* hip;
     FabricDwqContext* fabric;
@@ -93,29 +93,31 @@ public:
 
     /**
      * Initialize GDA communication
+     * @param boot_ Bootstrap instance providing rank, size, and collective ops
      * @param local_rank Local rank for GPU selection (e.g., SLURM_LOCALID)
      */
-    explicit GdaComm(int local_rank = -1)
-        : affinity(nullptr), hip(nullptr), fabric(nullptr), ofi_barrier(nullptr),
+    explicit GdaComm(gicc::Bootstrap& boot_, int local_rank = -1)
+        : boot(boot_),
+          affinity(nullptr), hip(nullptr), fabric(nullptr), ofi_barrier(nullptr),
           current_threshold(0),
           atomic_result(nullptr), atomic_operand(nullptr),
           mr_atomic_result(nullptr), mr_atomic_operand(nullptr),
           atomic_completion_cntr(nullptr)
     {
-        // Get local rank from PMI if not provided
+        // Get local rank from Bootstrap if not provided
         if (local_rank < 0) {
-            local_rank = pmi.local_rank;
+            local_rank = boot.local_rank();
             if (local_rank < 0) {
                 int num_devices;
                 (void)hipGetDeviceCount(&num_devices);
-                local_rank = pmi.rank % num_devices;
+                local_rank = boot.rank() % num_devices;
             }
         }
 
         // Initialize components
         affinity = new DeviceAffinityDetector(local_rank);
         hip = new HipDeviceContext(affinity->selected_gpu_id);
-        fabric = new FabricDwqContext(pmi.rank, affinity);
+        fabric = new FabricDwqContext(boot.rank(), affinity);
 
         // Exchange addresses with all ranks
         exchange_addresses();
@@ -168,7 +170,7 @@ public:
     GdaHandle register_buffer(void* buf, size_t size, bool is_device) {
         auto* mr = new MemoryRegion(
             fabric->domain, fabric->ep, fabric->cxi_info,
-            buf, size, is_device, hip->gpu_id, pmi.rank);
+            buf, size, is_device, hip->gpu_id, boot.rank());
         registered_mrs.push_back(mr);
 
         GdaHandle handle;
@@ -215,7 +217,7 @@ public:
         auto it = remote_info.find(map_key);
         if (it == remote_info.end()) {
             fprintf(stderr, "Rank %d: RMA info not set for rank %d buf %d\n",
-                    pmi.rank, dest_rank, dest_buf_index);
+                    boot.rank(), dest_rank, dest_buf_index);
             exit(1);
         }
         const auto& ri = it->second;
@@ -235,12 +237,12 @@ public:
         // static int put_debug_count = 0;
         // if (put_debug_count < 5) {
         //     printf("Rank %d put(): virt_addr=%d, ri.rma_addr=0x%lx, ri.base_addr=0x%lx, computed remote_addr=0x%lx, key=0x%lx\n",
-        //            pmi.rank, fabric->is_virt_addr_mode(), ri.rma_addr, ri.base_addr, remote_addr, ri.rma_key);
+        //            boot.rank(), fabric->is_virt_addr_mode(), ri.rma_addr, ri.base_addr, remote_addr, ri.rma_key);
         //     put_debug_count++;
         // }
 
         // Queue RMA write
-        auto* dwq = new DwqWorkBuilder(pmi.rank);
+        auto* dwq = new DwqWorkBuilder(boot.rank());
         dwq->queue_rma_write(
             fabric->domain, fabric->ep,
             src_handle.buf, src_handle.mr->desc, size,
@@ -274,7 +276,7 @@ public:
         uint64_t rma_addr = fabric->is_virt_addr_mode() ? remote_addr : remote_addr;
 
         // Queue RMA write
-        auto* dwq = new DwqWorkBuilder(pmi.rank);
+        auto* dwq = new DwqWorkBuilder(boot.rank());
         dwq->queue_rma_write(
             fabric->domain, fabric->ep,
             src_handle.buf, src_handle.local_desc, size,
@@ -377,8 +379,8 @@ public:
     }
 
     // Accessors
-    int rank() const { return pmi.rank; }
-    int size() const { return pmi.size; }
+    int rank() const { return boot.rank(); }
+    int size() const { return boot.size(); }
     int gpu_id() const { return hip->gpu_id; }
     bool is_virt_addr_mode() const { return fabric->is_virt_addr_mode(); }
     uint64_t get_current_threshold() const { return current_threshold; }
@@ -429,7 +431,7 @@ public:
         auto it = remote_info.find(map_key);
         if (it == remote_info.end()) {
             fprintf(stderr, "Rank %d: RMA info not set for rank %d buf %d\n",
-                    pmi.rank, dest_rank, dest_buf_index);
+                    boot.rank(), dest_rank, dest_buf_index);
             exit(1);
         }
         const auto& ri = it->second;
@@ -442,7 +444,7 @@ public:
         }
 
         // Queue RMA write
-        auto* dwq = new DwqWorkBuilder(pmi.rank);
+        auto* dwq = new DwqWorkBuilder(boot.rank());
         dwq->queue_rma_write(
             fabric->domain, fabric->ep,
             src_handle.buf, src_handle.mr->desc, size,
@@ -479,39 +481,33 @@ private:
         int ret = fi_control(&fabric->domain->fid, FI_QUEUE_WORK, &wb_work);
         if (ret) {
             fprintf(stderr, "Rank %d: fi_control(writeback) failed: %s\n",
-                    pmi.rank, fi_strerror(-ret));
+                    boot.rank(), fi_strerror(-ret));
             exit(1);
         }
         pending_wb_ops.push_back(wb_op);
     }
 
     void exchange_addresses() {
-        av_addrs.resize(pmi.size);
+        av_addrs.resize(boot.size());
 
-        char* my_hex = (char*)malloc(2 * fabric->addrlen + 1);
-        bytes_to_hex((uint8_t*)fabric->local_addr, fabric->addrlen, my_hex);
+        // Allgather libfabric addresses (raw bytes, no hex).
+        auto all = boot.allgather(fabric->local_addr, (int)fabric->addrlen);
 
-        char key[PMI2_MAX_KEYLEN];
-        snprintf(key, sizeof(key), "addr-%d", pmi.rank);
-        pmi.kvs_put(key, my_hex);
-        pmi.barrier();
-
-        uint8_t* peer_bin = (uint8_t*)malloc(fabric->addrlen);
-        for (int r = 0; r < pmi.size; r++) {
-            char peer_hex[PMI2_MAX_VALLEN];
-            snprintf(key, sizeof(key), "addr-%d", r);
-            pmi.kvs_get(key, peer_hex, sizeof(peer_hex));
-            hex_to_bytes(peer_hex, peer_bin, fabric->addrlen);
-
-            if (fi_av_insert(fabric->av, peer_bin, 1, &av_addrs[r], 0, NULL) != 1) {
-                fprintf(stderr, "Rank %d: fi_av_insert(rank %d) failed\n", pmi.rank, r);
+        for (int r = 0; r < boot.size(); r++) {
+            if ((int)all[r].size() != (int)fabric->addrlen) {
+                fprintf(stderr, "Rank %d: allgather(rank %d) size mismatch: "
+                                "expected %zu, got %zu\n",
+                        boot.rank(), r, fabric->addrlen, all[r].size());
+                exit(1);
+            }
+            if (fi_av_insert(fabric->av, all[r].data(), 1, &av_addrs[r], 0, NULL) != 1) {
+                fprintf(stderr, "Rank %d: fi_av_insert(rank %d) failed\n",
+                        boot.rank(), r);
                 exit(1);
             }
         }
 
-        fabric->local_addr_in_av = av_addrs[pmi.rank];
-        free(my_hex);
-        free(peer_bin);
+        fabric->local_addr_in_av = av_addrs[boot.rank()];
     }
 
     void init_atomic_signaling() {
@@ -527,9 +523,9 @@ private:
 
         // Register as memory regions for RDMA
         mr_atomic_result = new MemoryRegion(fabric->domain, fabric->ep, fabric->cxi_info,
-                                             atomic_result, sizeof(uint64_t), true, hip->gpu_id, pmi.rank);
+                                             atomic_result, sizeof(uint64_t), true, hip->gpu_id, boot.rank());
         mr_atomic_operand = new MemoryRegion(fabric->domain, fabric->ep, fabric->cxi_info,
-                                              atomic_operand, sizeof(uint64_t), true, hip->gpu_id, pmi.rank);
+                                              atomic_operand, sizeof(uint64_t), true, hip->gpu_id, boot.rank());
 
         // Create completion counter for atomic operations
         struct fi_cntr_attr cntr_attr = {};
@@ -538,75 +534,38 @@ private:
         int ret = fi_cntr_open(fabric->domain, &cntr_attr, &atomic_completion_cntr, NULL);
         if (ret) {
             fprintf(stderr, "Rank %d: fi_cntr_open(atomic) failed: %s\n",
-                    pmi.rank, fi_strerror(-ret));
+                    boot.rank(), fi_strerror(-ret));
             exit(1);
         }
     }
 
     void init_barrier() {
         ofi_barrier = new OfiBarrier(fabric->domain, fabric->av, fabric->cxi_info,
-                                      pmi.rank, pmi.size);
+                                      boot.rank(), boot.size());
 
-        // Exchange barrier EP addresses
-        char* my_hex = (char*)malloc(2 * ofi_barrier->addrlen + 1);
-        bytes_to_hex((uint8_t*)ofi_barrier->local_addr, ofi_barrier->addrlen, my_hex);
+        // Allgather barrier-EP addresses (raw bytes, no hex).
+        auto all = boot.allgather(ofi_barrier->local_addr,
+                                  (int)ofi_barrier->addrlen);
 
-        char key[PMI2_MAX_KEYLEN];
-        snprintf(key, sizeof(key), "barrier-ep-%d", pmi.rank);
-        pmi.kvs_put(key, my_hex);
-        pmi.barrier();
-
-        uint8_t* peer_bin = (uint8_t*)malloc(ofi_barrier->addrlen);
-        for (int r = 0; r < pmi.size; r++) {
-            char peer_hex[PMI2_MAX_VALLEN];
-            snprintf(key, sizeof(key), "barrier-ep-%d", r);
-            pmi.kvs_get(key, peer_hex, sizeof(peer_hex));
-            hex_to_bytes(peer_hex, peer_bin, ofi_barrier->addrlen);
-
+        for (int r = 0; r < boot.size(); r++) {
+            if ((int)all[r].size() != (int)ofi_barrier->addrlen) {
+                fprintf(stderr, "Rank %d: barrier allgather(rank %d) size mismatch\n",
+                        boot.rank(), r);
+                exit(1);
+            }
             fi_addr_t peer_av_addr;
-            if (fi_av_insert(fabric->av, peer_bin, 1, &peer_av_addr, 0, NULL) != 1) {
-                fprintf(stderr, "Rank %d: fi_av_insert(barrier %d) failed\n", pmi.rank, r);
+            if (fi_av_insert(fabric->av, all[r].data(), 1, &peer_av_addr, 0, NULL) != 1) {
+                fprintf(stderr, "Rank %d: fi_av_insert(barrier %d) failed\n",
+                        boot.rank(), r);
                 exit(1);
             }
             ofi_barrier->set_peer_addr(r, peer_av_addr);
         }
 
         ofi_barrier->post_initial_recvs();
-
-        free(my_hex);
-        free(peer_bin);
     }
 
     uint64_t make_remote_key(int rank, int buf_index) const {
         return ((uint64_t)rank << 48) | ((uint64_t)buf_index & 0xFFFFFFFFFFFF);
-    }
-
-    // Hex conversion utilities
-    static void bytes_to_hex(const uint8_t* in, size_t len, char* out) {
-        static const char* h = "0123456789abcdef";
-        for (size_t i = 0; i < len; i++) {
-            out[2 * i] = h[(in[i] >> 4) & 0xF];
-            out[2 * i + 1] = h[in[i] & 0xF];
-        }
-        out[2 * len] = '\0';
-    }
-
-    static int hexval(char c) {
-        if ('0' <= c && c <= '9') return c - '0';
-        if ('a' <= c && c <= 'f') return c - 'a' + 10;
-        if ('A' <= c && c <= 'F') return c - 'A' + 10;
-        return -1;
-    }
-
-    static int hex_to_bytes(const char* in, uint8_t* out, size_t outlen) {
-        size_t n = strlen(in);
-        if (n % 2 != 0 || outlen < n / 2) return -1;
-        for (size_t i = 0; i < n; i += 2) {
-            int hi = hexval(in[i]);
-            int lo = hexval(in[i + 1]);
-            if (hi < 0 || lo < 0) return -1;
-            out[i / 2] = (uint8_t)((hi << 4) | lo);
-        }
-        return (int)(n / 2);
     }
 };
