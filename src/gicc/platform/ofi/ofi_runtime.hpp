@@ -20,7 +20,6 @@
  */
 #pragma once
 
-#include <mpi.h>
 #include <hip/hip_runtime.h>
 #include <cstddef>
 #include <cstdint>
@@ -34,7 +33,7 @@
 
 // OFI backend internals (GdaComm, FabricDwqContext, MemoryRegion, etc.)
 #include "internal/hip_device_context.hpp"
-#include "internal/pmi_session.hpp"
+#include "gicc/bootstrap/bootstrap.hpp"
 #include "internal/device_affinity.hpp"
 #include "internal/fabric_dwq_context.hpp"
 #include "internal/memory_region.hpp"
@@ -57,16 +56,15 @@ class Runtime {
 public:
     static constexpr int POOL_SIZE = 32;   // max ops per batch
 
-    explicit Runtime(MPI_Comm comm = MPI_COMM_WORLD)
-        : comm_(nullptr), mpi_comm_(comm),
+    Runtime()
+        : comm_(nullptr),
           h_dev_ctx_(nullptr), d_dev_ctx_(nullptr),
           d_slot_pool_(nullptr), mr_slot_pool_(nullptr),
           d_operand_pool_(nullptr), mr_operand_pool_(nullptr),
           my_n_ops_(0), atomic_signals_queued_(false)
     {
-        (void)mpi_comm_;
         unset_rocr_visible_devices();
-        comm_ = new GdaComm();
+        comm_ = new GdaComm(boot_);
 
         // ONE shared GPU buffer holds POOL_SIZE × uint64_t atomic_result
         // slots, registered with ONE MemoryRegion.
@@ -328,6 +326,8 @@ public:
 
     int rank()   const { return comm_->rank(); }
     int size()   const { return comm_->size(); }
+    Bootstrap& boot() noexcept { return boot_; }
+    const Bootstrap& boot() const noexcept { return boot_; }
     int gpu_id() const { return comm_->gpu_id(); }
 
     GdaComm& ofi_comm() { return *comm_; }
@@ -346,8 +346,8 @@ private:
         struct fid_cntr* atomic_completion_cntr = nullptr;
     };
 
+    gicc::Bootstrap               boot_;
     GdaComm*                      comm_;
-    MPI_Comm                      mpi_comm_;
     DeviceCtx*                    h_dev_ctx_;
     DeviceCtx*                    d_dev_ctx_;
 
@@ -364,7 +364,7 @@ private:
 
     std::vector<OfiBuffer>        local_bufs_;
 
-    // Hex utilities for PMI exchange
+    // Hex utilities (retained for KVS-style bootstrap exchange through GdaComm)
     static void buf_to_hex(const uint8_t* in, size_t len, char* out) {
         static const char* h = "0123456789abcdef";
         for (size_t i = 0; i < len; i++) {
