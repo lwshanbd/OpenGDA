@@ -10,7 +10,6 @@
  */
 #include <cstdio>
 #include <cstdlib>
-#include <mpi.h>
 #include <hip/hip_runtime.h>
 
 #include "gicc/gicc.hpp"
@@ -47,14 +46,12 @@ static void verify_dst(int rank, void* d_dst, size_t size, const char* name) {
 }
 
 int main(int argc, char** argv) {
-    MPI_Init(&argc, &argv);
-
+    (void)argc; (void)argv;
     gicc::Runtime rt;
     int rank = rt.rank();
     int nranks = rt.size();
     if (nranks != 2) {
         if (rank == 0) fprintf(stderr, "Need exactly 2 ranks\n");
-        MPI_Finalize();
         return 1;
     }
 
@@ -73,7 +70,7 @@ int main(int argc, char** argv) {
     auto src_buf = rt.register_buffer(d_src, SIZE * N_PUTS, true);
     auto dst_buf = rt.register_buffer(d_dst, SIZE * N_PUTS, true);
     rt.exchange();
-    MPI_Barrier(MPI_COMM_WORLD);
+    rt.boot().barrier();
 
     if (rank == 0) {
         printf("=== gicc unified API: %zu puts of %zu bytes ===\n", N_PUTS, SIZE);
@@ -86,12 +83,11 @@ int main(int argc, char** argv) {
         (void)hipDeviceSynchronize();
         rt.reset();
     }
-    MPI_Barrier(MPI_COMM_WORLD);
+    rt.boot().barrier();
     verify_dst(rank, d_dst, SIZE * N_PUTS, "gicc put_no_db + flush + quiet");
-    MPI_Barrier(MPI_COMM_WORLD);
+    rt.boot().barrier();
 
     (void)hipFree(d_src);
     (void)hipFree(d_dst);
-    MPI_Finalize();
     return 0;
 }
