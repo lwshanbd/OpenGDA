@@ -11,7 +11,6 @@
 #include <gicc/gicc_device.cuh>
 
 #include <cuda_runtime.h>
-#include <mpi.h>
 #include <cstdio>
 #include <cstdint>
 #include <unistd.h>
@@ -116,7 +115,7 @@ __global__ void warmup_kernel(
 static void cuda_check(cudaError_t err, const char* msg) {
     if (err != cudaSuccess) {
         fprintf(stderr, "CUDA Error: %s - %s\n", msg, cudaGetErrorString(err));
-        MPI_Abort(MPI_COMM_WORLD, 1);
+        std::exit(1);
     }
 }
 
@@ -136,14 +135,12 @@ static const char* format_size(size_t size, char* buf) {
 //==============================================================================
 
 int main(int argc, char** argv) {
-    MPI_Init(&argc, &argv);
-
+    (void)argc; (void)argv;
     // --- All setup in one object ---
     gicc::Runtime rt;
 
     if (rt.size() != 2) {
         if (rt.rank() == 0) fprintf(stderr, "Requires exactly 2 ranks\n");
-        MPI_Finalize();
         return 1;
     }
 
@@ -279,6 +276,5 @@ int main(int argc, char** argv) {
     cudaFree(d_send);
     cudaFree(d_recv);
 
-    MPI_Finalize();
     return 0;
 }
