@@ -115,7 +115,7 @@ __global__ void warmup_kernel(
 static void cuda_check(cudaError_t err, const char* msg) {
     if (err != cudaSuccess) {
         fprintf(stderr, "CUDA Error: %s - %s\n", msg, cudaGetErrorString(err));
-        std::exit(1);
+        gicc::abort(1, "cuda_check failed");
     }
 }
 

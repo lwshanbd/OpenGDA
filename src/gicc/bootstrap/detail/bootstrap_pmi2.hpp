@@ -14,8 +14,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace gicc::detail {
@@ -34,11 +36,19 @@ public:
         owned_ = true;
 
         char host[256] = {0};
-        gethostname(host, sizeof(host) - 1);
+        if (gethostname(host, sizeof(host) - 1) != 0) {
+            throw std::runtime_error("BootstrapPMI2: gethostname failed");
+        }
+        host[sizeof(host) - 1] = '\0';
+        if (host[0] == '\0') {
+            throw std::runtime_error("BootstrapPMI2: gethostname returned empty string");
+        }
         hostname_.assign(host);
 
-        read_env_local_identity();
         publish_hostname_and_fence();
+        // locality_map() requires the hostname KVS entries; resolve local
+        // identity from the map (authoritative) with env vars as a hint.
+        resolve_local_identity();
     }
 
     BootstrapPMI2(int argc, char** argv)
@@ -126,25 +136,30 @@ public:
     }
 
     void send(const void* buf, int len, int dest, int tag = 0) {
-        const uint64_t epoch = next_epoch();
-        publish_blob(kvs_key("p2p", epoch, rank_, dest, tag),
+        // Per-(src,dst,tag) sequence so asymmetric send/recv patterns (e.g. a
+        // gather on rank 0 pulling from each peer) stay in sync — a global
+        // counter would diverge between sender and receiver.
+        const uint64_t seq = next_p2p_seq(rank_, dest, tag);
+        publish_blob(kvs_key("p2p", seq, rank_, dest, tag),
                      reinterpret_cast<const uint8_t*>(buf), len);
         barrier();
     }
     void recv(void* buf, int len, int src, int tag = 0) {
         barrier();
-        auto blob = fetch_blob(kvs_key("p2p", next_epoch_peek(), src, rank_, tag));
+        const uint64_t seq = next_p2p_seq(src, rank_, tag);
+        auto blob = fetch_blob(kvs_key("p2p", seq, src, rank_, tag));
         if ((int)blob.size() != len) {
             throw std::runtime_error("BootstrapPMI2::recv: size mismatch");
         }
         std::memcpy(buf, blob.data(), len);
     }
     void sendrecv(const void* sbuf, void* rbuf, int len, int peer, int tag = 0) {
-        const uint64_t epoch = next_epoch();
-        publish_blob(kvs_key("p2p", epoch, rank_, peer, tag),
+        const uint64_t send_seq = next_p2p_seq(rank_, peer, tag);
+        const uint64_t recv_seq = next_p2p_seq(peer, rank_, tag);
+        publish_blob(kvs_key("p2p", send_seq, rank_, peer, tag),
                      reinterpret_cast<const uint8_t*>(sbuf), len);
         barrier();
-        auto blob = fetch_blob(kvs_key("p2p", epoch, peer, rank_, tag));
+        auto blob = fetch_blob(kvs_key("p2p", recv_seq, peer, rank_, tag));
         if ((int)blob.size() != len) {
             throw std::runtime_error("BootstrapPMI2::sendrecv: size mismatch");
         }
@@ -157,6 +172,12 @@ public:
         return std::chrono::duration<double>(now).count();
     }
 
+    // Abort all ranks. PMI2_Abort notifies the resource manager.
+    [[noreturn]] static void abort(int code = 1, const char* msg = "BootstrapPMI2::abort") {
+        PMI2_Abort(1 /*flag: abort all*/, msg);
+        std::_Exit(code);  // fallback if PMI2_Abort returns
+    }
+
 private:
     int rank_ = -1;
     int size_ = 0;
@@ -164,26 +185,53 @@ private:
     int local_size_ = 0;
     bool owned_ = false;
     std::string hostname_;
-    uint64_t epoch_counter_ = 0;
+    std::map<std::tuple<int,int,int>, uint64_t> p2p_seq_;  // key: (src,dst,tag)
 
-    uint64_t next_epoch() { return epoch_counter_++; }
-    uint64_t next_epoch_peek() { return epoch_counter_ - 1; }
+    uint64_t next_p2p_seq(int src, int dst, int tag) {
+        return p2p_seq_[{src, dst, tag}]++;
+    }
 
-    void read_env_local_identity() {
+    // Resolve local_rank_ / local_size_. Prefer launcher env vars; if the
+    // launcher-provided values are inconsistent with the KVS-derived locality
+    // map we trust the map and emit a warning — silently taking (0,1) masks
+    // misconfiguration and collapses every rank onto GPU 0.
+    void resolve_local_identity() {
         const char* lr_vars[] = {
             "SLURM_LOCALID", "FLUX_TASK_LOCAL_ID",
             "OMPI_COMM_WORLD_LOCAL_RANK", "MPI_LOCALRANKID", nullptr};
-        for (int i = 0; lr_vars[i] && local_rank_ < 0; ++i) {
-            if (const char* v = std::getenv(lr_vars[i])) local_rank_ = std::atoi(v);
+        int env_lr = -1;
+        for (int i = 0; lr_vars[i] && env_lr < 0; ++i) {
+            if (const char* v = std::getenv(lr_vars[i])) env_lr = std::atoi(v);
         }
-        if (local_rank_ < 0) local_rank_ = 0;
-
         const char* ls_vars[] = {
             "SLURM_NTASKS_PER_NODE", "FLUX_LOCAL_RANKS", nullptr};
-        for (int i = 0; ls_vars[i] && local_size_ <= 0; ++i) {
-            if (const char* v = std::getenv(ls_vars[i])) local_size_ = std::atoi(v);
+        int env_ls = -1;
+        for (int i = 0; ls_vars[i] && env_ls < 0; ++i) {
+            if (const char* v = std::getenv(ls_vars[i])) env_ls = std::atoi(v);
         }
-        if (local_size_ <= 0) local_size_ = 1;
+
+        auto same = locality_map();
+        int derived_lr = 0, derived_ls = 0;
+        for (int i = 0; i < size_; ++i) {
+            if (!same[i]) continue;
+            if (i < rank_) ++derived_lr;
+            ++derived_ls;
+        }
+
+        if (env_lr >= 0 && env_lr != derived_lr) {
+            std::fprintf(stderr,
+                "BootstrapPMI2 rank %d: env local_rank=%d disagrees with "
+                "hostname-derived %d; using derived.\n",
+                rank_, env_lr, derived_lr);
+        }
+        if (env_ls > 0 && env_ls != derived_ls) {
+            std::fprintf(stderr,
+                "BootstrapPMI2 rank %d: env local_size=%d disagrees with "
+                "hostname-derived %d; using derived.\n",
+                rank_, env_ls, derived_ls);
+        }
+        local_rank_ = derived_lr;
+        local_size_ = derived_ls;
     }
 
     void publish_hostname_and_fence() {
@@ -207,16 +255,23 @@ private:
         }
         return out;
     }
-    static std::vector<uint8_t> hex_decode(const char* s) {
-        int n = (int)std::strlen(s);
+    static int hex_nibble(char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+        if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+        return -1;
+    }
+    static std::vector<uint8_t> hex_decode(const char* s, int n) {
         if (n % 2 != 0) {
             throw std::runtime_error("BootstrapPMI2: odd-length hex blob");
         }
         std::vector<uint8_t> out(n / 2);
         for (int i = 0; i < n / 2; ++i) {
-            unsigned hi = 0, lo = 0;
-            std::sscanf(s + 2 * i,     "%1x", &hi);
-            std::sscanf(s + 2 * i + 1, "%1x", &lo);
+            int hi = hex_nibble(s[2 * i]);
+            int lo = hex_nibble(s[2 * i + 1]);
+            if (hi < 0 || lo < 0) {
+                throw std::runtime_error("BootstrapPMI2: non-hex byte in blob");
+            }
             out[i] = (uint8_t)((hi << 4) | lo);
         }
         return out;
@@ -245,15 +300,33 @@ private:
         }
     }
     std::vector<uint8_t> fetch_blob(const std::string& key) {
+        // Grow the buffer until PMI2_KVS_Get reports a vallen that fits.
+        // A fixed 16 KiB buffer silently truncates larger allgathers.
         std::vector<char> buf(16 * 1024);
-        int vallen = 0;
-        int rc = PMI2_KVS_Get(NULL, PMI2_ID_NULL, key.c_str(),
-                              buf.data(), (int)buf.size(), &vallen);
-        if (rc != PMI2_SUCCESS) {
-            throw std::runtime_error(
-                "BootstrapPMI2::fetch_blob: KVS_Get(" + key + ") failed");
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            int vallen = 0;
+            int rc = PMI2_KVS_Get(NULL, PMI2_ID_NULL, key.c_str(),
+                                  buf.data(), (int)buf.size(), &vallen);
+            if (rc != PMI2_SUCCESS) {
+                throw std::runtime_error(
+                    "BootstrapPMI2::fetch_blob: KVS_Get(" + key + ") failed");
+            }
+            if (vallen < 0) {
+                throw std::runtime_error(
+                    "BootstrapPMI2::fetch_blob: negative vallen for " + key);
+            }
+            if (vallen < (int)buf.size()) {
+                // vallen includes the trailing NUL on some implementations;
+                // hex_decode only consumes the hex chars.
+                int hex_len = vallen;
+                while (hex_len > 0 && buf[hex_len - 1] == '\0') --hex_len;
+                return hex_decode(buf.data(), hex_len);
+            }
+            buf.resize(buf.size() * 4);
         }
-        return hex_decode(buf.data());
+        throw std::runtime_error(
+            "BootstrapPMI2::fetch_blob: value for " + key +
+            " exceeds max buffer (4 MiB)");
     }
 };
 

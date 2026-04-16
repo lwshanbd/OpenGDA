@@ -23,3 +23,13 @@
     #error "Define GICC_BOOTSTRAP_MPI or GICC_BOOTSTRAP_PMI2 " \
            "(set via -DGICC_BOOTSTRAP=mpi|pmi2 in CMake)"
 #endif
+
+namespace gicc {
+
+// Tear down the whole job. Use this from error paths in examples/apps so a
+// single failing rank cannot leave peers hanging on a collective.
+[[noreturn]] inline void abort(int code = 1, const char* msg = nullptr) {
+    Bootstrap::abort(code, msg);
+}
+
+} // namespace gicc

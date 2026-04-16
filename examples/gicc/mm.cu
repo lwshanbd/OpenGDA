@@ -21,7 +21,7 @@
     if (err != cudaSuccess) { \
         std::cerr << "CUDA error: " << cudaGetErrorString(err) \
                   << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
-        std::exit(1); \
+        gicc::abort(1, "CUDA_CHECK failed"); \
     } \
 } while(0)
 
