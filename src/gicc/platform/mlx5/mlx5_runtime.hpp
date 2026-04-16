@@ -2,7 +2,7 @@
  * mlx5_runtime.hpp - MLX5 platform implementation of gicc::Runtime
  *
  * Handles all host-side setup for GPU-triggered RDMA over InfiniBand:
- *   - MPI bootstrap
+ *   - Bootstrap (MPI or PMI2, selected at build time)
  *   - GPU selection
  *   - IB device open, PD allocation
  *   - DevX QP creation per peer (GPU-accessible WQE buf, doorbell, BlueFlame)
@@ -15,8 +15,6 @@
 #include <cuda_runtime.h>
 #include <infiniband/verbs.h>
 #include <infiniband/mlx5dv.h>
-#include <mpi.h>
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,7 +24,7 @@
 #include "gicc/gicc_types.hpp"
 #include "gicc/mlx5/devx_qp.hpp"
 #include "gicc/util/memory_region.hpp"
-#include "gicc/util/mpi_bootstrap.hpp"
+#include "gicc/bootstrap/bootstrap.hpp"
 
 // Include gda_device_opt.cuh for GdaDeviceStateOpt struct definition.
 // Must come AFTER mlx5dv.h (included by mlx5_devx_qp.hpp) to avoid
@@ -44,9 +42,7 @@ using DeviceCtx = gicc::mlx5::GdaDeviceStateOpt;
 
 class Runtime {
 public:
-    Runtime(MPI_Comm comm = MPI_COMM_WORLD) {
-        mpi_ = new gicc::MpiBootstrap(comm);
-
+    Runtime() {
         // GPU setup
         int num_gpus = 0;
         cudaGetDeviceCount(&num_gpus);
@@ -54,7 +50,7 @@ public:
             fprintf(stderr, "GICC: No CUDA devices found\n");
             exit(1);
         }
-        gpu_id_ = mpi_->local_rank % num_gpus;
+        gpu_id_ = boot_.local_rank() % num_gpus;
         cudaSetDevice(gpu_id_);
         cudaGetDeviceProperties(&gpu_props_, gpu_id_);
         clock_rate_khz_ = gpu_props_.clockRate;
@@ -65,18 +61,17 @@ public:
         // Allocate protection domain
         pd_ = ibv_alloc_pd(ib_ctx_);
         if (!pd_) {
-            fprintf(stderr, "GICC Rank %d: ibv_alloc_pd failed\n", mpi_->rank);
+            fprintf(stderr, "GICC Rank %d: ibv_alloc_pd failed\n", boot_.rank());
             exit(1);
         }
 
         // Create one DevX QP per peer
-        for (int i = 0; i < mpi_->size; i++) {
-            if (i == mpi_->rank) continue;
+        for (int i = 0; i < boot_.size(); i++) {
+            if (i == boot_.rank()) continue;
             peer_qps_[i] = new gicc::mlx5::DevxQp(
-                ib_ctx_, pd_, mpi_->rank, 1, 256, 512);
+                ib_ctx_, pd_, boot_.rank(), 1, 256, 512);
         }
 
-        // Connect all QPs
         connect_peers();
     }
 
@@ -91,16 +86,13 @@ public:
 
         if (pd_) { ibv_dealloc_pd(pd_); pd_ = nullptr; }
         if (ib_ctx_) { ibv_close_device(ib_ctx_); ib_ctx_ = nullptr; }
-
-        delete mpi_;
-        mpi_ = nullptr;
     }
 
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
 
     Buffer register_buffer(void* buf, size_t size, bool is_device) {
-        auto* mr = new gicc::MemoryRegion(pd_, buf, size, is_device, mpi_->rank);
+        auto* mr = new gicc::MemoryRegion(pd_, buf, size, is_device, boot_.rank());
         int idx = (int)local_bufs_.size();
         local_bufs_.push_back(mr);
         return { buf, size, (uint64_t)buf, mr->lkey, mr->rkey, idx };
@@ -115,17 +107,14 @@ public:
             my_entries[i] = { (uint64_t)local_bufs_[i]->buf, local_bufs_[i]->rkey };
         }
 
-        std::vector<BufEntry> all_entries(mpi_->size * n);
-        MPI_Allgather(my_entries.data(), n * (int)sizeof(BufEntry), MPI_BYTE,
-                      all_entries.data(), n * (int)sizeof(BufEntry), MPI_BYTE,
-                      mpi_->comm);
+        auto raw = boot_.allgather(my_entries.data(), n * (int)sizeof(BufEntry));
 
-        remote_bufs_.resize(mpi_->size);
-        for (int r = 0; r < mpi_->size; r++) {
+        remote_bufs_.resize(boot_.size());
+        for (int r = 0; r < boot_.size(); r++) {
             remote_bufs_[r].resize(n);
+            const auto* entries = reinterpret_cast<const BufEntry*>(raw[r].data());
             for (int b = 0; b < n; b++) {
-                auto& e = all_entries[r * n + b];
-                remote_bufs_[r][b] = { e.addr, e.rkey };
+                remote_bufs_[r][b] = { entries[b].addr, entries[b].rkey };
             }
         }
     }
@@ -138,7 +127,7 @@ public:
         auto it = peer_qps_.find(peer_rank);
         if (it == peer_qps_.end()) {
             fprintf(stderr, "GICC Rank %d: No QP for peer %d\n",
-                    mpi_->rank, peer_rank);
+                    boot_.rank(), peer_rank);
             exit(1);
         }
         auto* qp = it->second;
@@ -186,8 +175,8 @@ public:
     GiccContext* build_context() {
         GiccContext h_ctx;
         memset(&h_ctx, 0, sizeof(h_ctx));
-        h_ctx.my_rank = mpi_->rank;
-        h_ctx.num_peers = mpi_->size;
+        h_ctx.my_rank = boot_.rank();
+        h_ctx.num_peers = boot_.size();
 
         // Fill local buffer registry
         h_ctx.num_local_bufs = (int)local_bufs_.size();
@@ -199,7 +188,7 @@ public:
         }
 
         // Fill remote buffer info and per-peer DeviceCtxs
-        for (int peer = 0; peer < mpi_->size && peer < GICC_MAX_PEERS; peer++) {
+        for (int peer = 0; peer < boot_.size() && peer < GICC_MAX_PEERS; peer++) {
             // Remote buffer entries
             for (int b = 0; b < h_ctx.num_local_bufs && b < GICC_MAX_BUFS; b++) {
                 h_ctx.remote_bufs[peer][b].addr = remote_bufs_[peer][b].addr;
@@ -207,7 +196,7 @@ public:
             }
 
             // Per-peer DeviceCtx (reuse prepare() logic, pass buf 0 for default remote)
-            if (peer == mpi_->rank) {
+            if (peer == boot_.rank()) {
                 h_ctx.peer_ctxs[peer] = nullptr;
             } else {
                 h_ctx.peer_ctxs[peer] = prepare(peer, 0);
@@ -225,16 +214,19 @@ public:
         device_ctxs_.clear();
     }
 
-    void barrier() { mpi_->barrier(); }
+    void barrier() { boot_.barrier(); }
 
-    int rank() const { return mpi_->rank; }
-    int size() const { return mpi_->size; }
+    int rank() const { return boot_.rank(); }
+    int size() const { return boot_.size(); }
     int gpu_id() const { return gpu_id_; }
     double clock_rate_khz() const { return clock_rate_khz_; }
     const char* gpu_name() const { return gpu_props_.name; }
 
+    Bootstrap& boot() noexcept { return boot_; }
+    const Bootstrap& boot() const noexcept { return boot_; }
+
 private:
-    gicc::MpiBootstrap* mpi_ = nullptr;
+    gicc::Bootstrap boot_;
     struct ibv_context* ib_ctx_ = nullptr;
     struct ibv_pd* pd_ = nullptr;
 
@@ -252,7 +244,7 @@ private:
         int num_devices = 0;
         struct ibv_device** dev_list = ibv_get_device_list(&num_devices);
         if (!dev_list || num_devices == 0) {
-            fprintf(stderr, "GICC Rank %d: No IB devices found\n", mpi_->rank);
+            fprintf(stderr, "GICC Rank %d: No IB devices found\n", boot_.rank());
             exit(1);
         }
 
@@ -271,7 +263,7 @@ private:
         ibv_free_device_list(dev_list);
 
         if (!ib_ctx_) {
-            fprintf(stderr, "GICC Rank %d: ibv_open_device failed\n", mpi_->rank);
+            fprintf(stderr, "GICC Rank %d: ibv_open_device failed\n", boot_.rank());
             exit(1);
         }
     }
@@ -298,7 +290,7 @@ private:
             my_info.psn = 0;
 
             ConnInfo peer_info = {};
-            mpi_->exchange(&my_info, &peer_info, sizeof(ConnInfo), peer);
+            boot_.sendrecv(&my_info, &peer_info, sizeof(ConnInfo), peer);
 
             qp->rst2init();
             qp->init2rtr(peer_info.qpn, peer_info.lid, peer_info.gid,
@@ -306,7 +298,7 @@ private:
             qp->rtr2rts(my_info.psn);
         }
 
-        mpi_->barrier();
+        boot_.barrier();
     }
 };
 
