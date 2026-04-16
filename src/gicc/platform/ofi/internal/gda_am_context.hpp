@@ -4,7 +4,7 @@
  * This file provides host-side AM context management:
  *   - Allocation of per-peer inbox rings in GPU device memory
  *   - Registration of memory regions for RDMA
- *   - Address exchange via PMI KVS
+ *   - Address exchange via Bootstrap allgather
  *
  * The AM subsystem shares DWQ/counter pool with GdaComm.
  */
@@ -197,32 +197,27 @@ private:
             my_infos[p].nslots = nslots;
         }
 
-        // Publish my info
-        char key[PMI2_MAX_KEYLEN];
-        char hex[PMI2_MAX_VALLEN];
+        // Allgather per-peer info blobs via Bootstrap.
         size_t info_size = sizeof(am_exchange_info_t) * npeers;
+        auto all = comm.boot.allgather(my_infos.data(), (int)info_size);
 
-        snprintf(key, sizeof(key), "am-info-%d", comm.rank());
-        bytes_to_hex((uint8_t*)my_infos.data(), info_size, hex);
-        comm.pmi.kvs_put(key, hex);
-
-        comm.pmi.barrier();
-
-        // Get all peers' info and populate states
+        // Populate send/recv states from each peer's contribution.
         h_send_states.resize(npeers);
         h_recv_states.resize(npeers);
 
         for (int p = 0; p < npeers; p++) {
-            // Get peer's exchange info
-            snprintf(key, sizeof(key), "am-info-%d", p);
-            char peer_hex[PMI2_MAX_VALLEN];
-            comm.pmi.kvs_get(key, peer_hex, sizeof(peer_hex));
-
-            std::vector<am_exchange_info_t> peer_infos(npeers);
-            hex_to_bytes(peer_hex, (uint8_t*)peer_infos.data(), info_size);
+            if (all[p].size() != info_size) {
+                fprintf(stderr,
+                        "Rank %d: AM exchange blob(%d) size mismatch: "
+                        "expected %zu, got %zu\n",
+                        comm.rank(), p, info_size, all[p].size());
+                exit(1);
+            }
+            const auto* peer_infos =
+                reinterpret_cast<const am_exchange_info_t*>(all[p].data());
 
             // Peer p's info for ME is at index [my_rank]
-            am_exchange_info_t& info_for_me = peer_infos[comm.rank()];
+            const am_exchange_info_t& info_for_me = peer_infos[comm.rank()];
 
             // Setup send state for peer p (where I send TO peer p)
             h_send_states[p].peer_rank = p;
@@ -283,34 +278,6 @@ private:
         check_hip(hipDeviceSynchronize(), "hipDeviceSynchronize");
     }
 
-    // Hex conversion utilities
-    static void bytes_to_hex(const uint8_t* in, size_t len, char* out) {
-        static const char* h = "0123456789abcdef";
-        for (size_t i = 0; i < len; i++) {
-            out[2 * i] = h[(in[i] >> 4) & 0xF];
-            out[2 * i + 1] = h[in[i] & 0xF];
-        }
-        out[2 * len] = '\0';
-    }
-
-    static int hexval(char c) {
-        if ('0' <= c && c <= '9') return c - '0';
-        if ('a' <= c && c <= 'f') return c - 'a' + 10;
-        if ('A' <= c && c <= 'F') return c - 'A' + 10;
-        return -1;
-    }
-
-    static int hex_to_bytes(const char* in, uint8_t* out, size_t outlen) {
-        size_t n = strlen(in);
-        if (n % 2 != 0 || outlen < n / 2) return -1;
-        for (size_t i = 0; i < n; i += 2) {
-            int hi = hexval(in[i]);
-            int lo = hexval(in[i + 1]);
-            if (hi < 0 || lo < 0) return -1;
-            out[i / 2] = (uint8_t)((hi << 4) | lo);
-        }
-        return (int)(n / 2);
-    }
 };
 
 }  // namespace am
