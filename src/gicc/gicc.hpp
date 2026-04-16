@@ -3,7 +3,7 @@
  *
  * Simplified NVSHMEM-style API:
  *
- *   gicc::init(MPI_COMM_WORLD);
+ *   gicc::init();
  *   void* send = gicc::malloc(size);              // collective
  *   void* recv = gicc::malloc(size);              // collective
  *   auto* ctx  = gicc::context();                 // GPU-accessible context
@@ -30,15 +30,16 @@ namespace gicc {
 // The Runtime class is defined by the platform-specific header below.
 // All platforms must provide these methods:
 //
-//   Runtime()                          - Initialize (MPI, GPU, network)
+//   Runtime()                          - Initialize (Bootstrap, GPU, network)
 //   ~Runtime()                         - Cleanup
 //   Buffer register_buffer(ptr, size, is_device)
 //   void exchange()                    - Collective buffer info exchange
 //   RemoteBufferInfo remote_buffer(rank, buf_index)
 //   DeviceCtx* prepare(peer_rank, remote_buf_index)
 //   void reset()                       - Free GPU DeviceCtxs
-//   void barrier()                     - MPI barrier
+//   void barrier()                     - Global barrier (via Bootstrap)
 //   int rank(), size(), gpu_id()
+//   Bootstrap& boot()                  - Access the Bootstrap for collectives
 //   double clock_rate_khz()
 //   const char* gpu_name()
 //==============================================================================
