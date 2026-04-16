@@ -21,7 +21,7 @@
 #include <vector>
 #include <algorithm>
 
-#include <mpi.h>
+
 #include <hip/hip_runtime.h>
 
 #include "gicc/gicc.hpp"
@@ -72,7 +72,7 @@ __global__ void verify_copy_all_kernel(const uint8_t* src_base, uint8_t* dst_bas
 // hipMemset(<16KB) → kernel-memset path whose L2 writeback can race with
 // subsequent NIC PCIe writes to the same address. The threadfence_system
 // at the end forces all preceding writes to be visible in HBM before
-// the kernel exits, so MPI_Barrier afterwards is a true memory ordering
+// the kernel exits, so a Bootstrap barrier afterwards is a true memory ordering
 // boundary.
 __global__ void memset_fenced_kernel(uint8_t* dst, uint8_t value, size_t n) {
     for (size_t i = threadIdx.x + blockIdx.x * blockDim.x; i < n;
@@ -90,14 +90,12 @@ static const char* fmt_size(size_t s, char* buf) {
 }
 
 int main(int argc, char** argv) {
-    MPI_Init(&argc, &argv);
-
+    (void)argc; (void)argv;
     gicc::Runtime rt;
     int rank   = rt.rank();
     int nranks = rt.size();
     if (nranks != 2) {
         if (rank == 0) fprintf(stderr, "Need exactly 2 ranks\n");
-        MPI_Finalize();
         return 1;
     }
     int peer = 1 - rank;
@@ -131,7 +129,7 @@ int main(int argc, char** argv) {
     }
 
     rt.exchange();
-    MPI_Barrier(MPI_COMM_WORLD);
+    rt.boot().barrier();
 
     if (rank == 0) {
         printf("%-8s  %12s  %12s  %s\n", "Size", "Total(us)", "Per-xfer(us)", "Statistics");
@@ -165,7 +163,7 @@ int main(int argc, char** argv) {
             } else {
                 // EXPERIMENT: no per-iter init on rank 1
             }
-            MPI_Barrier(MPI_COMM_WORLD);
+            rt.boot().barrier();
 
             if (rank == 0) {
                 for (int i = 0; i < N_STREAMS; i++) {
@@ -184,7 +182,7 @@ int main(int argc, char** argv) {
 
                 rt.reset();
             }
-            MPI_Barrier(MPI_COMM_WORLD);
+            rt.boot().barrier();
 
             // Verification (rank 1) — single GPU kernel copies all 32 stream
             // sub-regions in one launch to avoid 32 sequential kernel launch
@@ -214,7 +212,7 @@ int main(int argc, char** argv) {
                 }
                 if (total_errors > 0) verify_failures++;
             }
-            MPI_Barrier(MPI_COMM_WORLD);
+            rt.boot().barrier();
         }
 
         if (rank == 0 && n_done > 0) {
@@ -238,6 +236,5 @@ int main(int argc, char** argv) {
     (void)hipFree(d_src);
     (void)hipFree(d_dst);
     (void)hipHostFree(h_verify);
-    MPI_Finalize();
     return 0;
 }
