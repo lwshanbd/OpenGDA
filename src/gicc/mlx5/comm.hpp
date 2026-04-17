@@ -17,7 +17,7 @@
 #include <arpa/inet.h>
 
 #include "gicc/util/cuda_device_context.hpp"
-#include "gicc/util/mpi_bootstrap.hpp"
+#include "gicc/bootstrap/bootstrap.hpp"
 #include "gicc/util/ibv_context.hpp"
 #include "gicc/util/memory_region.hpp"
 #include "types.hpp"
@@ -58,7 +58,7 @@ struct GdaRemoteInfo {
 class GdaComm {
 public:
     // Components
-    MpiBootstrap mpi;
+    gicc::Bootstrap& boot;
     CudaDeviceContext* cuda;
     IbvContext* ibv;
 
@@ -78,14 +78,14 @@ public:
     volatile uint64_t* d_trigger_cntr;
     volatile uint64_t* d_completion_cntr;
 
-    explicit GdaComm(int local_rank = -1)
-        : cuda(nullptr), ibv(nullptr),
+    explicit GdaComm(gicc::Bootstrap& boot_, int local_rank = -1)
+        : boot(boot_), cuda(nullptr), ibv(nullptr),
           op_counter(0), completion_counter(0),
           h_trigger_cntr(nullptr), h_completion_cntr(nullptr),
           d_trigger_cntr(nullptr), d_completion_cntr(nullptr)
     {
         // Determine GPU to use
-        int gpu_id = (local_rank >= 0) ? local_rank : mpi.local_rank;
+        int gpu_id = (local_rank >= 0) ? local_rank : boot.local_rank();
 
         int num_gpus = 0;
         CUDA_CHECK(cudaGetDeviceCount(&num_gpus));
@@ -97,7 +97,7 @@ public:
         cuda = new CudaDeviceContext(gpu_id);
 
         // Initialize IB with per-peer QPs
-        ibv = new IbvContext(mpi.rank, mpi.size);
+        ibv = new IbvContext(boot.rank(), boot.size());
 
         // Allocate GPU-visible counters
         allocate_counters();
@@ -124,7 +124,7 @@ public:
      * Register a buffer for RDMA
      */
     GdaHandle register_buffer(void* buf, size_t size, bool is_device) {
-        auto* mr = new MemoryRegion(ibv->pd, buf, size, is_device, mpi.rank);
+        auto* mr = new MemoryRegion(ibv->pd, buf, size, is_device, boot.rank());
         registered_mrs.push_back(mr);
 
         GdaHandle handle;
@@ -148,9 +148,9 @@ public:
         my_info.addr = (uint64_t)handle.buf;
         my_info.rkey = handle.mr->rkey;
 
-        auto all_info = mpi.allgather_fixed(my_info);
+        auto all_info = boot.allgather_fixed(my_info);
 
-        for (int r = 0; r < mpi.size; r++) {
+        for (int r = 0; r < boot.size(); r++) {
             uint64_t key = make_key(r, buf_index);
             remote_info[key] = {all_info[r].addr, all_info[r].rkey};
         }
@@ -173,7 +173,7 @@ public:
         auto it = remote_info.find(key);
         if (it == remote_info.end()) {
             fprintf(stderr, "Rank %d: No remote info for rank %d buf %d\n",
-                    mpi.rank, dest_rank, buf_index);
+                    boot.rank(), dest_rank, buf_index);
             exit(1);
         }
 
@@ -182,7 +182,7 @@ public:
         if (getenv("GDA_DEBUG")) {
             printf("Rank %d: RDMA PUT to rank %d buf %d: local=%p (lkey=0x%x), "
                    "remote=0x%lx (rkey=0x%x), size=%zu, op_id=%lu\n",
-                   mpi.rank, dest_rank, buf_index,
+                   boot.rank(), dest_rank, buf_index,
                    handle.buf, handle.mr->lkey,
                    it->second.addr, it->second.rkey, size, op_id);
         }
@@ -195,7 +195,7 @@ public:
 
         if (ret) {
             fprintf(stderr, "Rank %d: post_rdma_write failed: %s\n",
-                    mpi.rank, strerror(ret));
+                    boot.rank(), strerror(ret));
             exit(1);
         }
 
@@ -217,7 +217,7 @@ public:
 
         if (ret) {
             fprintf(stderr, "Rank %d: post_rdma_write failed: %s\n",
-                    mpi.rank, strerror(ret));
+                    boot.rank(), strerror(ret));
             exit(1);
         }
 
@@ -233,7 +233,7 @@ public:
         auto it = remote_info.find(key);
         if (it == remote_info.end()) {
             fprintf(stderr, "Rank %d: No remote info for rank %d buf %d\n",
-                    mpi.rank, src_rank, buf_index);
+                    boot.rank(), src_rank, buf_index);
             exit(1);
         }
 
@@ -247,7 +247,7 @@ public:
 
         if (ret) {
             fprintf(stderr, "Rank %d: post_rdma_read failed: %s\n",
-                    mpi.rank, strerror(ret));
+                    boot.rank(), strerror(ret));
             exit(1);
         }
 
@@ -264,13 +264,13 @@ public:
         while (completed < count) {
             int n = ibv->poll_cq(&wc, 1);
             if (n < 0) {
-                fprintf(stderr, "Rank %d: poll_cq failed\n", mpi.rank);
+                fprintf(stderr, "Rank %d: poll_cq failed\n", boot.rank());
                 exit(1);
             }
             if (n > 0) {
                 if (wc.status != IBV_WC_SUCCESS) {
                     fprintf(stderr, "Rank %d: WC error: %s (op_id=%lu)\n",
-                            mpi.rank, ibv_wc_status_str(wc.status), wc.wr_id);
+                            boot.rank(), ibv_wc_status_str(wc.status), wc.wr_id);
                     exit(1);
                 }
                 completed++;
@@ -286,13 +286,13 @@ public:
         struct ibv_wc wc[16];
         int n = ibv->poll_cq(wc, std::min(max_completions, 16));
         if (n < 0) {
-            fprintf(stderr, "Rank %d: poll_cq failed\n", mpi.rank);
+            fprintf(stderr, "Rank %d: poll_cq failed\n", boot.rank());
             return n;
         }
         for (int i = 0; i < n; i++) {
             if (wc[i].status != IBV_WC_SUCCESS) {
                 fprintf(stderr, "Rank %d: WC error: %s\n",
-                        mpi.rank, ibv_wc_status_str(wc[i].status));
+                        boot.rank(), ibv_wc_status_str(wc[i].status));
             }
             completion_counter++;
         }
@@ -331,7 +331,7 @@ public:
      * Global barrier
      */
     void barrier() {
-        mpi.barrier();
+        boot.barrier();
     }
 
     /**
@@ -345,8 +345,8 @@ public:
     }
 
     // Accessors
-    int rank() const { return mpi.rank; }
-    int size() const { return mpi.size; }
+    int rank() const { return boot.rank(); }
+    int size() const { return boot.size(); }
     int gpu_id() const { return cuda->gpu_id; }
 
 private:
@@ -372,15 +372,15 @@ private:
 
     void exchange_and_connect() {
         // For each peer, exchange connection info
-        for (int peer = 0; peer < mpi.size; peer++) {
-            if (peer == mpi.rank) continue;
+        for (int peer = 0; peer < boot.size(); peer++) {
+            if (peer == boot.rank()) continue;
 
             // Get local info for this peer's QP
             IbvConnInfo local_info = ibv->get_local_info(peer);
             IbvConnInfo peer_info;
 
             // Exchange with peer
-            mpi.exchange(&local_info, &peer_info, sizeof(IbvConnInfo), peer);
+            boot.sendrecv(&local_info, &peer_info, sizeof(IbvConnInfo), peer);
 
             // Store peer's info
             ibv->set_peer_info(peer, peer_info);
@@ -392,20 +392,20 @@ private:
                 inet_ntop(AF_INET6, peer_info.gid, peer_gid, sizeof(peer_gid));
                 printf("Rank %d: QP to peer %d - local(qp=%u, lid=%u, psn=%u, gid=%s) -> "
                        "peer(qp=%u, lid=%u, psn=%u, gid=%s)\n",
-                       mpi.rank, peer, local_info.qp_num, local_info.lid, local_info.psn, local_gid,
+                       boot.rank(), peer, local_info.qp_num, local_info.lid, local_info.psn, local_gid,
                        peer_info.qp_num, peer_info.lid, peer_info.psn, peer_gid);
             }
         }
 
-        mpi.barrier();
+        boot.barrier();
 
         // Connect all QPs
-        for (int peer = 0; peer < mpi.size; peer++) {
-            if (peer == mpi.rank) continue;
+        for (int peer = 0; peer < boot.size(); peer++) {
+            if (peer == boot.rank()) continue;
             ibv->connect_to_peer(peer);
         }
 
-        mpi.barrier();
+        boot.barrier();
     }
 
     uint64_t make_key(int rank, int buf_index) const {

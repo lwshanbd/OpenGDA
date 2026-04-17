@@ -15,14 +15,13 @@
 #include <cstring>
 #include <unistd.h>
 #include <cuda_runtime.h>
-#include <mpi.h>
 
 #define CUDA_CHECK(cmd) do { \
     cudaError_t err = cmd; \
     if (err != cudaSuccess) { \
         std::cerr << "CUDA error: " << cudaGetErrorString(err) \
                   << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
-        MPI_Abort(MPI_COMM_WORLD, 1); \
+        gicc::abort(1, "CUDA_CHECK failed"); \
     } \
 } while(0)
 
@@ -97,8 +96,7 @@ __global__ void gpu_rdma_write_and_wait_kernel(
 
 int main(int argc, char** argv)
 {
-    MPI_Init(&argc, &argv);
-
+    (void)argc; (void)argv;
     // --- All IB/QP setup in one object ---
     gicc::Runtime rt;
 
@@ -107,7 +105,6 @@ int main(int argc, char** argv)
 
     if (npes < 2) {
         if (mype == 0) std::cerr << "Requires at least 2 processes\n";
-        MPI_Finalize();
         return 1;
     }
 
@@ -224,7 +221,7 @@ int main(int argc, char** argv)
                 d_As, d_B[cur_buf], d_Cs, N, Ns, col_offset);
 
             CUDA_CHECK(cudaDeviceSynchronize());
-            MPI_Barrier(MPI_COMM_WORLD);
+            rt.boot().barrier();
         }
 
         clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
@@ -254,12 +251,12 @@ int main(int argc, char** argv)
             auto C = new float[N * N];
             for (int i = 0; i < Ns * N; i++) C[i] = h_Cs[i];
             for (int r = 1; r < npes; r++)
-                MPI_Recv(C + r * Ns * N, Ns * N, MPI_FLOAT, r, 0,
-                         MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                rt.boot().recv(C + r * Ns * N,
+                               Ns * N * (int)sizeof(float), r, 0);
             print_matrix(C, N, N);
             delete[] C;
         } else {
-            MPI_Send(h_Cs, Ns * N, MPI_FLOAT, 0, 0, MPI_COMM_WORLD);
+            rt.boot().send(h_Cs, Ns * N * (int)sizeof(float), 0, 0);
         }
     }
 
@@ -273,6 +270,5 @@ int main(int argc, char** argv)
     delete[] h_Bs;
     delete[] h_As;
 
-    MPI_Finalize();
     return 0;
 }

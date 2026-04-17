@@ -23,7 +23,7 @@
 #include <vector>
 #include <unordered_map>
 
-#include "gicc/util/mpi_bootstrap.hpp"
+#include "gicc/bootstrap/bootstrap.hpp"
 #include "gda_context.hpp"
 #include "gicc/util/memory_region.hpp"
 #include "device.cuh"
@@ -49,7 +49,7 @@ struct GdaGpuHandle {
 
 class GdaGpuComm {
 public:
-    MpiBootstrap mpi;
+    gicc::Bootstrap& boot;
     Mlx5GdaContext* mlx5;
 
     // CUDA context
@@ -82,13 +82,13 @@ public:
     int top_neighbor;
     int bottom_neighbor;
 
-    explicit GdaGpuComm(int local_rank = -1)
-        : mlx5(nullptr), gpu_id(0), d_state(nullptr),
+    explicit GdaGpuComm(gicc::Bootstrap& boot_, int local_rank = -1)
+        : boot(boot_), mlx5(nullptr), gpu_id(0), d_state(nullptr),
           h_num_completions(nullptr), d_num_completions(nullptr),
           top_neighbor(-1), bottom_neighbor(-1)
     {
         // Determine GPU to use
-        gpu_id = (local_rank >= 0) ? local_rank : mpi.local_rank;
+        gpu_id = (local_rank >= 0) ? local_rank : boot.local_rank();
 
         int num_gpus = 0;
         CUDA_CHECK(cudaGetDeviceCount(&num_gpus));
@@ -100,11 +100,11 @@ public:
         CUDA_CHECK(cudaGetDeviceProperties(&props, gpu_id));
 
         // Initialize MLX5 context
-        mlx5 = new Mlx5GdaContext(mpi);
+        mlx5 = new Mlx5GdaContext(boot);
 
         // Determine neighbors (ring topology)
-        top_neighbor = (mpi.rank > 0) ? mpi.rank - 1 : (mpi.size - 1);
-        bottom_neighbor = (mpi.rank + 1) % mpi.size;
+        top_neighbor = (boot.rank() > 0) ? boot.rank() - 1 : (boot.size() - 1);
+        bottom_neighbor = (boot.rank() + 1) % boot.size();
 
         // Create QPs for neighbors
         create_neighbor_qps();
@@ -118,11 +118,11 @@ public:
         // Allocate completion counter
         allocate_completion_counter();
 
-        if (mpi.rank == 0) {
+        if (boot.rank() == 0) {
             printf("GdaGpuComm initialized:\n");
             printf("  GPU: %s\n", props.name);
             printf("  IB device: %s\n", mlx5->dev_name.c_str());
-            printf("  Rank %d of %d\n", mpi.rank, mpi.size);
+            printf("  Rank %d of %d\n", boot.rank(), boot.size());
             printf("  Neighbors: top=%d, bottom=%d\n", top_neighbor, bottom_neighbor);
             fflush(stdout);
         }
@@ -146,7 +146,7 @@ public:
      * Register a buffer for RDMA
      */
     GdaGpuHandle register_buffer(void* buf, size_t size, bool is_device) {
-        auto* mr = new MemoryRegion(mlx5->pd, buf, size, is_device, mpi.rank);
+        auto* mr = new MemoryRegion(mlx5->pd, buf, size, is_device, boot.rank());
         registered_mrs.push_back(mr);
 
         GdaGpuHandle handle;
@@ -170,9 +170,9 @@ public:
         my_info.addr = (uint64_t)handle.buf;
         my_info.rkey = handle.mr->rkey;
 
-        auto all_info = mpi.allgather_fixed(my_info);
+        auto all_info = boot.allgather_fixed(my_info);
 
-        for (int r = 0; r < mpi.size; r++) {
+        for (int r = 0; r < boot.size(); r++) {
             uint64_t key = make_key(r, buf_index);
             remote_info[key] = {all_info[r].addr, all_info[r].rkey};
         }
@@ -291,20 +291,20 @@ public:
      * Barrier
      */
     void barrier() {
-        mpi.barrier();
+        boot.barrier();
     }
 
     // Accessors
-    int rank() const { return mpi.rank; }
-    int size() const { return mpi.size; }
+    int rank() const { return boot.rank(); }
+    int size() const { return boot.size(); }
 
 private:
     void create_neighbor_qps() {
         // Create QPs for top and bottom neighbors
-        if (top_neighbor != mpi.rank) {
+        if (top_neighbor != boot.rank()) {
             mlx5->create_qp_for_peer(top_neighbor);
         }
-        if (bottom_neighbor != mpi.rank && bottom_neighbor != top_neighbor) {
+        if (bottom_neighbor != boot.rank() && bottom_neighbor != top_neighbor) {
             mlx5->create_qp_for_peer(bottom_neighbor);
         }
     }
@@ -319,13 +319,13 @@ private:
         };
 
         // Exchange with top neighbor
-        if (top_neighbor != mpi.rank) {
+        if (top_neighbor != boot.rank()) {
             GdaConnInfo my_info = mlx5->get_local_info_for_peer(top_neighbor);
             ConnExchange my_ex = {my_info.qpn, my_info.lid, {}, my_info.psn};
             memcpy(my_ex.gid, my_info.gid, 16);
 
             ConnExchange peer_ex;
-            mpi.exchange(&my_ex, &peer_ex, sizeof(ConnExchange), top_neighbor);
+            boot.sendrecv(&my_ex, &peer_ex, sizeof(ConnExchange), top_neighbor);
 
             GdaConnInfo peer_info;
             peer_info.qpn = peer_ex.qpn;
@@ -339,13 +339,13 @@ private:
         }
 
         // Exchange with bottom neighbor
-        if (bottom_neighbor != mpi.rank && bottom_neighbor != top_neighbor) {
+        if (bottom_neighbor != boot.rank() && bottom_neighbor != top_neighbor) {
             GdaConnInfo my_info = mlx5->get_local_info_for_peer(bottom_neighbor);
             ConnExchange my_ex = {my_info.qpn, my_info.lid, {}, my_info.psn};
             memcpy(my_ex.gid, my_info.gid, 16);
 
             ConnExchange peer_ex;
-            mpi.exchange(&my_ex, &peer_ex, sizeof(ConnExchange), bottom_neighbor);
+            boot.sendrecv(&my_ex, &peer_ex, sizeof(ConnExchange), bottom_neighbor);
 
             GdaConnInfo peer_info;
             peer_info.qpn = peer_ex.qpn;
@@ -358,7 +358,7 @@ private:
             mlx5->connect_to_peer(bottom_neighbor, peer_info);
         }
 
-        mpi.barrier();
+        boot.barrier();
     }
 
     void setup_device_states() {
@@ -431,14 +431,14 @@ private:
         cudaError_t err = cudaHostAlloc((void**)&h_num_completions, sizeof(uint64_t),
                                         cudaHostAllocMapped);
         if (err != cudaSuccess) {
-            fprintf(stderr, "Rank %d: cudaHostAlloc for num_completions failed\n", mpi.rank);
+            fprintf(stderr, "Rank %d: cudaHostAlloc for num_completions failed\n", boot.rank());
             exit(1);
         }
         *h_num_completions = 0;
 
         err = cudaHostGetDevicePointer((void**)&d_num_completions, (void*)h_num_completions, 0);
         if (err != cudaSuccess) {
-            fprintf(stderr, "Rank %d: cudaHostGetDevicePointer for num_completions failed\n", mpi.rank);
+            fprintf(stderr, "Rank %d: cudaHostGetDevicePointer for num_completions failed\n", boot.rank());
             exit(1);
         }
     }

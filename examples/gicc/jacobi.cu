@@ -10,9 +10,10 @@
 
 #include <gicc/gicc.hpp>
 #include <gicc/gicc_device.cuh>
+#include <gicc/coll.hpp>
 
-#include <mpi.h>
 #include <cuda_runtime.h>
+#include <chrono>
 #include <cub/block/block_reduce.cuh>
 #include <algorithm>
 #include <cmath>
@@ -27,14 +28,6 @@
         fprintf(stderr, "CUDA error: %s at %s:%d\n", \
                 cudaGetErrorString(err), __FILE__, __LINE__); \
         exit(err); \
-    } \
-} while(0)
-
-#define MPI_CHECK(call) do { \
-    int s = call; \
-    if (MPI_SUCCESS != s) { \
-        fprintf(stderr, "MPI error at line %d\n", __LINE__); \
-        exit(s); \
     } \
 } while(0)
 
@@ -235,7 +228,8 @@ double single_gpu(int nx, int ny, int iter_max, real* a_ref_h, int nccheck, bool
 
     int iter = 0;
     real l2_norm = 1.0f;
-    double start = MPI_Wtime();
+    double start = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 
     while (l2_norm > tol && iter < iter_max) {
         CUDA_CHECK(cudaMemsetAsync(l2_norm_d, 0, sizeof(real), stream));
@@ -258,7 +252,8 @@ double single_gpu(int nx, int ny, int iter_max, real* a_ref_h, int nccheck, bool
         iter++;
     }
 
-    double stop = MPI_Wtime();
+    double stop = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
     CUDA_CHECK(cudaMemcpy(a_ref_h, a, nx * ny * sizeof(real), cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaStreamDestroy(stream));
@@ -290,8 +285,6 @@ bool get_arg(char** begin, char** end, const std::string& arg) {
 // =============================================================================
 
 int main(int argc, char* argv[]) {
-    MPI_CHECK(MPI_Init(&argc, &argv));
-
     // --- All IB/QP setup in one object ---
     gicc::Runtime rt;
 
@@ -317,7 +310,7 @@ int main(int argc, char* argv[]) {
         CUDA_CHECK(cudaMallocHost(&a_h, nx * ny * sizeof(real)));
         runtime_serial = single_gpu(nx, ny, iter_max, a_ref_h, nccheck, !csv);
     }
-    MPI_CHECK(MPI_Bcast(&runtime_serial, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD));
+    rt.boot().broadcast<double>(runtime_serial, 0);
     rt.barrier();
 
     // Domain decomposition
@@ -372,24 +365,13 @@ int main(int argc, char* argv[]) {
     }
 
     HaloInfo top_info = {}, bottom_info = {};
-    {
-        MPI_Request reqs[4];
-        int nreqs = 0;
-        if (has_top) {
-            int tag = std::min(rank, top);
-            MPI_CHECK(MPI_Isend(&my_info, sizeof(HaloInfo), MPI_BYTE, top, tag,
-                                MPI_COMM_WORLD, &reqs[nreqs++]));
-            MPI_CHECK(MPI_Irecv(&top_info, sizeof(HaloInfo), MPI_BYTE, top, tag,
-                                MPI_COMM_WORLD, &reqs[nreqs++]));
-        }
-        if (has_bottom) {
-            int tag = size + std::min(rank, bottom);
-            MPI_CHECK(MPI_Isend(&my_info, sizeof(HaloInfo), MPI_BYTE, bottom, tag,
-                                MPI_COMM_WORLD, &reqs[nreqs++]));
-            MPI_CHECK(MPI_Irecv(&bottom_info, sizeof(HaloInfo), MPI_BYTE, bottom, tag,
-                                MPI_COMM_WORLD, &reqs[nreqs++]));
-        }
-        if (nreqs > 0) MPI_CHECK(MPI_Waitall(nreqs, reqs, MPI_STATUSES_IGNORE));
+    if (has_top) {
+        int tag = std::min(rank, top);
+        rt.boot().sendrecv(&my_info, &top_info, (int)sizeof(HaloInfo), top, tag);
+    }
+    if (has_bottom) {
+        int tag = size + std::min(rank, bottom);
+        rt.boot().sendrecv(&my_info, &bottom_info, (int)sizeof(HaloInfo), bottom, tag);
     }
 
     // --- Prepare GICC DeviceCtx per neighbor ---
@@ -442,7 +424,7 @@ int main(int argc, char* argv[]) {
     int cur_buf = 0, next_buf = 1;
 
     rt.barrier();
-    double start = MPI_Wtime();
+    double start = rt.boot().wtime();
 
     while (l2_norm > tol && iter < iter_max) {
         CUDA_CHECK(cudaMemsetAsync(l2_norm_d, 0, sizeof(real), compute_stream));
@@ -476,7 +458,7 @@ int main(int argc, char* argv[]) {
         rt.barrier();
 
         if (calc_norm) {
-            MPI_CHECK(MPI_Allreduce(l2_norm_h, &l2_norm, 1, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD));
+            l2_norm = gicc::coll::allreduce_sum(rt.boot(), *l2_norm_h);
             l2_norm = std::sqrt(l2_norm);
             if (!csv && rank == 0 && (iter % 100) == 0)
                 printf("%5d, %0.6f\n", iter, l2_norm);
@@ -489,7 +471,7 @@ int main(int argc, char* argv[]) {
 
     CUDA_CHECK(cudaDeviceSynchronize());
     rt.barrier();
-    double stop = MPI_Wtime();
+    double stop = rt.boot().wtime();
 
     // Verify
     int result_correct = 1;
@@ -509,8 +491,8 @@ int main(int argc, char* argv[]) {
                 else
                     r_start = num_ranks_low * chunk_size_low +
                               (r - num_ranks_low) * chunk_size_high + 1;
-                MPI_CHECK(MPI_Recv(a_h + r_start * nx, r_cs * nx, MPI_FLOAT,
-                                   r, 100, MPI_COMM_WORLD, MPI_STATUS_IGNORE));
+                rt.boot().recv(a_h + r_start * nx,
+                               r_cs * nx * (int)sizeof(float), r, 100);
             }
             for (int iy = 1; result_correct && (iy < ny - 1); ++iy)
                 for (int ix = 1; result_correct && (ix < nx - 1); ++ix)
@@ -520,10 +502,11 @@ int main(int argc, char* argv[]) {
                         result_correct = 0;
                     }
         } else {
-            MPI_CHECK(MPI_Send(local_h, chunk_size * nx, MPI_FLOAT, 0, 100, MPI_COMM_WORLD));
+            rt.boot().send(local_h,
+                           chunk_size * nx * (int)sizeof(float), 0, 100);
         }
         CUDA_CHECK(cudaFreeHost(local_h));
-        MPI_CHECK(MPI_Bcast(&result_correct, 1, MPI_INT, 0, MPI_COMM_WORLD));
+        rt.boot().broadcast<int>(result_correct, 0);
     }
 
     if (rank == 0 && result_correct) {
@@ -549,6 +532,5 @@ int main(int argc, char* argv[]) {
     if (a_h) CUDA_CHECK(cudaFreeHost(a_h));
     if (a_ref_h) CUDA_CHECK(cudaFreeHost(a_ref_h));
 
-    MPI_CHECK(MPI_Finalize());
     return (result_correct == 1) ? 0 : 1;
 }

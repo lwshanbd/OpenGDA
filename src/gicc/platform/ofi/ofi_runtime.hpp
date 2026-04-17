@@ -20,7 +20,6 @@
  */
 #pragma once
 
-#include <mpi.h>
 #include <hip/hip_runtime.h>
 #include <cstddef>
 #include <cstdint>
@@ -34,7 +33,7 @@
 
 // OFI backend internals (GdaComm, FabricDwqContext, MemoryRegion, etc.)
 #include "internal/hip_device_context.hpp"
-#include "internal/pmi_session.hpp"
+#include "gicc/bootstrap/bootstrap.hpp"
 #include "internal/device_affinity.hpp"
 #include "internal/fabric_dwq_context.hpp"
 #include "internal/memory_region.hpp"
@@ -57,16 +56,15 @@ class Runtime {
 public:
     static constexpr int POOL_SIZE = 32;   // max ops per batch
 
-    explicit Runtime(MPI_Comm comm = MPI_COMM_WORLD)
-        : comm_(nullptr), mpi_comm_(comm),
+    Runtime()
+        : comm_(nullptr),
           h_dev_ctx_(nullptr), d_dev_ctx_(nullptr),
           d_slot_pool_(nullptr), mr_slot_pool_(nullptr),
           d_operand_pool_(nullptr), mr_operand_pool_(nullptr),
           my_n_ops_(0), atomic_signals_queued_(false)
     {
-        (void)mpi_comm_;
         unset_rocr_visible_devices();
-        comm_ = new GdaComm();
+        comm_ = new GdaComm(boot_);
 
         // ONE shared GPU buffer holds POOL_SIZE × uint64_t atomic_result
         // slots, registered with ONE MemoryRegion.
@@ -156,7 +154,7 @@ public:
     }
 
     //--------------------------------------------------------------------------
-    // Collective exchange of registered buffer metadata via PMI2 KVS.
+    // Collective exchange of registered buffer metadata via Bootstrap allgather.
     //--------------------------------------------------------------------------
     void exchange() {
         int nbuf = (int)local_bufs_.size();
@@ -168,21 +166,20 @@ public:
             my_metas[i].key  = local_bufs_[i].key_;
         }
 
-        char key[PMI2_MAX_KEYLEN];
-        char hex[PMI2_MAX_VALLEN];
-        snprintf(key, sizeof(key), "gicc-bufs-%d", comm_->rank());
-        buf_to_hex((uint8_t*)my_metas.data(), nbuf * sizeof(BufMeta), hex);
-        comm_->pmi.kvs_put(key, hex);
-        comm_->pmi.barrier();
+        auto raw = boot_.allgather(my_metas.data(),
+                                   nbuf * (int)sizeof(BufMeta));
 
-        for (int r = 0; r < comm_->size(); r++) {
-            snprintf(key, sizeof(key), "gicc-bufs-%d", r);
-            char peer_hex[PMI2_MAX_VALLEN];
-            comm_->pmi.kvs_get(key, peer_hex, sizeof(peer_hex));
-
-            std::vector<BufMeta> peer_metas(nbuf);
-            hex_to_buf(peer_hex, (uint8_t*)peer_metas.data(), nbuf * sizeof(BufMeta));
-
+        for (int r = 0; r < boot_.size(); r++) {
+            if (raw[r].size() != nbuf * sizeof(BufMeta)) {
+                fprintf(stderr,
+                    "GICC: exchange() rank %d expected %d buffers (%zu B), "
+                    "peer %d sent %zu B\n",
+                    boot_.rank(), nbuf, nbuf * sizeof(BufMeta),
+                    r, raw[r].size());
+                gicc::abort(1, "exchange(): buffer count mismatch");
+            }
+            const auto* peer_metas =
+                reinterpret_cast<const BufMeta*>(raw[r].data());
             for (int i = 0; i < nbuf; i++) {
                 comm_->set_remote_info_by_index(r, i,
                     peer_metas[i].addr, peer_metas[i].key);
@@ -328,6 +325,8 @@ public:
 
     int rank()   const { return comm_->rank(); }
     int size()   const { return comm_->size(); }
+    Bootstrap& boot() noexcept { return boot_; }
+    const Bootstrap& boot() const noexcept { return boot_; }
     int gpu_id() const { return comm_->gpu_id(); }
 
     GdaComm& ofi_comm() { return *comm_; }
@@ -346,8 +345,8 @@ private:
         struct fid_cntr* atomic_completion_cntr = nullptr;
     };
 
+    gicc::Bootstrap               boot_;
     GdaComm*                      comm_;
-    MPI_Comm                      mpi_comm_;
     DeviceCtx*                    h_dev_ctx_;
     DeviceCtx*                    d_dev_ctx_;
 
@@ -363,35 +362,6 @@ private:
     std::vector<DwqWorkBuilder*>  my_pending_;
 
     std::vector<OfiBuffer>        local_bufs_;
-
-    // Hex utilities for PMI exchange
-    static void buf_to_hex(const uint8_t* in, size_t len, char* out) {
-        static const char* h = "0123456789abcdef";
-        for (size_t i = 0; i < len; i++) {
-            out[2 * i]     = h[(in[i] >> 4) & 0xF];
-            out[2 * i + 1] = h[in[i] & 0xF];
-        }
-        out[2 * len] = '\0';
-    }
-
-    static int hexval(char c) {
-        if ('0' <= c && c <= '9') return c - '0';
-        if ('a' <= c && c <= 'f') return c - 'a' + 10;
-        if ('A' <= c && c <= 'F') return c - 'A' + 10;
-        return -1;
-    }
-
-    static int hex_to_buf(const char* in, uint8_t* out, size_t outlen) {
-        size_t n = strlen(in);
-        if (n % 2 != 0 || outlen < n / 2) return -1;
-        for (size_t i = 0; i < n; i += 2) {
-            int hi = hexval(in[i]);
-            int lo = hexval(in[i + 1]);
-            if (hi < 0 || lo < 0) return -1;
-            out[i / 2] = (uint8_t)((hi << 4) | lo);
-        }
-        return (int)(n / 2);
-    }
 };
 
 } // namespace gicc

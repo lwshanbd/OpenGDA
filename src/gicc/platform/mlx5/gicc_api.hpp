@@ -2,7 +2,7 @@
  * gicc_api.hpp — NVSHMEM-style simplified GICC API
  *
  * Usage:
- *   gicc::init(MPI_COMM_WORLD);
+ *   gicc::init();
  *   void* buf = gicc::malloc(size);           // collective: alloc + register + exchange
  *   gicc::GiccContext* ctx = gicc::context();  // get GPU context for kernels
  *   gicc::barrier();
@@ -15,7 +15,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
-#include <mpi.h>
 #include <cuda_runtime.h>
 
 // Forward: Runtime is defined by the platform header included before this file.
@@ -39,11 +38,11 @@ inline GlobalState*& state() {
 
 } // namespace detail
 
-/// Initialize GICC (MPI, GPU, IB, QP creation). Collective.
-inline void init(MPI_Comm comm = MPI_COMM_WORLD) {
+/// Initialize GICC (Bootstrap, GPU, IB, QP creation). Collective.
+inline void init() {
     if (detail::state()) return;  // already initialized
     detail::state() = new detail::GlobalState();
-    detail::state()->rt = new Runtime(comm);
+    detail::state()->rt = new Runtime();
 }
 
 /// Allocate GPU memory, register with IB, and exchange info. Collective.
@@ -103,7 +102,7 @@ inline void* remote_ptr(void* local_ptr, int peer) {
     return nullptr;
 }
 
-/// MPI barrier.
+/// Global barrier (via Bootstrap).
 inline void barrier() {
     detail::state()->rt->barrier();
 }

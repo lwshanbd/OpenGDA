@@ -37,7 +37,6 @@
 #pragma once
 
 #include <hip/hip_runtime.h>
-#include <mpi.h>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -358,12 +357,9 @@ private:
         uint64_t my_key  = mr_signals_->key;
 
         int sz = comm_.size();
-        std::vector<uint64_t> all_bases(sz), all_keys(sz);
 
-        MPI_Allgather(&my_base, 1, MPI_UINT64_T,
-                      all_bases.data(), 1, MPI_UINT64_T, MPI_COMM_WORLD);
-        MPI_Allgather(&my_key,  1, MPI_UINT64_T,
-                      all_keys.data(),  1, MPI_UINT64_T, MPI_COMM_WORLD);
+        auto all_bases = comm_.boot.template allgather_fixed<uint64_t>(my_base);
+        auto all_keys  = comm_.boot.template allgather_fixed<uint64_t>(my_key);
 
         remote_signal_addrs_.resize(n_rounds_);
         remote_signal_keys_.resize(n_rounds_);
