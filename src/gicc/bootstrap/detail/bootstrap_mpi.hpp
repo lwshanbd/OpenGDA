@@ -148,7 +148,10 @@ public:
     double wtime() const noexcept { return MPI_Wtime(); }
 
     // Abort all ranks. Safe to call from any rank; others need not cooperate.
-    [[noreturn]] static void abort(int code = 1, const char* /*msg*/ = nullptr) {
+    [[noreturn]] static void abort(int code = 1, const char* msg = nullptr) {
+        if (msg && *msg) {
+            std::fprintf(stderr, "BootstrapMPI::abort: %s (code=%d)\n", msg, code);
+        }
         int already = 0;
         MPI_Initialized(&already);
         if (already) MPI_Abort(MPI_COMM_WORLD, code);

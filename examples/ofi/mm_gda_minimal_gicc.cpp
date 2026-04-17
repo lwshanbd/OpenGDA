@@ -148,12 +148,17 @@ int main(int argc, char** argv)
         HIP_CHECK(hipIpcGetMemHandle(&my_handles[0], d_B[0]));
         HIP_CHECK(hipIpcGetMemHandle(&my_handles[1], d_B[1]));
 
-        // Send to left, receive from right — we want our RIGHT neighbor's
-        // handles. Bootstrap::sendrecv targets a single peer, so we split
-        // into two half-exchanges.
+        // Ring exchange: send to left, recv from right. All ranks calling a
+        // blocking send first would deadlock once payload exceeds the eager
+        // threshold, so order by rank parity to break the cycle.
         hipIpcMemHandle_t right_handles[2];
-        rt.boot().send(my_handles, (int)sizeof(my_handles), left_neighbor, 0);
-        rt.boot().recv(right_handles, (int)sizeof(right_handles), right_neighbor, 0);
+        if ((mype & 1) == 0) {
+            rt.boot().send(my_handles, (int)sizeof(my_handles), left_neighbor, 0);
+            rt.boot().recv(right_handles, (int)sizeof(right_handles), right_neighbor, 0);
+        } else {
+            rt.boot().recv(right_handles, (int)sizeof(right_handles), right_neighbor, 0);
+            rt.boot().send(my_handles, (int)sizeof(my_handles), left_neighbor, 0);
+        }
 
         if (right_is_local) {
             HIP_CHECK(hipIpcOpenMemHandle((void**)&right_d_B[0], right_handles[0],

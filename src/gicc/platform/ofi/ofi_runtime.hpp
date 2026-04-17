@@ -170,6 +170,14 @@ public:
                                    nbuf * (int)sizeof(BufMeta));
 
         for (int r = 0; r < boot_.size(); r++) {
+            if (raw[r].size() != nbuf * sizeof(BufMeta)) {
+                fprintf(stderr,
+                    "GICC: exchange() rank %d expected %d buffers (%zu B), "
+                    "peer %d sent %zu B\n",
+                    boot_.rank(), nbuf, nbuf * sizeof(BufMeta),
+                    r, raw[r].size());
+                gicc::abort(1, "exchange(): buffer count mismatch");
+            }
             const auto* peer_metas =
                 reinterpret_cast<const BufMeta*>(raw[r].data());
             for (int i = 0; i < nbuf; i++) {

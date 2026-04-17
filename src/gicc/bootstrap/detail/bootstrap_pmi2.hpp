@@ -92,7 +92,9 @@ public:
 
     std::vector<std::vector<uint8_t>>
     allgather(const void* data, int len) {
-        const uint64_t epoch = next_epoch();
+        // Collective — all ranks step coll_epoch_ together, so a per-rank
+        // counter stays in lockstep without per-pair tracking.
+        const uint64_t epoch = coll_epoch_++;
         publish_blob(kvs_key("ag", epoch, rank_),
                      reinterpret_cast<const uint8_t*>(data), len);
         barrier();
@@ -119,7 +121,7 @@ public:
 
     template<class T>
     void broadcast(T& value, int root = 0) {
-        const uint64_t epoch = next_epoch();
+        const uint64_t epoch = coll_epoch_++;
         if (rank_ == root) {
             publish_blob(kvs_key("bc", epoch, root),
                          reinterpret_cast<const uint8_t*>(&value), sizeof(T));
@@ -185,6 +187,7 @@ private:
     int local_size_ = 0;
     bool owned_ = false;
     std::string hostname_;
+    uint64_t coll_epoch_ = 0;  // advances in lockstep across ranks
     std::map<std::tuple<int,int,int>, uint64_t> p2p_seq_;  // key: (src,dst,tag)
 
     uint64_t next_p2p_seq(int src, int dst, int tag) {

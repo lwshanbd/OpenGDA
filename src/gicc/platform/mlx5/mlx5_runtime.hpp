@@ -40,19 +40,27 @@ namespace gicc {
 // mlx5_runtime.hpp can be used without including device headers)
 using DeviceCtx = gicc::mlx5::GdaDeviceStateOpt;
 
+inline void gicc_cuda_check(cudaError_t err, const char* what) {
+    if (err != cudaSuccess) {
+        fprintf(stderr, "GICC: %s failed: %s\n", what, cudaGetErrorString(err));
+        gicc::abort(1, what);
+    }
+}
+
 class Runtime {
 public:
     Runtime() {
         // GPU setup
         int num_gpus = 0;
-        cudaGetDeviceCount(&num_gpus);
+        gicc_cuda_check(cudaGetDeviceCount(&num_gpus), "cudaGetDeviceCount");
         if (num_gpus == 0) {
             fprintf(stderr, "GICC: No CUDA devices found\n");
-            exit(1);
+            gicc::abort(1, "no CUDA devices");
         }
         gpu_id_ = boot_.local_rank() % num_gpus;
-        cudaSetDevice(gpu_id_);
-        cudaGetDeviceProperties(&gpu_props_, gpu_id_);
+        gicc_cuda_check(cudaSetDevice(gpu_id_), "cudaSetDevice");
+        gicc_cuda_check(cudaGetDeviceProperties(&gpu_props_, gpu_id_),
+                        "cudaGetDeviceProperties");
         clock_rate_khz_ = gpu_props_.clockRate;
 
         // Open IB device
@@ -111,6 +119,15 @@ public:
 
         remote_bufs_.resize(boot_.size());
         for (int r = 0; r < boot_.size(); r++) {
+            // All ranks must register the same number of buffers in the
+            // same order. Catch mismatches here instead of reading OOB.
+            if (raw[r].size() != n * sizeof(BufEntry)) {
+                fprintf(stderr,
+                    "GICC: exchange() rank %d expected %d buffers (%zu B), "
+                    "peer %d sent %zu B\n",
+                    boot_.rank(), n, n * sizeof(BufEntry), r, raw[r].size());
+                gicc::abort(1, "exchange(): buffer count mismatch");
+            }
             remote_bufs_[r].resize(n);
             const auto* entries = reinterpret_cast<const BufEntry*>(raw[r].data());
             for (int b = 0; b < n; b++) {
