@@ -271,9 +271,12 @@ public:
 
         // Seed expected_signal for the first barrier before flipping into
         // continuous mode, so setup() will skip the write (kernel owns the
-        // field from here on).
+        // field from here on). d_context_ is unconditionally allocated by
+        // setup_device_context() regardless of n_rounds_, so the same guard
+        // applies as in the single-barrier path in setup() — no n_rounds_
+        // clause needed.
         h_context_.expected_signal = barrier_count_ + 1;
-        if (d_context_ && n_rounds_ > 0) {
+        if (d_context_) {
             hipMemcpy(&d_context_->expected_signal, &h_context_.expected_signal,
                       sizeof(uint64_t), hipMemcpyHostToDevice);
         }
