@@ -22,14 +22,14 @@
 #include <unordered_map>
 
 #include "gicc/gicc_types.hpp"
-#include "gicc/mlx5/devx_qp.hpp"
+#include "gicc/platform/mlx5/devx_qp.hpp"
 #include "gicc/util/memory_region.hpp"
 #include "gicc/bootstrap/bootstrap.hpp"
 
 // Include gda_device_opt.cuh for GdaDeviceStateOpt struct definition.
 // Must come AFTER mlx5dv.h (included by mlx5_devx_qp.hpp) to avoid
 // macro conflicts with MLX5 enum constants.
-#include "gicc/mlx5/device_opt.cuh"
+#include "gicc/platform/mlx5/device_opt.cuh"
 
 // Simplified GPU context (NVSHMEM-style API)
 #include "gicc/platform/mlx5/gicc_context.cuh"

@@ -6,7 +6,7 @@
  */
 #pragma once
 
-#include "gicc/mlx5/device_opt.cuh"
+#include "gicc/platform/mlx5/device_opt.cuh"
 
 namespace gicc {
 

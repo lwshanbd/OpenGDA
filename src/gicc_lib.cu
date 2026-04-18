@@ -10,8 +10,8 @@
 // they are compiled only here, inside the library.
 // (This file is the canonical compilation unit for the kernels.)
 
-#include "gicc/mlx5/device_opt.cuh"
-#include "gicc/mlx5/device.cuh"
+#include "gicc/platform/mlx5/device_opt.cuh"
+#include "gicc/platform/mlx5/device.cuh"
 
 // Force instantiation of key types to ensure they are available in the library
 namespace gicc::mlx5 {
