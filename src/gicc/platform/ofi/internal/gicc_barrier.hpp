@@ -255,12 +255,32 @@ public:
     // Continuous mode: multiple barriers in single kernel
     // =========================================================================
 
-    /** Start continuous mode for num_barriers barriers. */
+    /** Start continuous mode for num_barriers barriers.
+     *
+     *  expected_signal ownership contract:
+     *    - single-barrier mode: the host writes expected_signal = threshold
+     *      on every setup() call; the kernel only reads it.
+     *    - continuous mode: the host writes expected_signal exactly once
+     *      here at start_continuous (the first barrier's threshold), then
+     *      continuous_mode_ is turned on and subsequent setup() calls skip
+     *      the write. The kernel is expected to increment expected_signal
+     *      itself after each barrier() call for the rest of the run.
+     */
     void start_continuous(uint64_t num_barriers) {
         ever_active_ = true;
         target_barrier_count_ = barrier_count_ + num_barriers;
-        setup();
+
+        // Seed expected_signal for the first barrier before flipping into
+        // continuous mode, so setup() will skip the write (kernel owns the
+        // field from here on).
+        h_context_.expected_signal = barrier_count_ + 1;
+        if (d_context_ && n_rounds_ > 0) {
+            hipMemcpy(&d_context_->expected_signal, &h_context_.expected_signal,
+                      sizeof(uint64_t), hipMemcpyHostToDevice);
+        }
+
         continuous_mode_ = true;
+        setup();
     }
 
     /** Wait for all continuous barriers to complete. */
