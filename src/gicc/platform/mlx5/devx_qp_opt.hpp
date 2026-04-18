@@ -107,8 +107,8 @@ public:
     int port_num;
 
     // Device state for GPU kernels
-    GdaDeviceStateOpt* h_device_state;
-    GdaDeviceStateOpt* d_device_state;
+    DeviceStateOpt* h_device_state;
+    DeviceStateOpt* d_device_state;
 
     DevxQpOpt(struct ibv_context* ctx_, struct ibv_pd* pd_, int rank_, int port_ = 1,
               uint32_t qp_depth = 256, uint32_t cq_depth = 512, uint32_t batch = 32)
@@ -213,14 +213,14 @@ public:
     }
 
     // Get device state for passing to GPU kernels
-    GdaDeviceStateOpt* get_device_state() { return d_device_state; }
+    DeviceStateOpt* get_device_state() { return d_device_state; }
 
     // Update remote target info
     void set_remote_target(uint64_t remote_addr, uint32_t remote_rkey) {
         h_device_state->remote_addr = remote_addr;
         h_device_state->remote_rkey = remote_rkey;
         // Copy to GPU
-        cudaMemcpy(d_device_state, h_device_state, sizeof(GdaDeviceStateOpt),
+        cudaMemcpy(d_device_state, h_device_state, sizeof(DeviceStateOpt),
                    cudaMemcpyHostToDevice);
     }
 
@@ -593,7 +593,7 @@ private:
 
     void allocate_device_state() {
         // Allocate host-side state
-        cudaError_t err = cudaHostAlloc((void**)&h_device_state, sizeof(GdaDeviceStateOpt),
+        cudaError_t err = cudaHostAlloc((void**)&h_device_state, sizeof(DeviceStateOpt),
                                          cudaHostAllocMapped);
         if (err != cudaSuccess) {
             fprintf(stderr, "Rank %d: cudaHostAlloc for device state failed\n", rank);
@@ -611,7 +611,7 @@ private:
         h_device_state->resv_head = d_resv_head;
         h_device_state->ready_head = d_ready_head;
         h_device_state->prod_idx = d_prod_idx;
-        h_device_state->cqe = (volatile GdaCqe64*)d_cq_buf;
+        h_device_state->cqe = (volatile Cqe64*)d_cq_buf;
         h_device_state->ncqes = num_cqe;
         h_device_state->ncqes_mask = num_cqe - 1;
         h_device_state->cq_cons_idx = nullptr;  // TODO
@@ -623,14 +623,14 @@ private:
         h_device_state->batch_mask = batch_size - 1;
 
         // Allocate device copy
-        err = cudaMalloc(&d_device_state, sizeof(GdaDeviceStateOpt));
+        err = cudaMalloc(&d_device_state, sizeof(DeviceStateOpt));
         if (err != cudaSuccess) {
             fprintf(stderr, "Rank %d: cudaMalloc for device state failed\n", rank);
             exit(1);
         }
 
         // Copy to device
-        err = cudaMemcpy(d_device_state, h_device_state, sizeof(GdaDeviceStateOpt),
+        err = cudaMemcpy(d_device_state, h_device_state, sizeof(DeviceStateOpt),
                          cudaMemcpyHostToDevice);
         if (err != cudaSuccess) {
             fprintf(stderr, "Rank %d: cudaMemcpy for device state failed\n", rank);

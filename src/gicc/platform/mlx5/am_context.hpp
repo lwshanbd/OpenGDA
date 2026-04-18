@@ -68,8 +68,8 @@ public:
     std::vector<am_recv_state_t> h_recv_states;
 
     // Device state for RDMA operations
-    GdaDeviceStateOpt* d_gda_state;
-    GdaDeviceStateOpt h_gda_state;
+    DeviceStateOpt* d_gda_state;
+    DeviceStateOpt h_gda_state;
 
     /**
      * Initialize AM context
@@ -139,7 +139,7 @@ public:
     int size() const { return boot.size(); }
 
     am_context_t* get_device_context() const { return d_context; }
-    GdaDeviceStateOpt* get_gda_state() const { return d_gda_state; }
+    DeviceStateOpt* get_gda_state() const { return d_gda_state; }
 
     // Get send state for a peer (for building RDMA operations)
     am_peer_send_state_t& get_send_state(int peer) { return h_send_states[peer]; }
@@ -286,14 +286,14 @@ private:
         h_gda_state.prod_idx = qp->d_prod_idx;
 
         // CQ info
-        h_gda_state.cqe = (volatile GdaCqe64Opt*)qp->d_cq_buf;
+        h_gda_state.cqe = (volatile Cqe64Opt*)qp->d_cq_buf;
         h_gda_state.ncqes = qp->num_cqe;
         h_gda_state.ncqes_mask = h_gda_state.ncqes - 1;
         h_gda_state.cq_dbrec = qp->d_cq_dbrec;
 
-        check_cuda(cudaMalloc(&d_gda_state, sizeof(GdaDeviceStateOpt)),
+        check_cuda(cudaMalloc(&d_gda_state, sizeof(DeviceStateOpt)),
                    "cudaMalloc(d_gda_state)");
-        check_cuda(cudaMemcpy(d_gda_state, &h_gda_state, sizeof(GdaDeviceStateOpt),
+        check_cuda(cudaMemcpy(d_gda_state, &h_gda_state, sizeof(DeviceStateOpt),
                               cudaMemcpyHostToDevice),
                    "cudaMemcpy(d_gda_state)");
 

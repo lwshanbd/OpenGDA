@@ -201,7 +201,7 @@ int am_wait_one(am_recv_state_t* recv_state) {
  */
 __device__ __forceinline__
 uint64_t am_send_short(
-    GdaDeviceStateOpt* gda_state,
+    DeviceStateOpt* gda_state,
     am_slot_t* local_slot,
     uint32_t local_lkey,
     uint64_t remote_ring_base,
@@ -249,7 +249,7 @@ uint64_t am_send_short(
  */
 __device__ __forceinline__
 uint64_t am_send_payload(
-    GdaDeviceStateOpt* gda_state,
+    DeviceStateOpt* gda_state,
     am_slot_t* local_slot,
     uint32_t local_lkey,
     uint64_t remote_ring_base,
@@ -332,7 +332,7 @@ void am_poll_once_kernel(am_context_t* ctx, int max_poll_per_peer, int* result) 
  */
 __device__ __forceinline__
 void am_send_reply_fast(
-    GdaDeviceStateOpt* gda_state,
+    DeviceStateOpt* gda_state,
     uint64_t ack_addr,
     uint32_t ack_rkey,
     uint64_t local_reply_addr,
@@ -394,7 +394,7 @@ void am_wait_reply(volatile am_ack_entry_t* ack_entry, uint64_t expected_seq) {
 __device__ __forceinline__
 am_slot_t* am_recv_and_reply_fast(
     am_recv_state_t* recv_state,
-    GdaDeviceStateOpt* gda_state,
+    DeviceStateOpt* gda_state,
     uint64_t reply_buf_base,
     uint32_t local_lkey,
     int iter_idx)
@@ -445,7 +445,7 @@ am_slot_t* am_recv_and_reply_fast(
  */
 __device__ __forceinline__
 void am_send_request(
-    GdaDeviceStateOpt* gda_state,
+    DeviceStateOpt* gda_state,
     am_slot_t* local_slot,
     uint32_t local_lkey,
     uint64_t remote_ring_base,

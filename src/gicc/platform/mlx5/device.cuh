@@ -52,7 +52,7 @@ __device__ __forceinline__ uint16_t gda_betoh16(uint16_t x) {
 }
 
 // MLX5 WQE Control Segment (16 bytes)
-struct GdaCtrlSeg {
+struct CtrlSeg {
     uint32_t opmod_idx_opcode;
     uint32_t qpn_ds;
     uint8_t  signature;
@@ -62,21 +62,21 @@ struct GdaCtrlSeg {
 } __attribute__((packed));
 
 // MLX5 Remote Address Segment (16 bytes)
-struct GdaRaddrSeg {
+struct RaddrSeg {
     uint64_t raddr;
     uint32_t rkey;
     uint32_t reserved;
 } __attribute__((packed));
 
 // MLX5 Data Segment (16 bytes)
-struct GdaDataSeg {
+struct DataSeg {
     uint32_t byte_count;
     uint32_t lkey;
     uint64_t addr;
 } __attribute__((packed));
 
 // MLX5 CQE structure (64 bytes) - simplified
-struct GdaCqe64 {
+struct Cqe64 {
     uint8_t  rsvd0[46];
     uint16_t wqe_counter;
     uint8_t  signature;
@@ -84,7 +84,7 @@ struct GdaCqe64 {
 } __attribute__((packed));
 
 // GPU-accessible QP state (passed from host)
-struct GdaDeviceState {
+struct DeviceState {
     uint32_t qpn;                    // QP number
     uint16_t nwqes;                  // Number of WQEs in queue
     uint16_t nwqes_mask;             // nwqes - 1 for fast modulo
@@ -100,7 +100,7 @@ struct GdaDeviceState {
     volatile uint64_t* prod_idx;     // Current producer index
 
     // CQ for completion
-    volatile GdaCqe64* cqe;          // CQ entry buffer
+    volatile Cqe64* cqe;          // CQ entry buffer
     uint32_t ncqes;                  // Number of CQ entries
     uint32_t ncqes_mask;             // ncqes - 1
     volatile uint64_t* cq_cons_idx;  // CQ consumer index (GPU-managed)
@@ -120,7 +120,7 @@ __device__ __forceinline__ void gda_membar() {
 }
 
 // Get pointer to WQE at given index
-__device__ __forceinline__ void* gda_get_wqe_ptr(GdaDeviceState* state, uint16_t wqe_idx) {
+__device__ __forceinline__ void* gda_get_wqe_ptr(DeviceState* state, uint16_t wqe_idx) {
     uint16_t idx = wqe_idx & state->nwqes_mask;
     return (void*)((uintptr_t)state->wqe_buf + (idx << MLX5_SEND_WQE_SHIFT));
 }
@@ -138,7 +138,7 @@ __device__ __forceinline__ void* gda_get_wqe_ptr(GdaDeviceState* state, uint16_t
  * @param signaled   Whether to request completion notification
  */
 __device__ __forceinline__ void gda_build_rdma_write_wqe(
-    GdaDeviceState* state,
+    DeviceState* state,
     uint64_t local_addr,
     uint32_t local_lkey,
     uint64_t remote_addr,
@@ -151,9 +151,9 @@ __device__ __forceinline__ void gda_build_rdma_write_wqe(
     void* wqe_ptr = gda_get_wqe_ptr(state, wqe_idx);
 
     // Layout: Control Seg (16B) + Raddr Seg (16B) + Data Seg (16B) = 48B = 3 DS
-    GdaCtrlSeg* ctrl = (GdaCtrlSeg*)wqe_ptr;
-    GdaRaddrSeg* raddr = (GdaRaddrSeg*)((uintptr_t)wqe_ptr + 16);
-    GdaDataSeg* data = (GdaDataSeg*)((uintptr_t)wqe_ptr + 32);
+    CtrlSeg* ctrl = (CtrlSeg*)wqe_ptr;
+    RaddrSeg* raddr = (RaddrSeg*)((uintptr_t)wqe_ptr + 16);
+    DataSeg* data = (DataSeg*)((uintptr_t)wqe_ptr + 32);
 
     // Build control segment
     // opmod_idx_opcode: opmod(8) | wqe_idx(16) | opcode(8)
@@ -184,7 +184,7 @@ __device__ __forceinline__ void gda_build_rdma_write_wqe(
  * @param state   Device state
  * @param wqe_idx Index of the WQE to post (producer index + 1)
  */
-__device__ __forceinline__ void gda_ring_doorbell(GdaDeviceState* state, uint16_t wqe_idx) {
+__device__ __forceinline__ void gda_ring_doorbell(DeviceState* state, uint16_t wqe_idx) {
     // Ensure WQE writes are visible to NIC before ringing doorbell
     gda_membar();
 
@@ -204,7 +204,7 @@ __device__ __forceinline__ void gda_ring_doorbell(GdaDeviceState* state, uint16_
  * @param expected_completions Expected number of completions after this op
  * @return 0 on success, -1 on timeout, -2 on error
  */
-__device__ __forceinline__ int gda_poll_cq(GdaDeviceState* state, uint64_t expected_completions) {
+__device__ __forceinline__ int gda_poll_cq(DeviceState* state, uint64_t expected_completions) {
     if (!state->cqe) return 0;  // No CQ access, assume success
 
     // Get current completion count
@@ -215,7 +215,7 @@ __device__ __forceinline__ int gda_poll_cq(GdaDeviceState* state, uint64_t expec
     // Owner toggles each time we wrap around the CQ
     uint8_t expected_owner = (start_completions / state->ncqes) & 1;
 
-    volatile GdaCqe64* cqe = &state->cqe[cqe_idx];
+    volatile Cqe64* cqe = &state->cqe[cqe_idx];
 
     // Timeout counter
     uint64_t timeout = 10000000ULL;  // ~10 million iterations
@@ -258,7 +258,7 @@ __device__ __forceinline__ int gda_poll_cq(GdaDeviceState* state, uint64_t expec
  * Each thread block handles one RDMA operation
  */
 __global__ void gda_rdma_write_kernel(
-    GdaDeviceState* state,
+    DeviceState* state,
     uint64_t local_addr,
     uint32_t local_lkey,
     uint64_t remote_addr,
@@ -293,7 +293,7 @@ __global__ void gda_rdma_write_kernel(
  * Simple ping-pong kernel - one thread triggers RDMA and waits
  */
 __global__ void gda_pingpong_kernel(
-    GdaDeviceState* state,
+    DeviceState* state,
     uint64_t local_addr,
     uint32_t local_lkey,
     uint64_t remote_addr,

@@ -15,7 +15,7 @@ constexpr int GDA_MAX_PEERS = 64;
 constexpr int GDA_MAX_PENDING_OPS = 256;
 
 // Operation types
-enum class GdaOpType : uint8_t {
+enum class OpType : uint8_t {
     PUT = 0,
     GET = 1,
     ATOMIC_ADD = 2,
@@ -23,7 +23,7 @@ enum class GdaOpType : uint8_t {
 };
 
 // Operation status
-enum class GdaOpStatus : uint8_t {
+enum class OpStatus : uint8_t {
     PENDING = 0,
     TRIGGERED = 1,
     COMPLETED = 2,
@@ -32,7 +32,7 @@ enum class GdaOpStatus : uint8_t {
 
 // Work request for GPU-triggered operations
 // This structure is written by GPU and read by NIC/driver
-struct __attribute__((aligned(64))) GdaWorkRequest {
+struct __attribute__((aligned(64))) WorkRequest {
     volatile uint64_t trigger;         // GPU writes to trigger operation
     uint64_t local_addr;               // Local buffer address
     uint64_t remote_addr;              // Remote buffer address
@@ -40,20 +40,20 @@ struct __attribute__((aligned(64))) GdaWorkRequest {
     uint32_t lkey;                     // Local memory key
     uint32_t rkey;                     // Remote memory key
     uint16_t dest_rank;                // Destination rank
-    uint8_t op_type;                   // GdaOpType
+    uint8_t op_type;                   // OpType
     uint8_t flags;                     // Reserved flags
     volatile uint64_t completion;      // Set when operation completes
 };
 
-static_assert(sizeof(GdaWorkRequest) == 64, "GdaWorkRequest must be 64 bytes");
+static_assert(sizeof(WorkRequest) == 64, "WorkRequest must be 64 bytes");
 
 // Completion queue entry visible to GPU
-struct __attribute__((aligned(8))) GdaCompletion {
+struct __attribute__((aligned(8))) Completion {
     volatile uint64_t seq;             // Sequence number (incremented on completion)
 };
 
 // Device-side context passed to GPU kernels
-struct GdaDeviceContext {
+struct DeviceContext {
     // Trigger counter - GPU writes here to trigger operations
     volatile uint64_t* trigger_cntr;
 
@@ -61,7 +61,7 @@ struct GdaDeviceContext {
     volatile uint64_t* completion_cntr;
 
     // Work request array (GPU can see pending operations)
-    GdaWorkRequest* work_requests;
+    WorkRequest* work_requests;
     int num_work_requests;
 
     // Rank info

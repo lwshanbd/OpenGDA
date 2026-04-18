@@ -8,7 +8,7 @@
  * MULTI-QP SUPPORT: Creates one QP per neighbor for ring topology.
  *
  * Usage:
- *   GdaGpuComm comm;
+ *   GpuComm comm;
  *   auto handle = comm.register_buffer(gpu_buf, size);
  *   comm.exchange_buffer_info(handle);
  *
@@ -40,14 +40,14 @@ namespace gicc::mlx5 {
 } while(0)
 
 // Handle to registered buffer
-struct GdaGpuHandle {
+struct GpuHandle {
     void* buf;
     size_t size;
     MemoryRegion* mr;
     bool is_device;
 };
 
-class GdaGpuComm {
+class GpuComm {
 public:
     gicc::Bootstrap& boot;
     DevxContext* mlx5;
@@ -67,12 +67,12 @@ public:
     std::unordered_map<uint64_t, RemoteInfo> remote_info;
 
     // Device state (GPU-accessible) - per peer
-    std::unordered_map<int, GdaDeviceState*> d_state_per_peer;
-    std::unordered_map<int, GdaDeviceState> h_state_per_peer;
+    std::unordered_map<int, DeviceState*> d_state_per_peer;
+    std::unordered_map<int, DeviceState> h_state_per_peer;
 
     // Legacy: single device state (for backward compatibility)
-    GdaDeviceState* d_state;
-    GdaDeviceState device_state;
+    DeviceState* d_state;
+    DeviceState device_state;
 
     // Completion counter (GPU-accessible)
     volatile uint64_t* h_num_completions;
@@ -82,7 +82,7 @@ public:
     int top_neighbor;
     int bottom_neighbor;
 
-    explicit GdaGpuComm(gicc::Bootstrap& boot_, int local_rank = -1)
+    explicit GpuComm(gicc::Bootstrap& boot_, int local_rank = -1)
         : boot(boot_), mlx5(nullptr), gpu_id(0), d_state(nullptr),
           h_num_completions(nullptr), d_num_completions(nullptr),
           top_neighbor(-1), bottom_neighbor(-1)
@@ -119,7 +119,7 @@ public:
         allocate_completion_counter();
 
         if (boot.rank() == 0) {
-            printf("GdaGpuComm initialized:\n");
+            printf("GpuComm initialized:\n");
             printf("  GPU: %s\n", props.name);
             printf("  IB device: %s\n", mlx5->dev_name.c_str());
             printf("  Rank %d of %d\n", boot.rank(), boot.size());
@@ -128,7 +128,7 @@ public:
         }
     }
 
-    ~GdaGpuComm() {
+    ~GpuComm() {
         for (auto& kv : d_state_per_peer) {
             if (kv.second) cudaFree(kv.second);
         }
@@ -139,17 +139,17 @@ public:
     }
 
     // No copy
-    GdaGpuComm(const GdaGpuComm&) = delete;
-    GdaGpuComm& operator=(const GdaGpuComm&) = delete;
+    GpuComm(const GpuComm&) = delete;
+    GpuComm& operator=(const GpuComm&) = delete;
 
     /**
      * Register a buffer for RDMA
      */
-    GdaGpuHandle register_buffer(void* buf, size_t size, bool is_device) {
+    GpuHandle register_buffer(void* buf, size_t size, bool is_device) {
         auto* mr = new MemoryRegion(mlx5->pd, buf, size, is_device, boot.rank());
         registered_mrs.push_back(mr);
 
-        GdaGpuHandle handle;
+        GpuHandle handle;
         handle.buf = buf;
         handle.size = size;
         handle.mr = mr;
@@ -160,7 +160,7 @@ public:
     /**
      * Exchange buffer info with all peers
      */
-    void exchange_buffer_info(const GdaGpuHandle& handle, int buf_index = 0) {
+    void exchange_buffer_info(const GpuHandle& handle, int buf_index = 0) {
         struct BufInfo {
             uint64_t addr;
             uint32_t rkey;
@@ -198,7 +198,7 @@ public:
     /**
      * Get device state pointer for a specific peer
      */
-    GdaDeviceState* get_device_state_for_peer(int peer) {
+    DeviceState* get_device_state_for_peer(int peer) {
         auto it = d_state_per_peer.find(peer);
         if (it != d_state_per_peer.end()) {
             return it->second;
@@ -209,14 +209,14 @@ public:
     /**
      * Get device state pointer for GPU kernels (legacy - uses first peer)
      */
-    GdaDeviceState* get_device_state() {
+    DeviceState* get_device_state() {
         return d_state;
     }
 
     /**
      * Get local buffer info for GPU kernels
      */
-    void get_local_buffer_info(const GdaGpuHandle& handle,
+    void get_local_buffer_info(const GpuHandle& handle,
                                uint64_t* addr, uint32_t* lkey) {
         *addr = (uint64_t)handle.buf;
         *lkey = handle.mr->lkey;
@@ -239,7 +239,7 @@ public:
     /**
      * CPU-side put for testing (uses standard ibv)
      */
-    void cpu_put(const GdaGpuHandle& handle, int dest_rank, int buf_index,
+    void cpu_put(const GpuHandle& handle, int dest_rank, int buf_index,
                  size_t size) {
         uint64_t key = make_key(dest_rank, buf_index);
         auto it = remote_info.find(key);
@@ -320,14 +320,14 @@ private:
 
         // Exchange with top neighbor
         if (top_neighbor != boot.rank()) {
-            GdaConnInfo my_info = mlx5->get_local_info_for_peer(top_neighbor);
+            ConnInfo my_info = mlx5->get_local_info_for_peer(top_neighbor);
             ConnExchange my_ex = {my_info.qpn, my_info.lid, {}, my_info.psn};
             memcpy(my_ex.gid, my_info.gid, 16);
 
             ConnExchange peer_ex;
             boot.sendrecv(&my_ex, &peer_ex, sizeof(ConnExchange), top_neighbor);
 
-            GdaConnInfo peer_info;
+            ConnInfo peer_info;
             peer_info.qpn = peer_ex.qpn;
             peer_info.lid = peer_ex.lid;
             memcpy(peer_info.gid, peer_ex.gid, 16);
@@ -340,14 +340,14 @@ private:
 
         // Exchange with bottom neighbor
         if (bottom_neighbor != boot.rank() && bottom_neighbor != top_neighbor) {
-            GdaConnInfo my_info = mlx5->get_local_info_for_peer(bottom_neighbor);
+            ConnInfo my_info = mlx5->get_local_info_for_peer(bottom_neighbor);
             ConnExchange my_ex = {my_info.qpn, my_info.lid, {}, my_info.psn};
             memcpy(my_ex.gid, my_info.gid, 16);
 
             ConnExchange peer_ex;
             boot.sendrecv(&my_ex, &peer_ex, sizeof(ConnExchange), bottom_neighbor);
 
-            GdaConnInfo peer_info;
+            ConnInfo peer_info;
             peer_info.qpn = peer_ex.qpn;
             peer_info.lid = peer_ex.lid;
             memcpy(peer_info.gid, peer_ex.gid, 16);
@@ -384,7 +384,7 @@ private:
         auto it = mlx5->peer_qps.find(peer);
         if (it == mlx5->peer_qps.end()) return;
 
-        GdaDeviceState state;
+        DeviceState state;
         memset(&state, 0, sizeof(state));
 
         const PerPeerQp& pqp = it->second;
@@ -395,7 +395,7 @@ private:
         state.wqe_lkey = 0;
         state.dbrec = pqp.d_dbrec;
         state.prod_idx = pqp.d_prod_idx;
-        state.cqe = (volatile GdaCqe64*)mlx5->d_cqe;
+        state.cqe = (volatile Cqe64*)mlx5->d_cqe;
         state.ncqes = mlx5->cq_depth;
         state.ncqes_mask = mlx5->cq_depth - 1;
         state.cq_cons_idx = nullptr;
@@ -406,9 +406,9 @@ private:
 
         h_state_per_peer[peer] = state;
 
-        GdaDeviceState* d_state_ptr;
-        CUDA_CHECK(cudaMalloc(&d_state_ptr, sizeof(GdaDeviceState)));
-        CUDA_CHECK(cudaMemcpy(d_state_ptr, &state, sizeof(GdaDeviceState),
+        DeviceState* d_state_ptr;
+        CUDA_CHECK(cudaMalloc(&d_state_ptr, sizeof(DeviceState)));
+        CUDA_CHECK(cudaMemcpy(d_state_ptr, &state, sizeof(DeviceState),
                               cudaMemcpyHostToDevice));
         d_state_per_peer[peer] = d_state_ptr;
     }
@@ -422,7 +422,7 @@ private:
 
         auto d_it = d_state_per_peer.find(peer);
         if (d_it != d_state_per_peer.end()) {
-            CUDA_CHECK(cudaMemcpy(d_it->second, &it->second, sizeof(GdaDeviceState),
+            CUDA_CHECK(cudaMemcpy(d_it->second, &it->second, sizeof(DeviceState),
                                   cudaMemcpyHostToDevice));
         }
     }

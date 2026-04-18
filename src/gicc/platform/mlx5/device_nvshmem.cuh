@@ -113,7 +113,7 @@ __device__ __forceinline__ uint64_t gda_globaltimer() {
 // Device state structure (nvshmem-style)
 //==============================================================================
 
-struct GdaDeviceQpState {
+struct DeviceQpState {
     // QP info
     uint32_t qpn;
     uint16_t nwqes;           // Number of WQEs (power of 2)
@@ -166,7 +166,7 @@ __device__ __forceinline__ void gda_lock_release(volatile int* lock) {
 // WQE pointer calculation
 //==============================================================================
 
-__device__ __forceinline__ void* gda_get_wqe_ptr(GdaDeviceQpState* qp, uint16_t wqe_idx) {
+__device__ __forceinline__ void* gda_get_wqe_ptr(DeviceQpState* qp, uint16_t wqe_idx) {
     uint16_t idx = wqe_idx & qp->nwqes_mask;
     return (void*)((uintptr_t)qp->wqe_buf + (idx << MLX5_SEND_WQE_SHIFT));
 }
@@ -183,7 +183,7 @@ __device__ __forceinline__ void* gda_get_wqe_ptr(GdaDeviceQpState* qp, uint16_t 
  *   [32-47] Data Segment
  */
 __device__ __forceinline__ void gda_build_rdma_write_wqe(
-    GdaDeviceQpState* qp,
+    DeviceQpState* qp,
     uint64_t local_addr,
     uint32_t local_lkey,
     uint64_t remote_addr,
@@ -220,7 +220,7 @@ __device__ __forceinline__ void gda_build_rdma_write_wqe(
  * Avoids separate data fetch for small messages
  */
 __device__ __forceinline__ void gda_build_rdma_write_inline_wqe(
-    GdaDeviceQpState* qp,
+    DeviceQpState* qp,
     const void* data,
     uint32_t size,
     uint64_t remote_addr,
@@ -261,7 +261,7 @@ __device__ __forceinline__ void gda_build_rdma_write_inline_wqe(
  * Update doorbell record
  * DBREC contains the index of the next empty WQEBB
  */
-__device__ __forceinline__ void gda_update_dbr(GdaDeviceQpState* qp, uint32_t dbrec_head) {
+__device__ __forceinline__ void gda_update_dbr(DeviceQpState* qp, uint32_t dbrec_head) {
     // Optimized: mask to 16-bit, byte-swap, and store
     uint32_t dbrec_val;
     asm volatile(
@@ -284,7 +284,7 @@ __device__ __forceinline__ void gda_update_dbr(GdaDeviceQpState* qp, uint32_t db
  * Ring BlueFlame doorbell
  * Single 64-bit write containing prod_idx and qpn
  */
-__device__ __forceinline__ void gda_ring_db(GdaDeviceQpState* qp, uint16_t prod_idx) {
+__device__ __forceinline__ void gda_ring_db(DeviceQpState* qp, uint16_t prod_idx) {
     // Control segment format for BlueFlame
     uint32_t opmod_idx_opcode = gda_htobe32(prod_idx << 8);
     uint32_t qpn_ds = gda_htobe32(qp->qpn << 8);
@@ -304,7 +304,7 @@ __device__ __forceinline__ void gda_ring_db(GdaDeviceQpState* qp, uint16_t prod_
  * - Sequences: MEMBAR -> update_dbr -> MEMBAR -> ring_db
  */
 template <bool need_strong_flush = false>
-__device__ __forceinline__ void gda_post_send(GdaDeviceQpState* qp, uint64_t new_prod_idx) {
+__device__ __forceinline__ void gda_post_send(DeviceQpState* qp, uint64_t new_prod_idx) {
     gda_lock_acquire(qp->post_send_lock);
 
     uint64_t old_prod_idx;
@@ -336,7 +336,7 @@ __device__ __forceinline__ void gda_post_send(GdaDeviceQpState* qp, uint64_t new
  */
 template <bool need_strong_flush = false>
 __device__ __forceinline__ void gda_submit_requests(
-    GdaDeviceQpState* qp,
+    DeviceQpState* qp,
     uint64_t base_wqe_idx,
     uint16_t num_wqes)
 {
@@ -377,7 +377,7 @@ __device__ __forceinline__ void gda_submit_requests(
  */
 template <bool is_shared_among_ctas = false>
 __device__ __forceinline__ uint64_t gda_reserve_wqe_slots(
-    GdaDeviceQpState* qp,
+    DeviceQpState* qp,
     uint32_t num_wqes)
 {
     uint64_t wqe_idx;
@@ -399,7 +399,7 @@ __device__ __forceinline__ uint64_t gda_reserve_wqe_slots(
  * Single RDMA WRITE with immediate doorbell
  */
 __device__ __forceinline__ void gda_rdma_write(
-    GdaDeviceQpState* qp,
+    DeviceQpState* qp,
     uint64_t local_addr,
     uint32_t local_lkey,
     uint64_t remote_addr,
@@ -426,7 +426,7 @@ __device__ __forceinline__ void gda_rdma_write(
  * Call gda_flush() to ring doorbell after batch
  */
 __device__ __forceinline__ uint64_t gda_rdma_write_batched(
-    GdaDeviceQpState* qp,
+    DeviceQpState* qp,
     uint64_t local_addr,
     uint32_t local_lkey,
     uint64_t remote_addr,
@@ -450,7 +450,7 @@ __device__ __forceinline__ uint64_t gda_rdma_write_batched(
  * Flush pending WQEs (ring doorbell)
  */
 __device__ __forceinline__ void gda_flush(
-    GdaDeviceQpState* qp,
+    DeviceQpState* qp,
     uint64_t base_wqe_idx,
     uint16_t num_wqes)
 {
@@ -466,7 +466,7 @@ __device__ __forceinline__ void gda_flush(
  * Each thread builds one WQE, thread 0 rings doorbell
  */
 __global__ void gda_concurrent_write_kernel(
-    GdaDeviceQpState* qp,
+    DeviceQpState* qp,
     uint64_t* local_addrs,
     uint32_t* local_lkeys,
     uint64_t* remote_addrs,

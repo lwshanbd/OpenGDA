@@ -17,7 +17,7 @@ namespace gicc {
 // Created by Runtime::prepare() and passed to GPU kernels.
 //==============================================================================
 
-using DeviceCtx = gicc::mlx5::GdaDeviceStateOpt;
+using DeviceCtx = gicc::mlx5::DeviceStateOpt;
 
 //==============================================================================
 // RDMA PUT - Build WQE + ring BlueFlame doorbell from GPU

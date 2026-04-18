@@ -17,7 +17,7 @@
 
 #if defined(GICC_PLATFORM_MLX5)
 #include "gicc/platform/mlx5/device_opt.cuh"
-namespace gicc { using RawDeviceCtx = gicc::mlx5::GdaDeviceStateOpt; }
+namespace gicc { using RawDeviceCtx = gicc::mlx5::DeviceStateOpt; }
 #endif
 
 namespace gicc {

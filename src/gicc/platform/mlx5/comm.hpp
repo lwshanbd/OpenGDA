@@ -42,7 +42,7 @@ __global__ void gda_trigger_kernel(volatile uint64_t* trigger_addr, uint64_t val
 }
 
 // Handle to registered memory
-struct GdaHandle {
+struct Handle {
     void* buf;
     size_t size;
     MemoryRegion* mr;
@@ -50,7 +50,7 @@ struct GdaHandle {
 };
 
 // Remote buffer info
-struct GdaRemoteInfo {
+struct RemoteInfo {
     uint64_t addr;
     uint32_t rkey;
 };
@@ -66,7 +66,7 @@ public:
     std::vector<MemoryRegion*> registered_mrs;
 
     // Remote info: (rank, buf_index) -> info
-    std::unordered_map<uint64_t, GdaRemoteInfo> remote_info;
+    std::unordered_map<uint64_t, RemoteInfo> remote_info;
 
     // Operation tracking
     std::atomic<uint64_t> op_counter;
@@ -123,11 +123,11 @@ public:
     /**
      * Register a buffer for RDMA
      */
-    GdaHandle register_buffer(void* buf, size_t size, bool is_device) {
+    Handle register_buffer(void* buf, size_t size, bool is_device) {
         auto* mr = new MemoryRegion(ibv->pd, buf, size, is_device, boot.rank());
         registered_mrs.push_back(mr);
 
-        GdaHandle handle;
+        Handle handle;
         handle.buf = buf;
         handle.size = size;
         handle.mr = mr;
@@ -138,7 +138,7 @@ public:
     /**
      * Exchange buffer info with all peers
      */
-    void exchange_buffer_info(const GdaHandle& handle, int buf_index = 0) {
+    void exchange_buffer_info(const Handle& handle, int buf_index = 0) {
         struct BufInfo {
             uint64_t addr;
             uint32_t rkey;
@@ -167,7 +167,7 @@ public:
     /**
      * RDMA put operation
      */
-    uint64_t put(const GdaHandle& handle, int dest_rank, int buf_index,
+    uint64_t put(const Handle& handle, int dest_rank, int buf_index,
                  size_t size, bool signaled = true) {
         uint64_t key = make_key(dest_rank, buf_index);
         auto it = remote_info.find(key);
@@ -205,7 +205,7 @@ public:
     /**
      * RDMA put with explicit remote address
      */
-    uint64_t put_raw(const GdaHandle& handle, int dest_rank,
+    uint64_t put_raw(const Handle& handle, int dest_rank,
                      uint64_t remote_addr, uint32_t rkey,
                      size_t size, bool signaled = true) {
         uint64_t op_id = ++op_counter;
@@ -227,7 +227,7 @@ public:
     /**
      * RDMA get operation
      */
-    uint64_t get(const GdaHandle& handle, int src_rank, int buf_index,
+    uint64_t get(const Handle& handle, int src_rank, int buf_index,
                  size_t size, bool signaled = true) {
         uint64_t key = make_key(src_rank, buf_index);
         auto it = remote_info.find(key);

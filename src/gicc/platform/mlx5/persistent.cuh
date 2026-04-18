@@ -15,7 +15,7 @@
 namespace gicc::mlx5 {
 
 // Command types for persistent kernel
-enum GdaCommandType : uint32_t {
+enum CommandType : uint32_t {
     GDA_CMD_NOP = 0,
     GDA_CMD_RDMA_WRITE = 1,
     GDA_CMD_RDMA_READ = 2,
@@ -24,7 +24,7 @@ enum GdaCommandType : uint32_t {
 };
 
 // Command structure (64 bytes to match WQE size)
-struct alignas(64) GdaCommand {
+struct alignas(64) Command {
     uint32_t type;           // Command type
     uint32_t flags;          // Flags (signaled, etc.)
     uint64_t local_addr;     // Local buffer address
@@ -38,16 +38,16 @@ struct alignas(64) GdaCommand {
 };
 
 // Ring buffer for commands (GPU polls this)
-struct GdaCommandRing {
+struct CommandRing {
     volatile uint64_t head;    // CPU writes (producer)
     volatile uint64_t tail;    // GPU writes (consumer)
     uint32_t size;             // Number of entries
     uint32_t mask;             // size - 1
-    GdaCommand* commands;      // Command buffer (GPU-accessible)
+    Command* commands;      // Command buffer (GPU-accessible)
 };
 
 // Extended device state for persistent kernel
-struct GdaPersistentState {
+struct PersistentState {
     // QP info
     uint32_t qpn;
     uint16_t nwqes;
@@ -73,7 +73,7 @@ struct GdaPersistentState {
     uint32_t cq_arm_sn;      // CQ arm sequence number
 
     // Command ring
-    GdaCommandRing cmd_ring;
+    CommandRing cmd_ring;
 
     // Statistics
     volatile uint64_t* ops_completed;
@@ -126,13 +126,13 @@ __device__ __forceinline__ void p_membar() {
 }
 
 // Get WQE pointer
-__device__ __forceinline__ void* p_get_wqe(GdaPersistentState* s, uint16_t idx) {
+__device__ __forceinline__ void* p_get_wqe(PersistentState* s, uint16_t idx) {
     return (void*)((uintptr_t)s->wqe_buf + ((idx & s->nwqes_mask) << MLX5_SEND_WQE_SHIFT));
 }
 
 // Build RDMA WRITE WQE
 __device__ __forceinline__ void p_build_write_wqe(
-    GdaPersistentState* state,
+    PersistentState* state,
     uint64_t local_addr,
     uint32_t local_lkey,
     uint64_t remote_addr,
@@ -169,7 +169,7 @@ __device__ __forceinline__ void p_build_write_wqe(
 
 // Ring doorbell (following nvshmem sequence)
 // @param new_prod_idx The new producer index (current + 1)
-__device__ __forceinline__ void p_ring_doorbell(GdaPersistentState* state, uint16_t new_prod_idx) {
+__device__ __forceinline__ void p_ring_doorbell(PersistentState* state, uint16_t new_prod_idx) {
     // Update producer index first
     *state->prod_idx = new_prod_idx;
 
@@ -197,7 +197,7 @@ __device__ __forceinline__ void p_ring_doorbell(GdaPersistentState* state, uint1
 }
 
 // Poll CQ for completion (non-blocking)
-__device__ __forceinline__ bool p_poll_cq_once(GdaPersistentState* state) {
+__device__ __forceinline__ bool p_poll_cq_once(PersistentState* state) {
     if (!state->cqe || !state->cq_cons_idx) return true;  // No CQ, assume done
 
     uint64_t cons = *state->cq_cons_idx;
@@ -220,7 +220,7 @@ __device__ __forceinline__ bool p_poll_cq_once(GdaPersistentState* state) {
 }
 
 // Poll CQ with timeout
-__device__ __forceinline__ bool p_poll_cq(GdaPersistentState* state, int max_polls) {
+__device__ __forceinline__ bool p_poll_cq(PersistentState* state, int max_polls) {
     for (int i = 0; i < max_polls; i++) {
         if (p_poll_cq_once(state)) return true;
     }
@@ -236,10 +236,10 @@ __device__ __forceinline__ bool p_poll_cq(GdaPersistentState* state, int max_pol
  * - Posts WQEs and rings doorbell
  * - Optionally waits for completion
  */
-__global__ void gda_persistent_kernel(GdaPersistentState* state) {
+__global__ void gda_persistent_kernel(PersistentState* state) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    GdaCommandRing* ring = &state->cmd_ring;
+    CommandRing* ring = &state->cmd_ring;
     uint64_t local_tail = ring->tail;
 
     while (true) {
@@ -254,7 +254,7 @@ __global__ void gda_persistent_kernel(GdaPersistentState* state) {
 
         // Process command
         uint32_t cmd_idx = local_tail & ring->mask;
-        GdaCommand* cmd = &ring->commands[cmd_idx];
+        Command* cmd = &ring->commands[cmd_idx];
 
         // Fence to ensure we see the full command
         __threadfence_system();
@@ -315,7 +315,7 @@ __global__ void gda_persistent_kernel(GdaPersistentState* state) {
  * GPU directly triggers RDMA and waits for completion
  */
 __global__ void gda_simple_pingpong(
-    GdaPersistentState* state,
+    PersistentState* state,
     uint64_t local_addr,
     uint32_t local_lkey,
     uint64_t remote_addr,
@@ -365,7 +365,7 @@ __global__ void gda_simple_pingpong(
  * Batched RDMA kernel - one kernel launch for multiple operations
  */
 __global__ void gda_batched_write(
-    GdaPersistentState* state,
+    PersistentState* state,
     uint64_t* local_addrs,
     uint32_t* local_lkeys,
     uint64_t* remote_addrs,
