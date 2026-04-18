@@ -156,7 +156,7 @@ public:
             : dst_seq_offset;
 
         // Queue body put using Fabric
-        GdaHandle body_handle;
+        Handle body_handle;
         body_handle.buf = (char*)d_slot + src_body_offset;
         body_handle.local_desc = mr->desc;
         body_handle.rma_key = mr->key;
@@ -169,7 +169,7 @@ public:
         (void)thresh1;
 
         // Queue seq put (release point) - must come after body
-        GdaHandle seq_handle;
+        Handle seq_handle;
         seq_handle.buf = d_slot;  // seq is at offset 0
         seq_handle.local_desc = mr->desc;
         seq_handle.rma_key = mr->key;
@@ -243,7 +243,7 @@ public:
             ? (ss.remote_ring_base + dst_seq_offset)
             : dst_seq_offset;
 
-        GdaHandle body_handle;
+        Handle body_handle;
         body_handle.buf = (char*)d_slot + src_body_offset;
         body_handle.local_desc = mr->desc;
         body_handle.rma_key = mr->key;
@@ -254,7 +254,7 @@ public:
             ss.remote_ring_key,
             body_size);
 
-        GdaHandle seq_handle;
+        Handle seq_handle;
         seq_handle.buf = d_slot;
         seq_handle.local_desc = mr->desc;
         seq_handle.rma_key = mr->key;
@@ -340,7 +340,7 @@ public:
             : 0;  // offset 0 within the MR
 
         // Queue the 8-byte put
-        GdaHandle ack_handle;
+        Handle ack_handle;
         ack_handle.buf = d_ack;
         ack_handle.local_desc = mr->desc;
         ack_handle.rma_key = mr->key;

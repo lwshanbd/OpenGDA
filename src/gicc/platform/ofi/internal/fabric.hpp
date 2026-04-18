@@ -39,8 +39,10 @@ __global__ void gda_trigger_kernel(volatile uint64_t* trigger_addr, uint64_t thr
     *trigger_addr = threshold;
 }
 
+namespace gicc {
+
 // Handle to a registered memory region
-struct GdaHandle {
+struct Handle {
     void* buf;              // Local buffer pointer
     size_t size;            // Buffer size
     MemoryRegion* mr;       // Memory region (may be null for raw handles)
@@ -50,14 +52,12 @@ struct GdaHandle {
 };
 
 // Remote RMA info for a specific buffer
-struct GdaRemoteInfo {
+struct RemoteInfo {
     fi_addr_t av_addr;
     uint64_t rma_addr;      // Full address (base + offset) for virt_addr mode
     uint64_t rma_key;
     uint64_t base_addr;     // MR base address (for computing offset in non-virt_addr mode)
 };
-
-namespace gicc {
 
 class Fabric {
 public:
@@ -72,7 +72,7 @@ public:
     std::vector<fi_addr_t> av_addrs;
 
     // Remote RMA info: (rank, buf_index) -> remote info
-    std::unordered_map<uint64_t, GdaRemoteInfo> remote_info;
+    std::unordered_map<uint64_t, RemoteInfo> remote_info;
 
     // Registered memory regions (for cleanup)
     std::vector<MemoryRegion*> registered_mrs;
@@ -169,13 +169,13 @@ public:
      * @param is_device True if buffer is on GPU
      * @return Handle for use in put/get operations
      */
-    GdaHandle register_buffer(void* buf, size_t size, bool is_device) {
+    Handle register_buffer(void* buf, size_t size, bool is_device) {
         auto* mr = new MemoryRegion(
             fabric->domain, fabric->ep, fabric->cxi_info,
             buf, size, is_device, hip->gpu_id, boot.rank());
         registered_mrs.push_back(mr);
 
-        GdaHandle handle;
+        Handle handle;
         handle.buf = buf;
         handle.size = size;
         handle.mr = mr;
@@ -210,7 +210,7 @@ public:
      * @param size Transfer size
      * @return The threshold value to pass to trigger()
      */
-    uint64_t put(const GdaHandle& src_handle, int dest_rank,
+    uint64_t put(const Handle& src_handle, int dest_rank,
                  int dest_buf_index, size_t size) {
         current_threshold++;
         uint64_t threshold = current_threshold;
@@ -269,7 +269,7 @@ public:
      * @param size Transfer size
      * @return The threshold value to pass to trigger()
      */
-    uint64_t put_raw(const GdaHandle& src_handle, int dest_rank,
+    uint64_t put_raw(const Handle& src_handle, int dest_rank,
                      uint64_t remote_addr, uint64_t remote_key, size_t size) {
         current_threshold++;
         uint64_t threshold = current_threshold;
@@ -390,7 +390,7 @@ public:
     /**
      * Get remote RMA info for debugging
      */
-    GdaRemoteInfo get_remote_info(int dest_rank, int buf_index) const {
+    RemoteInfo get_remote_info(int dest_rank, int buf_index) const {
         uint64_t map_key = make_remote_key(dest_rank, buf_index);
         auto it = remote_info.find(map_key);
         if (it != remote_info.end()) {
@@ -424,7 +424,7 @@ public:
      * @param size Transfer size
      * @return The threshold value to pass to trigger()
      */
-    uint64_t put_with_signal(const GdaHandle& src_handle, int dest_rank,
+    uint64_t put_with_signal(const Handle& src_handle, int dest_rank,
                               int dest_buf_index, size_t size) {
         current_threshold++;
         uint64_t threshold = current_threshold;

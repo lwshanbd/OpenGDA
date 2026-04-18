@@ -133,7 +133,7 @@ public:
     // Buffer registration — delegates to Fabric, caches local metadata.
     //--------------------------------------------------------------------------
     Buffer register_buffer(void* buf, size_t size, bool is_device) {
-        GdaHandle h = comm_->register_buffer(buf, size, is_device);
+        Handle h = comm_->register_buffer(buf, size, is_device);
         int idx = (int)local_bufs_.size();
 
         OfiBuffer ob;
@@ -215,7 +215,7 @@ public:
         const uint64_t trigger_threshold  = my_n_ops_ + 1;  // 1-based
         my_n_ops_++;
 
-        GdaRemoteInfo ri = comm_->get_remote_info(dest_rank, dest_buf_index);
+        RemoteInfo ri = comm_->get_remote_info(dest_rank, dest_buf_index);
         if (ri.rma_key == 0 && ri.rma_addr == 0) {
             fprintf(stderr, "gicc::Runtime: remote info not set for rank %d "
                     "buf %d (call exchange() first)\n", dest_rank, dest_buf_index);
