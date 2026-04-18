@@ -82,7 +82,7 @@ public:
     }
 
     ~Barrier() {
-        if (thread_running_.load()) finalize();
+        finalize();
     }
 
     Barrier(const Barrier&) = delete;
@@ -92,7 +92,8 @@ public:
     // Lifecycle
     // =========================================================================
 
-    /** Spawn the monitor thread. Call once before using the barrier. */
+    /** Spawn the monitor thread. Required for continuous mode; optional for
+     *  single-barrier mode. Safe to call exactly zero or one time. */
     void init() {
         if (thread_running_.load()) return;
 
@@ -104,13 +105,20 @@ public:
         monitor_thread_ = std::thread(&Barrier::monitor_loop, this);
     }
 
-    /** Stop the monitor thread and release resources. */
+    /** Stop the monitor thread (if running) and release every resource the
+     *  constructor allocated. Idempotent — safe to call repeatedly or to call
+     *  exactly once via the destructor when init() was never invoked. */
     void finalize() {
-        if (!thread_running_.load()) return;
+        // Stop the monitor thread, if one was ever spawned.
+        if (thread_running_.load()) {
+            thread_running_ = false;
+            continuous_mode_ = false;
+            if (monitor_thread_.joinable()) monitor_thread_.join();
+        }
 
-        thread_running_ = false;
-        continuous_mode_ = false;
-        if (monitor_thread_.joinable()) monitor_thread_.join();
+        // Every release below is guarded by a nullptr check and clears the
+        // pointer, so the whole function is idempotent whether or not init()
+        // ran and whether or not finalize() has been called before.
 
         // DWQ ops
         for (auto* op : dwq_ops_) delete op;
