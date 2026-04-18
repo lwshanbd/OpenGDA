@@ -6,7 +6,7 @@
  *
  * Usage:
  *   Fabric comm;
- *   GdaAm am(comm);
+ *   Am am(comm);
  *
  *   // Send handle-only AM
  *   am_args64_t args;
@@ -27,21 +27,21 @@
 #include <vector>
 
 #include "am_types.hpp"
-#include "gda_am_context.hpp"
-#include "gda_am_device.hpp"
+#include "am_context.hpp"
+#include "am_device.hpp"
 #include "fabric.hpp"
 
 namespace gicc {
 namespace am {
 
 // =============================================================================
-// GdaAm - Simplified Active Message class
+// Am - Simplified Active Message class
 // =============================================================================
 
-class GdaAm {
+class Am {
 public:
     // AM context
-    GdaAmContext am_ctx;
+    Context am_ctx;
 
     // Staging buffers (device memory, registered for RDMA)
     std::vector<am_slot_t*> d_staging;
@@ -67,7 +67,7 @@ public:
      * @param nslots Slots per peer inbox ring (default 128)
      * @param staging_pool_size Number of staging slots for sending (default 16)
      */
-    GdaAm(Fabric& comm, int nslots = AM_DEFAULT_RING_SLOTS, size_t staging_pool_size = 16)
+    Am(Fabric& comm, int nslots = AM_DEFAULT_RING_SLOTS, size_t staging_pool_size = 16)
         : am_ctx(comm, nslots),
           staging_idx(0),
           staging_size(staging_pool_size),
@@ -79,7 +79,7 @@ public:
         allocate_reply_staging(staging_pool_size);
     }
 
-    ~GdaAm() {
+    ~Am() {
         for (auto* mr : staging_mrs) delete mr;
         for (auto* p : d_staging) if (p) hipFree(p);
         for (auto* mr : reply_mrs) delete mr;
@@ -87,8 +87,8 @@ public:
     }
 
     // No copy
-    GdaAm(const GdaAm&) = delete;
-    GdaAm& operator=(const GdaAm&) = delete;
+    Am(const Am&) = delete;
+    Am& operator=(const Am&) = delete;
 
     /**
      * Queue a handle-only AM send (no payload).

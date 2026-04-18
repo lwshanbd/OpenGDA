@@ -19,7 +19,7 @@
 #include "gicc/bootstrap/bootstrap.hpp"
 #include "gicc/platform/ofi/internal/hip_device_context.hpp"
 #include "gicc/platform/ofi/internal/fabric.hpp"
-#include "gicc/platform/ofi/internal/gda_am.hpp"
+#include "gicc/platform/ofi/internal/am.hpp"
 
 using namespace gicc::am;
 
@@ -144,7 +144,7 @@ __global__ void reqreq_nodeB_kernel(
 // Test runners
 // =============================================================================
 
-static void run_reqrep_test(gicc::Fabric& comm, GdaAm& am, int peer,
+static void run_reqrep_test(gicc::Fabric& comm, gicc::am::Am& am, int peer,
                             int n_batches, int warmup_batches,
                             double clock_rate_khz, uint64_t* d_cycles)
 {
@@ -244,7 +244,7 @@ static void run_reqrep_test(gicc::Fabric& comm, GdaAm& am, int peer,
     }
 }
 
-static void run_reqreq_test(gicc::Fabric& comm, GdaAm& am, int peer,
+static void run_reqreq_test(gicc::Fabric& comm, gicc::am::Am& am, int peer,
                             int n_batches, int warmup_batches,
                             double clock_rate_khz, uint64_t* d_cycles)
 {
@@ -365,7 +365,7 @@ int main(int argc, char** argv) {
         fflush(stdout);
     }
 
-    GdaAm am(comm, 128, BATCH_SIZE + 4);
+    gicc::am::Am am(comm, 128, BATCH_SIZE + 4);
 
     hipDeviceProp_t props;
     HIP_CHECK(hipGetDeviceProperties(&props, comm.gpu_id()));

@@ -24,10 +24,10 @@ namespace gicc {
 namespace am {
 
 // =============================================================================
-// GdaAmContext - Simplified AM context class
+// Context - Simplified AM context class
 // =============================================================================
 
-class GdaAmContext {
+class Context {
 public:
     // Reference to parent Fabric (for fabric, PMI, etc.)
     Fabric& comm;
@@ -64,7 +64,7 @@ public:
      * @param comm_ Reference to initialized Fabric
      * @param nslots_ Number of slots per inbox ring (power of 2, default 128)
      */
-    GdaAmContext(Fabric& comm_, int nslots_ = AM_DEFAULT_RING_SLOTS)
+    Context(Fabric& comm_, int nslots_ = AM_DEFAULT_RING_SLOTS)
         : comm(comm_),
           nslots(nslots_),
           d_context(nullptr),
@@ -97,7 +97,7 @@ public:
         }
     }
 
-    ~GdaAmContext() {
+    ~Context() {
         // Cleanup device state
         if (d_context) hipFree(d_context);
         if (d_send_states) hipFree(d_send_states);
@@ -113,8 +113,8 @@ public:
     }
 
     // No copy
-    GdaAmContext(const GdaAmContext&) = delete;
-    GdaAmContext& operator=(const GdaAmContext&) = delete;
+    Context(const Context&) = delete;
+    Context& operator=(const Context&) = delete;
 
     /**
      * Get device-accessible AM context pointer
