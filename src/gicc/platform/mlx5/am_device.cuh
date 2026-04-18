@@ -1,5 +1,5 @@
 /**
- * nvib_am_device.cuh - GPU device-side Active Message functions for NVIDIA IB
+ * am_device.cuh - GPU device-side Active Message functions for NVIDIA IB
  *
  * Provides device functions for:
  *   - Building and sending AM via RDMA WRITE
@@ -20,7 +20,7 @@
 #include "device_opt.cuh"
 
 namespace gicc::mlx5 {
-namespace nvib_am {
+namespace am {
 
 // =============================================================================
 // Handler implementations (device functions)
@@ -474,5 +474,5 @@ void am_send_request(
     gda_ring_doorbell_bf(gda_state, new_prod);
 }
 
-}  // namespace nvib_am
+}  // namespace am
 }  // namespace gicc::mlx5

@@ -1,5 +1,5 @@
 /**
- * nvib_am_context.hpp - Active Message context for NVIDIA IB
+ * am_context.hpp - Active Message context for NVIDIA IB
  *
  * This file provides host-side AM context management:
  *   - Allocation of per-peer inbox rings in GPU device memory
@@ -22,7 +22,7 @@
 #include "device_opt.cuh"
 
 namespace gicc::mlx5 {
-namespace nvib_am {
+namespace am {
 
 // =============================================================================
 // Connection info for QP exchange
@@ -36,10 +36,10 @@ struct QpConnInfo {
 };
 
 // =============================================================================
-// NvibAmContext - Active Message context class
+// Context - Active Message context class
 // =============================================================================
 
-class NvibAmContext {
+class Context {
 public:
     // Bootstrap handle (provides rank/size and collectives)
     gicc::Bootstrap& boot;
@@ -78,7 +78,7 @@ public:
      * @param qp_ DevX QP for RDMA
      * @param nslots_ Number of slots per inbox ring (power of 2)
      */
-    NvibAmContext(gicc::Bootstrap& boot_,
+    Context(gicc::Bootstrap& boot_,
                   struct ibv_context* ib_ctx_,
                   struct ibv_pd* pd_,
                   DevxQp* qp_,
@@ -122,7 +122,7 @@ public:
         }
     }
 
-    ~NvibAmContext() {
+    ~Context() {
         if (d_context) cudaFree(d_context);
         if (d_recv_states) cudaFree(d_recv_states);
         if (d_gda_state) cudaFree(d_gda_state);
@@ -132,8 +132,8 @@ public:
     }
 
     // No copy
-    NvibAmContext(const NvibAmContext&) = delete;
-    NvibAmContext& operator=(const NvibAmContext&) = delete;
+    Context(const Context&) = delete;
+    Context& operator=(const Context&) = delete;
 
     int rank() const { return boot.rank(); }
     int size() const { return boot.size(); }
@@ -301,5 +301,5 @@ private:
     }
 };
 
-}  // namespace nvib_am
+}  // namespace am
 }  // namespace gicc::mlx5

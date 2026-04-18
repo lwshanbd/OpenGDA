@@ -9,7 +9,7 @@
  *
  * Usage:
  *   Fabric comm;
- *   GdaAm am(comm);
+ *   Am am(comm);
  *   AmArgs args;
  *   args[0] = value;
  *   am.send_handle(dest, AM_HANDLER_NOOP, args);
@@ -61,7 +61,7 @@ __global__ void am_poll_kernel(AmDeviceContext* ctx, int max_per_peer, int* resu
     *result = total;
 }
 
-class GdaAm {
+class Am {
 public:
     Fabric& comm;
 
@@ -93,7 +93,7 @@ public:
     // Operation tracking
     uint64_t pending_ops;
 
-    explicit GdaAm(Fabric& comm_, int nslots_ = 128, size_t staging_pool = 16)
+    explicit Am(Fabric& comm_, int nslots_ = 128, size_t staging_pool = 16)
         : comm(comm_), nslots(nslots_),
           h_recv_states(nullptr), d_recv_states(nullptr),
           d_context(nullptr),
@@ -106,7 +106,7 @@ public:
         setup_device_context();
     }
 
-    ~GdaAm() {
+    ~Am() {
         // Free staging
         for (auto* mr : staging_mrs) delete mr;
         for (auto* p : d_staging) if (p) cudaFree(p);
@@ -122,8 +122,8 @@ public:
     }
 
     // No copy
-    GdaAm(const GdaAm&) = delete;
-    GdaAm& operator=(const GdaAm&) = delete;
+    Am(const Am&) = delete;
+    Am& operator=(const Am&) = delete;
 
     /**
      * Send a handle-only AM (no payload)
