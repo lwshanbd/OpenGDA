@@ -1,5 +1,5 @@
 /**
- * gda_am.hpp - Simplified GPU-Direct Async Active Message API
+ * am.hpp - Active Message subsystem for the OFI backend
  *
  * AM subsystem uses Fabric's put mechanism directly.
  * AM = put(slot_body) + put(seq)

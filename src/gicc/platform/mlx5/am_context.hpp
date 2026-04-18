@@ -275,7 +275,7 @@ private:
                               cudaMemcpyHostToDevice),
                    "cudaMemcpy(d_context)");
 
-        // Setup GDA state for RDMA operations
+        // Setup device state for RDMA operations
         memset(&h_gda_state, 0, sizeof(h_gda_state));
         h_gda_state.qpn = qp->qpn;
         h_gda_state.nwqes = 1 << qp->log_wq_size;

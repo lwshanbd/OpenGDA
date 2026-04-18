@@ -94,7 +94,7 @@ public:
     struct fid_cntr* atomic_completion_cntr;  // Counter for atomic ops
 
     /**
-     * Initialize GDA communication
+     * Initialize the OFI fabric layer
      * @param boot_ Bootstrap instance providing rank, size, and collective ops
      * @param local_rank Local rank for GPU selection (e.g., SLURM_LOCALID)
      */

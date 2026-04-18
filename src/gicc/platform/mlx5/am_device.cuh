@@ -191,7 +191,7 @@ int am_wait_one(am_recv_state_t* recv_state) {
  * and only does acquire fence after seeing seq, the body at offset 8
  * will be visible by the time the receiver reads it.
  *
- * @param gda_state GDA device state for RDMA
+ * @param gda_state Device state for RDMA
  * @param local_slot Local staging slot (device memory)
  * @param local_lkey Local MR lkey
  * @param remote_ring_base Remote inbox ring base address
@@ -238,7 +238,7 @@ uint64_t am_send_short(
 /**
  * Build and send a payload AM
  *
- * @param gda_state GDA device state
+ * @param gda_state Device state
  * @param local_slot Local staging slot
  * @param local_lkey Local MR lkey
  * @param remote_ring_base Remote inbox ring base
@@ -324,7 +324,7 @@ void am_poll_once_kernel(am_context_t* ctx, int max_poll_per_peer, int* result) 
  *
  * Uses pre-prepared reply buffer - NO runtime writes, NO extra fence.
  *
- * @param gda_state GDA device state for RDMA
+ * @param gda_state Device state for RDMA
  * @param ack_addr Sender's ack buffer address (from reply token)
  * @param ack_rkey Sender's ack buffer rkey (from reply token)
  * @param local_reply_addr Address of pre-prepared reply value (already contains ack_seq)
@@ -385,7 +385,7 @@ void am_wait_reply(volatile am_ack_entry_t* ack_entry, uint64_t expected_seq) {
  * Uses pre-prepared reply buffer array for zero-copy reply.
  *
  * @param recv_state Receiver state for the peer
- * @param gda_state GDA device state for RDMA
+ * @param gda_state Device state for RDMA
  * @param reply_buf_base Base address of pre-prepared reply buffer array
  * @param local_lkey Local MR lkey
  * @param iter_idx Current iteration index (to select reply buffer)
@@ -436,7 +436,7 @@ am_slot_t* am_recv_and_reply_fast(
  *   args[1] = ack_rkey
  *   args[2] = ack_seq (expected reply sequence)
  *
- * @param gda_state GDA device state
+ * @param gda_state Device state
  * @param local_slot Local staging slot (must have reply token in args)
  * @param local_lkey Local MR lkey
  * @param remote_ring_base Remote inbox ring base

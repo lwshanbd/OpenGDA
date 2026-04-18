@@ -1,7 +1,7 @@
 /**
- * gda_types.hpp - Type definitions for GPU-Direct Async
+ * types.hpp - Type definitions for the MLX5 backend
  *
- * Common types used across the NVIDIA OpenGDA implementation.
+ * Common types used across the MLX5 (NVIDIA + InfiniBand) implementation.
  */
 #pragma once
 

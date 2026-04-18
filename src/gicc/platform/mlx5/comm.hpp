@@ -1,5 +1,5 @@
 /**
- * gda_comm.hpp - GPU-Direct Async Communication API for NVIDIA + InfiniBand
+ * comm.hpp - GPU-triggered communication API for the MLX5 backend
  *
  * Provides nvshmem-like put/get APIs:
  *   - put(): RDMA write to remote rank
