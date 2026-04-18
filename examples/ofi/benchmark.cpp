@@ -1,5 +1,5 @@
 /**
- * gda_benchmark_gicc.cpp - 32-stream concurrent DWQ micro-benchmark, ported
+ * benchmark.cpp - 32-stream concurrent DWQ micro-benchmark, ported
  * to the unified gicc:: high-level API. Equivalent to the original
  * main.cpp + benchmark_runner.hpp but written entirely against
  * gicc::Runtime / gicc::flush / gicc::quiet, with no direct use of the
@@ -12,7 +12,7 @@
  *   - measure hipDeviceSynchronize() time
  *   - rt.reset()
  *
- * Run: FI_MR_CACHE_MAX_COUNT=0 srun -N 2 -n 2 --ntasks-per-node=1 ./gda_benchmark_gicc
+ * Run: FI_MR_CACHE_MAX_COUNT=0 srun -N 2 -n 2 --ntasks-per-node=1 ./benchmark
  */
 #include <cstdio>
 #include <cstdlib>

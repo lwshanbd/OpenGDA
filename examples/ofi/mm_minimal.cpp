@@ -1,6 +1,6 @@
 /**
- * mm_gda_minimal_gicc.cpp - Distributed matrix multiplication ported to the
- * unified gicc:: high-level API. Same algorithm and timing methodology as
+ * mm_minimal.cpp - Distributed matrix multiplication on the unified gicc::
+ * high-level API. Same algorithm and timing methodology as the legacy
  * mm_gda_minimal.cpp, but the communication path is built entirely on
  * gicc::Runtime / gicc::Token / gicc::flush / Runtime::wait.
  *
@@ -14,7 +14,7 @@
  *
  * Run:
  *   FI_MR_CACHE_MAX_COUNT=0 \
- *     srun -N <nodes> -n <ranks> --ntasks-per-node=8 ./mm_gda_minimal_gicc <N>
+ *     srun -N <nodes> -n <ranks> --ntasks-per-node=8 ./mm_minimal <N>
  *
  *   (If GICC_BOOTSTRAP=pmi2, also export PMI_MAX_KVS_ENTRIES=2000.)
  */
