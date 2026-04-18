@@ -161,6 +161,23 @@ public:
     void setup() {
         uint64_t threshold = barrier_count_ + 1;
 
+        // Single-rank case: no peers, no DWQ ops. Still bump ready_counter so
+        // the device-side barrier() loop terminates. Host only writes
+        // expected_signal in single-barrier mode — in continuous mode the
+        // kernel owns that field (same rule as the n_rounds_ > 0 path below).
+        if (n_rounds_ == 0) {
+            if (!continuous_mode_.load(std::memory_order_relaxed)) {
+                h_context_.expected_signal = threshold;
+                if (d_context_) {
+                    hipMemcpy(&d_context_->expected_signal,
+                              &h_context_.expected_signal,
+                              sizeof(uint64_t), hipMemcpyHostToDevice);
+                }
+            }
+            __atomic_add_fetch(h_ready_counter_, 1, __ATOMIC_SEQ_CST);
+            return;
+        }
+
         int buf_idx = barrier_count_ % N_SIGNAL_BUFFERS;
         uint64_t* h_sig = h_signal_values_[buf_idx];
         MemoryRegion* mr_sig = mr_signal_values_[buf_idx];
@@ -336,6 +353,20 @@ private:
     // =========================================================================
 
     void allocate_signals() {
+        // Ready/done counters are always needed — the device-side barrier()
+        // spins on ready_counter even when there are zero rounds, and
+        // setup() always bumps it.
+        hipHostMalloc((void**)&h_done_counter_, sizeof(uint64_t), hipHostMallocDefault);
+        *h_done_counter_ = 0;
+
+        hipHostMalloc((void**)&h_ready_counter_, sizeof(uint64_t), hipHostMallocDefault);
+        *h_ready_counter_ = 0;
+
+        // Skip signal/source buffers entirely when size <= 1 (n_rounds_ == 0):
+        // there are no peers to write to, and MemoryRegion rejects zero-length
+        // regions.
+        if (n_rounds_ == 0) return;
+
         size_t signals_size = n_rounds_ * BARRIER_SIGNAL_SLOTS * sizeof(uint64_t);
         hipHostMalloc(&d_signals_, signals_size, hipHostMallocDefault);
         memset((void*)d_signals_, 0, signals_size);
@@ -352,15 +383,11 @@ private:
                 h_signal_values_[i], sizeof(uint64_t), false,
                 comm_.gpu_id(), comm_.rank());
         }
-
-        hipHostMalloc((void**)&h_done_counter_, sizeof(uint64_t), hipHostMallocDefault);
-        *h_done_counter_ = 0;
-
-        hipHostMalloc((void**)&h_ready_counter_, sizeof(uint64_t), hipHostMallocDefault);
-        *h_ready_counter_ = 0;
     }
 
     void exchange_addresses() {
+        if (n_rounds_ == 0) return;  // size <= 1: no peers to exchange with
+
         uint64_t my_base = (uint64_t)d_signals_;
         uint64_t my_key  = mr_signals_->key;
 
@@ -387,13 +414,18 @@ private:
     }
 
     void setup_device_context() {
-        hipMalloc(&d_trigger_addrs_, n_rounds_ * sizeof(uint64_t*));
+        // Skip the trigger-address array when there are no rounds — hipMalloc
+        // with size 0 is implementation-defined and the kernel never indexes
+        // trigger_addrs when n_rounds == 0.
+        if (n_rounds_ > 0) {
+            hipMalloc(&d_trigger_addrs_, n_rounds_ * sizeof(uint64_t*));
 
-        std::vector<volatile uint64_t*> h_trig(n_rounds_);
-        for (int k = 0; k < n_rounds_; k++)
-            h_trig[k] = counter_pairs_[k].dev_trigger_cntr;
-        hipMemcpy(d_trigger_addrs_, h_trig.data(),
-                  n_rounds_ * sizeof(uint64_t*), hipMemcpyHostToDevice);
+            std::vector<volatile uint64_t*> h_trig(n_rounds_);
+            for (int k = 0; k < n_rounds_; k++)
+                h_trig[k] = counter_pairs_[k].dev_trigger_cntr;
+            hipMemcpy(d_trigger_addrs_, h_trig.data(),
+                      n_rounds_ * sizeof(uint64_t*), hipMemcpyHostToDevice);
+        }
 
         h_context_.n_rounds        = n_rounds_;
         h_context_.rank            = comm_.rank();
