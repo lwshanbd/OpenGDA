@@ -260,7 +260,7 @@ public:
      *    - single-barrier mode: the host writes expected_signal = threshold
      *      on every setup() call; the kernel only reads it.
      *    - continuous mode: the host writes expected_signal exactly once
-     *      here at prepare (the first barrier's threshold), then
+     *      here in `prepare()` (the first barrier's threshold), then
      *      continuous_mode_ is turned on and subsequent setup() calls skip
      *      the write. The kernel is expected to increment expected_signal
      *      itself after each barrier() call for the rest of the run.
@@ -285,7 +285,12 @@ public:
         setup();
     }
 
-    /** Wait for all continuous barriers to complete. */
+    /** Block until every barrier armed by a prior `prepare()` has completed.
+     *
+     *  Precondition: `prepare(N)` was called and the kernel launched in
+     *  between, so the GPU will actually drive the done_counter through
+     *  all N generations.
+     */
     void wait() {
         while (barrier_count_ < target_barrier_count_.load())
             std::this_thread::yield();
