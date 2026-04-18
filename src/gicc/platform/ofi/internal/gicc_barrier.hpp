@@ -78,6 +78,7 @@ public:
         allocate_signals();
         exchange_addresses();
         create_counters();
+        create_dwq_pool();
         setup_device_context();
     }
 
@@ -196,15 +197,14 @@ public:
         for (int k = 0; k < n_rounds_; k++) {
             int peer = (comm_.rank() + (1 << k)) % comm_.size();
 
-            auto* dwq = new DwqWorkBuilder(comm_.rank());
-
             int sig_idx = k * BARRIER_SIGNAL_SLOTS + slot;
             uint64_t remote_offset = sig_idx * sizeof(uint64_t);
             uint64_t remote_addr = comm_.is_virt_addr_mode()
                 ? (remote_signal_addrs_[k] + remote_offset)
                 : remote_offset;
 
-            dwq->queue_rma_write(
+            // Reuse the pre-allocated DwqWorkBuilder for round k.
+            dwq_ops_[k]->queue_rma_write(
                 comm_.fabric->domain,
                 comm_.fabric->ep,
                 h_sig,
@@ -216,8 +216,6 @@ public:
                 counter_pairs_[k].trigger_cntr,
                 counter_pairs_[k].completion_cntr,
                 threshold);
-
-            dwq_ops_.push_back(dwq);
         }
 
         // Signal GPU that DWQ ops are ready
@@ -235,8 +233,8 @@ public:
 
     /** Reset for next barrier. Call after wait_completion(). */
     void reset() {
-        for (auto* op : dwq_ops_) delete op;
-        dwq_ops_.clear();
+        // DwqWorkBuilders are pooled in the ctor and reused across barriers.
+        // Nothing to free here — setup() will repopulate their fields.
 
         barrier_count_++;
 
@@ -436,6 +434,15 @@ private:
         counter_pairs_.resize(n_rounds_);
         for (int k = 0; k < n_rounds_; k++)
             counter_pairs_[k] = comm_.fabric->create_counter_pair();
+    }
+
+    // Pre-allocate one DwqWorkBuilder per round. queue_rma_write() re-populates
+    // every field on each setup() call, and reset() only returns once libfabric
+    // has signalled completion, so reuse across barriers is safe.
+    void create_dwq_pool() {
+        dwq_ops_.reserve(n_rounds_);
+        for (int k = 0; k < n_rounds_; k++)
+            dwq_ops_.push_back(new DwqWorkBuilder(comm_.rank()));
     }
 
     void setup_device_context() {
