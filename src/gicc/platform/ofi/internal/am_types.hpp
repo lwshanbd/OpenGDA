@@ -18,7 +18,7 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace opengda {
+namespace gicc {
 namespace am {
 
 // =============================================================================
@@ -229,4 +229,4 @@ struct am_exchange_info_t {
 };
 
 }  // namespace am
-}  // namespace opengda
+}  // namespace gicc

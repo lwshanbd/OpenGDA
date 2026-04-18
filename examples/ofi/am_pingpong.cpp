@@ -21,7 +21,7 @@
 #include "gicc/platform/ofi/internal/gda_comm.hpp"
 #include "gicc/platform/ofi/internal/gda_am.hpp"
 
-using namespace opengda::am;
+using namespace gicc::am;
 
 #define HIP_CHECK(cmd) do {                                                   \
     hipError_t err = cmd;                                                     \

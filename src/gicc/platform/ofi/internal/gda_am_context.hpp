@@ -20,7 +20,7 @@
 #include "gda_comm.hpp"
 #include "memory_region.hpp"
 
-namespace opengda {
+namespace gicc {
 namespace am {
 
 // =============================================================================
@@ -281,4 +281,4 @@ private:
 };
 
 }  // namespace am
-}  // namespace opengda
+}  // namespace gicc

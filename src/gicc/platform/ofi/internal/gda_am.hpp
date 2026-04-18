@@ -31,7 +31,7 @@
 #include "gda_am_device.hpp"
 #include "gda_comm.hpp"
 
-namespace opengda {
+namespace gicc {
 namespace am {
 
 // =============================================================================
@@ -418,4 +418,4 @@ private:
 };
 
 }  // namespace am
-}  // namespace opengda
+}  // namespace gicc

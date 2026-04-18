@@ -13,7 +13,7 @@
 #include <cstdint>
 #include "am_types.hpp"
 
-namespace opengda {
+namespace gicc {
 namespace am {
 
 // =============================================================================
@@ -199,4 +199,4 @@ void am_poll_once_kernel(am_context_t* ctx, int max_poll_per_peer, int* result) 
 }
 
 }  // namespace am
-}  // namespace opengda
+}  // namespace gicc
