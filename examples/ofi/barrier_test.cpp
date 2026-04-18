@@ -109,11 +109,11 @@ int main(int argc, char** argv) {
         if (rank == 0) printf("Test 2: %d continuous barriers ... ", N_CONTINUOUS);
         fflush(stdout);
 
-        barrier.start_continuous(N_CONTINUOUS);
+        barrier.prepare(N_CONTINUOUS);
         hipLaunchKernelGGL(continuous_barrier_kernel, dim3(1), dim3(1), 0, 0,
                            barrier.device_ctx(), N_CONTINUOUS,
                            (volatile uint64_t*)h_counter);
-        barrier.wait_continuous();
+        barrier.wait();
         hipDeviceSynchronize();
 
         if (*h_counter != (uint64_t)N_CONTINUOUS) {

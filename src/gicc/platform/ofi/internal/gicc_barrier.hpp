@@ -28,9 +28,9 @@
  *   gicc::Barrier barrier(rt.fabric());
  *   barrier.init();
  *
- *   barrier.start_continuous(100);
+ *   barrier.prepare(100);
  *   my_kernel<<<...>>>(args, barrier.device_ctx());
- *   barrier.wait_continuous();
+ *   barrier.wait();
  *
  *   barrier.finalize();
  */
@@ -260,12 +260,12 @@ public:
      *    - single-barrier mode: the host writes expected_signal = threshold
      *      on every setup() call; the kernel only reads it.
      *    - continuous mode: the host writes expected_signal exactly once
-     *      here at start_continuous (the first barrier's threshold), then
+     *      here at prepare (the first barrier's threshold), then
      *      continuous_mode_ is turned on and subsequent setup() calls skip
      *      the write. The kernel is expected to increment expected_signal
      *      itself after each barrier() call for the rest of the run.
      */
-    void start_continuous(uint64_t num_barriers) {
+    void prepare(uint64_t num_barriers) {
         ever_active_ = true;
         target_barrier_count_ = barrier_count_ + num_barriers;
 
@@ -286,7 +286,7 @@ public:
     }
 
     /** Wait for all continuous barriers to complete. */
-    void wait_continuous() {
+    void wait() {
         while (barrier_count_ < target_barrier_count_.load())
             std::this_thread::yield();
         continuous_mode_ = false;
