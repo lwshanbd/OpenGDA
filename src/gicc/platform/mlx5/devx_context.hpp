@@ -1,5 +1,5 @@
 /**
- * mlx5_gda_context.hpp - MLX5 DevX context for GPU-triggered RDMA
+ * devx_context.hpp - MLX5 DevX context for GPU-triggered RDMA
  *
  * Uses mlx5dv DevX API to allow GPU to directly:
  *   - Build and write WQEs to NIC-mapped memory
@@ -156,7 +156,7 @@ struct PerPeerQp {
     }
 };
 
-class Mlx5GdaContext {
+class DevxContext {
 public:
     // IB objects
     struct ibv_context* ctx;
@@ -198,7 +198,7 @@ public:
     uint64_t* h_prod_idx;
     uint32_t psn;
 
-    Mlx5GdaContext(gicc::Bootstrap& boot_, const char* device_name = nullptr, int port = 1)
+    DevxContext(gicc::Bootstrap& boot_, const char* device_name = nullptr, int port = 1)
         : ctx(nullptr), pd(nullptr), cq(nullptr),
           port_num(port), boot(boot_), rank(boot_.rank()), size(boot_.size()),
           d_cqe(nullptr),
@@ -220,7 +220,7 @@ public:
         allocate_cq_gpu_resources();
     }
 
-    ~Mlx5GdaContext() {
+    ~DevxContext() {
         // Free per-peer QP resources
         for (auto& kv : peer_qps) {
             free_peer_qp_gpu_resources(kv.second);
@@ -238,8 +238,8 @@ public:
     }
 
     // No copy
-    Mlx5GdaContext(const Mlx5GdaContext&) = delete;
-    Mlx5GdaContext& operator=(const Mlx5GdaContext&) = delete;
+    DevxContext(const DevxContext&) = delete;
+    DevxContext& operator=(const DevxContext&) = delete;
 
     /**
      * Create a QP for communicating with a specific peer

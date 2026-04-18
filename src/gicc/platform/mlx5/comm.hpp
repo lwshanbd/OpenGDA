@@ -55,7 +55,7 @@ struct GdaRemoteInfo {
     uint32_t rkey;
 };
 
-class GdaComm {
+class Fabric {
 public:
     // Components
     gicc::Bootstrap& boot;
@@ -78,7 +78,7 @@ public:
     volatile uint64_t* d_trigger_cntr;
     volatile uint64_t* d_completion_cntr;
 
-    explicit GdaComm(gicc::Bootstrap& boot_, int local_rank = -1)
+    explicit Fabric(gicc::Bootstrap& boot_, int local_rank = -1)
         : boot(boot_), cuda(nullptr), ibv(nullptr),
           op_counter(0), completion_counter(0),
           h_trigger_cntr(nullptr), h_completion_cntr(nullptr),
@@ -106,7 +106,7 @@ public:
         exchange_and_connect();
     }
 
-    ~GdaComm() {
+    ~Fabric() {
         for (auto* mr : registered_mrs) delete mr;
         registered_mrs.clear();
 
@@ -117,8 +117,8 @@ public:
     }
 
     // No copy
-    GdaComm(const GdaComm&) = delete;
-    GdaComm& operator=(const GdaComm&) = delete;
+    Fabric(const Fabric&) = delete;
+    Fabric& operator=(const Fabric&) = delete;
 
     /**
      * Register a buffer for RDMA

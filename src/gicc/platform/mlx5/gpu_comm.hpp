@@ -24,7 +24,7 @@
 #include <unordered_map>
 
 #include "gicc/bootstrap/bootstrap.hpp"
-#include "gda_context.hpp"
+#include "devx_context.hpp"
 #include "gicc/util/memory_region.hpp"
 #include "device.cuh"
 
@@ -50,7 +50,7 @@ struct GdaGpuHandle {
 class GdaGpuComm {
 public:
     gicc::Bootstrap& boot;
-    Mlx5GdaContext* mlx5;
+    DevxContext* mlx5;
 
     // CUDA context
     int gpu_id;
@@ -100,7 +100,7 @@ public:
         CUDA_CHECK(cudaGetDeviceProperties(&props, gpu_id));
 
         // Initialize MLX5 context
-        mlx5 = new Mlx5GdaContext(boot);
+        mlx5 = new DevxContext(boot);
 
         // Determine neighbors (ring topology)
         top_neighbor = (boot.rank() > 0) ? boot.rank() - 1 : (boot.size() - 1);

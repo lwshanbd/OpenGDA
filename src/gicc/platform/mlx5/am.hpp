@@ -8,7 +8,7 @@
  *   - seq written LAST as release point
  *
  * Usage:
- *   GdaComm comm;
+ *   Fabric comm;
  *   GdaAm am(comm);
  *   AmArgs args;
  *   args[0] = value;
@@ -63,7 +63,7 @@ __global__ void am_poll_kernel(AmDeviceContext* ctx, int max_per_peer, int* resu
 
 class GdaAm {
 public:
-    GdaComm& comm;
+    Fabric& comm;
 
     // Per-peer inbox rings (device memory)
     std::vector<AmSlot*> d_inbox_rings;
@@ -93,7 +93,7 @@ public:
     // Operation tracking
     uint64_t pending_ops;
 
-    explicit GdaAm(GdaComm& comm_, int nslots_ = 128, size_t staging_pool = 16)
+    explicit GdaAm(Fabric& comm_, int nslots_ = 128, size_t staging_pool = 16)
         : comm(comm_), nslots(nslots_),
           h_recv_states(nullptr), d_recv_states(nullptr),
           d_context(nullptr),
@@ -161,7 +161,7 @@ public:
         size_t body_offset = offsetof(AmSlot, hdr);
         size_t body_size = sizeof(AmHeader) + sizeof(AmArgs);
 
-        // Connection already established in GdaComm constructor
+        // Connection already established in Fabric constructor
         comm.put_raw({(void*)((char*)d_slot + body_offset), body_size, mr, true},
                      dest_rank,
                      dst_slot_addr + body_offset,
