@@ -43,7 +43,7 @@ __global__ void continuous_barrier_kernel(gicc::BarrierCtx* bctx,
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
     gicc::Bootstrap boot;
-    GdaComm comm(boot);
+    gicc::Fabric comm(boot);
     int rank = comm.rank();
     int nranks = comm.size();
 

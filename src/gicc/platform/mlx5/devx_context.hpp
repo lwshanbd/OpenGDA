@@ -1,5 +1,5 @@
 /**
- * mlx5_gda_context.hpp - MLX5 DevX context for GPU-triggered RDMA
+ * devx_context.hpp - MLX5 DevX context for GPU-triggered RDMA
  *
  * Uses mlx5dv DevX API to allow GPU to directly:
  *   - Build and write WQEs to NIC-mapped memory
@@ -90,7 +90,7 @@ struct Mlx5Cqe64 {
 #endif
 
 // GPU-accessible QP state
-struct GdaDeviceQp {
+struct DeviceQp {
     uint32_t qpn;                    // QP number
     uint16_t nwqes;                  // Number of WQEs in queue
 
@@ -113,7 +113,7 @@ struct GdaDeviceQp {
 };
 
 // Remote peer info for RDMA
-struct GdaRemotePeer {
+struct RemotePeer {
     uint64_t buf_addr;               // Remote buffer address
     uint32_t rkey;                   // Remote key
     uint32_t qpn;                    // Remote QP number
@@ -122,7 +122,7 @@ struct GdaRemotePeer {
 };
 
 // Connection info for exchange
-struct GdaConnInfo {
+struct ConnInfo {
     uint32_t qpn;
     uint16_t lid;
     uint8_t  gid[16];
@@ -146,7 +146,7 @@ struct PerPeerQp {
     uint64_t* h_prod_idx;
 
     // Remote peer info
-    GdaRemotePeer remote;
+    RemotePeer remote;
 
     PerPeerQp() : qp(nullptr), psn(0), connected(false),
                   d_wqe_buf(nullptr), d_dbrec(nullptr), d_bf_reg(nullptr),
@@ -156,7 +156,7 @@ struct PerPeerQp {
     }
 };
 
-class Mlx5GdaContext {
+class DevxContext {
 public:
     // IB objects
     struct ibv_context* ctx;
@@ -173,7 +173,7 @@ public:
 
     // Per-peer QPs (multi-QP support)
     std::map<int, PerPeerQp> peer_qps;
-    std::vector<GdaRemotePeer> remote_peers;
+    std::vector<RemotePeer> remote_peers;
 
     // Bootstrap (MPI or PMI2, selected at build time)
     gicc::Bootstrap& boot;
@@ -198,7 +198,7 @@ public:
     uint64_t* h_prod_idx;
     uint32_t psn;
 
-    Mlx5GdaContext(gicc::Bootstrap& boot_, const char* device_name = nullptr, int port = 1)
+    DevxContext(gicc::Bootstrap& boot_, const char* device_name = nullptr, int port = 1)
         : ctx(nullptr), pd(nullptr), cq(nullptr),
           port_num(port), boot(boot_), rank(boot_.rank()), size(boot_.size()),
           d_cqe(nullptr),
@@ -220,7 +220,7 @@ public:
         allocate_cq_gpu_resources();
     }
 
-    ~Mlx5GdaContext() {
+    ~DevxContext() {
         // Free per-peer QP resources
         for (auto& kv : peer_qps) {
             free_peer_qp_gpu_resources(kv.second);
@@ -238,8 +238,8 @@ public:
     }
 
     // No copy
-    Mlx5GdaContext(const Mlx5GdaContext&) = delete;
-    Mlx5GdaContext& operator=(const Mlx5GdaContext&) = delete;
+    DevxContext(const DevxContext&) = delete;
+    DevxContext& operator=(const DevxContext&) = delete;
 
     /**
      * Create a QP for communicating with a specific peer
@@ -311,14 +311,14 @@ public:
     /**
      * Get local connection info for a specific peer's QP
      */
-    GdaConnInfo get_local_info_for_peer(int peer_rank) {
+    ConnInfo get_local_info_for_peer(int peer_rank) {
         auto it = peer_qps.find(peer_rank);
         if (it == peer_qps.end()) {
             fprintf(stderr, "Rank %d: No QP for peer %d\n", rank, peer_rank);
             exit(1);
         }
 
-        GdaConnInfo info;
+        ConnInfo info;
         info.qpn = it->second.qp->qp_num;
         info.lid = port_attr.lid;
         memcpy(info.gid, gid.raw, 16);
@@ -329,16 +329,16 @@ public:
     }
 
     // Legacy: Get local connection info (uses first QP)
-    GdaConnInfo get_local_info() const {
+    ConnInfo get_local_info() const {
         if (peer_qps.empty()) {
-            GdaConnInfo info = {};
+            ConnInfo info = {};
             info.lid = port_attr.lid;
             memcpy(info.gid, gid.raw, 16);
             return info;
         }
 
         auto it = peer_qps.begin();
-        GdaConnInfo info;
+        ConnInfo info;
         info.qpn = it->second.qp->qp_num;
         info.lid = port_attr.lid;
         memcpy(info.gid, gid.raw, 16);
@@ -351,7 +351,7 @@ public:
     /**
      * Connect QP to a specific peer
      */
-    void connect_to_peer(int peer_rank, const GdaConnInfo& peer_info) {
+    void connect_to_peer(int peer_rank, const ConnInfo& peer_info) {
         if (peer_rank == rank) return;
 
         auto it = peer_qps.find(peer_rank);
@@ -452,8 +452,8 @@ public:
     }
 
     // Legacy: Get GPU-accessible device QP info (uses first QP)
-    GdaDeviceQp get_device_qp() const {
-        GdaDeviceQp dqp;
+    DeviceQp get_device_qp() const {
+        DeviceQp dqp;
         memset(&dqp, 0, sizeof(dqp));
 
         if (!peer_qps.empty()) {
@@ -511,7 +511,7 @@ private:
         }
 
         // Check environment variable for device name override
-        const char* env_dev = getenv("GDA_IB_DEV");
+        const char* env_dev = getenv("GICC_IB_DEV");
         if (env_dev) {
             device_name = env_dev;
         }

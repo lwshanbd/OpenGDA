@@ -6,7 +6,7 @@
  */
 #pragma once
 
-#include "gicc/mlx5/device_opt.cuh"
+#include "gicc/platform/mlx5/device_opt.cuh"
 
 namespace gicc {
 
@@ -17,7 +17,7 @@ namespace gicc {
 // Created by Runtime::prepare() and passed to GPU kernels.
 //==============================================================================
 
-using DeviceCtx = gicc::mlx5::GdaDeviceStateOpt;
+using DeviceCtx = gicc::mlx5::DeviceStateOpt;
 
 //==============================================================================
 // RDMA PUT - Build WQE + ring BlueFlame doorbell from GPU

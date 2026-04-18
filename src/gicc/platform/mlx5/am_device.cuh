@@ -1,5 +1,5 @@
 /**
- * nvib_am_device.cuh - GPU device-side Active Message functions for NVIDIA IB
+ * am_device.cuh - GPU device-side Active Message functions for NVIDIA IB
  *
  * Provides device functions for:
  *   - Building and sending AM via RDMA WRITE
@@ -20,7 +20,7 @@
 #include "device_opt.cuh"
 
 namespace gicc::mlx5 {
-namespace nvib_am {
+namespace am {
 
 // =============================================================================
 // Handler implementations (device functions)
@@ -191,7 +191,7 @@ int am_wait_one(am_recv_state_t* recv_state) {
  * and only does acquire fence after seeing seq, the body at offset 8
  * will be visible by the time the receiver reads it.
  *
- * @param gda_state GDA device state for RDMA
+ * @param gda_state Device state for RDMA
  * @param local_slot Local staging slot (device memory)
  * @param local_lkey Local MR lkey
  * @param remote_ring_base Remote inbox ring base address
@@ -201,7 +201,7 @@ int am_wait_one(am_recv_state_t* recv_state) {
  */
 __device__ __forceinline__
 uint64_t am_send_short(
-    GdaDeviceStateOpt* gda_state,
+    DeviceStateOpt* gda_state,
     am_slot_t* local_slot,
     uint32_t local_lkey,
     uint64_t remote_ring_base,
@@ -238,7 +238,7 @@ uint64_t am_send_short(
 /**
  * Build and send a payload AM
  *
- * @param gda_state GDA device state
+ * @param gda_state Device state
  * @param local_slot Local staging slot
  * @param local_lkey Local MR lkey
  * @param remote_ring_base Remote inbox ring base
@@ -249,7 +249,7 @@ uint64_t am_send_short(
  */
 __device__ __forceinline__
 uint64_t am_send_payload(
-    GdaDeviceStateOpt* gda_state,
+    DeviceStateOpt* gda_state,
     am_slot_t* local_slot,
     uint32_t local_lkey,
     uint64_t remote_ring_base,
@@ -324,7 +324,7 @@ void am_poll_once_kernel(am_context_t* ctx, int max_poll_per_peer, int* result) 
  *
  * Uses pre-prepared reply buffer - NO runtime writes, NO extra fence.
  *
- * @param gda_state GDA device state for RDMA
+ * @param gda_state Device state for RDMA
  * @param ack_addr Sender's ack buffer address (from reply token)
  * @param ack_rkey Sender's ack buffer rkey (from reply token)
  * @param local_reply_addr Address of pre-prepared reply value (already contains ack_seq)
@@ -332,7 +332,7 @@ void am_poll_once_kernel(am_context_t* ctx, int max_poll_per_peer, int* result) 
  */
 __device__ __forceinline__
 void am_send_reply_fast(
-    GdaDeviceStateOpt* gda_state,
+    DeviceStateOpt* gda_state,
     uint64_t ack_addr,
     uint32_t ack_rkey,
     uint64_t local_reply_addr,
@@ -385,7 +385,7 @@ void am_wait_reply(volatile am_ack_entry_t* ack_entry, uint64_t expected_seq) {
  * Uses pre-prepared reply buffer array for zero-copy reply.
  *
  * @param recv_state Receiver state for the peer
- * @param gda_state GDA device state for RDMA
+ * @param gda_state Device state for RDMA
  * @param reply_buf_base Base address of pre-prepared reply buffer array
  * @param local_lkey Local MR lkey
  * @param iter_idx Current iteration index (to select reply buffer)
@@ -394,7 +394,7 @@ void am_wait_reply(volatile am_ack_entry_t* ack_entry, uint64_t expected_seq) {
 __device__ __forceinline__
 am_slot_t* am_recv_and_reply_fast(
     am_recv_state_t* recv_state,
-    GdaDeviceStateOpt* gda_state,
+    DeviceStateOpt* gda_state,
     uint64_t reply_buf_base,
     uint32_t local_lkey,
     int iter_idx)
@@ -436,7 +436,7 @@ am_slot_t* am_recv_and_reply_fast(
  *   args[1] = ack_rkey
  *   args[2] = ack_seq (expected reply sequence)
  *
- * @param gda_state GDA device state
+ * @param gda_state Device state
  * @param local_slot Local staging slot (must have reply token in args)
  * @param local_lkey Local MR lkey
  * @param remote_ring_base Remote inbox ring base
@@ -445,7 +445,7 @@ am_slot_t* am_recv_and_reply_fast(
  */
 __device__ __forceinline__
 void am_send_request(
-    GdaDeviceStateOpt* gda_state,
+    DeviceStateOpt* gda_state,
     am_slot_t* local_slot,
     uint32_t local_lkey,
     uint64_t remote_ring_base,
@@ -474,5 +474,5 @@ void am_send_request(
     gda_ring_doorbell_bf(gda_state, new_prod);
 }
 
-}  // namespace nvib_am
+}  // namespace am
 }  // namespace gicc::mlx5

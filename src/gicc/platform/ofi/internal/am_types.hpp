@@ -1,5 +1,5 @@
 /**
- * am_types.hpp - Active Message type definitions for GPU-Direct Async
+ * am_types.hpp - Active Message type definitions for the OFI backend
  *
  * This file defines all data structures for the GPU-triggered Active Message
  * subsystem. All structures are designed to be device-visible and cache-line
@@ -18,7 +18,7 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace opengda {
+namespace gicc {
 namespace am {
 
 // =============================================================================
@@ -229,4 +229,4 @@ struct am_exchange_info_t {
 };
 
 }  // namespace am
-}  // namespace opengda
+}  // namespace gicc

@@ -1,5 +1,5 @@
 /**
- * nvib_am_context.hpp - Active Message context for NVIDIA IB
+ * am_context.hpp - Active Message context for NVIDIA IB
  *
  * This file provides host-side AM context management:
  *   - Allocation of per-peer inbox rings in GPU device memory
@@ -22,7 +22,7 @@
 #include "device_opt.cuh"
 
 namespace gicc::mlx5 {
-namespace nvib_am {
+namespace am {
 
 // =============================================================================
 // Connection info for QP exchange
@@ -36,10 +36,10 @@ struct QpConnInfo {
 };
 
 // =============================================================================
-// NvibAmContext - Active Message context class
+// Context - Active Message context class
 // =============================================================================
 
-class NvibAmContext {
+class Context {
 public:
     // Bootstrap handle (provides rank/size and collectives)
     gicc::Bootstrap& boot;
@@ -68,8 +68,8 @@ public:
     std::vector<am_recv_state_t> h_recv_states;
 
     // Device state for RDMA operations
-    GdaDeviceStateOpt* d_gda_state;
-    GdaDeviceStateOpt h_gda_state;
+    DeviceStateOpt* d_gda_state;
+    DeviceStateOpt h_gda_state;
 
     /**
      * Initialize AM context
@@ -78,7 +78,7 @@ public:
      * @param qp_ DevX QP for RDMA
      * @param nslots_ Number of slots per inbox ring (power of 2)
      */
-    NvibAmContext(gicc::Bootstrap& boot_,
+    Context(gicc::Bootstrap& boot_,
                   struct ibv_context* ib_ctx_,
                   struct ibv_pd* pd_,
                   DevxQp* qp_,
@@ -122,7 +122,7 @@ public:
         }
     }
 
-    ~NvibAmContext() {
+    ~Context() {
         if (d_context) cudaFree(d_context);
         if (d_recv_states) cudaFree(d_recv_states);
         if (d_gda_state) cudaFree(d_gda_state);
@@ -132,14 +132,14 @@ public:
     }
 
     // No copy
-    NvibAmContext(const NvibAmContext&) = delete;
-    NvibAmContext& operator=(const NvibAmContext&) = delete;
+    Context(const Context&) = delete;
+    Context& operator=(const Context&) = delete;
 
     int rank() const { return boot.rank(); }
     int size() const { return boot.size(); }
 
     am_context_t* get_device_context() const { return d_context; }
-    GdaDeviceStateOpt* get_gda_state() const { return d_gda_state; }
+    DeviceStateOpt* get_gda_state() const { return d_gda_state; }
 
     // Get send state for a peer (for building RDMA operations)
     am_peer_send_state_t& get_send_state(int peer) { return h_send_states[peer]; }
@@ -275,7 +275,7 @@ private:
                               cudaMemcpyHostToDevice),
                    "cudaMemcpy(d_context)");
 
-        // Setup GDA state for RDMA operations
+        // Setup device state for RDMA operations
         memset(&h_gda_state, 0, sizeof(h_gda_state));
         h_gda_state.qpn = qp->qpn;
         h_gda_state.nwqes = 1 << qp->log_wq_size;
@@ -286,14 +286,14 @@ private:
         h_gda_state.prod_idx = qp->d_prod_idx;
 
         // CQ info
-        h_gda_state.cqe = (volatile GdaCqe64Opt*)qp->d_cq_buf;
+        h_gda_state.cqe = (volatile Cqe64Opt*)qp->d_cq_buf;
         h_gda_state.ncqes = qp->num_cqe;
         h_gda_state.ncqes_mask = h_gda_state.ncqes - 1;
         h_gda_state.cq_dbrec = qp->d_cq_dbrec;
 
-        check_cuda(cudaMalloc(&d_gda_state, sizeof(GdaDeviceStateOpt)),
+        check_cuda(cudaMalloc(&d_gda_state, sizeof(DeviceStateOpt)),
                    "cudaMalloc(d_gda_state)");
-        check_cuda(cudaMemcpy(d_gda_state, &h_gda_state, sizeof(GdaDeviceStateOpt),
+        check_cuda(cudaMemcpy(d_gda_state, &h_gda_state, sizeof(DeviceStateOpt),
                               cudaMemcpyHostToDevice),
                    "cudaMemcpy(d_gda_state)");
 
@@ -301,5 +301,5 @@ private:
     }
 };
 
-}  // namespace nvib_am
+}  // namespace am
 }  // namespace gicc::mlx5

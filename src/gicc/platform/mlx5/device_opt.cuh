@@ -46,7 +46,7 @@ namespace gicc::mlx5 {
 #endif
 
 // Default batch size (number of WQEs per doorbell)
-#define GDA_DEFAULT_BATCH_SIZE 32
+#define GICC_DEFAULT_BATCH_SIZE 32
 
 //==============================================================================
 // OPTIMIZED BYTE SWAP - using CUDA intrinsics (use prefix to avoid conflicts)
@@ -136,7 +136,7 @@ __device__ __forceinline__ uint64_t gda_globaltimer() {
 // OPTIMIZED DEVICE STATE - includes BlueFlame and batching support
 //==============================================================================
 
-struct GdaCqe64Opt {
+struct Cqe64Opt {
     uint8_t  rsvd0[46];
     uint16_t wqe_counter;
     uint8_t  signature;
@@ -144,7 +144,7 @@ struct GdaCqe64Opt {
 } __attribute__((packed));
 
 // Extended device state with optimization support
-struct GdaDeviceStateOpt {
+struct DeviceStateOpt {
     // QP info
     uint32_t qpn;
     uint16_t nwqes;
@@ -166,7 +166,7 @@ struct GdaDeviceStateOpt {
     volatile uint64_t* prod_idx;     // Posted to hardware
 
     // CQ for completion
-    volatile GdaCqe64Opt* cqe;
+    volatile Cqe64Opt* cqe;
     uint32_t ncqes;
     uint32_t ncqes_mask;
     volatile uint64_t* cq_cons_idx;
@@ -188,7 +188,7 @@ struct GdaDeviceStateOpt {
 // OPTIMIZED WQE BUILDING - Per-32bit writes with L1 bypass
 //==============================================================================
 
-__device__ __forceinline__ void* gda_get_wqe_ptr(GdaDeviceStateOpt* state, uint16_t wqe_idx) {
+__device__ __forceinline__ void* gda_get_wqe_ptr(DeviceStateOpt* state, uint16_t wqe_idx) {
     uint16_t idx = wqe_idx & state->nwqes_mask;
     return (void*)((uintptr_t)state->wqe_buf + (idx << MLX5_SEND_WQE_SHIFT));
 }
@@ -202,7 +202,7 @@ __device__ __forceinline__ void* gda_get_wqe_ptr(GdaDeviceStateOpt* state, uint1
  *   [32-47] Data Segment
  */
 __device__ __forceinline__ void gda_build_rdma_write_wqe_opt(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint64_t local_addr,
     uint32_t local_lkey,
     uint64_t remote_addr,
@@ -274,7 +274,7 @@ __device__ __forceinline__ void gda_build_rdma_write_wqe_opt(
  *   Upper 32 bits go to bytes 4-7
  */
 __device__ __forceinline__ void gda_ring_doorbell_bf(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint16_t wqe_idx)
 {
     // Build BlueFlame value matching control segment layout
@@ -308,7 +308,7 @@ __device__ __forceinline__ void gda_ring_doorbell_bf(
  * Simple doorbell (no BlueFlame) - fallback path
  */
 __device__ __forceinline__ void gda_ring_doorbell_simple(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint16_t wqe_idx)
 {
     // Memory fence to ensure WQE writes are visible
@@ -330,7 +330,7 @@ __device__ __forceinline__ void gda_ring_doorbell_simple(
  * Returns the base WQE index for the reservation
  */
 __device__ __forceinline__ uint64_t gda_reserve_wqe_slots(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint32_t num_slots)
 {
     return atomicAdd((unsigned long long*)state->resv_head, num_slots);
@@ -341,7 +341,7 @@ __device__ __forceinline__ uint64_t gda_reserve_wqe_slots(
  * Uses CAS to ensure ordering with other threads
  */
 __device__ __forceinline__ void gda_mark_wqes_ready(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint64_t base_idx,
     uint32_t num_wqes)
 {
@@ -362,7 +362,7 @@ __device__ __forceinline__ void gda_mark_wqes_ready(
  * Uses mask-based boundary detection (O(1))
  */
 __device__ __forceinline__ bool gda_should_post_doorbell(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint64_t base_idx,
     uint64_t new_idx)
 {
@@ -375,7 +375,7 @@ __device__ __forceinline__ bool gda_should_post_doorbell(
  * Post multiple WQEs with single doorbell
  */
 __device__ __forceinline__ void gda_post_wqes_batched(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint64_t new_prod_idx)
 {
     // Ensure all WQE writes are visible
@@ -447,7 +447,7 @@ __device__ __forceinline__ uint8_t gda_read_sysmem_u8(volatile uint8_t* ptr) {
 }
 
 __device__ __forceinline__ int gda_poll_cq_wqe_counter(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint64_t expected_wqe_idx,
     uint64_t timeout_ns = 0)
 {
@@ -503,7 +503,7 @@ __device__ __forceinline__ int gda_poll_cq_wqe_counter(
  * For host memory CQE, uses ld.acquire.sys to bypass GPU cache.
  */
 __device__ __forceinline__ void gda_quiet(
-    GdaDeviceStateOpt* state)
+    DeviceStateOpt* state)
 {
     // Get current producer index - this is the WQE we need to wait for
     uint64_t prod_idx = gda_load_relaxed_u64(state->prod_idx);
@@ -539,7 +539,7 @@ __device__ __forceinline__ void gda_quiet_with_ack(
 
 // Legacy function - replaced by gda_quiet
 __device__ __forceinline__ int gda_poll_cq_opt(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint64_t expected_completions,
     uint64_t timeout_ns = 50000)
 {
@@ -556,7 +556,7 @@ __device__ __forceinline__ int gda_poll_cq_opt(
  * This avoids one fence.acq_rel.gpu + doorbell per WQE.
  */
 __device__ __forceinline__ void gda_rdma_write_no_db(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint64_t local_addr,
     uint32_t local_lkey,
     uint64_t remote_addr,
@@ -580,7 +580,7 @@ __device__ __forceinline__ void gda_rdma_write_no_db(
  * Flush all pending WQEs to the NIC by ringing the doorbell.
  * Call after one or more gda_rdma_write_no_db() on the same QP.
  */
-__device__ __forceinline__ void gda_flush_doorbell(GdaDeviceStateOpt* state)
+__device__ __forceinline__ void gda_flush_doorbell(DeviceStateOpt* state)
 {
     uint16_t wqe_idx = (uint16_t)(gda_load_relaxed_u64(state->prod_idx) & 0xFFFF);
     gda_ring_doorbell_bf(state, wqe_idx);
@@ -595,7 +595,7 @@ __device__ __forceinline__ void gda_flush_doorbell(GdaDeviceStateOpt* state)
  *   - Doorbell contains prod_idx + 1 (the new producer index)
  */
 __device__ __forceinline__ void gda_rdma_write_opt(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint64_t local_addr,
     uint32_t local_lkey,
     uint64_t remote_addr,
@@ -623,7 +623,7 @@ __device__ __forceinline__ void gda_rdma_write_opt(
  * Returns true if doorbell was rung (caller should wait if needed)
  */
 __device__ __forceinline__ bool gda_rdma_write_batched(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint64_t local_addr,
     uint32_t local_lkey,
     uint64_t remote_addr,
@@ -657,11 +657,11 @@ __device__ __forceinline__ bool gda_rdma_write_batched(
 
 //==============================================================================
 // OPTIMIZED KERNELS
-// Guard with GDA_DEVICE_OPT_SUPPRESS_KERNELS to avoid multiple-definition
+// Guard with GICC_DEVICE_OPT_SUPPRESS_KERNELS to avoid multiple-definition
 // errors when this header is included from multiple translation units.
 //==============================================================================
 
-#ifndef GDA_DEVICE_OPT_SUPPRESS_KERNELS
+#ifndef GICC_DEVICE_OPT_SUPPRESS_KERNELS
 
 /**
  * Optimized burst kernel - single thread, maximum throughput
@@ -671,7 +671,7 @@ __device__ __forceinline__ bool gda_rdma_write_batched(
  *   - Doorbell contains (prod + i + 1) = next empty slot
  */
 __global__ void gda_burst_kernel_opt(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint64_t local_addr,
     uint32_t local_lkey,
     uint32_t size,
@@ -715,7 +715,7 @@ __global__ void gda_burst_kernel_opt(
  * Optimized ping-pong kernel with cycle counting
  */
 __global__ void gda_pingpong_kernel_opt(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint64_t local_addr,
     uint32_t local_lkey,
     uint32_t size,
@@ -743,7 +743,7 @@ __global__ void gda_pingpong_kernel_opt(
  * For maximum parallelism when building many WQEs
  */
 __global__ void gda_multi_wqe_kernel(
-    GdaDeviceStateOpt* state,
+    DeviceStateOpt* state,
     uint64_t* local_addrs,   // Array of source addresses
     uint32_t local_lkey,
     uint64_t* remote_addrs,  // Array of dest addresses
@@ -795,6 +795,6 @@ __global__ void gda_multi_wqe_kernel(
     }
 }
 
-#endif  // GDA_DEVICE_OPT_SUPPRESS_KERNELS
+#endif  // GICC_DEVICE_OPT_SUPPRESS_KERNELS
 
 }  // namespace gicc::mlx5

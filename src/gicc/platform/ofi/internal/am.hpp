@@ -1,12 +1,12 @@
 /**
- * gda_am.hpp - Simplified GPU-Direct Async Active Message API
+ * am.hpp - Active Message subsystem for the OFI backend
  *
- * AM subsystem uses GdaComm's put mechanism directly.
+ * AM subsystem uses Fabric's put mechanism directly.
  * AM = put(slot_body) + put(seq)
  *
  * Usage:
- *   GdaComm comm;
- *   GdaAm am(comm);
+ *   Fabric comm;
+ *   Am am(comm);
  *
  *   // Send handle-only AM
  *   am_args64_t args;
@@ -27,21 +27,21 @@
 #include <vector>
 
 #include "am_types.hpp"
-#include "gda_am_context.hpp"
-#include "gda_am_device.hpp"
-#include "gda_comm.hpp"
+#include "am_context.hpp"
+#include "am_device.hpp"
+#include "fabric.hpp"
 
-namespace opengda {
+namespace gicc {
 namespace am {
 
 // =============================================================================
-// GdaAm - Simplified Active Message class
+// Am - Simplified Active Message class
 // =============================================================================
 
-class GdaAm {
+class Am {
 public:
     // AM context
-    GdaAmContext am_ctx;
+    Context am_ctx;
 
     // Staging buffers (device memory, registered for RDMA)
     std::vector<am_slot_t*> d_staging;
@@ -63,11 +63,11 @@ public:
 
     /**
      * Initialize AM subsystem
-     * @param comm Reference to initialized GdaComm
+     * @param comm Reference to initialized Fabric
      * @param nslots Slots per peer inbox ring (default 128)
      * @param staging_pool_size Number of staging slots for sending (default 16)
      */
-    GdaAm(GdaComm& comm, int nslots = AM_DEFAULT_RING_SLOTS, size_t staging_pool_size = 16)
+    Am(Fabric& comm, int nslots = AM_DEFAULT_RING_SLOTS, size_t staging_pool_size = 16)
         : am_ctx(comm, nslots),
           staging_idx(0),
           staging_size(staging_pool_size),
@@ -79,7 +79,7 @@ public:
         allocate_reply_staging(staging_pool_size);
     }
 
-    ~GdaAm() {
+    ~Am() {
         for (auto* mr : staging_mrs) delete mr;
         for (auto* p : d_staging) if (p) hipFree(p);
         for (auto* mr : reply_mrs) delete mr;
@@ -87,12 +87,12 @@ public:
     }
 
     // No copy
-    GdaAm(const GdaAm&) = delete;
-    GdaAm& operator=(const GdaAm&) = delete;
+    Am(const Am&) = delete;
+    Am& operator=(const Am&) = delete;
 
     /**
      * Queue a handle-only AM send (no payload).
-     * Uses GdaComm::put() internally.
+     * Uses Fabric::put() internally.
      *
      * @param dest_rank Destination rank
      * @param handler_id Handler to invoke
@@ -155,8 +155,8 @@ public:
             ? (ss.remote_ring_base + dst_seq_offset)
             : dst_seq_offset;
 
-        // Queue body put using GdaComm
-        GdaHandle body_handle;
+        // Queue body put using Fabric
+        Handle body_handle;
         body_handle.buf = (char*)d_slot + src_body_offset;
         body_handle.local_desc = mr->desc;
         body_handle.rma_key = mr->key;
@@ -169,7 +169,7 @@ public:
         (void)thresh1;
 
         // Queue seq put (release point) - must come after body
-        GdaHandle seq_handle;
+        Handle seq_handle;
         seq_handle.buf = d_slot;  // seq is at offset 0
         seq_handle.local_desc = mr->desc;
         seq_handle.rma_key = mr->key;
@@ -243,7 +243,7 @@ public:
             ? (ss.remote_ring_base + dst_seq_offset)
             : dst_seq_offset;
 
-        GdaHandle body_handle;
+        Handle body_handle;
         body_handle.buf = (char*)d_slot + src_body_offset;
         body_handle.local_desc = mr->desc;
         body_handle.rma_key = mr->key;
@@ -254,7 +254,7 @@ public:
             ss.remote_ring_key,
             body_size);
 
-        GdaHandle seq_handle;
+        Handle seq_handle;
         seq_handle.buf = d_slot;
         seq_handle.local_desc = mr->desc;
         seq_handle.rma_key = mr->key;
@@ -340,7 +340,7 @@ public:
             : 0;  // offset 0 within the MR
 
         // Queue the 8-byte put
-        GdaHandle ack_handle;
+        Handle ack_handle;
         ack_handle.buf = d_ack;
         ack_handle.local_desc = mr->desc;
         ack_handle.rma_key = mr->key;
@@ -375,7 +375,7 @@ public:
     // Accessors
     int rank() const { return am_ctx.comm.rank(); }
     int size() const { return am_ctx.comm.size(); }
-    GdaComm& comm() { return am_ctx.comm; }
+    Fabric& comm() { return am_ctx.comm; }
 
 private:
     void allocate_staging(size_t pool_size) {
@@ -418,4 +418,4 @@ private:
 };
 
 }  // namespace am
-}  // namespace opengda
+}  // namespace gicc

@@ -22,14 +22,14 @@
 #include <unordered_map>
 
 #include "gicc/gicc_types.hpp"
-#include "gicc/mlx5/devx_qp.hpp"
+#include "gicc/platform/mlx5/devx_qp.hpp"
 #include "gicc/util/memory_region.hpp"
 #include "gicc/bootstrap/bootstrap.hpp"
 
-// Include gda_device_opt.cuh for GdaDeviceStateOpt struct definition.
+// Include gda_device_opt.cuh for DeviceStateOpt struct definition.
 // Must come AFTER mlx5dv.h (included by mlx5_devx_qp.hpp) to avoid
 // macro conflicts with MLX5 enum constants.
-#include "gicc/mlx5/device_opt.cuh"
+#include "gicc/platform/mlx5/device_opt.cuh"
 
 // Simplified GPU context (NVSHMEM-style API)
 #include "gicc/platform/mlx5/gicc_context.cuh"
@@ -38,7 +38,7 @@ namespace gicc {
 
 // DeviceCtx alias (same as in mlx5_device.cuh, repeated here so
 // mlx5_runtime.hpp can be used without including device headers)
-using DeviceCtx = gicc::mlx5::GdaDeviceStateOpt;
+using DeviceCtx = gicc::mlx5::DeviceStateOpt;
 
 inline void gicc_cuda_check(cudaError_t err, const char* what) {
     if (err != cudaSuccess) {
@@ -163,7 +163,7 @@ public:
         h_ctx.bf_reg = (volatile uint64_t*)qp->d_uar_reg;
         h_ctx.prod_idx = qp->d_prod_idx;
 
-        h_ctx.cqe = (volatile gicc::mlx5::GdaCqe64Opt*)qp->d_cq_buf;
+        h_ctx.cqe = (volatile gicc::mlx5::Cqe64Opt*)qp->d_cq_buf;
         h_ctx.ncqes = qp->num_cqe;
         h_ctx.ncqes_mask = qp->num_cqe - 1;
 

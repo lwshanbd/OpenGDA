@@ -38,20 +38,28 @@ src/                          # GICC library source (shared library + headers)
     gicc.hpp                  # Top-level host API
     gicc_types.hpp            # Buffer, RemoteBufferInfo types
     gicc_device.cuh           # Device-side API (put, quiet, flush)
-    platform/mlx5/            # MLX5 backend (host Runtime + device wrappers)
-    mlx5/                     # Low-level MLX5 transport (DevX QP, WQE, CQ)
-    util/                     # Utilities (MPI bootstrap, memory registration)
+    bootstrap/                # MPI / PMI2 bootstrap
+    coll.hpp                  # Collective ops
+    platform/mlx5/            # MLX5 backend: Runtime, Fabric, DevxContext,
+                              #   Am, device-side WQE/CQ code, all MLX5 bits
+    platform/ofi/             # OFI/CXI backend: Runtime, Fabric, Am, Barrier
+    util/                     # MemoryRegion, ibv_context, cuda_device_context
   CMakeLists.txt              # Builds libgicc.so
   gicc_lib.cu                 # Library compilation unit
 
-examples/gicc/                # Example programs linking against libgicc
+examples/gicc/                # MLX5 examples (CUDA) linking against libgicc
   pingpong_bench.cu           # Latency/bandwidth benchmark
   mm.cu                       # Distributed matrix multiplication
   jacobi.cu                   # Jacobi solver with fused RDMA
 
-gicc/                         # Original GICC source (being migrated to src/)
-nvidia/                       # Original NVIDIA backend (being migrated to src/)
-minimal/                      # CXI/Slingshot implementation (Tioga)
+examples/ofi/                 # OFI examples (HIP) — built when GICC_BACKEND=ofi
+  benchmark.cpp               # 32-stream DWQ micro-benchmark
+  mm_minimal.cpp              # Ring-topology distributed matmul
+  barrier_test.cpp            # GPU-triggered dissemination barrier
+  am_pingpong.cpp             # Active Message ping-pong latency
+  test_gicc.cpp               # Minimal put/quiet/flush sanity check
+
+legacy/, minimal/, prototype/ # Pre-GICC (OpenGDA-era) code, not built
 ```
 
 ## Build Commands (MAPLE)

@@ -1,7 +1,7 @@
 /**
  * ofi_runtime.hpp - libfabric (CXI/OFI) implementation of gicc::Runtime
  *
- * Directly owns a GdaComm for fabric setup (PMI bootstrap, MR registration,
+ * Directly owns a Fabric for fabric setup (PMI bootstrap, MR registration,
  * address exchange) and implements a per-stream completion+atomic pool that
  * mirrors the proven-correct benchmark_runner.hpp design.
  *
@@ -31,7 +31,7 @@
 #include "gicc/gicc_types.hpp"
 #include "gicc/platform/ofi/ofi_device.cuh"
 
-// OFI backend internals (GdaComm, FabricDwqContext, MemoryRegion, etc.)
+// OFI backend internals (Fabric, FabricDwqContext, MemoryRegion, etc.)
 #include "internal/hip_device_context.hpp"
 #include "gicc/bootstrap/bootstrap.hpp"
 #include "internal/device_affinity.hpp"
@@ -39,7 +39,7 @@
 #include "internal/memory_region.hpp"
 #include "internal/dwq_work_builder.hpp"
 #include "internal/ofi_barrier.hpp"
-#include "internal/gda_comm.hpp"
+#include "internal/fabric.hpp"
 
 namespace gicc {
 
@@ -64,7 +64,7 @@ public:
           my_n_ops_(0), atomic_signals_queued_(false)
     {
         unset_rocr_visible_devices();
-        comm_ = new GdaComm(boot_);
+        comm_ = new Fabric(boot_);
 
         // ONE shared GPU buffer holds POOL_SIZE × uint64_t atomic_result
         // slots, registered with ONE MemoryRegion.
@@ -130,10 +130,10 @@ public:
     Runtime& operator=(const Runtime&) = delete;
 
     //--------------------------------------------------------------------------
-    // Buffer registration — delegates to GdaComm, caches local metadata.
+    // Buffer registration — delegates to Fabric, caches local metadata.
     //--------------------------------------------------------------------------
     Buffer register_buffer(void* buf, size_t size, bool is_device) {
-        GdaHandle h = comm_->register_buffer(buf, size, is_device);
+        Handle h = comm_->register_buffer(buf, size, is_device);
         int idx = (int)local_bufs_.size();
 
         OfiBuffer ob;
@@ -188,7 +188,7 @@ public:
     }
 
     RemoteBufferInfo remote_buffer(int rank, int buf_index) const {
-        auto ri = const_cast<GdaComm*>(comm_)->get_remote_info(rank, buf_index);
+        auto ri = const_cast<Fabric*>(comm_)->get_remote_info(rank, buf_index);
         RemoteBufferInfo r;
         r.addr = ri.rma_addr;
         r.rkey = (uint32_t)(ri.rma_key & 0xFFFFFFFFu);
@@ -215,7 +215,7 @@ public:
         const uint64_t trigger_threshold  = my_n_ops_ + 1;  // 1-based
         my_n_ops_++;
 
-        GdaRemoteInfo ri = comm_->get_remote_info(dest_rank, dest_buf_index);
+        RemoteInfo ri = comm_->get_remote_info(dest_rank, dest_buf_index);
         if (ri.rma_key == 0 && ri.rma_addr == 0) {
             fprintf(stderr, "gicc::Runtime: remote info not set for rank %d "
                     "buf %d (call exchange() first)\n", dest_rank, dest_buf_index);
@@ -329,7 +329,7 @@ public:
     const Bootstrap& boot() const noexcept { return boot_; }
     int gpu_id() const { return comm_->gpu_id(); }
 
-    GdaComm& ofi_comm() { return *comm_; }
+    Fabric& fabric() { return *comm_; }
 
 private:
     // Internal buffer metadata (replaces gda::Buffer).
@@ -346,7 +346,7 @@ private:
     };
 
     gicc::Bootstrap               boot_;
-    GdaComm*                      comm_;
+    Fabric*                      comm_;
     DeviceCtx*                    h_dev_ctx_;
     DeviceCtx*                    d_dev_ctx_;
 

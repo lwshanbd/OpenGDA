@@ -1,5 +1,5 @@
 /**
- * gda_comm.hpp - GPU-Direct Async Communication API for NVIDIA + InfiniBand
+ * comm.hpp - GPU-triggered communication API for the MLX5 backend
  *
  * Provides nvshmem-like put/get APIs:
  *   - put(): RDMA write to remote rank
@@ -42,7 +42,7 @@ __global__ void gda_trigger_kernel(volatile uint64_t* trigger_addr, uint64_t val
 }
 
 // Handle to registered memory
-struct GdaHandle {
+struct Handle {
     void* buf;
     size_t size;
     MemoryRegion* mr;
@@ -50,12 +50,12 @@ struct GdaHandle {
 };
 
 // Remote buffer info
-struct GdaRemoteInfo {
+struct RemoteInfo {
     uint64_t addr;
     uint32_t rkey;
 };
 
-class GdaComm {
+class Fabric {
 public:
     // Components
     gicc::Bootstrap& boot;
@@ -66,7 +66,7 @@ public:
     std::vector<MemoryRegion*> registered_mrs;
 
     // Remote info: (rank, buf_index) -> info
-    std::unordered_map<uint64_t, GdaRemoteInfo> remote_info;
+    std::unordered_map<uint64_t, RemoteInfo> remote_info;
 
     // Operation tracking
     std::atomic<uint64_t> op_counter;
@@ -78,7 +78,7 @@ public:
     volatile uint64_t* d_trigger_cntr;
     volatile uint64_t* d_completion_cntr;
 
-    explicit GdaComm(gicc::Bootstrap& boot_, int local_rank = -1)
+    explicit Fabric(gicc::Bootstrap& boot_, int local_rank = -1)
         : boot(boot_), cuda(nullptr), ibv(nullptr),
           op_counter(0), completion_counter(0),
           h_trigger_cntr(nullptr), h_completion_cntr(nullptr),
@@ -106,7 +106,7 @@ public:
         exchange_and_connect();
     }
 
-    ~GdaComm() {
+    ~Fabric() {
         for (auto* mr : registered_mrs) delete mr;
         registered_mrs.clear();
 
@@ -117,17 +117,17 @@ public:
     }
 
     // No copy
-    GdaComm(const GdaComm&) = delete;
-    GdaComm& operator=(const GdaComm&) = delete;
+    Fabric(const Fabric&) = delete;
+    Fabric& operator=(const Fabric&) = delete;
 
     /**
      * Register a buffer for RDMA
      */
-    GdaHandle register_buffer(void* buf, size_t size, bool is_device) {
+    Handle register_buffer(void* buf, size_t size, bool is_device) {
         auto* mr = new MemoryRegion(ibv->pd, buf, size, is_device, boot.rank());
         registered_mrs.push_back(mr);
 
-        GdaHandle handle;
+        Handle handle;
         handle.buf = buf;
         handle.size = size;
         handle.mr = mr;
@@ -138,7 +138,7 @@ public:
     /**
      * Exchange buffer info with all peers
      */
-    void exchange_buffer_info(const GdaHandle& handle, int buf_index = 0) {
+    void exchange_buffer_info(const Handle& handle, int buf_index = 0) {
         struct BufInfo {
             uint64_t addr;
             uint32_t rkey;
@@ -167,7 +167,7 @@ public:
     /**
      * RDMA put operation
      */
-    uint64_t put(const GdaHandle& handle, int dest_rank, int buf_index,
+    uint64_t put(const Handle& handle, int dest_rank, int buf_index,
                  size_t size, bool signaled = true) {
         uint64_t key = make_key(dest_rank, buf_index);
         auto it = remote_info.find(key);
@@ -179,7 +179,7 @@ public:
 
         uint64_t op_id = ++op_counter;
 
-        if (getenv("GDA_DEBUG")) {
+        if (getenv("GICC_DEBUG")) {
             printf("Rank %d: RDMA PUT to rank %d buf %d: local=%p (lkey=0x%x), "
                    "remote=0x%lx (rkey=0x%x), size=%zu, op_id=%lu\n",
                    boot.rank(), dest_rank, buf_index,
@@ -205,7 +205,7 @@ public:
     /**
      * RDMA put with explicit remote address
      */
-    uint64_t put_raw(const GdaHandle& handle, int dest_rank,
+    uint64_t put_raw(const Handle& handle, int dest_rank,
                      uint64_t remote_addr, uint32_t rkey,
                      size_t size, bool signaled = true) {
         uint64_t op_id = ++op_counter;
@@ -227,7 +227,7 @@ public:
     /**
      * RDMA get operation
      */
-    uint64_t get(const GdaHandle& handle, int src_rank, int buf_index,
+    uint64_t get(const Handle& handle, int src_rank, int buf_index,
                  size_t size, bool signaled = true) {
         uint64_t key = make_key(src_rank, buf_index);
         auto it = remote_info.find(key);
@@ -386,7 +386,7 @@ private:
             ibv->set_peer_info(peer, peer_info);
 
             // Debug output
-            if (getenv("GDA_DEBUG")) {
+            if (getenv("GICC_DEBUG")) {
                 char local_gid[64], peer_gid[64];
                 inet_ntop(AF_INET6, local_info.gid, local_gid, sizeof(local_gid));
                 inet_ntop(AF_INET6, peer_info.gid, peer_gid, sizeof(peer_gid));

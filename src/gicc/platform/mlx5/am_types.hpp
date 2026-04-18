@@ -1,5 +1,5 @@
 /**
- * nvib_am_types.hpp - Active Message type definitions for NVIDIA IB
+ * am_types.hpp - Active Message type definitions for NVIDIA IB
  *
  * Message Types:
  *   1. Short AM (handle-only): 64 bytes total (power of 2 for efficiency)
@@ -15,7 +15,7 @@
 #include <cstddef>
 
 namespace gicc::mlx5 {
-namespace nvib_am {
+namespace am {
 
 // =============================================================================
 // Configuration Constants
@@ -179,5 +179,5 @@ struct am_ack_entry_t {
 
 static_assert(sizeof(am_ack_entry_t) == 8, "am_ack_entry_t must be 8 bytes");
 
-}  // namespace nvib_am
+}  // namespace am
 }  // namespace gicc::mlx5
