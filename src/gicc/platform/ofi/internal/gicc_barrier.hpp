@@ -246,9 +246,10 @@ public:
                 fi_cq_read(comm_.fabric->cq, NULL, 0);
         }
 
-        // Extra CQ progress to release DWQ resources
-        for (int i = 0; i < 100; i++)
-            fi_cq_read(comm_.fabric->cq, NULL, 0);
+        // Drain any remaining completions so libfabric releases DWQ resources
+        // promptly. fi_cq_read returns the number of completions read (> 0)
+        // or a negative error code (e.g. -FI_EAGAIN) when the CQ is empty.
+        while (fi_cq_read(comm_.fabric->cq, NULL, 0) > 0) { }
     }
 
     // =========================================================================
