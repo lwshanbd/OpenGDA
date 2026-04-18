@@ -1,14 +1,15 @@
 /**
- * gda_comm.hpp - Simple communication wrapper for GPU-Direct Async (DWQ)
+ * fabric.hpp - Low-level fabric primitives for GICC on libfabric/CXI
  *
- * Provides a simple API for GPU-triggered RDMA operations:
- *   - put(): queue a one-sided write to remote rank
+ * Provides the fabric layer used directly by gicc::Runtime and by
+ * subsystems (gicc::Barrier, gicc::am::Am). Offers:
+ *   - put_raw(): queue a one-sided write to remote rank
  *   - trigger(): trigger queued DWQ operations from GPU
  *   - wait(): wait for pending operations
- *   - barrier(): global synchronization
+ *   - barrier(): global synchronization (host-side, via OfiBarrier)
  *
  * Simple usage:
- *   GdaComm comm;
+ *   gicc::Fabric comm(boot);
  *   auto handle = comm.register_buffer(d_buf, size, true);
  *   comm.set_remote_info_by_index(dest_rank, 0, remote_addr, remote_key);
  *   uint64_t thresh = comm.put(handle, dest_rank, 0, size);
@@ -56,7 +57,9 @@ struct GdaRemoteInfo {
     uint64_t base_addr;     // MR base address (for computing offset in non-virt_addr mode)
 };
 
-class GdaComm {
+namespace gicc {
+
+class Fabric {
 public:
     // Core components (public for advanced usage)
     gicc::Bootstrap& boot;
@@ -95,7 +98,7 @@ public:
      * @param boot_ Bootstrap instance providing rank, size, and collective ops
      * @param local_rank Local rank for GPU selection (e.g., SLURM_LOCALID)
      */
-    explicit GdaComm(gicc::Bootstrap& boot_, int local_rank = -1)
+    explicit Fabric(Bootstrap& boot_, int local_rank = -1)
         : boot(boot_),
           affinity(nullptr), hip(nullptr), fabric(nullptr), ofi_barrier(nullptr),
           current_threshold(0),
@@ -128,7 +131,7 @@ public:
         init_atomic_signaling();
     }
 
-    ~GdaComm() {
+    ~Fabric() {
         // Cleanup pending operations
         for (auto* op : pending_ops) delete op;
         pending_ops.clear();
@@ -156,8 +159,8 @@ public:
     }
 
     // No copy
-    GdaComm(const GdaComm&) = delete;
-    GdaComm& operator=(const GdaComm&) = delete;
+    Fabric(const Fabric&) = delete;
+    Fabric& operator=(const Fabric&) = delete;
 
     /**
      * Register a buffer for RDMA operations
@@ -568,3 +571,5 @@ private:
         return ((uint64_t)rank << 48) | ((uint64_t)buf_index & 0xFFFFFFFFFFFF);
     }
 };
+
+} // namespace gicc

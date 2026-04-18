@@ -12,7 +12,7 @@
  *
  * Usage Mode 1: Single barrier per kernel launch
  *   gicc::Runtime rt;
- *   gicc::Barrier barrier(rt.ofi_comm());
+ *   gicc::Barrier barrier(rt.fabric());
  *   barrier.init();
  *
  *   for (int iter = 0; iter < N; iter++) {
@@ -25,7 +25,7 @@
  *   barrier.finalize();
  *
  * Usage Mode 2: Multiple barriers in single kernel (continuous mode)
- *   gicc::Barrier barrier(rt.ofi_comm());
+ *   gicc::Barrier barrier(rt.fabric());
  *   barrier.init();
  *
  *   barrier.start_continuous(100);
@@ -44,7 +44,7 @@
 #include <atomic>
 #include <chrono>
 
-#include "gda_comm.hpp"
+#include "fabric.hpp"
 #include "dwq_work_builder.hpp"
 #include "gicc/platform/ofi/ofi_barrier_device.cuh"
 
@@ -54,7 +54,7 @@ class Barrier {
 public:
     static constexpr int MAX_ROUNDS = 12;  // up to 4096 ranks
 
-    explicit Barrier(GdaComm& comm_)
+    explicit Barrier(Fabric& comm_)
         : comm_(comm_),
           barrier_count_(0),
           n_rounds_(0),
@@ -255,7 +255,7 @@ public:
 private:
     static constexpr int N_SIGNAL_BUFFERS = 2;
 
-    GdaComm& comm_;
+    Fabric& comm_;
     int      n_rounds_;
     uint64_t barrier_count_;
 

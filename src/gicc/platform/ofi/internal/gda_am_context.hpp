@@ -6,7 +6,7 @@
  *   - Registration of memory regions for RDMA
  *   - Address exchange via Bootstrap allgather
  *
- * The AM subsystem shares DWQ/counter pool with GdaComm.
+ * The AM subsystem shares DWQ/counter pool with Fabric.
  */
 #pragma once
 
@@ -17,7 +17,7 @@
 #include <vector>
 
 #include "am_types.hpp"
-#include "gda_comm.hpp"
+#include "fabric.hpp"
 #include "memory_region.hpp"
 
 namespace gicc {
@@ -29,8 +29,8 @@ namespace am {
 
 class GdaAmContext {
 public:
-    // Reference to parent GdaComm (for fabric, PMI, etc.)
-    GdaComm& comm;
+    // Reference to parent Fabric (for fabric, PMI, etc.)
+    Fabric& comm;
 
     // Configuration
     int nslots;
@@ -61,10 +61,10 @@ public:
 
     /**
      * Initialize AM context
-     * @param comm_ Reference to initialized GdaComm
+     * @param comm_ Reference to initialized Fabric
      * @param nslots_ Number of slots per inbox ring (power of 2, default 128)
      */
-    GdaAmContext(GdaComm& comm_, int nslots_ = AM_DEFAULT_RING_SLOTS)
+    GdaAmContext(Fabric& comm_, int nslots_ = AM_DEFAULT_RING_SLOTS)
         : comm(comm_),
           nslots(nslots_),
           d_context(nullptr),

@@ -1,11 +1,11 @@
 /**
  * gda_am.hpp - Simplified GPU-Direct Async Active Message API
  *
- * AM subsystem uses GdaComm's put mechanism directly.
+ * AM subsystem uses Fabric's put mechanism directly.
  * AM = put(slot_body) + put(seq)
  *
  * Usage:
- *   GdaComm comm;
+ *   Fabric comm;
  *   GdaAm am(comm);
  *
  *   // Send handle-only AM
@@ -29,7 +29,7 @@
 #include "am_types.hpp"
 #include "gda_am_context.hpp"
 #include "gda_am_device.hpp"
-#include "gda_comm.hpp"
+#include "fabric.hpp"
 
 namespace gicc {
 namespace am {
@@ -63,11 +63,11 @@ public:
 
     /**
      * Initialize AM subsystem
-     * @param comm Reference to initialized GdaComm
+     * @param comm Reference to initialized Fabric
      * @param nslots Slots per peer inbox ring (default 128)
      * @param staging_pool_size Number of staging slots for sending (default 16)
      */
-    GdaAm(GdaComm& comm, int nslots = AM_DEFAULT_RING_SLOTS, size_t staging_pool_size = 16)
+    GdaAm(Fabric& comm, int nslots = AM_DEFAULT_RING_SLOTS, size_t staging_pool_size = 16)
         : am_ctx(comm, nslots),
           staging_idx(0),
           staging_size(staging_pool_size),
@@ -92,7 +92,7 @@ public:
 
     /**
      * Queue a handle-only AM send (no payload).
-     * Uses GdaComm::put() internally.
+     * Uses Fabric::put() internally.
      *
      * @param dest_rank Destination rank
      * @param handler_id Handler to invoke
@@ -155,7 +155,7 @@ public:
             ? (ss.remote_ring_base + dst_seq_offset)
             : dst_seq_offset;
 
-        // Queue body put using GdaComm
+        // Queue body put using Fabric
         GdaHandle body_handle;
         body_handle.buf = (char*)d_slot + src_body_offset;
         body_handle.local_desc = mr->desc;
@@ -375,7 +375,7 @@ public:
     // Accessors
     int rank() const { return am_ctx.comm.rank(); }
     int size() const { return am_ctx.comm.size(); }
-    GdaComm& comm() { return am_ctx.comm; }
+    Fabric& comm() { return am_ctx.comm; }
 
 private:
     void allocate_staging(size_t pool_size) {
