@@ -349,7 +349,7 @@ public:
             mtu = port_attr.active_mtu;  // ibv_mtu enum: 1=256, 2=512, 3=1024, 4=2048, 5=4096
 
             // Check for environment override
-            const char* mtu_env = getenv("GDA_MTU");
+            const char* mtu_env = getenv("GICC_MTU");
             if (mtu_env) {
                 int mtu_bytes = atoi(mtu_env);
                 int requested_mtu;

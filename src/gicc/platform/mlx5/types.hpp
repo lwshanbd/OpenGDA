@@ -11,8 +11,8 @@
 namespace gicc::mlx5 {
 
 // Configuration constants
-constexpr int GDA_MAX_PEERS = 64;
-constexpr int GDA_MAX_PENDING_OPS = 256;
+constexpr int MAX_PEERS = 64;
+constexpr int MAX_PENDING_OPS = 256;
 
 // Operation types
 enum class OpType : uint8_t {

@@ -46,7 +46,7 @@ namespace gicc::mlx5 {
 #endif
 
 // Default batch size (number of WQEs per doorbell)
-#define GDA_DEFAULT_BATCH_SIZE 32
+#define GICC_DEFAULT_BATCH_SIZE 32
 
 //==============================================================================
 // OPTIMIZED BYTE SWAP - using CUDA intrinsics (use prefix to avoid conflicts)
@@ -657,11 +657,11 @@ __device__ __forceinline__ bool gda_rdma_write_batched(
 
 //==============================================================================
 // OPTIMIZED KERNELS
-// Guard with GDA_DEVICE_OPT_SUPPRESS_KERNELS to avoid multiple-definition
+// Guard with GICC_DEVICE_OPT_SUPPRESS_KERNELS to avoid multiple-definition
 // errors when this header is included from multiple translation units.
 //==============================================================================
 
-#ifndef GDA_DEVICE_OPT_SUPPRESS_KERNELS
+#ifndef GICC_DEVICE_OPT_SUPPRESS_KERNELS
 
 /**
  * Optimized burst kernel - single thread, maximum throughput
@@ -795,6 +795,6 @@ __global__ void gda_multi_wqe_kernel(
     }
 }
 
-#endif  // GDA_DEVICE_OPT_SUPPRESS_KERNELS
+#endif  // GICC_DEVICE_OPT_SUPPRESS_KERNELS
 
 }  // namespace gicc::mlx5

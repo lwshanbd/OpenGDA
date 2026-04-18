@@ -28,7 +28,7 @@ namespace gicc::mlx5 {
 #define MLX5_WQE_CTRL_CQ_UPDATE (1 << 2)
 #define MLX5_INLINE_SEG 0x80000000
 
-#define GDA_DEFAULT_BATCH_SIZE 32
+#define GICC_DEFAULT_BATCH_SIZE 32
 
 //==============================================================================
 // Byte swap using CUDA intrinsics

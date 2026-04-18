@@ -16,11 +16,11 @@ namespace gicc::mlx5 {
 
 // Command types for persistent kernel
 enum CommandType : uint32_t {
-    GDA_CMD_NOP = 0,
-    GDA_CMD_RDMA_WRITE = 1,
-    GDA_CMD_RDMA_READ = 2,
-    GDA_CMD_FENCE = 3,
-    GDA_CMD_EXIT = 0xFF
+    CMD_NOP = 0,
+    CMD_RDMA_WRITE = 1,
+    CMD_RDMA_READ = 2,
+    CMD_FENCE = 3,
+    CMD_EXIT = 0xFF
 };
 
 // Command structure (64 bytes to match WQE size)
@@ -261,11 +261,11 @@ __global__ void gda_persistent_kernel(PersistentState* state) {
 
         uint32_t type = cmd->type;
 
-        if (type == GDA_CMD_EXIT) {
+        if (type == CMD_EXIT) {
             break;
         }
 
-        if (type == GDA_CMD_RDMA_WRITE) {
+        if (type == CMD_RDMA_WRITE) {
             // Get current producer index
             uint64_t prod = *state->prod_idx;
             uint16_t wqe_slot = (uint16_t)(prod & 0xFFFF);

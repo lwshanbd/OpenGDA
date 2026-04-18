@@ -511,7 +511,7 @@ private:
         }
 
         // Check environment variable for device name override
-        const char* env_dev = getenv("GDA_IB_DEV");
+        const char* env_dev = getenv("GICC_IB_DEV");
         if (env_dev) {
             device_name = env_dev;
         }

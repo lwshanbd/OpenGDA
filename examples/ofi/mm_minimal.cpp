@@ -92,7 +92,7 @@ int main(int argc, char** argv)
     // On-node neighbor detection via Bootstrap's locality map.
     std::vector<bool> locality_map = rt.boot().locality_map();
 
-    bool use_ipc = (getenv("GDA_DISABLE_IPC") == nullptr);
+    bool use_ipc = (getenv("GICC_DISABLE_IPC") == nullptr);
     bool left_is_local  = use_ipc && locality_map[left_neighbor];
     bool right_is_local = use_ipc && locality_map[right_neighbor];
 

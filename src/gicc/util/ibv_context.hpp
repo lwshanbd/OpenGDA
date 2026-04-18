@@ -136,7 +136,7 @@ public:
         attr.path_mtu = port_attr.active_mtu;
 
         // Allow override via environment variable (but cap at active_mtu)
-        const char* mtu_env = getenv("GDA_MTU");
+        const char* mtu_env = getenv("GICC_MTU");
         if (mtu_env) {
             int mtu_val = atoi(mtu_env);
             enum ibv_mtu requested_mtu;
@@ -298,7 +298,7 @@ private:
         }
 
         // Check environment variable for device name override
-        const char* env_dev = getenv("GDA_IB_DEV");
+        const char* env_dev = getenv("GICC_IB_DEV");
         if (env_dev) {
             device_name = env_dev;
         }
@@ -358,7 +358,7 @@ private:
 
         // For RoCE, try to find a valid GID (prefer RoCEv2)
         // Check GID_INDEX env var first
-        const char* gid_env = getenv("GDA_GID_INDEX");
+        const char* gid_env = getenv("GICC_GID_INDEX");
         if (gid_env) {
             gid_index = atoi(gid_env);
         } else if (port_attr.link_layer == IBV_LINK_LAYER_ETHERNET) {

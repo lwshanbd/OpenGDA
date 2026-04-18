@@ -179,7 +179,7 @@ public:
 
         uint64_t op_id = ++op_counter;
 
-        if (getenv("GDA_DEBUG")) {
+        if (getenv("GICC_DEBUG")) {
             printf("Rank %d: RDMA PUT to rank %d buf %d: local=%p (lkey=0x%x), "
                    "remote=0x%lx (rkey=0x%x), size=%zu, op_id=%lu\n",
                    boot.rank(), dest_rank, buf_index,
@@ -386,7 +386,7 @@ private:
             ibv->set_peer_info(peer, peer_info);
 
             // Debug output
-            if (getenv("GDA_DEBUG")) {
+            if (getenv("GICC_DEBUG")) {
                 char local_gid[64], peer_gid[64];
                 inet_ntop(AF_INET6, local_info.gid, local_gid, sizeof(local_gid));
                 inet_ntop(AF_INET6, peer_info.gid, peer_gid, sizeof(peer_gid));
