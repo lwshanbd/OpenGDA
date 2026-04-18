@@ -356,7 +356,11 @@ private:
 
             fi_cq_read(comm_.fabric->cq, NULL, 0);
 
-            uint64_t gpu_done = *h_done_counter_;
+            // Acquire ordering pairs with the GPU's atomicAdd +
+            // __threadfence_system() at the tail of barrier(). volatile alone
+            // would not force the host to observe the new value.
+            uint64_t gpu_done = __atomic_load_n(
+                const_cast<uint64_t*>(h_done_counter_), __ATOMIC_ACQUIRE);
             if (gpu_done > barrier_count_) {
                 reset();
 
