@@ -35,7 +35,11 @@ struct BarrierCtx {
     int n_signal_slots;                    ///< = BARRIER_SIGNAL_SLOTS
     volatile uint64_t* signals;            ///< Signal buffers [n_rounds * n_signal_slots]
     volatile uint64_t** trigger_addrs;     ///< Per-round MMIO trigger addresses
-    uint64_t expected_signal;              ///< Expected signal value for this barrier
+    uint64_t expected_signal;              ///< Threshold for the next barrier.
+                                           ///< Host owns in single-barrier mode;
+                                           ///< kernel owns in continuous mode
+                                           ///< (must increment after each
+                                           ///< barrier() call).
     volatile uint64_t* done_counter;       ///< GPU->CPU notification (atomicAdd after barrier)
     volatile uint64_t* ready_counter;      ///< CPU->GPU notification (DWQ ops are queued)
 };

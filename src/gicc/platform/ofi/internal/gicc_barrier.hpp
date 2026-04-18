@@ -78,11 +78,12 @@ public:
         allocate_signals();
         exchange_addresses();
         create_counters();
+        create_dwq_pool();
         setup_device_context();
     }
 
     ~Barrier() {
-        if (thread_running_.load()) finalize();
+        finalize();
     }
 
     Barrier(const Barrier&) = delete;
@@ -92,7 +93,8 @@ public:
     // Lifecycle
     // =========================================================================
 
-    /** Spawn the monitor thread. Call once before using the barrier. */
+    /** Spawn the monitor thread. Required for continuous mode; optional for
+     *  single-barrier mode. Safe to call exactly zero or one time. */
     void init() {
         if (thread_running_.load()) return;
 
@@ -104,13 +106,20 @@ public:
         monitor_thread_ = std::thread(&Barrier::monitor_loop, this);
     }
 
-    /** Stop the monitor thread and release resources. */
+    /** Stop the monitor thread (if running) and release every resource the
+     *  constructor allocated. Idempotent — safe to call repeatedly or to call
+     *  exactly once via the destructor when init() was never invoked. */
     void finalize() {
-        if (!thread_running_.load()) return;
+        // Stop the monitor thread, if one was ever spawned.
+        if (thread_running_.load()) {
+            thread_running_ = false;
+            continuous_mode_ = false;
+            if (monitor_thread_.joinable()) monitor_thread_.join();
+        }
 
-        thread_running_ = false;
-        continuous_mode_ = false;
-        if (monitor_thread_.joinable()) monitor_thread_.join();
+        // Every release below is guarded by a nullptr check and clears the
+        // pointer, so the whole function is idempotent whether or not init()
+        // ran and whether or not finalize() has been called before.
 
         // DWQ ops
         for (auto* op : dwq_ops_) delete op;
@@ -153,6 +162,23 @@ public:
     void setup() {
         uint64_t threshold = barrier_count_ + 1;
 
+        // Single-rank case: no peers, no DWQ ops. Still bump ready_counter so
+        // the device-side barrier() loop terminates. Host only writes
+        // expected_signal in single-barrier mode — in continuous mode the
+        // kernel owns that field (same rule as the n_rounds_ > 0 path below).
+        if (n_rounds_ == 0) {
+            if (!continuous_mode_.load(std::memory_order_relaxed)) {
+                h_context_.expected_signal = threshold;
+                if (d_context_) {
+                    hipMemcpy(&d_context_->expected_signal,
+                              &h_context_.expected_signal,
+                              sizeof(uint64_t), hipMemcpyHostToDevice);
+                }
+            }
+            __atomic_add_fetch(h_ready_counter_, 1, __ATOMIC_SEQ_CST);
+            return;
+        }
+
         int buf_idx = barrier_count_ % N_SIGNAL_BUFFERS;
         uint64_t* h_sig = h_signal_values_[buf_idx];
         MemoryRegion* mr_sig = mr_signal_values_[buf_idx];
@@ -171,15 +197,14 @@ public:
         for (int k = 0; k < n_rounds_; k++) {
             int peer = (comm_.rank() + (1 << k)) % comm_.size();
 
-            auto* dwq = new DwqWorkBuilder(comm_.rank());
-
             int sig_idx = k * BARRIER_SIGNAL_SLOTS + slot;
             uint64_t remote_offset = sig_idx * sizeof(uint64_t);
             uint64_t remote_addr = comm_.is_virt_addr_mode()
                 ? (remote_signal_addrs_[k] + remote_offset)
                 : remote_offset;
 
-            dwq->queue_rma_write(
+            // Reuse the pre-allocated DwqWorkBuilder for round k.
+            dwq_ops_[k]->queue_rma_write(
                 comm_.fabric->domain,
                 comm_.fabric->ep,
                 h_sig,
@@ -191,8 +216,6 @@ public:
                 counter_pairs_[k].trigger_cntr,
                 counter_pairs_[k].completion_cntr,
                 threshold);
-
-            dwq_ops_.push_back(dwq);
         }
 
         // Signal GPU that DWQ ops are ready
@@ -210,8 +233,8 @@ public:
 
     /** Reset for next barrier. Call after wait_completion(). */
     void reset() {
-        for (auto* op : dwq_ops_) delete op;
-        dwq_ops_.clear();
+        // DwqWorkBuilders are pooled in the ctor and reused across barriers.
+        // Nothing to free here — setup() will repopulate their fields.
 
         barrier_count_++;
 
@@ -221,21 +244,45 @@ public:
                 fi_cq_read(comm_.fabric->cq, NULL, 0);
         }
 
-        // Extra CQ progress to release DWQ resources
-        for (int i = 0; i < 100; i++)
-            fi_cq_read(comm_.fabric->cq, NULL, 0);
+        // Drain any remaining completions so libfabric releases DWQ resources
+        // promptly. fi_cq_read returns the number of completions read (> 0)
+        // or a negative error code (e.g. -FI_EAGAIN) when the CQ is empty.
+        while (fi_cq_read(comm_.fabric->cq, NULL, 0) > 0) { }
     }
 
     // =========================================================================
     // Continuous mode: multiple barriers in single kernel
     // =========================================================================
 
-    /** Start continuous mode for num_barriers barriers. */
+    /** Start continuous mode for num_barriers barriers.
+     *
+     *  expected_signal ownership contract:
+     *    - single-barrier mode: the host writes expected_signal = threshold
+     *      on every setup() call; the kernel only reads it.
+     *    - continuous mode: the host writes expected_signal exactly once
+     *      here at start_continuous (the first barrier's threshold), then
+     *      continuous_mode_ is turned on and subsequent setup() calls skip
+     *      the write. The kernel is expected to increment expected_signal
+     *      itself after each barrier() call for the rest of the run.
+     */
     void start_continuous(uint64_t num_barriers) {
         ever_active_ = true;
         target_barrier_count_ = barrier_count_ + num_barriers;
-        setup();
+
+        // Seed expected_signal for the first barrier before flipping into
+        // continuous mode, so setup() will skip the write (kernel owns the
+        // field from here on). d_context_ is unconditionally allocated by
+        // setup_device_context() regardless of n_rounds_, so the same guard
+        // applies as in the single-barrier path in setup() — no n_rounds_
+        // clause needed.
+        h_context_.expected_signal = barrier_count_ + 1;
+        if (d_context_) {
+            hipMemcpy(&d_context_->expected_signal, &h_context_.expected_signal,
+                      sizeof(uint64_t), hipMemcpyHostToDevice);
+        }
+
         continuous_mode_ = true;
+        setup();
     }
 
     /** Wait for all continuous barriers to complete. */
@@ -311,7 +358,11 @@ private:
 
             fi_cq_read(comm_.fabric->cq, NULL, 0);
 
-            uint64_t gpu_done = *h_done_counter_;
+            // Acquire ordering pairs with the GPU's atomicAdd +
+            // __threadfence_system() at the tail of barrier(). volatile alone
+            // would not force the host to observe the new value.
+            uint64_t gpu_done = __atomic_load_n(
+                const_cast<uint64_t*>(h_done_counter_), __ATOMIC_ACQUIRE);
             if (gpu_done > barrier_count_) {
                 reset();
 
@@ -328,6 +379,20 @@ private:
     // =========================================================================
 
     void allocate_signals() {
+        // Ready/done counters are always needed — the device-side barrier()
+        // spins on ready_counter even when there are zero rounds, and
+        // setup() always bumps it.
+        hipHostMalloc((void**)&h_done_counter_, sizeof(uint64_t), hipHostMallocDefault);
+        *h_done_counter_ = 0;
+
+        hipHostMalloc((void**)&h_ready_counter_, sizeof(uint64_t), hipHostMallocDefault);
+        *h_ready_counter_ = 0;
+
+        // Skip signal/source buffers entirely when size <= 1 (n_rounds_ == 0):
+        // there are no peers to write to, and MemoryRegion rejects zero-length
+        // regions.
+        if (n_rounds_ == 0) return;
+
         size_t signals_size = n_rounds_ * BARRIER_SIGNAL_SLOTS * sizeof(uint64_t);
         hipHostMalloc(&d_signals_, signals_size, hipHostMallocDefault);
         memset((void*)d_signals_, 0, signals_size);
@@ -344,15 +409,11 @@ private:
                 h_signal_values_[i], sizeof(uint64_t), false,
                 comm_.gpu_id(), comm_.rank());
         }
-
-        hipHostMalloc((void**)&h_done_counter_, sizeof(uint64_t), hipHostMallocDefault);
-        *h_done_counter_ = 0;
-
-        hipHostMalloc((void**)&h_ready_counter_, sizeof(uint64_t), hipHostMallocDefault);
-        *h_ready_counter_ = 0;
     }
 
     void exchange_addresses() {
+        if (n_rounds_ == 0) return;  // size <= 1: no peers to exchange with
+
         uint64_t my_base = (uint64_t)d_signals_;
         uint64_t my_key  = mr_signals_->key;
 
@@ -378,14 +439,28 @@ private:
             counter_pairs_[k] = comm_.fabric->create_counter_pair();
     }
 
-    void setup_device_context() {
-        hipMalloc(&d_trigger_addrs_, n_rounds_ * sizeof(uint64_t*));
-
-        std::vector<volatile uint64_t*> h_trig(n_rounds_);
+    // Pre-allocate one DwqWorkBuilder per round. queue_rma_write() re-populates
+    // every field on each setup() call, and reset() only returns once libfabric
+    // has signalled completion, so reuse across barriers is safe.
+    void create_dwq_pool() {
+        dwq_ops_.reserve(n_rounds_);
         for (int k = 0; k < n_rounds_; k++)
-            h_trig[k] = counter_pairs_[k].dev_trigger_cntr;
-        hipMemcpy(d_trigger_addrs_, h_trig.data(),
-                  n_rounds_ * sizeof(uint64_t*), hipMemcpyHostToDevice);
+            dwq_ops_.push_back(new DwqWorkBuilder(comm_.rank()));
+    }
+
+    void setup_device_context() {
+        // Skip the trigger-address array when there are no rounds — hipMalloc
+        // with size 0 is implementation-defined and the kernel never indexes
+        // trigger_addrs when n_rounds == 0.
+        if (n_rounds_ > 0) {
+            hipMalloc(&d_trigger_addrs_, n_rounds_ * sizeof(uint64_t*));
+
+            std::vector<volatile uint64_t*> h_trig(n_rounds_);
+            for (int k = 0; k < n_rounds_; k++)
+                h_trig[k] = counter_pairs_[k].dev_trigger_cntr;
+            hipMemcpy(d_trigger_addrs_, h_trig.data(),
+                      n_rounds_ * sizeof(uint64_t*), hipMemcpyHostToDevice);
+        }
 
         h_context_.n_rounds        = n_rounds_;
         h_context_.rank            = comm_.rank();
