@@ -365,13 +365,14 @@ int main(int argc, char* argv[]) {
     }
 
     HaloInfo top_info = {}, bottom_info = {};
-    if (has_top) {
-        int tag = std::min(rank, top);
-        rt.boot().sendrecv(&my_info, &top_info, (int)sizeof(HaloInfo), top, tag);
-    }
-    if (has_bottom) {
-        int tag = size + std::min(rank, bottom);
-        rt.boot().sendrecv(&my_info, &bottom_info, (int)sizeof(HaloInfo), bottom, tag);
+    // Two sequential blocking sendrecvs (one with TOP, one with BOTTOM) form a
+    // ring of dependencies at N>=3: every rank waits on its TOP peer while
+    // holding its BOTTOM peer's match hostage. Use an allgather instead — it's
+    // a single collective with no circular wait, and setup cost is negligible.
+    {
+        auto all_info = rt.boot().allgather_fixed<HaloInfo>(my_info);
+        if (has_top) top_info = all_info[top];
+        if (has_bottom) bottom_info = all_info[bottom];
     }
 
     // --- Prepare GICC DeviceCtx per neighbor ---
