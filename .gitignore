@@ -21,6 +21,9 @@ reference/
 # Prototype files
 prototype/docs/
 
+# Local planning/design docs (spec, plan, review artifacts — never committed)
+docs/
+
 # Private Claude instructions
 .claude.local.md
 .claude/settings.local.json
