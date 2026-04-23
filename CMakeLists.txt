@@ -53,6 +53,18 @@ add_library(gicc_policy STATIC
 target_include_directories(gicc_policy PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+# ============================================================================
+# libgicc_dispatch — host-side multiversion dispatcher (M2-G)
+# ============================================================================
+add_library(gicc_dispatch STATIC
+    src/gicc/dispatch/dispatcher.cpp)
+target_link_libraries(gicc_dispatch PUBLIC gicc_policy)
+target_include_directories(gicc_dispatch PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+add_executable(dispatch_overhead tools/dispatch_bench/dispatch_overhead.cpp)
+target_link_libraries(dispatch_overhead PRIVATE gicc_dispatch)
+
 option(GICC_BUILD_POLICY_TESTS "Build libgicc_policy unit tests" ON)
 if(GICC_BUILD_POLICY_TESTS)
     enable_testing()
