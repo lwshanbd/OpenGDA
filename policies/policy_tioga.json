@@ -1,0 +1,39 @@
+{
+  "version": 1,
+
+  "_comment": "Tioga / AMD MI250X / HPE Slingshot CXI / libfabric OFI. v1 hand-written from M1 data; to be replaced by rule-list fitter output after M3 R022 calibration completes. NIC caps pinned to HPDC26/content/problem.tex Table 1.",
+
+  "platform_desc": {
+    "fabric": "ofi_cxi",
+    "gpu_family": "mi250x",
+    "nic_caps": {
+      "counter_max": 2047,
+      "dwq_max": 256,
+      "ctrs_per_op": 2,
+      "qp_max_per_peer": 0
+    }
+  },
+
+  "rules": [
+    {
+      "id": 10,
+      "_why": "Regular stencil (Jacobi) with a topology hint — use triggered path with deeper slot pipeline to overlap host retire with next-barrier arm. M1 R014 at N=32 showed 1.49x (not 2x) over N=16 indicating comm saturation; deeper stage-ahead should help.",
+      "if": { "peer_class": "k_from_topology_hint", "freq_class": "hot_loop" },
+      "then": { "path": "ofi_triggered", "slot_depth": 4, "pool_size": 16 }
+    },
+
+    {
+      "id": 20,
+      "_why": "Compute-heavy pattern (matmul) with constant peer ring — proxy path with a larger source-buffer pool. M1 R016/R017 showed matmul regressing N=16→32 (3326→3927 ms); the proxy path's per-hop pipelining beats the triggered path when comm dominates.",
+      "if": { "peer_class": "k_const",  "size_class": "large_const" },
+      "then": { "path": "ofi_proxy", "pool_size": 32, "channel_map": "static_graph_aware" }
+    },
+
+    {
+      "id": 99,
+      "_why": "Catch-all conservative variant. Minimum-feasible proxy path, always within CXI caps even at N=4096.",
+      "if": {},
+      "then": { "path": "ofi_proxy", "pool_size": 16, "channel_map": "static_graph_aware", "conservative": true }
+    }
+  ]
+}

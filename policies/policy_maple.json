@@ -1,0 +1,25 @@
+{
+  "version": 1,
+
+  "_comment": "MAPLE / NVIDIA GH200 / Mellanox ConnectX InfiniBand / MLX5. v1 hand-written from M1 data; to be replaced by rule-list fitter output after M3 R021 calibration. MLX5 uses QP-per-peer — cap pruning is a no-op (qp_max_per_peer=0 sentinel means 'not cap-bound').",
+
+  "platform_desc": {
+    "fabric": "ib_mlx5",
+    "gpu_family": "gh200",
+    "nic_caps": {
+      "counter_max": 0,
+      "dwq_max": 0,
+      "ctrs_per_op": 0,
+      "qp_max_per_peer": 0
+    }
+  },
+
+  "rules": [
+    {
+      "id": 1,
+      "_why": "All MLX5 paths use GPU-native RDMA via BlueFlame doorbells — no host proxy, no triggered deferral. Tunables degenerate; the ib_native decision is the only meaningful one.",
+      "if": {},
+      "then": { "path": "ib_native" }
+    }
+  ]
+}
