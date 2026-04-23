@@ -80,12 +80,23 @@ static std::string classifyCallSite(const CallBase& call) {
 
 // ---------- Feature extraction (deliberately coarse v1) --------------------
 
-// peer_class: if any operand is a ConstantInt we call it k_const; if there's
-// a surrounding llvm.var.annotation with "gicc_topology" we call it
+// peer_class: Look at the peer slot specifically — in gicc::put / gicc::
+// Runtime::prepare the peer argument is a 32-bit integer (the last one of
+// those, after the 64-bit size argument for put; the first for prepare).
+// If that specific slot is a ConstantInt → k_const; else if there is a
+// surrounding llvm.var.annotation with "gicc_topology" on any arg →
 // k_from_topology_hint; else dynamic.
 static gp::PeerClass extractPeerClass(const CallBase& call) {
-    for (const Use& op : call.operands()) {
-        if (isa<ConstantInt>(op.get())) return gp::PeerClass::KConst;
+    // Scan args: only 32-bit integer operands. If at least one exists and
+    // the LAST such is a ConstantInt, treat it as k_const. This matches
+    // gicc::put(..., uint64_t size, int peer) and gicc::Runtime::prepare(int peer, ...).
+    const Value* peer_operand = nullptr;
+    for (const Use& op : call.args()) {
+        Type* t = op.get()->getType();
+        if (t && t->isIntegerTy(32)) peer_operand = op.get();
+    }
+    if (peer_operand) {
+        if (isa<ConstantInt>(peer_operand)) return gp::PeerClass::KConst;
     }
     // Look for llvm.var.annotation on any of the call's Value arguments.
     // The Clang lowering of __attribute__((annotate("gicc_topology:..."))) emits
@@ -115,13 +126,16 @@ static gp::PeerClass extractPeerClass(const CallBase& call) {
     return gp::PeerClass::Dynamic;
 }
 
-// size_class: bucket a ConstantInt-sized argument; else dynamic. We scan all
-// integer operands and take the largest constant — matches the convention
-// that the size is usually the largest-magnitude integer arg (bytes).
+// size_class: bucket a ConstantInt-sized argument; else dynamic. gicc::put
+// takes the byte size as a 64-bit (size_t / unsigned long) operand — look
+// only at 64-bit integer args and pick the largest ConstantInt. That avoids
+// conflating size with the 32-bit peer rank.
 static gp::SizeClass extractSizeClass(const CallBase& call) {
     uint64_t best = 0;
     bool found = false;
-    for (const Use& op : call.operands()) {
+    for (const Use& op : call.args()) {
+        Type* t = op.get()->getType();
+        if (!t || !t->isIntegerTy(64)) continue;
         if (const auto* ci = dyn_cast<ConstantInt>(op.get())) {
             uint64_t v = ci->getZExtValue();
             if (v > best) { best = v; found = true; }

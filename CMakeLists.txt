@@ -59,7 +59,7 @@ if(GICC_BUILD_POLICY_TESTS)
     add_executable(test_policy tests/policy/test_policy.cpp)
     target_link_libraries(test_policy PRIVATE gicc_policy)
     add_test(NAME test_policy
-             COMMAND test_policy
+             COMMAND $<TARGET_FILE:test_policy>
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 

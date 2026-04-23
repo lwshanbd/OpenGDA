@@ -71,3 +71,12 @@ target_link_libraries(gicc_explain PRIVATE
     LLVMAnalysis
     LLVMPasses
     LLVMTransformUtils)
+
+# ---- Toy-kernel unit tests (Block M2-I) ------------------------------------
+if(GICC_BUILD_POLICY_TESTS)
+    add_test(NAME gicc_pass_toy_kernels
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/../../tests/gicc_pass/run_pass_tests.sh
+                "${CMAKE_BINARY_DIR}"
+                "${LLVM_TOOLS_BINARY_DIR}/clang++"
+                "${LLVM_TOOLS_BINARY_DIR}/opt")
+endif()
