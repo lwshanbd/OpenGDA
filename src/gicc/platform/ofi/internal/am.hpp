@@ -30,6 +30,7 @@
 #include "am_context.hpp"
 #include "am_device.hpp"
 #include "fabric.hpp"
+#include "gicc/gicc_build_config.hpp"
 
 namespace gicc {
 namespace am {
@@ -65,9 +66,10 @@ public:
      * Initialize AM subsystem
      * @param comm Reference to initialized Fabric
      * @param nslots Slots per peer inbox ring (default 128)
-     * @param staging_pool_size Number of staging slots for sending (default 16)
+     * @param staging_pool_size Number of staging slots for sending (default GICC_POOL_SIZE = 16).
+     *        M2 selector drives this via -DGICC_POOL_SIZE=<N> at compile time.
      */
-    Am(Fabric& comm, int nslots = AM_DEFAULT_RING_SLOTS, size_t staging_pool_size = 16)
+    Am(Fabric& comm, int nslots = AM_DEFAULT_RING_SLOTS, size_t staging_pool_size = GICC_POOL_SIZE)
         : am_ctx(comm, nslots),
           staging_idx(0),
           staging_size(staging_pool_size),

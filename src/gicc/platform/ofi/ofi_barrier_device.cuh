@@ -18,10 +18,13 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 
+#include "gicc/gicc_build_config.hpp"
+
 namespace gicc {
 
-/// Number of signal slots per round to avoid overwrites between consecutive barriers
-constexpr int BARRIER_SIGNAL_SLOTS = 2;
+/// Number of signal slots per round to avoid overwrites between consecutive barriers.
+/// M2 selector drives this via -DGICC_SLOT_DEPTH=<N> at compile time; 2 is the HPDC'26 default.
+constexpr int BARRIER_SIGNAL_SLOTS = GICC_SLOT_DEPTH;
 
 /**
  * GPU-accessible context for the dissemination barrier.

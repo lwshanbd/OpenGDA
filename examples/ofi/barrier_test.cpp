@@ -13,6 +13,10 @@
 #include "gicc/platform/ofi/ofi_barrier_device.cuh"
 #include "gicc/platform/ofi/internal/gicc_barrier.hpp"
 
+// For unset_rocr_visible_devices() — must run before Bootstrap init on
+// Tioga/Flux, otherwise multi-rank-per-node jobs see "invalid device ordinal".
+#include "gicc/platform/ofi/internal/hip_device_context.hpp"
+
 // =============================================================================
 // Test 1: Single barrier per kernel launch
 // =============================================================================
@@ -42,6 +46,8 @@ __global__ void continuous_barrier_kernel(gicc::BarrierCtx* bctx,
 
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
+    // Flux multi-rank-per-node GPU isolation fix (same as mm_minimal.cpp).
+    unset_rocr_visible_devices();
     gicc::Bootstrap boot;
     gicc::Fabric comm(boot);
     int rank = comm.rank();
