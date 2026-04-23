@@ -64,6 +64,16 @@ if(GICC_BUILD_POLICY_TESTS)
 endif()
 
 # ============================================================================
+# gicc_pass — LLVM analysis pass (M2-D/E/F).
+# Optional because building it requires a matching LLVM dev install.
+# Defaults ON because ROCm ships one.
+# ============================================================================
+option(GICC_BUILD_PASS "Build the GICC selector LLVM analysis pass" ON)
+if(GICC_BUILD_PASS)
+    add_subdirectory(tools/gicc_pass)
+endif()
+
+# ============================================================================
 # Backend subdirectories
 # ============================================================================
 if(GICC_BACKEND STREQUAL "mlx5")
