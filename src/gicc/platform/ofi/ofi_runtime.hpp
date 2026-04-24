@@ -49,7 +49,8 @@ namespace gicc {
  * slot's completion counter on the host.
  */
 struct Token {
-    int slot_idx;
+    int  slot_idx;
+    bool is_local = false;
 };
 
 class Runtime {
@@ -61,10 +62,24 @@ public:
           h_dev_ctx_(nullptr), d_dev_ctx_(nullptr),
           d_slot_pool_(nullptr), mr_slot_pool_(nullptr),
           d_operand_pool_(nullptr), mr_operand_pool_(nullptr),
-          my_n_ops_(0), atomic_signals_queued_(false)
+          my_n_ops_(0), my_n_remote_ops_(0), my_n_local_ops_(0),
+          atomic_signals_queued_(false),
+          h_local_ops_(nullptr), d_local_ops_(nullptr)
     {
         unset_rocr_visible_devices();
         comm_ = new Fabric(boot_);
+
+        // Locality map from Bootstrap: [rank] = true iff rank shares our node.
+        // put_no_db() routes same-node writes through HIP IPC — the copy is
+        // done INSIDE the user's kernel by gicc::put_local(), using
+        // IPC-mapped peer pointers. Remote peers keep the DWQ/CXI path.
+        local_peer_ = boot_.locality_map();
+        peer_mapped_ptrs_.assign(boot_.size(), {});
+
+        // Host-mapped array of local-op descriptors the kernel reads.
+        (void)hipHostMalloc(&h_local_ops_, POOL_SIZE * sizeof(LocalOp),
+                            hipHostMallocMapped);
+        (void)hipHostGetDevicePointer((void**)&d_local_ops_, h_local_ops_, 0);
 
         // ONE shared GPU buffer holds POOL_SIZE × uint64_t atomic_result
         // slots, registered with ONE MemoryRegion.
@@ -123,6 +138,17 @@ public:
         if (d_slot_pool_)    (void)hipFree(d_slot_pool_);
         if (d_operand_pool_) (void)hipFree(d_operand_pool_);
         if (h_dev_ctx_)      (void)hipHostFree(h_dev_ctx_);
+
+        // Close IPC mapped pointers (one per local peer × buffer).
+        for (auto& per_rank : peer_mapped_ptrs_) {
+            for (void* p : per_rank) {
+                if (p) (void)hipIpcCloseMemHandle(p);
+            }
+        }
+        peer_mapped_ptrs_.clear();
+
+        if (h_local_ops_) (void)hipHostFree(h_local_ops_);
+
         delete comm_;
     }
 
@@ -141,6 +167,15 @@ public:
         ob.desc_ = h.local_desc;
         ob.key_  = h.rma_key;
         ob.addr_ = h.rma_addr;
+
+        // Capture an IPC handle for device buffers so same-node peers can
+        // open them in exchange(). hipMalloc'd pointers are always valid
+        // here; for non-device buffers IPC isn't meaningful.
+        if (is_device) {
+            if (hipIpcGetMemHandle(&ob.ipc_handle, buf) == hipSuccess) {
+                ob.has_ipc_handle = true;
+            }
+        }
         local_bufs_.push_back(ob);
 
         Buffer b;
@@ -158,18 +193,26 @@ public:
     //--------------------------------------------------------------------------
     void exchange() {
         int nbuf = (int)local_bufs_.size();
+        int nranks = boot_.size();
 
-        struct BufMeta { uint64_t addr; uint64_t key; };
+        struct BufMeta {
+            uint64_t           addr;
+            uint64_t           key;
+            uint8_t            has_ipc;
+            hipIpcMemHandle_t  ipc_handle;
+        };
         std::vector<BufMeta> my_metas(nbuf);
         for (int i = 0; i < nbuf; i++) {
-            my_metas[i].addr = local_bufs_[i].addr_;
-            my_metas[i].key  = local_bufs_[i].key_;
+            my_metas[i].addr       = local_bufs_[i].addr_;
+            my_metas[i].key        = local_bufs_[i].key_;
+            my_metas[i].has_ipc    = local_bufs_[i].has_ipc_handle ? 1 : 0;
+            my_metas[i].ipc_handle = local_bufs_[i].ipc_handle;
         }
 
         auto raw = boot_.allgather(my_metas.data(),
                                    nbuf * (int)sizeof(BufMeta));
 
-        for (int r = 0; r < boot_.size(); r++) {
+        for (int r = 0; r < nranks; r++) {
             if (raw[r].size() != nbuf * sizeof(BufMeta)) {
                 fprintf(stderr,
                     "GICC: exchange() rank %d expected %d buffers (%zu B), "
@@ -180,9 +223,28 @@ public:
             }
             const auto* peer_metas =
                 reinterpret_cast<const BufMeta*>(raw[r].data());
+
+            peer_mapped_ptrs_[r].assign(nbuf, nullptr);
+
             for (int i = 0; i < nbuf; i++) {
                 comm_->set_remote_info_by_index(r, i,
                     peer_metas[i].addr, peer_metas[i].key);
+
+                // Open IPC mapping for same-node peers (skip self — writing
+                // to our own mapped pointer would bypass registered buffer
+                // semantics and there is no real peer to target).
+                if (r != boot_.rank()
+                    && local_peer_[r]
+                    && peer_metas[i].has_ipc)
+                {
+                    void* mapped = nullptr;
+                    hipError_t err = hipIpcOpenMemHandle(
+                        &mapped, peer_metas[i].ipc_handle,
+                        hipIpcMemLazyEnablePeerAccess);
+                    if (err == hipSuccess) {
+                        peer_mapped_ptrs_[r][i] = mapped;
+                    }
+                }
             }
         }
     }
@@ -211,9 +273,34 @@ public:
             exit(1);
         }
 
-        const int      slot_idx           = (int)my_n_ops_;
-        const uint64_t trigger_threshold  = my_n_ops_ + 1;  // 1-based
+        // IPC fast path: dest_rank shares our node and its buffer was IPC-
+        // mapped during exchange(). Stage a {dst,src,size} descriptor into
+        // host-mapped memory; the user's kernel will execute the copy via
+        // gicc::put_local(ctx) using direct GPU stores to the peer's
+        // IPC-mapped buffer. No DWQ op, no trigger slot consumed.
+        if (dest_rank != comm_->rank()
+            && local_peer_[dest_rank]
+            && (int)peer_mapped_ptrs_[dest_rank].size() > dest_buf_index
+            && peer_mapped_ptrs_[dest_rank][dest_buf_index] != nullptr)
+        {
+            if ((int)my_n_local_ops_ >= POOL_SIZE) {
+                fprintf(stderr, "gicc::Runtime::put_no_db: local batch "
+                        "exceeds POOL_SIZE=%d\n", POOL_SIZE);
+                exit(1);
+            }
+            const int local_idx = (int)my_n_local_ops_;
+            h_local_ops_[local_idx].dst =
+                (char*)peer_mapped_ptrs_[dest_rank][dest_buf_index] + dst_offset;
+            h_local_ops_[local_idx].src = (char*)ob.ptr + src_offset;
+            h_local_ops_[local_idx].size = size;
+            my_n_local_ops_++;
+            return Token{ local_idx, /*is_local=*/true };
+        }
+
+        const int slot_idx = (int)my_n_ops_;
         my_n_ops_++;
+        const uint64_t trigger_threshold = my_n_remote_ops_ + 1;  // 1-based
+        my_n_remote_ops_++;
 
         RemoteInfo ri = comm_->get_remote_info(dest_rank, dest_buf_index);
         if (ri.rma_key == 0 && ri.rma_addr == 0) {
@@ -250,7 +337,7 @@ public:
         my_pending_.push_back(dwq);
         atomic_signals_queued_ = true;
 
-        return Token{ slot_idx };
+        return Token{ slot_idx, /*is_local=*/false };
     }
 
     //--------------------------------------------------------------------------
@@ -260,15 +347,18 @@ public:
         (void)peer_rank;
         (void)remote_buf_index;
 
-        if (my_n_ops_ > 0) {
-            (void)hipMemset(d_slot_pool_, 0, my_n_ops_ * sizeof(uint64_t));
+        if (my_n_remote_ops_ > 0) {
+            (void)hipMemset(d_slot_pool_, 0,
+                            my_n_remote_ops_ * sizeof(uint64_t));
             (void)hipDeviceSynchronize();
         }
 
         h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
-        h_dev_ctx_->trigger_val_  = my_n_ops_;
+        h_dev_ctx_->trigger_val_  = my_n_remote_ops_;
         h_dev_ctx_->completion_   = (volatile uint64_t*)d_slot_pool_;
-        h_dev_ctx_->n_ops_        = my_n_ops_;
+        h_dev_ctx_->n_ops_        = my_n_remote_ops_;
+        h_dev_ctx_->local_ops_    = d_local_ops_;
+        h_dev_ctx_->n_local_ops_  = my_n_local_ops_;
         return d_dev_ctx_;
     }
 
@@ -277,9 +367,11 @@ public:
     //--------------------------------------------------------------------------
     DeviceCtx* prepare_trigger(Token /*tok*/) {
         h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
-        h_dev_ctx_->trigger_val_  = my_n_ops_;
+        h_dev_ctx_->trigger_val_  = my_n_remote_ops_;
         h_dev_ctx_->completion_   = nullptr;
         h_dev_ctx_->n_ops_        = 0;
+        h_dev_ctx_->local_ops_    = d_local_ops_;
+        h_dev_ctx_->n_local_ops_  = my_n_local_ops_;
         return d_dev_ctx_;
     }
 
@@ -287,6 +379,11 @@ public:
     // Host-side wait for a specific token.
     //--------------------------------------------------------------------------
     void wait(Token tok) {
+        // Local ops are executed INSIDE the user's kernel by gicc::put_local().
+        // The caller is expected to have already synchronised the kernel (e.g.
+        // hipStreamSynchronize / hipDeviceSynchronize) before calling wait(),
+        // so the copy has landed and no host-side polling is required.
+        if (tok.is_local) return;
         while (fi_cntr_read(slots_[tok.slot_idx].completion_cntr) < 1) {}
     }
 
@@ -294,6 +391,8 @@ public:
     // reset — drain the current batch and recycle the slots.
     //--------------------------------------------------------------------------
     void reset() {
+        // my_n_ops_ only counts remote ops (locals live in a parallel pool),
+        // so the existing fi_cntr drain covers the right slots.
         for (uint64_t i = 0; i < my_n_ops_; i++) {
             while (fi_cntr_read(slots_[i].completion_cntr) < 1) {
                 fi_cq_read(comm_->fabric->cq, NULL, 0);
@@ -317,7 +416,12 @@ public:
                 fi_cntr_set(slots_[i].atomic_completion_cntr, 0);
         }
 
+        // Local ops: the copies fired inside the caller's kernel. Caller is
+        // required to have synchronised the kernel before reset(), so the
+        // staged descriptors can be discarded outright.
         my_n_ops_              = 0;
+        my_n_remote_ops_       = 0;
+        my_n_local_ops_        = 0;
         atomic_signals_queued_ = false;
     }
 
@@ -334,10 +438,12 @@ public:
 private:
     // Internal buffer metadata (replaces gda::Buffer).
     struct OfiBuffer {
-        void*    ptr;
-        void*    desc_;
-        uint64_t key_;
-        uint64_t addr_;
+        void*             ptr;
+        void*             desc_;
+        uint64_t          key_;
+        uint64_t          addr_;
+        bool              has_ipc_handle = false;
+        hipIpcMemHandle_t ipc_handle{};
     };
 
     struct Slot {
@@ -357,11 +463,24 @@ private:
     void*                         d_operand_pool_;
     MemoryRegion*                 mr_operand_pool_;
 
-    uint64_t                      my_n_ops_;
+    uint64_t                      my_n_ops_;         // remote ops queued
+    uint64_t                      my_n_remote_ops_;  // mirrors my_n_ops_
+    uint64_t                      my_n_local_ops_;   // IPC ops queued
     bool                          atomic_signals_queued_;
     std::vector<DwqWorkBuilder*>  my_pending_;
 
     std::vector<OfiBuffer>        local_bufs_;
+
+    // IPC fast-path state. peer_mapped_ptrs_[rank][buf_idx] is the mapped
+    // pointer opened via hipIpcOpenMemHandle at exchange() time (or nullptr
+    // when the peer is off-node / the buffer had no IPC handle).
+    std::vector<bool>                  local_peer_;
+    std::vector<std::vector<void*>>    peer_mapped_ptrs_;
+
+    // Host-mapped array of LocalOp descriptors. put_no_db() fills entries
+    // here; the kernel reads them via d_local_ops_ during gicc::put_local().
+    LocalOp*                           h_local_ops_;
+    LocalOp*                           d_local_ops_;
 };
 
 } // namespace gicc

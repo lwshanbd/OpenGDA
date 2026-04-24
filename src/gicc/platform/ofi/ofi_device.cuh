@@ -36,12 +36,101 @@ namespace gicc {
 // libfabric MR, exactly mirroring benchmark_runner.hpp's per-stream
 // layout). quiet() returns once every pointed-to value has reached 1.
 //==============================================================================
+/// Staged local IPC copy. put_no_db() fills one of these per same-node peer
+/// during host-side enqueue; put_local() in the kernel executes the copy via
+/// direct GPU stores to peer_mapped memory.
+struct LocalOp {
+    void*    dst;
+    void*    src;
+    uint64_t size;
+};
+
 struct DeviceCtx {
     volatile uint64_t* trigger_addr_;   // MMIO trigger counter (mapped to GPU)
     volatile uint64_t* completion_;     // bit-cast of (uint64_t* const*) — see quiet()
     uint64_t           trigger_val_;    // value to write to trigger_addr_
     uint64_t           n_ops_;          // number of slot pointers to wait on
+    LocalOp*           local_ops_;      // device-visible array of local IPC copies
+    uint64_t           n_local_ops_;    // length of local_ops_ this batch
 };
+
+//==============================================================================
+// Block-cooperative device-to-device memcpy for IPC fast path.
+// Inspired by nvshmemi_memcpy_threadgroup: progressively tries 16B, 8B, 4B,
+// 2B, 1B chunks based on src/dst alignment. Each thread in the block takes
+// a stride of chunks. Callers MUST invoke from a single block; typical use
+// is the same thread block that triggered the kernel's compute+flush.
+//==============================================================================
+namespace detail {
+__device__ __forceinline__
+int tid_in_block() {
+    return threadIdx.x
+         + threadIdx.y * blockDim.x
+         + threadIdx.z * blockDim.x * blockDim.y;
+}
+__device__ __forceinline__
+int block_size() {
+    return blockDim.x * blockDim.y * blockDim.z;
+}
+} // namespace detail
+
+__device__ __forceinline__
+void memcpy_block(void* __restrict__ dst_v, const void* __restrict__ src_v,
+                  uint64_t len)
+{
+    int tid   = detail::tid_in_block();
+    int nth   = detail::block_size();
+    char* dst = (char*)dst_v;
+    const char* src = (const char*)src_v;
+
+    if (((uintptr_t)dst % 16 == 0) && ((uintptr_t)src % 16 == 0) && len >= 16) {
+        uint64_t n = len / 16;
+        int4* d = (int4*)dst; const int4* s = (const int4*)src;
+        for (uint64_t i = tid; i < n; i += nth) d[i] = s[i];
+        len -= n * 16; dst += n * 16; src += n * 16;
+        if (len == 0) return;
+    }
+    if (((uintptr_t)dst % 8 == 0) && ((uintptr_t)src % 8 == 0) && len >= 8) {
+        uint64_t n = len / 8;
+        uint64_t* d = (uint64_t*)dst; const uint64_t* s = (const uint64_t*)src;
+        for (uint64_t i = tid; i < n; i += nth) d[i] = s[i];
+        len -= n * 8; dst += n * 8; src += n * 8;
+        if (len == 0) return;
+    }
+    if (((uintptr_t)dst % 4 == 0) && ((uintptr_t)src % 4 == 0) && len >= 4) {
+        uint64_t n = len / 4;
+        uint32_t* d = (uint32_t*)dst; const uint32_t* s = (const uint32_t*)src;
+        for (uint64_t i = tid; i < n; i += nth) d[i] = s[i];
+        len -= n * 4; dst += n * 4; src += n * 4;
+        if (len == 0) return;
+    }
+    if (((uintptr_t)dst % 2 == 0) && ((uintptr_t)src % 2 == 0) && len >= 2) {
+        uint64_t n = len / 2;
+        uint16_t* d = (uint16_t*)dst; const uint16_t* s = (const uint16_t*)src;
+        for (uint64_t i = tid; i < n; i += nth) d[i] = s[i];
+        len -= n * 2; dst += n * 2; src += n * 2;
+        if (len == 0) return;
+    }
+    for (uint64_t i = tid; i < len; i += nth) dst[i] = src[i];
+}
+
+//==============================================================================
+// put_local — execute all IPC copies queued by Runtime::put_no_db().
+// Call from exactly one block (all threads cooperate). Does nothing if no
+// local ops were queued. Issues a __threadfence_system() at the end so peers
+// observe the writes before flush() rings the remote DWQ doorbell.
+//==============================================================================
+__device__ __forceinline__
+void put_local(DeviceCtx* ctx) {
+    if (blockIdx.x != 0 || blockIdx.y != 0 || blockIdx.z != 0) return;
+    for (uint64_t i = 0; i < ctx->n_local_ops_; i++) {
+        memcpy_block(ctx->local_ops_[i].dst,
+                     ctx->local_ops_[i].src,
+                     ctx->local_ops_[i].size);
+    }
+    __syncthreads();
+    if (detail::tid_in_block() == 0) __threadfence_system();
+}
 
 //==============================================================================
 // flush — ring the (virtual) doorbell.
