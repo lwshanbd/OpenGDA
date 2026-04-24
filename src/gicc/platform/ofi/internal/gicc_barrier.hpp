@@ -297,6 +297,13 @@ public:
                       sizeof(uint64_t), hipMemcpyHostToDevice);
         }
 
+        // Single-barrier mode does not update done_counter. Rebase it before
+        // enabling continuous GPU->CPU notifications so monitor_loop's
+        // gpu_done > barrier_count_ test remains valid after mixed usage.
+        __atomic_store_n(const_cast<uint64_t*>(h_done_counter_), barrier_count_,
+                         __ATOMIC_RELEASE);
+        set_notify_done(true);
+
         continuous_mode_ = true;
         setup();
     }
@@ -306,6 +313,7 @@ public:
         while (barrier_count_ < target_barrier_count_.load())
             std::this_thread::yield();
         continuous_mode_ = false;
+        set_notify_done(false);
     }
 
     // =========================================================================
@@ -405,9 +413,9 @@ private:
     // =========================================================================
 
     void allocate_signals() {
-        // Ready/done counters are always needed — the device-side barrier()
-        // spins on ready_counter even when there are zero rounds, and
-        // setup() always bumps it.
+        // ready_counter is always needed: device-side barrier() spins on it
+        // even when there are zero rounds, and setup() always bumps it.
+        // done_counter is used only when continuous mode enables notify_done.
         hipHostMalloc((void**)&h_done_counter_, sizeof(uint64_t), hipHostMallocDefault);
         *h_done_counter_ = 0;
 
@@ -542,10 +550,19 @@ private:
         h_context_.expected_signal   = 0;
         h_context_.done_counter      = h_done_counter_;
         h_context_.ready_counter     = h_ready_counter_;
+        h_context_.notify_done       = 0;
 
         hipMalloc(&d_context_, sizeof(BarrierCtx));
         hipMemcpy(d_context_, &h_context_, sizeof(BarrierCtx),
                   hipMemcpyHostToDevice);
+    }
+
+    void set_notify_done(bool enabled) {
+        h_context_.notify_done = enabled ? 1 : 0;
+        if (d_context_) {
+            hipMemcpy(&d_context_->notify_done, &h_context_.notify_done,
+                      sizeof(h_context_.notify_done), hipMemcpyHostToDevice);
+        }
     }
 };
 

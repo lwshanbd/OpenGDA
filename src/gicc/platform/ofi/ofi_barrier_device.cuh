@@ -46,8 +46,9 @@ struct BarrierCtx {
                                            ///< kernel owns in continuous mode
                                            ///< (must increment after each
                                            ///< barrier() call).
-    volatile uint64_t* done_counter;       ///< GPU->CPU notification (atomicAdd after barrier)
+    volatile uint64_t* done_counter;       ///< GPU->CPU notification for continuous mode
     volatile uint64_t* ready_counter;      ///< CPU->GPU notification (DWQ ops are queued)
+    int notify_done;                       ///< Nonzero when host monitor needs done_counter
 };
 
 /**
@@ -114,9 +115,13 @@ void barrier(BarrierCtx* ctx) {
 #endif
     }
 
-    // Notify CPU that this barrier is done
-    atomicAdd((unsigned long long*)ctx->done_counter, 1ULL);
-    __threadfence_system();
+    if (ctx->notify_done) {
+        // Continuous mode needs a GPU->CPU completion signal for the monitor
+        // thread. Single-barrier mode is synchronized by the kernel launch and
+        // OFI completion counters, so avoid this host-visible atomic/fence.
+        atomicAdd((unsigned long long*)ctx->done_counter, 1ULL);
+        __threadfence_system();
+    }
 }
 
 /**
