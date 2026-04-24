@@ -87,6 +87,7 @@ gicc_ofi_example(mm_minimal          mm_minimal.cpp)
 gicc_ofi_example(barrier_test        barrier_test.cpp)
 gicc_ofi_example(am_pingpong         am_pingpong.cpp)
 gicc_ofi_example(jacobi              jacobi.cpp)
+gicc_ofi_example(barrier_bench       barrier_bench.cpp)
 
 # Pure MPI barrier reference benchmark (CPU-triggered, no HIP/libfabric).
 if(GICC_BOOTSTRAP STREQUAL "mpi")
