@@ -124,7 +124,6 @@ public:
         // DWQ ops
         for (auto* op : dwq_ops_) delete op;
         dwq_ops_.clear();
-        clear_continuous_prequeue();
 
         // Counters
         for (auto& cp : counter_pairs_)
@@ -203,13 +202,34 @@ public:
                       sizeof(uint64_t), hipMemcpyHostToDevice);
         }
 
+        int slot = threshold % BARRIER_SIGNAL_SLOTS;
+
         for (int k = 0; k < n_rounds_; k++) {
             // Local round: the kernel will write the peer's slot directly
             // via the IPC-mapped pointer — nothing for the host to queue.
             if (round_is_local_[k]) continue;
 
+            int peer = (comm_.rank() + (1 << k)) % comm_.size();
+
+            int sig_idx = k * BARRIER_SIGNAL_SLOTS + slot;
+            uint64_t remote_offset = sig_idx * sizeof(uint64_t);
+            uint64_t remote_addr = comm_.is_virt_addr_mode()
+                ? (remote_signal_addrs_[k] + remote_offset)
+                : remote_offset;
+
             // Reuse the pre-allocated DwqWorkBuilder for round k.
-            queue_round_write(k, threshold, h_sig, mr_sig->desc, dwq_ops_[k]);
+            dwq_ops_[k]->queue_rma_write(
+                comm_.fabric->domain,
+                comm_.fabric->ep,
+                h_sig,
+                mr_sig->desc,
+                sizeof(uint64_t),
+                comm_.av_addrs[peer],
+                remote_addr,
+                remote_signal_keys_[k],
+                counter_pairs_[k].trigger_cntr,
+                counter_pairs_[k].completion_cntr,
+                threshold);
         }
 
         // Signal GPU that DWQ ops are ready
@@ -264,7 +284,6 @@ public:
     void start_continuous(uint64_t num_barriers) {
         ever_active_ = true;
         target_barrier_count_ = barrier_count_ + num_barriers;
-        clear_continuous_prequeue();
 
         // Seed expected_signal for the first barrier before flipping into
         // continuous mode, so setup() will skip the write (kernel owns the
@@ -278,8 +297,8 @@ public:
                       sizeof(uint64_t), hipMemcpyHostToDevice);
         }
 
-        prequeue_continuous(num_barriers);
         continuous_mode_ = true;
+        setup();
     }
 
     /** Wait for all continuous barriers to complete. */
@@ -338,14 +357,6 @@ private:
     // Pending DWQ ops
     std::vector<DwqWorkBuilder*> dwq_ops_;
 
-    // Continuous-mode prequeue. NVSHMEM's in-kernel barrier does not wait for
-    // the host to rearm each epoch. For OFI/CXI DWQ, emulate that by queuing
-    // every remote-round work item for the requested continuous run up front.
-    std::vector<DwqWorkBuilder*> continuous_dwq_ops_;
-    uint64_t*     h_continuous_signal_values_ = nullptr;
-    MemoryRegion* mr_continuous_signal_values_ = nullptr;
-    std::atomic<bool> continuous_prequeued_{false};
-
     // Host-visible counters
     volatile uint64_t* h_done_counter_;
     volatile uint64_t* h_ready_counter_;
@@ -381,98 +392,12 @@ private:
             if (gpu_done > barrier_count_) {
                 reset();
 
-                if (barrier_count_ < target_barrier_count_.load(std::memory_order_relaxed)
-                    && !continuous_prequeued_.load(std::memory_order_relaxed))
-                {
+                if (barrier_count_ < target_barrier_count_.load(std::memory_order_relaxed))
                     setup();
-                } else if (barrier_count_ >=
-                           target_barrier_count_.load(std::memory_order_relaxed)) {
+                else
                     continuous_mode_ = false;
-                }
             }
         }
-    }
-
-    void queue_round_write(int k, uint64_t threshold, uint64_t* src, void* desc,
-                           DwqWorkBuilder* op) {
-        int peer = (comm_.rank() + (1 << k)) % comm_.size();
-        int slot = threshold % BARRIER_SIGNAL_SLOTS;
-        int sig_idx = k * BARRIER_SIGNAL_SLOTS + slot;
-        uint64_t remote_offset = sig_idx * sizeof(uint64_t);
-        uint64_t remote_addr = comm_.is_virt_addr_mode()
-            ? (remote_signal_addrs_[k] + remote_offset)
-            : remote_offset;
-
-        op->queue_rma_write(
-            comm_.fabric->domain,
-            comm_.fabric->ep,
-            src,
-            desc,
-            sizeof(uint64_t),
-            comm_.av_addrs[peer],
-            remote_addr,
-            remote_signal_keys_[k],
-            counter_pairs_[k].trigger_cntr,
-            counter_pairs_[k].completion_cntr,
-            threshold);
-    }
-
-    void clear_continuous_prequeue() {
-        for (auto* op : continuous_dwq_ops_) delete op;
-        continuous_dwq_ops_.clear();
-
-        delete mr_continuous_signal_values_;
-        mr_continuous_signal_values_ = nullptr;
-
-        if (h_continuous_signal_values_) hipHostFree(h_continuous_signal_values_);
-        h_continuous_signal_values_ = nullptr;
-        continuous_prequeued_.store(false, std::memory_order_relaxed);
-    }
-
-    void prequeue_continuous(uint64_t num_barriers) {
-        if (num_barriers == 0) return;
-
-        if (n_rounds_ == 0) {
-            __atomic_add_fetch(h_ready_counter_, num_barriers, __ATOMIC_SEQ_CST);
-            continuous_prequeued_.store(true, std::memory_order_relaxed);
-            return;
-        }
-
-        hipHostMalloc(&h_continuous_signal_values_,
-                      num_barriers * sizeof(uint64_t),
-                      hipHostMallocDefault);
-        for (uint64_t i = 0; i < num_barriers; i++)
-            h_continuous_signal_values_[i] = barrier_count_ + i + 1;
-
-        mr_continuous_signal_values_ = new MemoryRegion(
-            comm_.fabric->domain, comm_.fabric->ep, comm_.fabric->cxi_info,
-            h_continuous_signal_values_, num_barriers * sizeof(uint64_t),
-            false, comm_.gpu_id(), comm_.rank());
-
-        uint64_t remote_rounds = 0;
-        for (int k = 0; k < n_rounds_; k++) {
-            if (!round_is_local_[k]) remote_rounds++;
-        }
-        continuous_dwq_ops_.reserve(num_barriers * remote_rounds);
-
-        for (uint64_t i = 0; i < num_barriers; i++) {
-            uint64_t threshold = barrier_count_ + i + 1;
-            for (int k = 0; k < n_rounds_; k++) {
-                if (round_is_local_[k]) continue;
-
-                auto* op = new DwqWorkBuilder(comm_.rank());
-                queue_round_write(k, threshold,
-                                  &h_continuous_signal_values_[i],
-                                  mr_continuous_signal_values_->desc,
-                                  op);
-                continuous_dwq_ops_.push_back(op);
-            }
-        }
-
-        // Let the kernel advance through the whole continuous run without
-        // waiting for the monitor thread to reset/setup each barrier.
-        __atomic_add_fetch(h_ready_counter_, num_barriers, __ATOMIC_SEQ_CST);
-        continuous_prequeued_.store(true, std::memory_order_relaxed);
     }
 
     // =========================================================================
