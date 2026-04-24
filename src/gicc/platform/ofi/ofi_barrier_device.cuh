@@ -70,6 +70,10 @@ void barrier(BarrierCtx* ctx) {
 
     // Wait for CPU to signal that DWQ operations are ready
     while (*ctx->ready_counter < expected) {}
+
+    // Match NVSHMEM's barrier shape: pay one system-scope release before
+    // publishing any barrier signals, rather than fencing after every
+    // notify/wait step. This orders prior GPU writes before the first signal.
     __threadfence_system();
 
     // Signal slot for this barrier (alternates to avoid overwrites)
@@ -85,11 +89,15 @@ void barrier(BarrierCtx* ctx) {
             // the signal directly to their signals[] array via the mapping
             // opened at init time — no NIC round-trip.
             ctx->peer_signal_bases[k][sig_idx] = expected;
+#ifdef GICC_OFI_BARRIER_STRICT_FENCES
             __threadfence_system();
+#endif
         } else {
             // Remote: ring the per-round CXI trigger counter so libfabric
             // fires the DWQ op queued by the host's setup().
             *ctx->trigger_addrs[k] = expected;
+            // The trigger counter is an MMIO mapping. Keep this fence so the
+            // doorbell reaches the NIC before this thread starts waiting.
             __threadfence_system();
         }
 
@@ -100,8 +108,18 @@ void barrier(BarrierCtx* ctx) {
         // so any value >= expected means the peer has reached at least
         // this point.
         while ((int64_t)(ctx->signals[sig_idx] - expected) < 0) {}
+#ifdef GICC_OFI_BARRIER_STRICT_FENCES
         __threadfence_system();
+#endif
     }
+
+    // In the optimized path, merge the old per-round receive-side fences into
+    // one final system fence before returning/notifying the CPU. Define
+    // GICC_OFI_BARRIER_STRICT_FENCES to restore the legacy fence-after-every
+    // local notify and wait behavior for debugging.
+#ifndef GICC_OFI_BARRIER_STRICT_FENCES
+    if (ctx->n_rounds > 0) __threadfence_system();
+#endif
 
     // Notify CPU that this barrier is done
     atomicAdd((unsigned long long*)ctx->done_counter, 1ULL);
