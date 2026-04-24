@@ -7,11 +7,13 @@
  */
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <hip/hip_runtime.h>
 
 #include "gicc/bootstrap/bootstrap.hpp"
 #include "gicc/platform/ofi/ofi_barrier_device.cuh"
 #include "gicc/platform/ofi/internal/gicc_barrier.hpp"
+#include "gicc/platform/ofi/internal/hip_device_context.hpp"
 
 // =============================================================================
 // Test 1: Single barrier per kernel launch
@@ -41,7 +43,8 @@ __global__ void continuous_barrier_kernel(gicc::BarrierCtx* bctx,
 }
 
 int main(int argc, char** argv) {
-    (void)argc; (void)argv;
+    unset_rocr_visible_devices();
+    const int n_continuous = (argc > 1) ? atoi(argv[1]) : 50;
     gicc::Bootstrap boot;
     gicc::Fabric comm(boot);
     int rank = comm.rank();
@@ -105,9 +108,13 @@ int main(int argc, char** argv) {
         hipHostMalloc((void**)&h_counter, sizeof(uint64_t), hipHostMallocDefault);
         *h_counter = 0;
 
-        constexpr int N_CONTINUOUS = 50;
+        const int N_CONTINUOUS = n_continuous;
         if (rank == 0) printf("Test 2: %d continuous barriers ... ", N_CONTINUOUS);
         fflush(stdout);
+
+        boot.barrier();
+        timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC_RAW, &t0);
 
         barrier.start_continuous(N_CONTINUOUS);
         hipLaunchKernelGGL(continuous_barrier_kernel, dim3(1), dim3(1), 0, 0,
@@ -115,6 +122,10 @@ int main(int argc, char** argv) {
                            (volatile uint64_t*)h_counter);
         barrier.wait_continuous();
         hipDeviceSynchronize();
+
+        clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
+        double elapsed_us = (t1.tv_sec - t0.tv_sec) * 1.0e6 +
+                            (t1.tv_nsec - t0.tv_nsec) / 1.0e3;
 
         if (*h_counter != (uint64_t)N_CONTINUOUS) {
             printf("FAILED (counter=%lu, expected=%d)\n",
@@ -127,7 +138,10 @@ int main(int argc, char** argv) {
         hipHostFree((void*)h_counter);
         barrier.finalize();
         boot.barrier();
-        if (rank == 0) printf("PASSED\n");
+        if (rank == 0) {
+            printf("PASSED  (%.1f us total, %.2f us/barrier)\n",
+                   elapsed_us, elapsed_us / N_CONTINUOUS);
+        }
         fflush(stdout);
     }
 
