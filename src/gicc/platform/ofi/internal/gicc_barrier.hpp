@@ -131,10 +131,19 @@ public:
         counter_pairs_.clear();
 
         // Device context
-        if (d_context_)       hipFree(d_context_);
-        if (d_trigger_addrs_) hipFree(d_trigger_addrs_);
-        d_context_ = nullptr;
-        d_trigger_addrs_ = nullptr;
+        if (d_context_)           hipFree(d_context_);
+        if (d_trigger_addrs_)     hipFree(d_trigger_addrs_);
+        if (d_peer_signal_bases_) hipFree(d_peer_signal_bases_);
+        d_context_           = nullptr;
+        d_trigger_addrs_     = nullptr;
+        d_peer_signal_bases_ = nullptr;
+
+        // IPC mappings to peer signal arrays (one per local round).
+        for (auto* p : peer_mapped_bases_) {
+            if (p) (void)hipIpcCloseMemHandle((void*)p);
+        }
+        peer_mapped_bases_.clear();
+        round_is_local_.clear();
 
         // Signal source buffers (double-buffered)
         for (int i = 0; i < N_SIGNAL_BUFFERS; i++) {
@@ -145,8 +154,9 @@ public:
         }
         delete mr_signals_;
         mr_signals_ = nullptr;
-        if (d_signals_) hipHostFree(d_signals_);
+        if (d_signals_) hipFree(d_signals_);
         d_signals_ = nullptr;
+        have_ipc_handle_ = false;
 
         if (h_done_counter_)  hipHostFree((void*)h_done_counter_);
         if (h_ready_counter_) hipHostFree((void*)h_ready_counter_);
@@ -195,6 +205,10 @@ public:
         int slot = threshold % BARRIER_SIGNAL_SLOTS;
 
         for (int k = 0; k < n_rounds_; k++) {
+            // Local round: the kernel will write the peer's slot directly
+            // via the IPC-mapped pointer — nothing for the host to queue.
+            if (round_is_local_[k]) continue;
+
             int peer = (comm_.rank() + (1 << k)) % comm_.size();
 
             int sig_idx = k * BARRIER_SIGNAL_SLOTS + slot;
@@ -226,6 +240,7 @@ public:
     void wait_completion() {
         uint64_t expected = barrier_count_ + 1;
         for (int k = 0; k < n_rounds_; k++) {
+            if (round_is_local_[k]) continue;  // no counter for local rounds
             while (fi_cntr_read(counter_pairs_[k].completion_cntr) < expected)
                 fi_cq_read(comm_.fabric->cq, NULL, 0);
         }
@@ -240,6 +255,7 @@ public:
 
         uint64_t expected = barrier_count_;
         for (int k = 0; k < n_rounds_; k++) {
+            if (round_is_local_[k]) continue;
             while (fi_cntr_read(counter_pairs_[k].completion_cntr) < expected)
                 fi_cq_read(comm_.fabric->cq, NULL, 0);
         }
@@ -320,6 +336,16 @@ private:
     // Trigger address array for kernel
     volatile uint64_t** d_trigger_addrs_;
 
+    // IPC fast path. peer_mapped_bases_[k] is the peer-in-round-k's d_signals_
+    // base mapped into our address space, or nullptr for remote rounds.
+    // d_peer_signal_bases_ is the same array copied to device memory so the
+    // kernel can index it via BarrierCtx::peer_signal_bases.
+    std::vector<volatile uint64_t*>  peer_mapped_bases_;
+    volatile uint64_t**              d_peer_signal_bases_ = nullptr;
+    std::vector<bool>                round_is_local_;
+    bool                             have_ipc_handle_ = false;
+    hipIpcMemHandle_t                ipc_handle_{};
+
     // Device context
     BarrierCtx  h_context_;
     BarrierCtx* d_context_;
@@ -393,13 +419,23 @@ private:
         // regions.
         if (n_rounds_ == 0) return;
 
+        // d_signals_ is now device memory so peers can open it via
+        // hipIpcGetMemHandle and write directly from a kernel on the same
+        // node. The remote DWQ path works with device memory too (MR with
+        // is_device=true), so the signal path is the same for both flavours
+        // of peer.
         size_t signals_size = n_rounds_ * BARRIER_SIGNAL_SLOTS * sizeof(uint64_t);
-        hipHostMalloc(&d_signals_, signals_size, hipHostMallocDefault);
-        memset((void*)d_signals_, 0, signals_size);
+        hipMalloc(&d_signals_, signals_size);
+        hipMemset((void*)d_signals_, 0, signals_size);
 
         mr_signals_ = new MemoryRegion(
             comm_.fabric->domain, comm_.fabric->ep, comm_.fabric->cxi_info,
-            d_signals_, signals_size, false, comm_.gpu_id(), comm_.rank());
+            d_signals_, signals_size, true, comm_.gpu_id(), comm_.rank());
+
+        // IPC handle for same-node peers to map into their address space.
+        have_ipc_handle_ = false;
+        if (hipIpcGetMemHandle(&ipc_handle_, d_signals_) == hipSuccess)
+            have_ipc_handle_ = true;
 
         for (int i = 0; i < N_SIGNAL_BUFFERS; i++) {
             hipHostMalloc(&h_signal_values_[i], sizeof(uint64_t), hipHostMallocDefault);
@@ -414,22 +450,47 @@ private:
     void exchange_addresses() {
         if (n_rounds_ == 0) return;  // size <= 1: no peers to exchange with
 
-        uint64_t my_base = (uint64_t)d_signals_;
-        uint64_t my_key  = mr_signals_->key;
-
         int sz = comm_.size();
+        int rank = comm_.rank();
 
-        auto all_bases = comm_.boot.template allgather_fixed<uint64_t>(my_base);
-        auto all_keys  = comm_.boot.template allgather_fixed<uint64_t>(my_key);
+        struct Meta {
+            uint64_t          base;
+            uint64_t          key;
+            uint8_t           has_ipc;
+            hipIpcMemHandle_t ipc;
+        };
+        Meta my{};
+        my.base     = (uint64_t)d_signals_;
+        my.key      = mr_signals_->key;
+        my.has_ipc  = have_ipc_handle_ ? 1 : 0;
+        my.ipc      = ipc_handle_;
+
+        auto all = comm_.boot.template allgather_fixed<Meta>(my);
 
         remote_signal_addrs_.resize(n_rounds_);
         remote_signal_keys_.resize(n_rounds_);
+        round_is_local_.assign(n_rounds_, false);
+        peer_mapped_bases_.assign(n_rounds_, nullptr);
 
-        int rank = comm_.rank();
+        // Locality map tells us which peer ranks share our node; Bootstrap
+        // builds it once per process via MPI_Comm_split_type.
+        std::vector<bool> locality = comm_.boot.locality_map();
+
         for (int k = 0; k < n_rounds_; k++) {
             int peer = (rank + (1 << k)) % sz;
-            remote_signal_addrs_[k] = all_bases[peer];
-            remote_signal_keys_[k]  = all_keys[peer];
+            remote_signal_addrs_[k] = all[peer].base;
+            remote_signal_keys_[k]  = all[peer].key;
+
+            if (peer != rank && locality[peer] && all[peer].has_ipc) {
+                void* mapped = nullptr;
+                if (hipIpcOpenMemHandle(&mapped, all[peer].ipc,
+                                        hipIpcMemLazyEnablePeerAccess)
+                    == hipSuccess)
+                {
+                    round_is_local_[k]   = true;
+                    peer_mapped_bases_[k] = (volatile uint64_t*)mapped;
+                }
+            }
         }
     }
 
@@ -454,23 +515,33 @@ private:
         // trigger_addrs when n_rounds == 0.
         if (n_rounds_ > 0) {
             hipMalloc(&d_trigger_addrs_, n_rounds_ * sizeof(uint64_t*));
-
             std::vector<volatile uint64_t*> h_trig(n_rounds_);
-            for (int k = 0; k < n_rounds_; k++)
+            for (int k = 0; k < n_rounds_; k++) {
+                // Local rounds won't dereference trigger_addrs[k], but keep
+                // the entry pointing at the real counter_pair to avoid
+                // dangling reads if the kernel ever walked it unguarded.
                 h_trig[k] = counter_pairs_[k].dev_trigger_cntr;
+            }
             hipMemcpy(d_trigger_addrs_, h_trig.data(),
+                      n_rounds_ * sizeof(uint64_t*), hipMemcpyHostToDevice);
+
+            // IPC mapped bases per round (nullptr for remote rounds). The
+            // kernel uses a non-null entry to take the IPC fast path.
+            hipMalloc(&d_peer_signal_bases_, n_rounds_ * sizeof(uint64_t*));
+            hipMemcpy(d_peer_signal_bases_, peer_mapped_bases_.data(),
                       n_rounds_ * sizeof(uint64_t*), hipMemcpyHostToDevice);
         }
 
-        h_context_.n_rounds        = n_rounds_;
-        h_context_.rank            = comm_.rank();
-        h_context_.size            = comm_.size();
-        h_context_.n_signal_slots  = BARRIER_SIGNAL_SLOTS;
-        h_context_.signals         = d_signals_;
-        h_context_.trigger_addrs   = d_trigger_addrs_;
-        h_context_.expected_signal = 0;
-        h_context_.done_counter    = h_done_counter_;
-        h_context_.ready_counter   = h_ready_counter_;
+        h_context_.n_rounds          = n_rounds_;
+        h_context_.rank              = comm_.rank();
+        h_context_.size              = comm_.size();
+        h_context_.n_signal_slots    = BARRIER_SIGNAL_SLOTS;
+        h_context_.signals           = d_signals_;
+        h_context_.trigger_addrs     = d_trigger_addrs_;
+        h_context_.peer_signal_bases = d_peer_signal_bases_;
+        h_context_.expected_signal   = 0;
+        h_context_.done_counter      = h_done_counter_;
+        h_context_.ready_counter     = h_ready_counter_;
 
         hipMalloc(&d_context_, sizeof(BarrierCtx));
         hipMemcpy(d_context_, &h_context_, sizeof(BarrierCtx),

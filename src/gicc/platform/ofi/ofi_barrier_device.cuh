@@ -35,6 +35,12 @@ struct BarrierCtx {
     int n_signal_slots;                    ///< = BARRIER_SIGNAL_SLOTS
     volatile uint64_t* signals;            ///< Signal buffers [n_rounds * n_signal_slots]
     volatile uint64_t** trigger_addrs;     ///< Per-round MMIO trigger addresses
+    /// Per-round IPC fast path. peer_signal_bases[k] is the peer's signals
+    /// array mapped into our address space (via hipIpcOpenMemHandle), or
+    /// nullptr if round k targets an off-node peer and must go through the
+    /// CXI DWQ trigger path. When non-null, the kernel writes the signal
+    /// directly via `peer_signal_bases[k][k * n_signal_slots + slot]`.
+    volatile uint64_t** peer_signal_bases;
     uint64_t expected_signal;              ///< Threshold for the next barrier.
                                            ///< Host owns in single-barrier mode;
                                            ///< kernel owns in continuous mode
@@ -70,9 +76,22 @@ void barrier(BarrierCtx* ctx) {
     int slot = expected % ctx->n_signal_slots;
 
     for (int k = 0; k < ctx->n_rounds; k++) {
-        // Trigger DWQ put for round k
-        *ctx->trigger_addrs[k] = expected;
-        __threadfence_system();
+        int sig_idx = k * ctx->n_signal_slots + slot;
+
+        if (ctx->peer_signal_bases != nullptr
+            && ctx->peer_signal_bases[k] != nullptr)
+        {
+            // IPC fast path: the peer in round k shares our node. Write
+            // the signal directly to their signals[] array via the mapping
+            // opened at init time — no NIC round-trip.
+            ctx->peer_signal_bases[k][sig_idx] = expected;
+            __threadfence_system();
+        } else {
+            // Remote: ring the per-round CXI trigger counter so libfabric
+            // fires the DWQ op queued by the host's setup().
+            *ctx->trigger_addrs[k] = expected;
+            __threadfence_system();
+        }
 
         // Wait for signal from peer. Use < (not !=) because a fast peer in
         // continuous mode can overtake us and overwrite the slot with a
@@ -80,7 +99,6 @@ void barrier(BarrierCtx* ctx) {
         // FIFO per endpoint and thresholds are monotonically increasing,
         // so any value >= expected means the peer has reached at least
         // this point.
-        int sig_idx = k * ctx->n_signal_slots + slot;
         while ((int64_t)(ctx->signals[sig_idx] - expected) < 0) {}
         __threadfence_system();
     }
