@@ -74,9 +74,14 @@ void barrier(BarrierCtx* ctx) {
         *ctx->trigger_addrs[k] = expected;
         __threadfence_system();
 
-        // Wait for signal from peer
+        // Wait for signal from peer. Use < (not !=) because a fast peer in
+        // continuous mode can overtake us and overwrite the slot with a
+        // larger threshold before we observe ours; libfabric preserves
+        // FIFO per endpoint and thresholds are monotonically increasing,
+        // so any value >= expected means the peer has reached at least
+        // this point.
         int sig_idx = k * ctx->n_signal_slots + slot;
-        while (ctx->signals[sig_idx] != expected) {}
+        while ((int64_t)(ctx->signals[sig_idx] - expected) < 0) {}
         __threadfence_system();
     }
 
