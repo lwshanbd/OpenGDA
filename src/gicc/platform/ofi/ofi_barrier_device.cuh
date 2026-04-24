@@ -50,20 +50,6 @@ struct BarrierCtx {
     volatile uint64_t* ready_counter;      ///< CPU->GPU notification (DWQ ops are queued)
 };
 
-namespace detail {
-
-__device__ __forceinline__
-void barrier_store_release(volatile uint64_t* addr, uint64_t value) {
-    __atomic_store_n(const_cast<uint64_t*>(addr), value, __ATOMIC_RELEASE);
-}
-
-__device__ __forceinline__
-uint64_t barrier_load_acquire(const volatile uint64_t* addr) {
-    return __atomic_load_n(const_cast<uint64_t*>(addr), __ATOMIC_ACQUIRE);
-}
-
-} // namespace detail
-
 /**
  * GPU device function — execute one dissemination barrier.
  *
@@ -83,7 +69,7 @@ void barrier(BarrierCtx* ctx) {
     uint64_t expected = ctx->expected_signal;
 
     // Wait for CPU to signal that DWQ operations are ready
-    while (detail::barrier_load_acquire(ctx->ready_counter) < expected) {}
+    while (*ctx->ready_counter < expected) {}
 
     // Orders pre-barrier GPU writes before any barrier signal is published.
     __threadfence_system();
@@ -101,16 +87,12 @@ void barrier(BarrierCtx* ctx) {
             // the signal directly to their signals[] array via the mapping
             // opened at init time — no NIC round-trip.
             //
-            // This mirrors NVSHMEM's direct LD/ST barrier signal path, but
-            // makes the publish edge explicit for HIP IPC memory: release
-            // store on the sender, acquire load in the receiver's poll loop.
-#ifdef GICC_OFI_BARRIER_STRICT_FENCES
+            // Match NVSHMEM's direct-store wait loop shape: publish the
+            // signal, then fence on the sender side so the peer can observe
+            // the HIP IPC store promptly. Do not make the receiver's hot
+            // spin loop an acquire load; NVSHMEM uses volatile polling here.
             ctx->peer_signal_bases[k][sig_idx] = expected;
             __threadfence_system();
-#else
-            detail::barrier_store_release(&ctx->peer_signal_bases[k][sig_idx],
-                                          expected);
-#endif
         } else {
             // Remote: ring the per-round CXI trigger counter so libfabric
             // fires the DWQ op queued by the host's setup().
@@ -126,8 +108,7 @@ void barrier(BarrierCtx* ctx) {
         // FIFO per endpoint and thresholds are monotonically increasing,
         // so any value >= expected means the peer has reached at least
         // this point.
-        while ((int64_t)(detail::barrier_load_acquire(&ctx->signals[sig_idx])
-                         - expected) < 0) {}
+        while ((int64_t)(ctx->signals[sig_idx] - expected) < 0) {}
 #ifdef GICC_OFI_BARRIER_STRICT_FENCES
         __threadfence_system();
 #endif
