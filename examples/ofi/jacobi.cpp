@@ -65,19 +65,16 @@ __global__ void initialize_boundaries_kernel(
     }
 }
 
-// Fused jacobi + DWQ trigger.
-// The last block to finish the compute rings the CXI trigger counter MMIO,
-// which fires every put_no_db() queued on the host since the last reset().
+// Compute-only jacobi kernel. After it completes, a separate single-block
+// trigger kernel runs gicc::put_local() (IPC copies) + gicc::flush() (remote
+// DWQ doorbell). Splitting keeps the compute kernel simple and lets the
+// trigger kernel use a 1-block launch as required by gicc::flush.
 template <int BX, int BY>
-__global__ void jacobi_kernel_fused_trigger(
+__global__ void jacobi_kernel_compute(
     real* __restrict__ a_new, const real* __restrict__ a,
     real* __restrict__ l2_norm,
     const int iy_start, const int iy_end, const int nx,
-    const bool calculate_norm,
-    gicc::DeviceCtx* ctx,
-    unsigned int* block_done_counter,
-    unsigned int total_blocks,
-    bool do_trigger)
+    const bool calculate_norm)
 {
     int iy = blockIdx.y * blockDim.y + threadIdx.y + iy_start;
     int ix = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -99,16 +96,12 @@ __global__ void jacobi_kernel_fused_trigger(
         if ((threadIdx.x % 32) == 0 && (threadIdx.y % 32) == 0)
             atomicAdd(l2_norm, local_l2);
     }
+}
 
-    __syncthreads();
-    if (threadIdx.x == 0 && threadIdx.y == 0) {
-        __threadfence_system();
-        unsigned int done = atomicAdd(block_done_counter, 1u);
-        if (do_trigger && done == total_blocks - 1) {
-            *ctx->trigger_addr_ = ctx->trigger_val_;
-            __threadfence_system();
-        }
-    }
+// Single-block kernel: run IPC copies cooperatively, then trigger remote DWQ.
+__global__ void jacobi_trigger_kernel(gicc::DeviceCtx* ctx) {
+    gicc::put_local(ctx);
+    gicc::flush(ctx);
 }
 
 void launch_initialize_boundaries(real* a_new, real* a, real pi, int offset,
@@ -118,18 +111,14 @@ void launch_initialize_boundaries(real* a_new, real* a, real pi, int offset,
     HIP_CHECK(hipGetLastError());
 }
 
-void launch_jacobi_fused_trigger(
+void launch_jacobi_compute(
     real* a_new, const real* a, real* l2_norm,
-    int iy_start, int iy_end, int nx, bool calc_norm,
-    gicc::DeviceCtx* ctx, unsigned int* block_counter,
-    bool do_trigger, hipStream_t stream)
+    int iy_start, int iy_end, int nx, bool calc_norm, hipStream_t stream)
 {
     constexpr int BX = 32, BY = 32;
     dim3 grid((nx + BX - 1) / BX, (iy_end - iy_start + BY - 1) / BY);
-    unsigned int total = grid.x * grid.y;
-    jacobi_kernel_fused_trigger<BX, BY><<<grid, dim3(BX, BY), 0, stream>>>(
-        a_new, a, l2_norm, iy_start, iy_end, nx, calc_norm,
-        ctx, block_counter, total, do_trigger);
+    jacobi_kernel_compute<BX, BY><<<grid, dim3(BX, BY), 0, stream>>>(
+        a_new, a, l2_norm, iy_start, iy_end, nx, calc_norm);
     HIP_CHECK(hipGetLastError());
 }
 
@@ -214,9 +203,6 @@ int main(int argc, char** argv)
     const size_t dst_offset_to_top    = (size_t)iy_end * row_bytes;  // their "bottom halo"
     const size_t dst_offset_to_bottom = 0;                           // their "top halo" (row 0)
 
-    unsigned int* d_block_counter;
-    HIP_CHECK(hipMalloc(&d_block_counter, sizeof(unsigned int)));
-
     real* l2_norm_d;
     real* l2_norm_h;
     HIP_CHECK(hipMalloc(&l2_norm_d, sizeof(real)));
@@ -242,13 +228,16 @@ int main(int argc, char** argv)
         gicc::DeviceCtx* ctx = rt.prepare_trigger(has_top ? tok_top : tok_bot);
 
         HIP_CHECK(hipMemsetAsync(l2_norm_d, 0, sizeof(real), stream));
-        HIP_CHECK(hipMemsetAsync(d_block_counter, 0, sizeof(unsigned int), stream));
 
-        launch_jacobi_fused_trigger(
-            buf[next_buf], buf[cur_buf], l2_norm_d,
-            iy_start, iy_end, nx, calc_norm,
-            ctx, d_block_counter,
-            /*do_trigger=*/(has_top || has_bottom), stream);
+        launch_jacobi_compute(buf[next_buf], buf[cur_buf], l2_norm_d,
+                              iy_start, iy_end, nx, calc_norm, stream);
+
+        // Single-block trigger kernel: fires IPC copies then remote DWQ.
+        // Must come AFTER compute since the halo row is what compute produced.
+        if (has_top || has_bottom) {
+            jacobi_trigger_kernel<<<1, 256, 0, stream>>>(ctx);
+            HIP_CHECK(hipGetLastError());
+        }
 
         HIP_CHECK(hipStreamSynchronize(stream));
         if (has_top)    rt.wait(tok_top);
@@ -304,7 +293,6 @@ int main(int argc, char** argv)
     HIP_CHECK(hipStreamDestroy(stream));
     HIP_CHECK(hipHostFree(l2_norm_h));
     HIP_CHECK(hipFree(l2_norm_d));
-    HIP_CHECK(hipFree(d_block_counter));
     HIP_CHECK(hipFree(buf[1]));
     HIP_CHECK(hipFree(buf[0]));
     return 0;
