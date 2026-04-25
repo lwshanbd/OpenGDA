@@ -172,19 +172,10 @@ public:
     void setup() {
         uint64_t threshold = barrier_count_ + 1;
 
-        // Single-rank case: no peers, no DWQ ops. Still bump ready_counter so
-        // the device-side barrier() loop terminates. Host only writes
-        // expected_signal in single-barrier mode — in continuous mode the
-        // kernel owns that field (same rule as the n_rounds_ > 0 path below).
+        // Single-rank case: no peers, no DWQ ops. Just bump ready_counter so
+        // the device-side barrier() loop sees a new sequence number and
+        // returns. dev_seen is kernel-owned; host never touches it.
         if (n_rounds_ == 0) {
-            if (!continuous_mode_.load(std::memory_order_relaxed)) {
-                h_context_.expected_signal = threshold;
-                if (d_context_) {
-                    hipMemcpy(&d_context_->expected_signal,
-                              &h_context_.expected_signal,
-                              sizeof(uint64_t), hipMemcpyHostToDevice);
-                }
-            }
             __atomic_add_fetch(h_ready_counter_, 1, __ATOMIC_SEQ_CST);
             return;
         }
@@ -194,13 +185,6 @@ public:
         MemoryRegion* mr_sig = mr_signal_values_[buf_idx];
 
         *h_sig = threshold;
-
-        // Update expected_signal on device (single mode only)
-        if (!continuous_mode_.load(std::memory_order_relaxed)) {
-            h_context_.expected_signal = threshold;
-            hipMemcpy(&d_context_->expected_signal, &h_context_.expected_signal,
-                      sizeof(uint64_t), hipMemcpyHostToDevice);
-        }
 
         int slot = threshold % BARRIER_SIGNAL_SLOTS;
 
@@ -272,30 +256,15 @@ public:
 
     /** Start continuous mode for num_barriers barriers.
      *
-     *  expected_signal ownership contract:
-     *    - single-barrier mode: the host writes expected_signal = threshold
-     *      on every setup() call; the kernel only reads it.
-     *    - continuous mode: the host writes expected_signal exactly once
-     *      here at start_continuous (the first barrier's threshold), then
-     *      continuous_mode_ is turned on and subsequent setup() calls skip
-     *      the write. The kernel is expected to increment expected_signal
-     *      itself after each barrier() call for the rest of the run.
+     *  Sequence-number ownership: the kernel owns dev_seen and increments it
+     *  inside barrier(). The host owns ready_counter and bumps it once per
+     *  barrier in setup(). No host->device handshake on a "next threshold"
+     *  field is needed, so single-barrier and continuous modes use the same
+     *  setup() path.
      */
     void start_continuous(uint64_t num_barriers) {
         ever_active_ = true;
         target_barrier_count_ = barrier_count_ + num_barriers;
-
-        // Seed expected_signal for the first barrier before flipping into
-        // continuous mode, so setup() will skip the write (kernel owns the
-        // field from here on). d_context_ is unconditionally allocated by
-        // setup_device_context() regardless of n_rounds_, so the same guard
-        // applies as in the single-barrier path in setup() — no n_rounds_
-        // clause needed.
-        h_context_.expected_signal = barrier_count_ + 1;
-        if (d_context_) {
-            hipMemcpy(&d_context_->expected_signal, &h_context_.expected_signal,
-                      sizeof(uint64_t), hipMemcpyHostToDevice);
-        }
 
         // Single-barrier mode does not update done_counter. Rebase it before
         // enabling continuous GPU->CPU notifications so monitor_loop's
@@ -547,7 +516,7 @@ private:
         h_context_.signals           = d_signals_;
         h_context_.trigger_addrs     = d_trigger_addrs_;
         h_context_.peer_signal_bases = d_peer_signal_bases_;
-        h_context_.expected_signal   = 0;
+        h_context_.dev_seen          = 0;
         h_context_.done_counter      = h_done_counter_;
         h_context_.ready_counter     = h_ready_counter_;
         h_context_.notify_done       = 0;

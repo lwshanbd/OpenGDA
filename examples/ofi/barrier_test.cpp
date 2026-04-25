@@ -28,7 +28,7 @@ __global__ void single_barrier_kernel(gicc::BarrierCtx* bctx,
 
 // =============================================================================
 // Test 2: Continuous mode — N barriers in one kernel launch
-// Increment expected_signal AFTER each barrier (matches host setup ordering).
+// barrier() advances its own dev_seen; the kernel just calls it in a loop.
 // =============================================================================
 
 __global__ void continuous_barrier_kernel(gicc::BarrierCtx* bctx,
@@ -37,7 +37,6 @@ __global__ void continuous_barrier_kernel(gicc::BarrierCtx* bctx,
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     for (int i = 0; i < num_barriers; i++) {
         gicc::barrier(bctx);
-        bctx->expected_signal++;
         *counter = i + 1;
     }
 }

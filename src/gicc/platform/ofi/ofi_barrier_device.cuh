@@ -41,13 +41,17 @@ struct BarrierCtx {
     /// CXI DWQ trigger path. When non-null, the kernel writes the signal
     /// directly via `peer_signal_bases[k][k * n_signal_slots + slot]`.
     volatile uint64_t** peer_signal_bases;
-    uint64_t expected_signal;              ///< Threshold for the next barrier.
-                                           ///< Host owns in single-barrier mode;
-                                           ///< kernel owns in continuous mode
-                                           ///< (must increment after each
-                                           ///< barrier() call).
+    uint64_t dev_seen;                     ///< Last barrier sequence number the
+                                           ///< kernel finished. Device-owned:
+                                           ///< host initialises to 0 and never
+                                           ///< writes it again. Persists across
+                                           ///< kernel launches in single-barrier
+                                           ///< mode and across barrier() calls
+                                           ///< in continuous mode.
     volatile uint64_t* done_counter;       ///< GPU->CPU notification for continuous mode
-    volatile uint64_t* ready_counter;      ///< CPU->GPU notification (DWQ ops are queued)
+    volatile uint64_t* ready_counter;      ///< CPU->GPU notification: monotonic
+                                           ///< barrier sequence number bumped by
+                                           ///< host setup() once per barrier.
     int notify_done;                       ///< Nonzero when host monitor needs done_counter
 };
 
@@ -67,10 +71,13 @@ struct BarrierCtx {
  */
 __device__ __forceinline__
 void barrier(BarrierCtx* ctx) {
-    uint64_t expected = ctx->expected_signal;
-
-    // Wait for CPU to signal that DWQ operations are ready
-    while (*ctx->ready_counter < expected) {}
+    // Wait for the host to bump ready_counter past the last barrier we
+    // finished. The new value is this barrier's sequence number — there is
+    // no separate expected_signal field, so the host avoids a per-barrier
+    // hipMemcpy. dev_seen is device-owned and persists across launches.
+    uint64_t seen = ctx->dev_seen;
+    while (*ctx->ready_counter <= seen) {}
+    uint64_t expected = seen + 1;
 
     // Orders pre-barrier GPU writes before any barrier signal is published.
     __threadfence_system();
@@ -114,6 +121,11 @@ void barrier(BarrierCtx* ctx) {
         __threadfence_system();
 #endif
     }
+
+    // Publish completion of this barrier so subsequent barrier() calls (in
+    // either continuous mode or a later kernel launch) wait for the *next*
+    // ready_counter bump, not this one.
+    ctx->dev_seen = expected;
 
     if (ctx->notify_done) {
         // Continuous mode needs a GPU->CPU completion signal for the monitor
