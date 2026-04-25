@@ -37,6 +37,7 @@
 #pragma once
 
 #include <hip/hip_runtime.h>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -121,8 +122,9 @@ public:
         // pointer, so the whole function is idempotent whether or not init()
         // ran and whether or not finalize() has been called before.
 
-        // DWQ ops
-        for (auto* op : dwq_ops_) delete op;
+        // DWQ ops (BUILDER_PIPELINE per round)
+        for (auto& pair : dwq_ops_)
+            for (auto* op : pair) delete op;
         dwq_ops_.clear();
 
         // Counters
@@ -168,9 +170,20 @@ public:
     // Single-barrier mode
     // =========================================================================
 
-    /** Queue DWQ operations for the next barrier. */
+    /** Queue DWQ operations for the next barrier and bump ready_counter so
+     *  the kernel can advance one more step.
+     *
+     *  Indexing keys off `queued_count_` (head of the sliding window), not
+     *  `barrier_count_` (tail). In single-barrier mode the user calls this
+     *  once per kernel launch and the head/tail stay one apart, exactly the
+     *  pre-Plan-B behaviour. In continuous mode `start_continuous` and
+     *  `monitor_loop` may call this several times back-to-back to keep up to
+     *  `PREFETCH_DEPTH` barriers queued ahead of the kernel; each call
+     *  consumes a different rotating slot, so payload buffers and DWQ
+     *  builders never collide.
+     */
     void setup() {
-        uint64_t threshold = barrier_count_ + 1;
+        uint64_t threshold = ++queued_count_;
 
         // Single-rank case: no peers, no DWQ ops. Just bump ready_counter so
         // the device-side barrier() loop sees a new sequence number and
@@ -180,13 +193,27 @@ public:
             return;
         }
 
-        int buf_idx = barrier_count_ % N_SIGNAL_BUFFERS;
+        int buf_idx = (threshold - 1) % N_SIGNAL_BUFFERS;
         uint64_t* h_sig = h_signal_values_[buf_idx];
         MemoryRegion* mr_sig = mr_signal_values_[buf_idx];
 
         *h_sig = threshold;
 
-        int slot = threshold % BARRIER_SIGNAL_SLOTS;
+        int slot        = threshold % BARRIER_SIGNAL_SLOTS;
+        int builder_idx = (threshold - 1) % BUILDER_PIPELINE;
+
+        // Slot-reuse wait. The slot we're about to fill last held the WQE for
+        // threshold = (threshold - PREFETCH_DEPTH). In steady continuous mode
+        // that send completed long ago, so this loop is a no-op; on the first
+        // PREFETCH_DEPTH barriers of a run there is no prior WQE to wait for.
+        if (threshold > BUILDER_PIPELINE) {
+            uint64_t prev_threshold = threshold - BUILDER_PIPELINE;
+            for (int k = 0; k < n_rounds_; k++) {
+                if (round_is_local_[k]) continue;
+                while (fi_cntr_read(counter_pairs_[k].completion_cntr) < prev_threshold)
+                    fi_cq_read(comm_.fabric->cq, NULL, 0);
+            }
+        }
 
         for (int k = 0; k < n_rounds_; k++) {
             // Local round: the kernel will write the peer's slot directly
@@ -201,8 +228,7 @@ public:
                 ? (remote_signal_addrs_[k] + remote_offset)
                 : remote_offset;
 
-            // Reuse the pre-allocated DwqWorkBuilder for round k.
-            dwq_ops_[k]->queue_rma_write(
+            dwq_ops_[k][builder_idx]->queue_rma_write(
                 comm_.fabric->domain,
                 comm_.fabric->ep,
                 h_sig,
@@ -232,21 +258,15 @@ public:
 
     /** Reset for next barrier. Call after wait_completion(). */
     void reset() {
-        // DwqWorkBuilders are pooled in the ctor and reused across barriers.
-        // Nothing to free here — setup() will repopulate their fields.
-
+        // DwqWorkBuilders are pooled in pairs in the ctor and ping-pong across
+        // barriers. The synchronous fi_cntr wait that used to live here moved
+        // into setup(): we only wait when we are about to reuse a slot, which
+        // in steady state is already complete. Just bump the counter and
+        // drain the CQ to let libfabric release completed WQEs.
         barrier_count_++;
 
-        uint64_t expected = barrier_count_;
-        for (int k = 0; k < n_rounds_; k++) {
-            if (round_is_local_[k]) continue;
-            while (fi_cntr_read(counter_pairs_[k].completion_cntr) < expected)
-                fi_cq_read(comm_.fabric->cq, NULL, 0);
-        }
-
-        // Drain any remaining completions so libfabric releases DWQ resources
-        // promptly. fi_cq_read returns the number of completions read (> 0)
-        // or a negative error code (e.g. -FI_EAGAIN) when the CQ is empty.
+        // fi_cq_read returns the number of completions read (> 0) or a
+        // negative error code (e.g. -FI_EAGAIN) when the CQ is empty.
         while (fi_cq_read(comm_.fabric->cq, NULL, 0) > 0) { }
     }
 
@@ -274,7 +294,16 @@ public:
         set_notify_done(true);
 
         continuous_mode_ = true;
-        setup();
+
+        // Pre-queue up to PREFETCH_DEPTH barriers ahead of the kernel. On
+        // entry the kernel sees ready_counter = queued_count_, dev_seen = 0,
+        // and can run that many barriers back-to-back without waiting on the
+        // host. The monitor thread refills the window one barrier per
+        // detected GPU completion so the depth stays roughly constant.
+        uint64_t prefetch = num_barriers < (uint64_t)PREFETCH_DEPTH
+                              ? num_barriers
+                              : (uint64_t)PREFETCH_DEPTH;
+        for (uint64_t i = 0; i < prefetch; i++) setup();
     }
 
     /** Wait for all continuous barriers to complete. */
@@ -293,11 +322,25 @@ public:
     uint64_t    count()      const { return barrier_count_; }
 
 private:
-    static constexpr int N_SIGNAL_BUFFERS = 2;
+    // Sliding-window depth. The host keeps up to PREFETCH_DEPTH DWQ ops queued
+    // ahead of the GPU at all times in continuous mode, so the kernel never
+    // has to round-trip to host memory between barriers in steady state. All
+    // three rotating resources (host payload buffers, device signal slots,
+    // DwqWorkBuilders) share this period so they alternate in lock-step.
+    //
+    // Constraint: BARRIER_SIGNAL_SLOTS in ofi_barrier_device.cuh must equal
+    // this value — peers index our signals[] by `expected % SLOTS` and we
+    // must stay coherent with that.
+    static constexpr int PREFETCH_DEPTH    = 8;
+    static constexpr int N_SIGNAL_BUFFERS  = PREFETCH_DEPTH;
+    static_assert(BARRIER_SIGNAL_SLOTS == PREFETCH_DEPTH,
+                  "BARRIER_SIGNAL_SLOTS must equal Barrier::PREFETCH_DEPTH");
 
     Fabric& comm_;
     int      n_rounds_;
-    uint64_t barrier_count_;
+    uint64_t barrier_count_;     ///< completed barriers (tail of window)
+    uint64_t queued_count_ = 0;  ///< barriers queued to libfabric (head)
+                                 ///< queued_count_ - barrier_count_ ≤ PREFETCH_DEPTH
 
     // Signal buffers (host-pinned, RDMA-registered)
     uint64_t*      d_signals_;
@@ -331,8 +374,15 @@ private:
     uint64_t*     h_signal_values_[N_SIGNAL_BUFFERS];
     MemoryRegion* mr_signal_values_[N_SIGNAL_BUFFERS];
 
-    // Pending DWQ ops
-    std::vector<DwqWorkBuilder*> dwq_ops_;
+    // Sliding-window pool of DWQ work builders. Outer dim is per-round; inner
+    // dim is PREFETCH_DEPTH slots. setup() picks a slot by
+    // queued_count_ % PREFETCH_DEPTH so that the K most recently queued
+    // barriers each have their own persistent fi_deferred_work struct. The
+    // OFI completion-counter wait runs once per slot reuse (depth lag), which
+    // in steady state is a no-op because the WQE we are reusing finished long
+    // ago.
+    static constexpr int BUILDER_PIPELINE = PREFETCH_DEPTH;
+    std::vector<std::array<DwqWorkBuilder*, BUILDER_PIPELINE>> dwq_ops_;
 
     // Host-visible counters
     volatile uint64_t* h_done_counter_;
@@ -369,9 +419,16 @@ private:
             if (gpu_done > barrier_count_) {
                 reset();
 
-                if (barrier_count_ < target_barrier_count_.load(std::memory_order_relaxed))
+                // Refill the sliding window: keep up to PREFETCH_DEPTH
+                // barriers queued ahead of barrier_count_, capped by the
+                // remaining barriers in this continuous run.
+                uint64_t target = target_barrier_count_.load(std::memory_order_relaxed);
+                while (queued_count_ < target &&
+                       (queued_count_ - barrier_count_) < (uint64_t)PREFETCH_DEPTH) {
                     setup();
-                else
+                }
+
+                if (barrier_count_ >= target)
                     continuous_mode_ = false;
             }
         }
@@ -477,13 +534,15 @@ private:
             counter_pairs_[k] = comm_.fabric->create_counter_pair();
     }
 
-    // Pre-allocate one DwqWorkBuilder per round. queue_rma_write() re-populates
-    // every field on each setup() call, and reset() only returns once libfabric
-    // has signalled completion, so reuse across barriers is safe.
+    // Pre-allocate BUILDER_PIPELINE DwqWorkBuilders per round. setup() picks a
+    // slot by barrier_count_ % BUILDER_PIPELINE; the slot is reused only after
+    // the OFI completion counter has caught up, which setup() now waits for
+    // explicitly when needed.
     void create_dwq_pool() {
-        dwq_ops_.reserve(n_rounds_);
+        dwq_ops_.resize(n_rounds_);
         for (int k = 0; k < n_rounds_; k++)
-            dwq_ops_.push_back(new DwqWorkBuilder(comm_.rank()));
+            for (int b = 0; b < BUILDER_PIPELINE; b++)
+                dwq_ops_[k][b] = new DwqWorkBuilder(comm_.rank());
     }
 
     void setup_device_context() {
