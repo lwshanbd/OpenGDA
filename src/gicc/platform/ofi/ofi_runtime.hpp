@@ -185,8 +185,8 @@ public:
         b.lkey  = (uint32_t)idx;
         b.rkey  = (uint32_t)(h.rma_key & 0xFFFFFFFFu);
         b.index = idx;
-        if ((int)buffers_.size() <= b.index) buffers_.resize(b.index + 1);
-        buffers_[b.index] = b;
+        // Index in buffers_ matches b.index (== lkey on this backend).
+        buffers_.push_back(b);
         return b;
     }
 
