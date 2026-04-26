@@ -163,4 +163,20 @@ void quiet(DeviceCtx* ctx) {
     }
 }
 
+// ============================================================================
+// Device-side stubs — actual queueing happens host-side via the
+// gicc-clang-plugin's generated kernel_trace<&K> specialization. These are
+// no-ops in the GPU code; the kernel body compiles unchanged from the MLX5
+// canonical form.
+// ============================================================================
+__device__ __forceinline__
+void put_no_db(DeviceCtx*, uint64_t /*local_addr*/, uint32_t /*local_lkey*/,
+               uint64_t /*remote_addr*/, uint32_t /*remote_rkey*/,
+               uint32_t /*size*/, bool /*signaled*/ = false) {}
+
+__device__ __forceinline__
+void get_no_db(DeviceCtx*, uint64_t /*local_addr*/, uint32_t /*local_lkey*/,
+               uint64_t /*remote_addr*/, uint32_t /*remote_rkey*/,
+               uint32_t /*size*/, bool /*signaled*/ = false) {}
+
 } // namespace gicc
