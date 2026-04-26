@@ -11,18 +11,19 @@
  *     DoStmt / IfStmt with HK condition, emit the matching host-side
  *     control flow scaffold and recurse on the body.
  *
- * F4 (this commit): if a put_no_db's arg subtree references CUDA/HIP
- *     grid builtins (blockIdx.{x,y,z}, threadIdx.{x,y,z}), wrap the
- *     lifted call in synthetic host-side loops — one per referenced
- *     dim, nested z>y>x, blocks outside threads — and textually
- *     substitute the builtin references in the emitted source. The
- *     scan also follows DeclRefExprs to HK local variables so a
- *     "int i = blockIdx.x; ... put(..., a+i, ...)" pattern picks up
- *     the dim through `i`'s initializer; the local decl is then
- *     re-emitted inside the synthetic loops with the same textual
- *     substitution applied. blockDim.* / gridDim.* are rewritten to
- *     the host-side `block.*` / `grid.*` dim3 fields. This is v1 —
- *     the unroll-small-grid heuristic from spec §5.3 is deferred.
+ * F4: if a put_no_db's arg subtree references CUDA/HIP grid builtins
+ *     (blockIdx.{x,y,z}, threadIdx.{x,y,z}), wrap the lifted call in
+ *     synthetic host-side loops — one per referenced dim, nested z>y>x,
+ *     blocks outside threads — and textually substitute the builtin
+ *     references in the emitted source. blockDim.* / gridDim.* are
+ *     rewritten to the host-side `block.*` / `grid.*` dim3 fields.
+ *
+ * F5 (this commit): lift gicc::get_no_db the same way as put_no_db.
+ *     Identical lookup machinery (buffer_by_lkey + peer_buffer_base);
+ *     emits rt.get_no_db(local_dst, peer, dst_buf_idx, size, local_off,
+ *     remote_off). local_addr/lkey is the read DESTINATION, not source —
+ *     reflected in the emitted variable names (_gicc_dst / _gicc_loff /
+ *     _gicc_roff) for readability.
  */
 #include "TraceEmitter.h"
 
@@ -299,12 +300,36 @@ const Dim kDimOrder[] = {
     Dim::BZ, Dim::BY, Dim::BX, Dim::TZ, Dim::TY, Dim::TX
 };
 
-// Emit the put_no_db call body itself (no synthetic-loop wrapping).
-// Each emitted sub-expression has builtin substitution applied so
-// references to blockIdx.x etc. become _gicc_bx etc.
-void emit_put_call(std::ostream& out, int lvl, const clang::CallExpr* ce,
+// One of the two RMA verbs we lift. Picks the rt-method name and the
+// emitted local variable names so the sidecar reads naturally — for a
+// PUT the local buffer is the SOURCE, for a GET it is the DESTINATION.
+enum class RmaOp { Put, Get };
+
+struct OpNames {
+    const char* rt_method;
+    const char* local_var;   // _gicc_src for put, _gicc_dst for get
+    const char* local_off;   // _gicc_soff for put, _gicc_loff for get
+    const char* remote_off;  // _gicc_doff for put, _gicc_roff for get
+};
+
+OpNames names_for(RmaOp op) {
+    if (op == RmaOp::Put) {
+        return {"put_no_db", "_gicc_src", "_gicc_soff", "_gicc_doff"};
+    }
+    return {"get_no_db", "_gicc_dst", "_gicc_loff", "_gicc_roff"};
+}
+
+// Emit the rt.put_no_db / rt.get_no_db call body itself (no synthetic
+// loop wrapping). Each emitted sub-expression has builtin substitution
+// applied so references to blockIdx.x etc. become _gicc_bx etc. The
+// arg layout is identical for put and get (ctx, local_addr, local_lkey,
+// remote_addr, remote_rkey, size [, signaled]); only the variable
+// naming differs to reflect data flow direction.
+void emit_rma_call(std::ostream& out, int lvl, RmaOp op,
+                   const clang::CallExpr* ce,
                    const clang::SourceManager& sm,
                    const clang::LangOptions& lo) {
+    const OpNames n = names_for(op);
     const std::string A  = substitute_builtins(source_text_expr(ce->getArg(1), sm, lo));
     const std::string LK = substitute_builtins(source_text_expr(ce->getArg(2), sm, lo));
     const std::string RA = substitute_builtins(source_text_expr(ce->getArg(3), sm, lo));
@@ -312,16 +337,19 @@ void emit_put_call(std::ostream& out, int lvl, const clang::CallExpr* ce,
     const std::string S  = substitute_builtins(source_text_expr(ce->getArg(5), sm, lo));
 
     indent(out, lvl);     out << "{\n";
-    indent(out, lvl + 1); out << "auto& _gicc_src = rt.buffer_by_lkey((uint32_t)("
+    indent(out, lvl + 1); out << "auto& " << n.local_var
+                              << " = rt.buffer_by_lkey((uint32_t)("
                               << LK << "));\n";
-    indent(out, lvl + 1); out << "size_t _gicc_soff = (uint64_t)(" << A
-                              << ") - (uint64_t)_gicc_src.addr;\n";
+    indent(out, lvl + 1); out << "size_t " << n.local_off << " = (uint64_t)(" << A
+                              << ") - (uint64_t)" << n.local_var << ".addr;\n";
     indent(out, lvl + 1); out << "uint64_t _gicc_base = rt.peer_buffer_base(peer, (uint32_t)("
                               << RK << "));\n";
-    indent(out, lvl + 1); out << "size_t _gicc_doff = (uint64_t)(" << RA
+    indent(out, lvl + 1); out << "size_t " << n.remote_off << " = (uint64_t)(" << RA
                               << ") - _gicc_base;\n";
-    indent(out, lvl + 1); out << "rt.put_no_db(_gicc_src, peer, (int)(" << RK
-                              << "), (size_t)(" << S << "), _gicc_soff, _gicc_doff);\n";
+    indent(out, lvl + 1); out << "rt." << n.rt_method << "("
+                              << n.local_var << ", peer, (int)(" << RK
+                              << "), (size_t)(" << S << "), "
+                              << n.local_off << ", " << n.remote_off << ");\n";
     indent(out, lvl);     out << "}\n";
 }
 
@@ -346,16 +374,22 @@ std::string render_hk_local(const clang::VarDecl* vd,
     return out;
 }
 
-// Top-level lift for one put_no_db call:
-//  1. Scan put args for grid builtin dims; transitively follow HK local
+// Top-level lift for one put_no_db / get_no_db call. The scaffolding
+// — transitive HK-local + builtin scan, synthetic loop nest, local
+// re-emission — is identical for put and get because their arg shape is
+// the same. emit_rma_call picks the right rt method and variable names
+// based on the op tag.
+//
+//  1. Scan args for grid builtin dims; transitively follow HK local
 //     refs into their init exprs to pick up dims indirectly via
 //     "int i = blockIdx.x;" patterns.
 //  2. Emit one synthetic for-loop per referenced dim (z>y>x order,
 //     blocks outside threads).
 //  3. Inside the loop nest, re-emit each transitively-referenced HK
 //     local with builtin substitution applied.
-//  4. Emit the put_no_db call itself (also with substitution).
-void emit_put_block(std::ostream& out, int lvl, const clang::CallExpr* ce,
+//  4. Emit the put / get call itself (also with substitution).
+void emit_rma_block(std::ostream& out, int lvl, RmaOp op,
+                    const clang::CallExpr* ce,
                     const HKAnalysis& hk,
                     const clang::FunctionDecl* kernel,
                     const llvm::DenseSet<const clang::VarDecl*>& loop_iters,
@@ -402,8 +436,8 @@ void emit_put_block(std::ostream& out, int lvl, const clang::CallExpr* ce,
         out << render_hk_local(vd, sm, lo) << "\n";
     }
 
-    // (4) The put itself (substitution applied inside).
-    emit_put_call(out, loop_lvl + 1, ce, sm, lo);
+    // (4) The put / get itself (substitution applied inside).
+    emit_rma_call(out, loop_lvl + 1, op, ce, sm, lo);
 
     indent(out, loop_lvl);     out << "}\n";
 
@@ -499,17 +533,21 @@ void emit_stmt(std::ostream& out, int lvl, const clang::Stmt* s,
         return;
     }
 
-    // gicc::* CallExpr — lift put_no_db, ignore flush / quiet.
+    // gicc::* CallExpr — lift put_no_db / get_no_db, ignore flush / quiet.
     if (auto* ce = llvm::dyn_cast<clang::CallExpr>(s)) {
         auto* fd = ce->getDirectCallee();
         if (!fd) return;
         const std::string qn = fd->getQualifiedNameAsString();
         if (qn == "gicc::put_no_db") {
             if (ce->getNumArgs() < 6) return;
-            emit_put_block(out, lvl, ce, hk, kernel, loop_iters, sm, lo);
+            emit_rma_block(out, lvl, RmaOp::Put, ce, hk, kernel,
+                           loop_iters, sm, lo);
+        } else if (qn == "gicc::get_no_db") {
+            if (ce->getNumArgs() < 6) return;
+            emit_rma_block(out, lvl, RmaOp::Get, ce, hk, kernel,
+                           loop_iters, sm, lo);
         }
-        // gicc::flush, gicc::quiet, gicc::get_no_db (handled in F5),
-        // and anything else: silently skip.
+        // gicc::flush, gicc::quiet, and anything else: silently skip.
         return;
     }
 
