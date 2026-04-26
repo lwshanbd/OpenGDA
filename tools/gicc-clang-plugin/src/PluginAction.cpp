@@ -24,8 +24,9 @@ namespace {
 
 class GiccConsumer : public ASTConsumer {
 public:
-    GiccConsumer(CompilerInstance& CI, bool debug_hk)
-        : CI_(CI), debug_hk_(debug_hk) {}
+    GiccConsumer(CompilerInstance& CI, bool debug_hk, std::string sidecar_dir)
+        : CI_(CI), debug_hk_(debug_hk),
+          sidecar_dir_(std::move(sidecar_dir)) {}
     void HandleTranslationUnit(ASTContext& Ctx) override {
         // HIP/CUDA invokes the frontend twice per TU (host + device pass).
         // We only want to analyze the host AST: that's where launch sites
@@ -53,7 +54,8 @@ public:
         // don't call into gicc:: at all (pure HIP/CUDA — not our concern)
         // and kernels that fail validation (errors already diagnosed).
         gicc_plugin::Validator val(CI_, diags);
-        gicc_plugin::TraceEmitter te(CI_);
+        gicc_plugin::TraceEmitter te(CI_, sidecar_dir_);
+        bool emitted_any = false;
         for (auto& ki : kd.kernels()) {
             gicc_plugin::HKAnalysis hk(ki.decl);
             hk.debug = debug_hk_;
@@ -62,23 +64,46 @@ public:
             if (!ok) continue;
             if (ki.calls.empty()) continue;
             te.emit(ki, hk);
+            emitted_any = true;
+        }
+        // Phase G: every TU built with -fplugin must produce a predictable
+        // sidecar so CMake can wire it into the build graph. If nothing
+        // was lifted above, write a near-empty stub now.
+        if (!emitted_any) {
+            auto& sm = CI_.getSourceManager();
+            auto fid = sm.getMainFileID();
+            auto fref = sm.getFileEntryRefForID(fid);
+            std::string main_file = fref
+                ? std::string(fref->getName())
+                : std::string("unknown");
+            te.ensure_sidecar(main_file);
         }
     }
 private:
     CompilerInstance& CI_;
     bool debug_hk_;
+    std::string sidecar_dir_;
 };
 
 class GiccPluginAction : public PluginASTAction {
 protected:
     std::unique_ptr<ASTConsumer>
     CreateASTConsumer(CompilerInstance& CI, llvm::StringRef) override {
-        return std::make_unique<GiccConsumer>(CI, debug_hk_);
+        return std::make_unique<GiccConsumer>(CI, debug_hk_, sidecar_dir_);
     }
     bool ParseArgs(const CompilerInstance&,
                    const std::vector<std::string>& args) override {
+        // Accepted flags:
+        //   debug-hk                          — verbose HK propagation
+        //   sidecar-dir=<path>                — write sidecars to <path>
+        // Empty sidecar-dir keeps the legacy /tmp default (lit tests).
+        const llvm::StringRef sidecar_prefix = "sidecar-dir=";
         for (const auto& a : args) {
-            if (a == "debug-hk") debug_hk_ = true;
+            if (a == "debug-hk") {
+                debug_hk_ = true;
+            } else if (llvm::StringRef(a).starts_with(sidecar_prefix)) {
+                sidecar_dir_ = a.substr(sidecar_prefix.size());
+            }
         }
         return true;
     }
@@ -87,6 +112,7 @@ protected:
     }
 private:
     bool debug_hk_ = false;
+    std::string sidecar_dir_;
 };
 
 } // namespace
