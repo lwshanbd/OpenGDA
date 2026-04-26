@@ -22,6 +22,13 @@ class GiccConsumer : public ASTConsumer {
 public:
     explicit GiccConsumer(CompilerInstance& CI) : CI_(CI) {}
     void HandleTranslationUnit(ASTContext& Ctx) override {
+        // HIP/CUDA invokes the frontend twice per TU (host + device pass).
+        // We only want to analyze the host AST: that's where launch sites
+        // live, and host is also where Phase 3 will inject trace
+        // specializations. Skipping the device pass also avoids duplicate
+        // Phase 2 diagnostics and Phase 3 ODR violations.
+        if (Ctx.getLangOpts().CUDAIsDevice) return;
+
         llvm::errs() << "[gicc-plugin] consumer ran\n";
         gicc_plugin::KernelDiscoveryVisitor kd;
         kd.TraverseDecl(Ctx.getTranslationUnitDecl());
