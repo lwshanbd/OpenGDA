@@ -65,7 +65,12 @@ clang::FunctionDecl* extractKernel(const clang::TemplateArgument& targ) {
 } // namespace
 
 bool KernelDiscoveryVisitor::VisitFunctionDecl(clang::FunctionDecl* fd) {
-    if (!fd->hasBody()) return true;
+    // Only the actual defining declaration carries the body we want to
+    // analyze. fd->hasBody() returns true for ANY redecl when one of the
+    // redecls carries a body — under Phase G's `-include`'d sidecar a
+    // kernel can have a forward decl + a definition; without isThisDeclarationADefinition
+    // we'd visit both and emit duplicate trace specializations.
+    if (!fd->isThisDeclarationADefinition()) return true;
     if (!fd->hasAttr<clang::CUDAGlobalAttr>()) return true;
     KernelInfo ki;
     ki.decl = fd;
