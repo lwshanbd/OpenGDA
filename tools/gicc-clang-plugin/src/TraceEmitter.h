@@ -23,7 +23,8 @@
 
 #include "clang/Frontend/CompilerInstance.h"
 
-#include <set>
+#include <map>
+#include <sstream>
 #include <string>
 
 namespace gicc_plugin {
@@ -33,23 +34,32 @@ public:
     TraceEmitter(clang::CompilerInstance& CI, std::string sidecar_dir)
         : CI_(CI), sidecar_dir_(std::move(sidecar_dir)) {}
 
-    // Emit one specialization. Appends to or creates the sidecar file.
-    // Returns the sidecar file path it wrote to.
+    // Emit one specialization. Buffered; not written to disk until flush().
+    // Returns the (eventual) sidecar file path.
     std::string emit(const KernelInfo& ki, const HKAnalysis& hk);
 
-    // Force-create a sidecar for this TU even if no kernel was lifted.
-    // Used by PluginAction so every TU built with -fplugin produces a
+    // Ensure the buffer for this TU exists even if no kernel was lifted.
+    // Called by PluginAction so every TU built with -fplugin produces a
     // predictable sidecar file (CMake needs it as a known build artifact).
-    // No-op if the sidecar already exists for this TU. Returns the path.
     std::string ensure_sidecar(const std::string& main_file);
+
+    // Write all buffered sidecar content to disk. To avoid bumping the
+    // sidecar's mtime (which would force a redundant main-TU recompile),
+    // a sidecar is only overwritten if its on-disk content differs from
+    // the buffered content. Called at end-of-TU by PluginAction.
+    void flush();
 
 private:
     clang::CompilerInstance& CI_;
     std::string sidecar_dir_;
-    // Track which sidecar files we've opened this run so we know whether
-    // to truncate vs append (each TU gets one sidecar with possibly
-    // multiple specializations stacked inside).
-    std::set<std::string> opened_sidecars_;
+    // Per-sidecar buffer: path -> content. Built up across emit() and
+    // ensure_sidecar() calls; written to disk in flush().
+    std::map<std::string, std::ostringstream> buffers_;
+
+    // Get-or-create buffer for the given sidecar path. Initializes the
+    // buffer with the standard header on first access.
+    std::ostringstream& buffer_for(const std::string& sidecar,
+                                   const std::string& main_file);
 };
 
 } // namespace gicc_plugin

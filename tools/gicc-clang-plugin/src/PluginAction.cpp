@@ -68,7 +68,8 @@ public:
         }
         // Phase G: every TU built with -fplugin must produce a predictable
         // sidecar so CMake can wire it into the build graph. If nothing
-        // was lifted above, write a near-empty stub now.
+        // was lifted above, the buffer for this TU is empty — call
+        // ensure_sidecar() to seed an empty header-only buffer.
         if (!emitted_any) {
             auto& sm = CI_.getSourceManager();
             auto fid = sm.getMainFileID();
@@ -78,6 +79,12 @@ public:
                 : std::string("unknown");
             te.ensure_sidecar(main_file);
         }
+        // Commit buffered sidecar content to disk. Writes are skipped
+        // when the on-disk content is byte-for-byte identical, so the
+        // file's mtime is preserved across no-op rebuilds — this is what
+        // lets the CMake helper use mtime-based dependency tracking
+        // without thrashing.
+        te.flush();
     }
 private:
     CompilerInstance& CI_;
