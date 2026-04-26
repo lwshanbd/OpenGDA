@@ -42,6 +42,17 @@ std::string strip_gicc_prefix(const std::string& qn) {
     return qn;
 }
 
+// v1 lift whitelist (spec §5.4): the only gicc:: device-side symbols a
+// kernel may call. Anything else gicc-namespaced — auto-doorbell put/get,
+// am::*, barrier_*, etc. — is a hard error since the plugin cannot
+// statically pre-stage it for the OFI DWQ.
+bool is_whitelisted(const std::string& qn) {
+    return qn == "gicc::put_no_db" ||
+           qn == "gicc::get_no_db" ||
+           qn == "gicc::flush"     ||
+           qn == "gicc::quiet";
+}
+
 } // namespace
 
 bool Validator::validate(const KernelInfo& ki, const HKAnalysis& hk) {
@@ -49,13 +60,26 @@ bool Validator::validate(const KernelInfo& ki, const HKAnalysis& hk) {
     auto& diag = CI_.getDiagnostics();
 
     for (const auto& call : ki.calls) {
+        const std::string short_fn = strip_gicc_prefix(call.qualified_name);
+
+        // E4: reject any gicc:: call not in the v1 whitelist.
+        if (!is_whitelisted(call.qualified_name)) {
+            diag.Report(call.expr->getBeginLoc(), diags_.non_whitelist_call)
+                << short_fn;
+            ok = false;
+            // Don't run the put-arg HK check on a non-whitelist call —
+            // the diagnostic message already covers it.
+            continue;
+        }
+
+        // E3: every put_no_db / get_no_db arg (except ctx + signaled)
+        // must be HK.
         const bool is_put = (call.qualified_name == "gicc::put_no_db" ||
                              call.qualified_name == "gicc::get_no_db");
         if (!is_put) continue;
 
         auto* ce = call.expr;
         const unsigned n = ce->getNumArgs();
-        const std::string short_fn = strip_gicc_prefix(call.qualified_name);
 
         // Skip ctx (arg 0). We check arg 6 (signaled) only if the
         // user passes a 7th arg, but per the spec it is allowed to be
