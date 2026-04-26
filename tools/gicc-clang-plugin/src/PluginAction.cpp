@@ -7,6 +7,7 @@
  * and LaunchSiteVisitor); later phases will add validation and trace
  * generation.
  */
+#include "Diagnostics.h"
 #include "HKAnalysis.h"
 #include "KernelDiscovery.h"
 
@@ -32,6 +33,13 @@ public:
         if (Ctx.getLangOpts().CUDAIsDevice) return;
 
         llvm::errs() << "[gicc-plugin] consumer ran\n";
+
+        // Build the per-TU diagnostic ID table once; passed by value
+        // (cheap) into validators in later phases.
+        gicc_plugin::Diags diags = gicc_plugin::Diags::create(
+            CI_.getDiagnostics());
+        (void)diags;
+
         gicc_plugin::KernelDiscoveryVisitor kd;
         kd.TraverseDecl(Ctx.getTranslationUnitDecl());
 

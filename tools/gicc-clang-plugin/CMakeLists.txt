@@ -29,6 +29,7 @@ add_library(gicc-clang-plugin MODULE
     src/PluginAction.cpp
     src/KernelDiscovery.cpp
     src/HKAnalysis.cpp
+    src/Diagnostics.cpp
 )
 
 target_include_directories(gicc-clang-plugin PRIVATE
