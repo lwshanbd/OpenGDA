@@ -65,3 +65,8 @@ namespace gicc {
 #if defined(GICC_PLATFORM_MLX5)
 #include "platform/mlx5/gicc_api.hpp"
 #endif
+
+//==============================================================================
+// gicc::launch — backend-agnostic kernel launch wrapper
+//==============================================================================
+#include "launch.hpp"

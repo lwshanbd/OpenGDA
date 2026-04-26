@@ -90,6 +90,7 @@ gicc_ofi_example(jacobi              jacobi.cpp)
 gicc_ofi_example(barrier_bench       barrier_bench.cpp)
 gicc_ofi_example(test_ofi_get        ${CMAKE_SOURCE_DIR}/legacy/ofi/test_ofi_get.cpp)
 gicc_ofi_example(test_lookup         ${CMAKE_SOURCE_DIR}/legacy/ofi/test_lookup.cpp)
+gicc_ofi_example(test_launch_skeleton ${CMAKE_SOURCE_DIR}/legacy/ofi/test_launch_skeleton.cpp)
 
 # Pure MPI barrier reference benchmark (CPU-triggered, no HIP/libfabric).
 if(GICC_BOOTSTRAP STREQUAL "mpi")
