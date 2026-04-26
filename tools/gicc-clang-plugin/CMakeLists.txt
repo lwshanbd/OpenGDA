@@ -27,6 +27,7 @@ message(STATUS "gicc-clang-plugin: using LLVM ${LLVM_VERSION_MAJOR} from ${LLVM_
 
 add_library(gicc-clang-plugin MODULE
     src/PluginAction.cpp
+    src/KernelDiscovery.cpp
 )
 
 target_include_directories(gicc-clang-plugin PRIVATE

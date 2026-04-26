@@ -3,10 +3,12 @@
  *
  * Registered as a Clang FrontendAction under the name "gicc". When loaded
  * via -fplugin=gicc-clang-plugin.so it instantiates a GiccConsumer for
- * each TU. v1 consumer just prints a marker line so we can confirm the
- * plugin activated; later phases will add discovery/validation/trace
+ * each TU. The consumer drives Phase 1 discovery (KernelDiscoveryVisitor
+ * and LaunchSiteVisitor); later phases will add validation and trace
  * generation.
  */
+#include "KernelDiscovery.h"
+
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendPluginRegistry.h"
 #include "clang/AST/ASTConsumer.h"
@@ -19,8 +21,11 @@ namespace {
 class GiccConsumer : public ASTConsumer {
 public:
     explicit GiccConsumer(CompilerInstance& CI) : CI_(CI) {}
-    void HandleTranslationUnit(ASTContext& /*Ctx*/) override {
+    void HandleTranslationUnit(ASTContext& Ctx) override {
         llvm::errs() << "[gicc-plugin] consumer ran\n";
+        gicc_plugin::KernelDiscoveryVisitor kd;
+        kd.TraverseDecl(Ctx.getTranslationUnitDecl());
+        // D2/D3 visitors added in subsequent commits.
     }
 private:
     CompilerInstance& CI_;
