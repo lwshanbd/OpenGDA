@@ -4,21 +4,27 @@
  * Mirrors src/gicc/platform/mlx5/mlx5_device.cuh as closely as the hardware
  * model permits. The CXI Deferred Work Queue requires that RDMA operations
  * be queued from the HOST (via fi_control(FI_QUEUE_WORK)) before the GPU
- * can trigger them. As a result:
+ * can trigger them. To keep kernel source portable across backends:
  *
- *   - There is NO __device__ gicc::put_no_db on this backend.
- *     Use Runtime::put_no_db(...) on the host instead.
+ *   - gicc::put_no_db / gicc::get_no_db are provided here as __device__
+ *     no-op compile stubs. They exist solely so kernels written in the
+ *     MLX5 canonical form (which calls put_no_db inline from the GPU)
+ *     compile unchanged on OFI. The stubs emit no instructions and the
+ *     compiler folds them away.
+ *   - The actual host-side queueing of those put/get operations is
+ *     produced by the gicc-clang-plugin's kernel_trace<&K> specialization
+ *     (forthcoming work, not yet present in this tree). The plugin walks
+ *     the kernel body, lifts each put_no_db call to a host-side
+ *     fi_control(FI_QUEUE_WORK) enqueue, and the kernel itself is left
+ *     to call only flush() and quiet().
  *   - gicc::flush(ctx) writes the trigger counter MMIO doorbell, which
- *     causes the NIC to execute every operation that was queued by
- *     Runtime::put_no_db().
+ *     causes the NIC to execute every operation that the plugin-generated
+ *     trace queued on the host.
  *   - gicc::quiet(ctx) polls per-op atomic_result slots. Each queued put has
  *     its own slot incremented by a chained atomic_signal queued by
  *     Runtime::prepare(). The kernel can be launched with any thread count;
  *     blockDim.x threads cooperatively poll the n_ops_ slots, striding by
  *     blockDim.x. Single-thread launches just iterate sequentially.
- *
- * Kernel code is line-for-line identical to the mlx5 backend except that
- * the CXI kernel does not call put_no_db (it was queued from the host).
  */
 #pragma once
 
