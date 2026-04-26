@@ -185,6 +185,8 @@ public:
         b.lkey  = (uint32_t)idx;
         b.rkey  = (uint32_t)(h.rma_key & 0xFFFFFFFFu);
         b.index = idx;
+        if ((int)buffers_.size() <= b.index) buffers_.resize(b.index + 1);
+        buffers_[b.index] = b;
         return b;
     }
 
@@ -255,6 +257,29 @@ public:
         r.addr = ri.rma_addr;
         r.rkey = (uint32_t)(ri.rma_key & 0xFFFFFFFFu);
         return r;
+    }
+
+    // O(1) — lkey == buf_index on this backend.
+    const Buffer& buffer_by_lkey(uint32_t lkey) const {
+        if ((size_t)lkey >= buffers_.size()) {
+            fprintf(stderr,
+                "gicc::Runtime::buffer_by_lkey(%u): no buffer with that lkey.\n",
+                lkey);
+            std::abort();
+        }
+        return buffers_[lkey];
+    }
+
+    // O(1) — rkey == peer's buf_index on this backend.
+    uint64_t peer_buffer_base(int peer, uint32_t rkey) const {
+        auto ri = const_cast<Fabric*>(comm_)->get_remote_info(peer, (int)rkey);
+        if (ri.rma_key == 0 && ri.rma_addr == 0) {
+            fprintf(stderr,
+                "gicc::Runtime::peer_buffer_base(peer=%d, rkey=%u): not exchanged.\n",
+                peer, rkey);
+            std::abort();
+        }
+        return ri.rma_addr;
     }
 
     //--------------------------------------------------------------------------
@@ -530,6 +555,10 @@ private:
     std::vector<DwqWorkBuilder*>  my_pending_;
 
     std::vector<OfiBuffer>        local_bufs_;
+
+    // Local buffers indexed by their buf_index (== lkey on this backend).
+    // Populated in register_buffer; used by buffer_by_lkey().
+    std::vector<Buffer>           buffers_;
 
     // IPC fast-path state. peer_mapped_ptrs_[rank][buf_idx] is the mapped
     // pointer opened via hipIpcOpenMemHandle at exchange() time (or nullptr
