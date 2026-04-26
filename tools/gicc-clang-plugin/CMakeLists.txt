@@ -31,6 +31,7 @@ add_library(gicc-clang-plugin MODULE
     src/HKAnalysis.cpp
     src/Diagnostics.cpp
     src/Validator.cpp
+    src/TraceEmitter.cpp
 )
 
 target_include_directories(gicc-clang-plugin PRIVATE

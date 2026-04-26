@@ -10,6 +10,7 @@
 #include "Diagnostics.h"
 #include "HKAnalysis.h"
 #include "KernelDiscovery.h"
+#include "TraceEmitter.h"
 #include "Validator.h"
 
 #include "clang/Frontend/CompilerInstance.h"
@@ -47,12 +48,20 @@ public:
         ls.TraverseDecl(Ctx.getTranslationUnitDecl());
 
         // Phase 2.a + 2.b: HK propagation + validation per kernel.
+        // Phase 3 (F1+): for each validated GICC kernel, emit a sidecar
+        // file with a kernel_trace specialization. We skip kernels that
+        // don't call into gicc:: at all (pure HIP/CUDA — not our concern)
+        // and kernels that fail validation (errors already diagnosed).
         gicc_plugin::Validator val(CI_, diags);
+        gicc_plugin::TraceEmitter te(CI_);
         for (auto& ki : kd.kernels()) {
             gicc_plugin::HKAnalysis hk(ki.decl);
             hk.debug = debug_hk_;
             hk.run();
-            val.validate(ki, hk);
+            const bool ok = val.validate(ki, hk);
+            if (!ok) continue;
+            if (ki.calls.empty()) continue;
+            te.emit(ki, hk);
         }
     }
 private:
