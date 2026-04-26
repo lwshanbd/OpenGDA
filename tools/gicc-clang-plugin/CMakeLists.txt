@@ -30,6 +30,7 @@ add_library(gicc-clang-plugin MODULE
     src/KernelDiscovery.cpp
     src/HKAnalysis.cpp
     src/Diagnostics.cpp
+    src/Validator.cpp
 )
 
 target_include_directories(gicc-clang-plugin PRIVATE

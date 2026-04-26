@@ -10,6 +10,7 @@
 #include "Diagnostics.h"
 #include "HKAnalysis.h"
 #include "KernelDiscovery.h"
+#include "Validator.h"
 
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendPluginRegistry.h"
@@ -38,7 +39,6 @@ public:
         // (cheap) into validators in later phases.
         gicc_plugin::Diags diags = gicc_plugin::Diags::create(
             CI_.getDiagnostics());
-        (void)diags;
 
         gicc_plugin::KernelDiscoveryVisitor kd;
         kd.TraverseDecl(Ctx.getTranslationUnitDecl());
@@ -46,11 +46,13 @@ public:
         gicc_plugin::LaunchSiteVisitor ls;
         ls.TraverseDecl(Ctx.getTranslationUnitDecl());
 
-        // Phase 2.a: HK propagation per kernel.
+        // Phase 2.a + 2.b: HK propagation + validation per kernel.
+        gicc_plugin::Validator val(CI_, diags);
         for (auto& ki : kd.kernels()) {
             gicc_plugin::HKAnalysis hk(ki.decl);
             hk.debug = debug_hk_;
             hk.run();
+            val.validate(ki, hk);
         }
     }
 private:
