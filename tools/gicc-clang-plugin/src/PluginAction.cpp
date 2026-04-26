@@ -25,7 +25,9 @@ public:
         llvm::errs() << "[gicc-plugin] consumer ran\n";
         gicc_plugin::KernelDiscoveryVisitor kd;
         kd.TraverseDecl(Ctx.getTranslationUnitDecl());
-        // D2/D3 visitors added in subsequent commits.
+
+        gicc_plugin::LaunchSiteVisitor ls;
+        ls.TraverseDecl(Ctx.getTranslationUnitDecl());
     }
 private:
     CompilerInstance& CI_;
