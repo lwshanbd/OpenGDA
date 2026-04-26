@@ -31,7 +31,7 @@ struct kernel_trace {
     template <typename... Args>
     static void run(Runtime& /*rt*/, int /*peer*/,
                     dim3 /*grid*/, dim3 /*block*/,
-                    Args&&... /*args*/) {}
+                    Args... /*args*/) {}
 };
 
 } // namespace detail

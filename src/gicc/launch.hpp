@@ -2,7 +2,8 @@
  * launch.hpp - top-level gicc::launch dispatcher.
  *
  * Selects the per-backend implementation. Both backends expose the same
- * gicc::launch(rt, kernel, grid, block, peer, dst_buf_idx, args...) form.
+ * gicc::launch<kernel>(rt, grid, block, peer, dst_buf_idx, args...) form
+ * (kernel is a NON-TYPE TEMPLATE PARAMETER, not a runtime argument).
  */
 #pragma once
 
