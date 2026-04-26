@@ -34,8 +34,12 @@
 #include "dwq_work_builder.hpp"
 #include "ofi_barrier.hpp"
 
-// GPU kernel to trigger DWQ operations
-__global__ void gda_trigger_kernel(volatile uint64_t* trigger_addr, uint64_t threshold) {
+// GPU kernel to trigger DWQ operations.
+// `static` (= internal linkage) so multiple TUs that include this header —
+// notably the gicc-clang-plugin's generated sidecars and the user's own
+// HIP TU — don't fight over the kernel symbol at link time.
+static __global__ void gda_trigger_kernel(volatile uint64_t* trigger_addr,
+                                          uint64_t threshold) {
     *trigger_addr = threshold;
 }
 
