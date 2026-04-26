@@ -1,0 +1,5 @@
+config.gicc_src_root    = "@CMAKE_SOURCE_DIR@"
+config.gicc_obj_root    = "@CMAKE_BINARY_DIR@"
+config.clang_executable = "/opt/rocm-6.4.0/lib/llvm/bin/clang++"
+config.plugin_path      = "@CMAKE_BINARY_DIR@/tools/gicc-clang-plugin/gicc-clang-plugin.so"
+lit_config.load_config(config, "@CMAKE_CURRENT_SOURCE_DIR@/tests/lit/lit.cfg.py")

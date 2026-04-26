@@ -50,3 +50,22 @@ set_target_properties(gicc-clang-plugin PROPERTIES
     PREFIX ""        # produce gicc-clang-plugin.so, not lib...so
     POSITION_INDEPENDENT_CODE ON
 )
+
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/lit/lit.site.cfg.py.in
+    ${CMAKE_CURRENT_BINARY_DIR}/tests/lit/lit.site.cfg.py
+    @ONLY
+)
+
+# Use system /usr/bin/lit; ROCm doesn't ship llvm-lit on this machine.
+find_program(LIT_EXECUTABLE NAMES lit llvm-lit
+             HINTS /usr/bin /opt/rocm-6.4.0/lib/llvm/bin)
+if(NOT LIT_EXECUTABLE)
+    message(WARNING "lit not found; check-gicc-plugin target unavailable")
+else()
+    add_custom_target(check-gicc-plugin
+        COMMAND ${LIT_EXECUTABLE} -v ${CMAKE_CURRENT_BINARY_DIR}/tests/lit
+        DEPENDS gicc-clang-plugin
+        USES_TERMINAL
+    )
+endif()
