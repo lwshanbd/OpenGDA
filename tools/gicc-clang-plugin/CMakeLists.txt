@@ -8,11 +8,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # typeinfo symbols (e.g. clang::PluginASTAction) go undefined at load.
 set(_GICC_EXPECTED_CXX "/opt/rocm-6.4.0/lib/llvm/bin/clang++")
 if(NOT CMAKE_CXX_COMPILER STREQUAL "${_GICC_EXPECTED_CXX}")
-    message(WARNING
-        "gicc-clang-plugin: CMAKE_CXX_COMPILER is '${CMAKE_CXX_COMPILER}', "
-        "but the plugin should be built with '${_GICC_EXPECTED_CXX}' "
-        "to match the Clang that will load it. Re-run cmake with "
-        "-DCMAKE_CXX_COMPILER=${_GICC_EXPECTED_CXX} if loading fails.")
+    message(FATAL_ERROR
+        "gicc-clang-plugin must be built with the ROCm Clang to match LLVM's "
+        "ABI (typeinfo + RTTI flags). Re-run cmake with:\n"
+        "  -DCMAKE_CXX_COMPILER=${_GICC_EXPECTED_CXX}\n"
+        "Current CMAKE_CXX_COMPILER: ${CMAKE_CXX_COMPILER}")
 endif()
 
 # Use the Clang/LLVM that ships with ROCm so plugin ABI matches hipcc's clang.
