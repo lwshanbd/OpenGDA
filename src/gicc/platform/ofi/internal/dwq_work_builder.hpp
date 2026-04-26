@@ -113,6 +113,64 @@ public:
         }
     }
 
+    // Queue an RMA read operation
+    // Triggered by trigger_cntr reaching threshold
+    // On completion, increments completion_cntr
+    // local_buf is the LOCAL DESTINATION (read pulls remote data INTO it).
+    void queue_rma_read(
+        struct fid_domain* domain,
+        struct fid_ep* ep,
+        void* local_buf,
+        void* desc,
+        size_t size,
+        fi_addr_t source_addr,
+        uint64_t remote_addr,
+        uint64_t remote_key,
+        struct fid_cntr* trigger_cntr,
+        struct fid_cntr* completion_cntr,
+        uint64_t threshold)
+    {
+        // Setup iovec for local destination
+        iov.iov_base = local_buf;
+        iov.iov_len = size;
+
+        // Setup remote address
+        rma_iov.addr = remote_addr;
+        rma_iov.len = size;
+        rma_iov.key = remote_key;
+
+        // Setup message
+        // CRITICAL: desc is void**, must point to persistent storage
+        stored_rma_desc = desc;
+        msg_rma.msg_iov = &iov;
+        msg_rma.desc = &stored_rma_desc;
+        msg_rma.iov_count = 1;
+        msg_rma.addr = source_addr;
+        msg_rma.rma_iov = &rma_iov;
+        msg_rma.rma_iov_count = 1;
+        msg_rma.context = NULL;
+        msg_rma.data = 0;
+
+        // Setup op_rma
+        op_rma.ep = ep;
+        op_rma.msg = msg_rma;
+        op_rma.flags = FI_COMPLETION;  // No FI_CXI_CNTR_WB - we use atomic signal instead
+
+        // Setup deferred work
+        work.triggering_cntr = trigger_cntr;
+        work.completion_cntr = completion_cntr;
+        work.threshold = threshold;
+        work.op_type = FI_OP_READ;
+        work.op.rma = &op_rma;
+
+        int ret = fi_control(&domain->fid, FI_QUEUE_WORK, &work);
+        if (ret) {
+            fprintf(stderr, "Rank %d: fi_control(FI_QUEUE_WORK/RMA_READ) failed: %s (%d)\n",
+                    rank, fi_strerror(-ret), ret);
+            exit(1);
+        }
+    }
+
     // Queue an atomic signal operation
     // Triggered by trigger_cntr reaching threshold
     // Performs atomic add to signal GPU completion

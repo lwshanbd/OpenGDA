@@ -340,6 +340,63 @@ public:
         return Token{ slot_idx, /*is_local=*/false };
     }
 
+    // get_no_db — queue an RMA READ. Same slot-pool accounting as put_no_db.
+    Token get_no_db(const Buffer& local_dst, int src_rank, int src_buf_index,
+                    size_t size, size_t local_offset = 0, size_t remote_offset = 0)
+    {
+        const OfiBuffer& ob = local_bufs_.at(local_dst.index);
+
+        if ((int)my_n_ops_ >= POOL_SIZE) {
+            fprintf(stderr,
+                "gicc::Runtime::get_no_db: batch exceeds POOL_SIZE=%d. "
+                "Call rt.reset() between batches or raise POOL_SIZE.\n",
+                POOL_SIZE);
+            exit(1);
+        }
+
+        const int slot_idx = (int)my_n_ops_;
+        my_n_ops_++;
+        const uint64_t trigger_threshold = my_n_remote_ops_ + 1;  // 1-based
+        my_n_remote_ops_++;
+
+        RemoteInfo ri = comm_->get_remote_info(src_rank, src_buf_index);
+        if (ri.rma_key == 0 && ri.rma_addr == 0) {
+            fprintf(stderr, "gicc::Runtime: remote info not set for rank %d "
+                    "buf %d (call exchange() first)\n", src_rank, src_buf_index);
+            exit(1);
+        }
+        const uint64_t remote_addr = comm_->is_virt_addr_mode()
+            ? (ri.rma_addr + remote_offset)
+            : (ri.rma_addr - ri.base_addr) + remote_offset;
+
+        auto* dwq = new DwqWorkBuilder(comm_->rank());
+        dwq->queue_rma_read(
+            comm_->fabric->domain, comm_->fabric->ep,
+            (char*)ob.ptr + local_offset, ob.desc_, size,
+            comm_->av_addrs[src_rank], remote_addr, ri.rma_key,
+            comm_->fabric->trigger_cntr,
+            slots_[slot_idx].completion_cntr,
+            trigger_threshold);
+
+        uint64_t* slot_addr = (uint64_t*)d_slot_pool_ + slot_idx;
+        const uint64_t result_addr = comm_->is_virt_addr_mode()
+            ? (uint64_t)slot_addr : ((uint64_t)slot_idx * sizeof(uint64_t));
+        dwq->queue_atomic_signal(
+            comm_->fabric->domain, comm_->fabric->ep,
+            d_operand_pool_, mr_operand_pool_->desc,
+            slot_addr, mr_slot_pool_->key,
+            result_addr,
+            comm_->fabric->local_addr_in_av,
+            slots_[slot_idx].completion_cntr,
+            slots_[slot_idx].atomic_completion_cntr,
+            1);
+
+        my_pending_.push_back(dwq);
+        atomic_signals_queued_ = true;
+
+        return Token{ slot_idx, /*is_local=*/false };
+    }
+
     //--------------------------------------------------------------------------
     // prepare — finalize a batched put_no_db sequence.
     //--------------------------------------------------------------------------
