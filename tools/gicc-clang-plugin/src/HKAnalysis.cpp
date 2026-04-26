@@ -27,9 +27,19 @@ HKAnalysis::HKAnalysis(clang::FunctionDecl* k) : kernel_(k) {}
 
 bool HKAnalysis::declIsHK(const clang::ValueDecl* d) const {
     if (!d) return false;
-    // Kernel parameters are always HK (passed via gicc::launch).
+    // Kernel parameters are always HK (passed via gicc::launch). Compare
+    // canonical decls so a kernel that has both a forward declaration
+    // (e.g. injected by a -include'd Phase G sidecar) and a definition
+    // matches its parameters' getDeclContext() correctly. Without this
+    // the parameter is owned by the canonical (forward) decl while
+    // kernel_ is the definition decl, and the equality fails.
     if (auto* pvd = llvm::dyn_cast<clang::ParmVarDecl>(d)) {
-        if (pvd->getDeclContext() == kernel_) return true;
+        const auto* pctx = llvm::dyn_cast<clang::FunctionDecl>(
+            pvd->getDeclContext());
+        if (pctx && kernel_ &&
+            pctx->getCanonicalDecl() == kernel_->getCanonicalDecl()) {
+            return true;
+        }
     }
     return hk_decls_.count(d) != 0;
 }
