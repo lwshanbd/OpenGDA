@@ -344,6 +344,9 @@ public:
     Token get_no_db(const Buffer& local_dst, int src_rank, int src_buf_index,
                     size_t size, size_t local_offset = 0, size_t remote_offset = 0)
     {
+        // NOTE: unlike put_no_db, no IPC fast-path here. v1 deliberately
+        // routes local get through DWQ — IPC short-circuit for reads is
+        // deferred (see unified-compiler-codegen design §12 "Out of Scope").
         const OfiBuffer& ob = local_bufs_.at(local_dst.index);
 
         if ((int)my_n_ops_ >= POOL_SIZE) {
