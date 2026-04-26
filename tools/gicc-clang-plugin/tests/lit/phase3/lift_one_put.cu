@@ -11,7 +11,7 @@
 //
 // CHECK: rt.buffer_by_lkey
 // CHECK: rt.peer_buffer_base(peer
-// CHECK: rt.put_no_db(__src, peer
+// CHECK: rt.put_no_db(_gicc_src, peer
 #include <hip/hip_runtime.h>
 #include "gicc/gicc.hpp"
 #include "gicc/gicc_device.cuh"

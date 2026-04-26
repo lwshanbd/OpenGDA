@@ -72,8 +72,11 @@ std::string source_text(const clang::Expr* e, const clang::SourceManager& sm,
 // Emit the host-side resolution + rt.put_no_db call for one
 // gicc::put_no_db(ctx, local_addr, local_lkey, remote_addr, remote_rkey,
 // size [, signaled]) call. We deliberately wrap each block in its own
-// scope so the __src / __soff / __base / __doff temporaries don't
-// collide across multiple lifted puts.
+// scope so the _gicc_src / _gicc_soff / _gicc_base / _gicc_doff
+// temporaries don't collide across multiple lifted puts. Names use a
+// _gicc_ prefix (single underscore) rather than __ since identifiers
+// starting with __ are reserved to the implementation per [lex.name]
+// and could collide with libc++/libstdc++ internals.
 void emit_put_block(std::ostream& out, const clang::CallExpr* ce,
                     const clang::SourceManager& sm,
                     const clang::LangOptions& lo) {
@@ -84,16 +87,16 @@ void emit_put_block(std::ostream& out, const clang::CallExpr* ce,
     const std::string S  = source_text(ce->getArg(5), sm, lo);
 
     out << "        {\n";
-    out << "            auto& __src = rt.buffer_by_lkey((uint32_t)("
+    out << "            auto& _gicc_src = rt.buffer_by_lkey((uint32_t)("
         << LK << "));\n";
-    out << "            size_t __soff = (uint64_t)(" << A
-        << ") - (uint64_t)__src.addr;\n";
-    out << "            uint64_t __base = rt.peer_buffer_base(peer, (uint32_t)("
+    out << "            size_t _gicc_soff = (uint64_t)(" << A
+        << ") - (uint64_t)_gicc_src.addr;\n";
+    out << "            uint64_t _gicc_base = rt.peer_buffer_base(peer, (uint32_t)("
         << RK << "));\n";
-    out << "            size_t __doff = (uint64_t)(" << RA
-        << ") - __base;\n";
-    out << "            rt.put_no_db(__src, peer, (int)(" << RK
-        << "), (size_t)(" << S << "), __soff, __doff);\n";
+    out << "            size_t _gicc_doff = (uint64_t)(" << RA
+        << ") - _gicc_base;\n";
+    out << "            rt.put_no_db(_gicc_src, peer, (int)(" << RK
+        << "), (size_t)(" << S << "), _gicc_soff, _gicc_doff);\n";
     out << "        }\n";
 }
 
