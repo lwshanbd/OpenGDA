@@ -154,9 +154,45 @@ private:
 
 } // namespace
 
+// E6: kernel's first formal parameter must be gicc::DeviceCtx*. The
+// gicc::launch wrapper synthesizes the ctx and prepends it before
+// forwarding the user-visible args, so the kernel signature MUST start
+// with that pointer or the launch ABI is broken.
+//
+// We resolve via the canonical CXXRecord path rather than QualType
+// string-printing because the textual form of the type varies with
+// PrintingPolicy ("class gicc::DeviceCtx *" vs "gicc::DeviceCtx *" vs
+// elaborated forms with HIP).
+namespace {
+bool first_arg_is_device_ctx_ptr(const clang::FunctionDecl* fd) {
+    if (!fd || fd->getNumParams() == 0) return false;
+    auto qt = fd->getParamDecl(0)->getType();
+    auto* pt = qt->getAs<clang::PointerType>();
+    if (!pt) return false;
+    auto pointee = pt->getPointeeType();
+    auto* rd = pointee->getAsCXXRecordDecl();
+    if (!rd) return false;
+    return rd->getQualifiedNameAsString() == "gicc::DeviceCtx";
+}
+} // namespace
+
 bool Validator::validate(const KernelInfo& ki, const HKAnalysis& hk) {
     bool ok = true;
     auto& diag = CI_.getDiagnostics();
+
+    // E6: check first parameter type. Only enforced for kernels that
+    // call into gicc — pure HIP/CUDA kernels are out of scope for the
+    // unified-launch ABI and shouldn't trigger this diagnostic. A
+    // kernel that uses any gicc:: API is, by definition, launched via
+    // gicc::launch, which prepends the synthesized ctx.
+    if (!ki.calls.empty() && !first_arg_is_device_ctx_ptr(ki.decl)) {
+        clang::SourceLocation loc = ki.decl->getNumParams() > 0
+            ? ki.decl->getParamDecl(0)->getBeginLoc()
+            : ki.decl->getBeginLoc();
+        diag.Report(loc, diags_.bad_first_arg)
+            << ki.decl->getNameAsString();
+        ok = false;
+    }
 
     for (const auto& call : ki.calls) {
         const std::string short_fn = strip_gicc_prefix(call.qualified_name);
