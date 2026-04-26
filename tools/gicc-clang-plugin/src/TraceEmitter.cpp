@@ -4,14 +4,16 @@
  * F1: build a kernel_trace<&K> specialization with an empty body and
  *     write it to /tmp/<basename>.gicc.cpp.
  *
- * F2 (this commit): for each gicc::put_no_db call in a validated kernel
- *     emit a host-side block that resolves the local source Buffer via
- *     rt.buffer_by_lkey(lkey), the destination base via
- *     rt.peer_buffer_base(peer, rkey), then calls rt.put_no_db with the
- *     resolved offsets. Argument source text is extracted with
- *     Lexer::getSourceText so the generated code mirrors what the user
- *     actually wrote (variable names, casts, etc.). Loops / threadIdx-
- *     indexed puts come in F3/F4.
+ * F2: lift each straight-line gicc::put_no_db into a host-side block
+ *     calling rt.put_no_db, with arg source text mirrored verbatim.
+ *
+ * F3 (this commit): walk the kernel body recursively. For ForStmt /
+ *     WhileStmt / DoStmt / IfStmt with HK condition, emit the matching
+ *     host-side control flow scaffold and recurse on the body. A nested
+ *     gicc::put_no_db is then lifted with all surrounding HK control
+ *     flow preserved. flush / quiet are dropped (no host effect).
+ *     Statements we don't understand are skipped — they don't influence
+ *     the schedule.
  */
 #include "TraceEmitter.h"
 
@@ -54,19 +56,39 @@ std::string param_decl_list(const clang::FunctionDecl* fd) {
     return out;
 }
 
-// Pull the verbatim source text of an Expr. We use getTokenRange so the
-// final token is included (getCharRange would chop it off). For the
-// straight-line-only F2 subset every arg should be a simple identifier
-// or short expression; if Lexer returns empty (e.g. macro-expanded
-// argument) we fall back to a literal "/*<unrenderable>*/" comment so
-// the sidecar still parses.
-std::string source_text(const clang::Expr* e, const clang::SourceManager& sm,
+// Pull the verbatim source text of an Expr / Stmt. We use getTokenRange
+// so the final token is included (getCharRange would chop it off). For
+// macro-expanded ranges Lexer returns empty; we surface that as a
+// placeholder so the sidecar still parses.
+std::string source_text(const clang::Stmt* s, const clang::SourceManager& sm,
                         const clang::LangOptions& lo) {
-    if (!e) return "/*null*/";
-    auto range = clang::CharSourceRange::getTokenRange(e->getSourceRange());
+    if (!s) return "/*null*/";
+    auto range = clang::CharSourceRange::getTokenRange(s->getSourceRange());
     llvm::StringRef text = clang::Lexer::getSourceText(range, sm, lo);
     if (text.empty()) return "/*<unrenderable>*/";
     return text.str();
+}
+
+std::string source_text_expr(const clang::Expr* e,
+                             const clang::SourceManager& sm,
+                             const clang::LangOptions& lo) {
+    return source_text(static_cast<const clang::Stmt*>(e), sm, lo);
+}
+
+// Trim trailing semicolon + whitespace from a text fragment. The init
+// part of a ForStmt is a Stmt* (often a DeclStmt) whose source range
+// usually does NOT include the trailing ';' — but be defensive.
+std::string strip_trailing_semicolon(std::string s) {
+    while (!s.empty() && (s.back() == ';' || s.back() == ' ' ||
+                          s.back() == '\t' || s.back() == '\n')) {
+        s.pop_back();
+    }
+    return s;
+}
+
+// Indent helper: emits N levels of 4-space indent.
+void indent(std::ostream& out, int level) {
+    for (int i = 0; i < level; i++) out << "    ";
 }
 
 // Emit the host-side resolution + rt.put_no_db call for one
@@ -77,32 +99,129 @@ std::string source_text(const clang::Expr* e, const clang::SourceManager& sm,
 // _gicc_ prefix (single underscore) rather than __ since identifiers
 // starting with __ are reserved to the implementation per [lex.name]
 // and could collide with libc++/libstdc++ internals.
-void emit_put_block(std::ostream& out, const clang::CallExpr* ce,
+void emit_put_block(std::ostream& out, int lvl, const clang::CallExpr* ce,
                     const clang::SourceManager& sm,
                     const clang::LangOptions& lo) {
-    const std::string A  = source_text(ce->getArg(1), sm, lo);
-    const std::string LK = source_text(ce->getArg(2), sm, lo);
-    const std::string RA = source_text(ce->getArg(3), sm, lo);
-    const std::string RK = source_text(ce->getArg(4), sm, lo);
-    const std::string S  = source_text(ce->getArg(5), sm, lo);
+    const std::string A  = source_text_expr(ce->getArg(1), sm, lo);
+    const std::string LK = source_text_expr(ce->getArg(2), sm, lo);
+    const std::string RA = source_text_expr(ce->getArg(3), sm, lo);
+    const std::string RK = source_text_expr(ce->getArg(4), sm, lo);
+    const std::string S  = source_text_expr(ce->getArg(5), sm, lo);
 
-    out << "        {\n";
-    out << "            auto& _gicc_src = rt.buffer_by_lkey((uint32_t)("
-        << LK << "));\n";
-    out << "            size_t _gicc_soff = (uint64_t)(" << A
-        << ") - (uint64_t)_gicc_src.addr;\n";
-    out << "            uint64_t _gicc_base = rt.peer_buffer_base(peer, (uint32_t)("
-        << RK << "));\n";
-    out << "            size_t _gicc_doff = (uint64_t)(" << RA
-        << ") - _gicc_base;\n";
-    out << "            rt.put_no_db(_gicc_src, peer, (int)(" << RK
-        << "), (size_t)(" << S << "), _gicc_soff, _gicc_doff);\n";
-    out << "        }\n";
+    indent(out, lvl);     out << "{\n";
+    indent(out, lvl + 1); out << "auto& _gicc_src = rt.buffer_by_lkey((uint32_t)("
+                              << LK << "));\n";
+    indent(out, lvl + 1); out << "size_t _gicc_soff = (uint64_t)(" << A
+                              << ") - (uint64_t)_gicc_src.addr;\n";
+    indent(out, lvl + 1); out << "uint64_t _gicc_base = rt.peer_buffer_base(peer, (uint32_t)("
+                              << RK << "));\n";
+    indent(out, lvl + 1); out << "size_t _gicc_doff = (uint64_t)(" << RA
+                              << ") - _gicc_base;\n";
+    indent(out, lvl + 1); out << "rt.put_no_db(_gicc_src, peer, (int)(" << RK
+                              << "), (size_t)(" << S << "), _gicc_soff, _gicc_doff);\n";
+    indent(out, lvl);     out << "}\n";
+}
+
+// Forward decl — emit_stmt and emit_compound recurse mutually.
+void emit_stmt(std::ostream& out, int lvl, const clang::Stmt* s,
+               const HKAnalysis& hk, const clang::SourceManager& sm,
+               const clang::LangOptions& lo);
+
+void emit_compound(std::ostream& out, int lvl, const clang::CompoundStmt* cs,
+                   const HKAnalysis& hk, const clang::SourceManager& sm,
+                   const clang::LangOptions& lo) {
+    if (!cs) return;
+    for (const auto* child : cs->body()) {
+        emit_stmt(out, lvl, child, hk, sm, lo);
+    }
+}
+
+// Emit a host-side mirror of one kernel-body Stmt. Statements that
+// don't affect the schedule (declarations of loop variables aside, plus
+// gicc::flush / gicc::quiet, plus everything we don't recognize) are
+// dropped silently.
+void emit_stmt(std::ostream& out, int lvl, const clang::Stmt* s,
+               const HKAnalysis& hk, const clang::SourceManager& sm,
+               const clang::LangOptions& lo) {
+    if (!s) return;
+
+    // CompoundStmt → recurse with same indent level (caller already
+    // emitted the opening '{').
+    if (auto* cs = llvm::dyn_cast<clang::CompoundStmt>(s)) {
+        emit_compound(out, lvl, cs, hk, sm, lo);
+        return;
+    }
+
+    // ForStmt with HK cond → emit an equivalent host for-loop. The
+    // init / cond / inc texts are extracted verbatim from source. If the
+    // cond is NOT HK we conservatively drop the loop (any put inside
+    // would have failed E5 in the validator anyway).
+    if (auto* fs = llvm::dyn_cast<clang::ForStmt>(s)) {
+        if (!hk.isHK(fs->getCond())) return;
+        std::string init = strip_trailing_semicolon(
+            source_text(fs->getInit(), sm, lo));
+        std::string cond = source_text_expr(fs->getCond(), sm, lo);
+        std::string inc  = source_text_expr(fs->getInc(),  sm, lo);
+        indent(out, lvl); out << "for (" << init << "; " << cond << "; "
+                              << inc << ") {\n";
+        emit_stmt(out, lvl + 1, fs->getBody(), hk, sm, lo);
+        indent(out, lvl); out << "}\n";
+        return;
+    }
+
+    if (auto* ws = llvm::dyn_cast<clang::WhileStmt>(s)) {
+        if (!hk.isHK(ws->getCond())) return;
+        std::string cond = source_text_expr(ws->getCond(), sm, lo);
+        indent(out, lvl); out << "while (" << cond << ") {\n";
+        emit_stmt(out, lvl + 1, ws->getBody(), hk, sm, lo);
+        indent(out, lvl); out << "}\n";
+        return;
+    }
+
+    if (auto* ds = llvm::dyn_cast<clang::DoStmt>(s)) {
+        if (!hk.isHK(ds->getCond())) return;
+        std::string cond = source_text_expr(ds->getCond(), sm, lo);
+        indent(out, lvl); out << "do {\n";
+        emit_stmt(out, lvl + 1, ds->getBody(), hk, sm, lo);
+        indent(out, lvl); out << "} while (" << cond << ");\n";
+        return;
+    }
+
+    if (auto* is = llvm::dyn_cast<clang::IfStmt>(s)) {
+        if (!hk.isHK(is->getCond())) return;
+        std::string cond = source_text_expr(is->getCond(), sm, lo);
+        indent(out, lvl); out << "if (" << cond << ") {\n";
+        emit_stmt(out, lvl + 1, is->getThen(), hk, sm, lo);
+        if (is->getElse()) {
+            indent(out, lvl); out << "} else {\n";
+            emit_stmt(out, lvl + 1, is->getElse(), hk, sm, lo);
+        }
+        indent(out, lvl); out << "}\n";
+        return;
+    }
+
+    // gicc::* CallExpr — lift put_no_db, ignore flush / quiet.
+    if (auto* ce = llvm::dyn_cast<clang::CallExpr>(s)) {
+        auto* fd = ce->getDirectCallee();
+        if (!fd) return;
+        const std::string qn = fd->getQualifiedNameAsString();
+        if (qn == "gicc::put_no_db") {
+            if (ce->getNumArgs() < 6) return;
+            emit_put_block(out, lvl, ce, sm, lo);
+        }
+        // gicc::flush, gicc::quiet, gicc::get_no_db (handled in F5),
+        // and anything else: silently skip.
+        return;
+    }
+
+    // Any other statement (DeclStmt for non-loop locals, raw expression
+    // statements, returns, etc.) is irrelevant to the host-side trace.
+    // Don't emit anything.
 }
 
 } // namespace
 
-std::string TraceEmitter::emit(const KernelInfo& ki, const HKAnalysis& /*hk*/) {
+std::string TraceEmitter::emit(const KernelInfo& ki, const HKAnalysis& hk) {
     auto& sm = CI_.getSourceManager();
     const auto& lo = CI_.getLangOpts();
     auto file_id = sm.getMainFileID();
@@ -162,13 +281,15 @@ std::string TraceEmitter::emit(const KernelInfo& ki, const HKAnalysis& /*hk*/) {
             << ";\n";
     }
 
-    // F2: lift every straight-line gicc::put_no_db call from the kernel
-    // body into a host-side rt.put_no_db. Order is preserved (calls in
-    // ki.calls are in source order from the AST visitor).
-    for (const auto& call : ki.calls) {
-        if (call.qualified_name != "gicc::put_no_db") continue;
-        if (!call.expr || call.expr->getNumArgs() < 6) continue;
-        emit_put_block(out, call.expr, sm, lo);
+    // F3: walk the kernel body recursively. The walker emits HK
+    // for/while/do/if scaffolds verbatim and lifts any nested
+    // put_no_db inside.
+    if (auto* body = ki.decl->getBody()) {
+        if (auto* cs = llvm::dyn_cast<clang::CompoundStmt>(body)) {
+            emit_compound(out, 2, cs, hk, sm, lo);
+        } else {
+            emit_stmt(out, 2, body, hk, sm, lo);
+        }
     }
 
     out << "    }\n";
