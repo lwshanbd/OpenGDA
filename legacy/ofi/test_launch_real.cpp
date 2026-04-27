@@ -54,15 +54,15 @@ int main() {
 
     if (rt.rank() == 0) {
         auto ri = rt.remote_buffer(peer, db.index);
-        // NOTE: pass the peer's buf_index as the "rkey" argument because
-        // the host-side trace's rt.peer_buffer_base lookup keys by
-        // buf_index (not by the libfabric MR key) on the OFI backend.
-        // The device put_no_db is a no-op compile stub here, so it
-        // doesn't matter that the kernel-visible value isn't a real
-        // rkey — only the host trace consumes it.
+        // The kernel-visible rkey is whatever the user wants. On OFI, the
+        // device-side put_no_db is a no-op stub AND the host-side trace
+        // ignores the rkey arg (it uses dst_buf_idx from gicc::launch to
+        // locate the peer buffer). We pass the real ri.rkey here for
+        // source-level portability with the MLX5 backend, where the kernel
+        // does consume it to build a WQE.
         gicc::launch<put_kernel>(rt, dim3(1), dim3(1), peer, db.index,
                                  (uint64_t)sb.addr, sb.lkey,
-                                 (uint64_t)ri.addr, (uint32_t)db.index,
+                                 (uint64_t)ri.addr, ri.rkey,
                                  (uint32_t)SIZE);
         CHECK(hipDeviceSynchronize() == hipSuccess);
         rt.reset();
