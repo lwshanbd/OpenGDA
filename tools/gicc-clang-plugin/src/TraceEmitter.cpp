@@ -71,6 +71,9 @@ std::string sidecar_path_for(const std::string& main_file,
 // Render a kernel param list as "T0 n0, T1 n1, ..." with the leading
 // DeviceCtx* (param 0) skipped. Uses a SuppressTagKeyword printing
 // policy so we get "gicc::DeviceCtx*" rather than "class gicc::DeviceCtx*".
+// Uses the CANONICAL type so user typedefs from the kernel TU
+// (e.g. `typedef float real;`) don't leak into the sidecar TU which
+// can't see them.
 std::string param_decl_list(const clang::FunctionDecl* fd) {
     clang::PrintingPolicy pp(fd->getASTContext().getLangOpts());
     pp.SuppressTagKeyword = true;
@@ -79,7 +82,7 @@ std::string param_decl_list(const clang::FunctionDecl* fd) {
     for (unsigned i = 1; i < fd->getNumParams(); i++) {
         if (i > 1) out += ", ";
         const auto* p = fd->getParamDecl(i);
-        out += p->getType().getAsString(pp);
+        out += p->getType().getCanonicalType().getAsString(pp);
         out += " ";
         out += p->getNameAsString();
     }
@@ -725,6 +728,11 @@ std::string TraceEmitter::emit(const KernelInfo& ki, const HKAnalysis& hk) {
     // inside the specialization. In v1 we deliberately avoid pulling the
     // user's TU header into the sidecar; the prototype here is the
     // minimum surface needed to take the address.
+    //
+    // Use the CANONICAL type for each parameter (getCanonicalType) — the
+    // user TU may have local typedefs (`typedef float real;`) that the
+    // sidecar TU has no way to see. Canonicalizing prints `float`
+    // instead of `real`, so the forward decl compiles standalone.
     {
         clang::PrintingPolicy pp(ki.decl->getASTContext().getLangOpts());
         pp.SuppressTagKeyword = true;
@@ -733,7 +741,7 @@ std::string TraceEmitter::emit(const KernelInfo& ki, const HKAnalysis& hk) {
         for (unsigned i = 0; i < ki.decl->getNumParams(); i++) {
             if (i > 0) out << ", ";
             const auto* p = ki.decl->getParamDecl(i);
-            out << p->getType().getAsString(pp);
+            out << p->getType().getCanonicalType().getAsString(pp);
         }
         out << ");\n\n";
     }
