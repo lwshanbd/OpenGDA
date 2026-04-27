@@ -18,10 +18,11 @@
 } while (0)
 
 __global__ void put_kernel(gicc::DeviceCtx* ctx,
+                           int peer, int dst_buf,
                            uint64_t la, uint32_t lk,
                            uint64_t ra, uint32_t rk, uint32_t s) {
+    gicc::put_no_db(ctx, peer, dst_buf, la, lk, ra, rk, s);
     if (threadIdx.x == 0) {
-        gicc::put_no_db(ctx, la, lk, ra, rk, s);
         gicc::flush(ctx);
         gicc::quiet(ctx);
     }
@@ -54,13 +55,11 @@ int main() {
 
     if (rt.rank() == 0) {
         auto ri = rt.remote_buffer(peer, db.index);
-        // The kernel-visible rkey is whatever the user wants. On OFI, the
-        // device-side put_no_db is a no-op stub AND the host-side trace
-        // ignores the rkey arg (it uses dst_buf_idx from gicc::launch to
-        // locate the peer buffer). We pass the real ri.rkey here for
-        // source-level portability with the MLX5 backend, where the kernel
-        // does consume it to build a WQE.
-        gicc::launch<put_kernel>(rt, dim3(1), dim3(1), peer, db.index,
+        // peer + dst_buf are now per-CALL on put_no_db (passed as kernel
+        // args), so launch itself doesn't need them. The kernel can issue
+        // puts to multiple peers in one launch.
+        gicc::launch<put_kernel>(rt, dim3(1), dim3(1),
+                                 peer, (int)db.index,
                                  (uint64_t)sb.addr, sb.lkey,
                                  (uint64_t)ri.addr, ri.rkey,
                                  (uint32_t)SIZE);

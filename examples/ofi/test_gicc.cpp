@@ -20,14 +20,16 @@
 #include "gicc/gicc_device.cuh"
 
 __global__ void put_kernel(gicc::DeviceCtx* ctx,
+                           int peer, int dst_buf,
                            int n, uint64_t la, uint32_t lk,
                            uint64_t ra, uint32_t rk, uint32_t s)
 {
+    for (int i = 0; i < n; i++) {
+        gicc::put_no_db(ctx, peer, dst_buf,
+                        la + (uint64_t)i * s, lk,
+                        ra + (uint64_t)i * s, rk, s);
+    }
     if (threadIdx.x == 0) {
-        for (int i = 0; i < n; i++) {
-            gicc::put_no_db(ctx, la + (uint64_t)i * s, lk,
-                                 ra + (uint64_t)i * s, rk, s);
-        }
         gicc::flush(ctx);
         gicc::quiet(ctx);
     }
@@ -87,7 +89,8 @@ int main(int argc, char** argv) {
         printf("=== gicc::launch unified API: %d puts of %zu bytes ===\n",
                N_PUTS, SIZE);
         auto ri = rt.remote_buffer(peer, dst_buf.index);
-        gicc::launch<put_kernel>(rt, dim3(1), dim3(1), peer, dst_buf.index,
+        gicc::launch<put_kernel>(rt, dim3(1), dim3(1),
+                                 peer, (int)dst_buf.index,
                                  N_PUTS,
                                  (uint64_t)src_buf.addr, src_buf.lkey,
                                  (uint64_t)ri.addr,     ri.rkey,

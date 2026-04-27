@@ -62,14 +62,14 @@ __global__ void matmul_step_kernel(gicc::DeviceCtx* ctx,
                                    const float* __restrict__ Bs,
                                    float* __restrict__ Cs,
                                    int N, int Ns, int col_offset,
+                                   int peer, int dst_buf,
                                    uint64_t la, uint32_t lk,
                                    uint64_t ra, uint32_t rk, uint32_t sz)
 {
-    if (threadIdx.x == 0 && threadIdx.y == 0
-        && blockIdx.x == 0 && blockIdx.y == 0) {
-        gicc::put_no_db(ctx, la, lk, ra, rk, sz);
-    }
-    gicc::flush(ctx);   // block-cooperative: IPC copies + DWQ trigger.
+    // put_no_db must be called from all threads of block 0 (the IPC
+    // route uses block-cooperative memcpy_block + __syncthreads). Other
+    // blocks early-return inside put_no_db.
+    gicc::put_no_db(ctx, peer, dst_buf, la, lk, ra, rk, sz);
 
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -80,7 +80,8 @@ __global__ void matmul_step_kernel(gicc::DeviceCtx* ctx,
         }
     }
 
-    gicc::quiet(ctx);   // block-cooperative wait.
+    gicc::flush(ctx);   // single-thread MMIO trigger for any DWQ-routed ops.
+    gicc::quiet(ctx);   // poll DWQ completion slots.
 }
 
 // =============================================================================
@@ -163,8 +164,8 @@ int main(int argc, char** argv)
         const int next_buf = 1;
         const int col_offset = mype * Ns;
         gicc::launch<matmul_step_kernel>(rt, gridDim, blockDim,
-            left_neighbor, next_buf,
             d_As, d_B[cur_buf], d_Cs, N, Ns, col_offset,
+            left_neighbor, next_buf,
             (uint64_t)gB[cur_buf]->addr, gB[cur_buf]->lkey,
             (uint64_t)left_remote[next_buf].addr, left_remote[next_buf].rkey,
             (uint32_t)stripe_size);
@@ -191,8 +192,8 @@ int main(int argc, char** argv)
             const int col_offset = block_num * Ns;
 
             gicc::launch<matmul_step_kernel>(rt, gridDim, blockDim,
-                left_neighbor, next_buf,
                 d_As, d_B[cur_buf], d_Cs, N, Ns, col_offset,
+                left_neighbor, next_buf,
                 (uint64_t)gB[cur_buf]->addr, gB[cur_buf]->lkey,
                 (uint64_t)left_remote[next_buf].addr, left_remote[next_buf].rkey,
                 (uint32_t)stripe_size);
