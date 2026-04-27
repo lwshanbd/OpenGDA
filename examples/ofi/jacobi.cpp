@@ -66,9 +66,10 @@ __global__ void initialize_boundaries_kernel(
 }
 
 // Compute-only jacobi kernel. After it completes, a separate single-block
-// trigger kernel runs gicc::put_local() (IPC copies) + gicc::flush() (remote
-// DWQ doorbell). Splitting keeps the compute kernel simple and lets the
-// trigger kernel use a 1-block launch as required by gicc::flush.
+// trigger kernel runs gicc::flush() — flush itself does the IPC fast-path
+// copies block-cooperatively and rings the remote DWQ doorbell. Splitting
+// from compute keeps this trigger launch's grid at one block as required by
+// flush's "block 0 only" rule.
 template <int BX, int BY>
 __global__ void jacobi_kernel_compute(
     real* __restrict__ a_new, const real* __restrict__ a,
@@ -98,9 +99,9 @@ __global__ void jacobi_kernel_compute(
     }
 }
 
-// Single-block kernel: run IPC copies cooperatively, then trigger remote DWQ.
+// Single-block kernel: flush() runs IPC copies cooperatively, then rings
+// the remote DWQ trigger doorbell.
 __global__ void jacobi_trigger_kernel(gicc::DeviceCtx* ctx) {
-    gicc::put_local(ctx);
     gicc::flush(ctx);
 }
 
