@@ -20,14 +20,15 @@
 #include "gicc/gicc_device.cuh"
 
 __global__ void put_kernel(gicc::DeviceCtx* ctx,
-                           int peer, int dst_buf,
-                           int n, uint64_t la, uint32_t lk,
-                           uint64_t ra, uint32_t rk, uint32_t s)
+                           int target, int dst_buf, int src_buf,
+                           int n, size_t bytes_per)
 {
     for (int i = 0; i < n; i++) {
-        gicc::put_no_db(ctx, peer, dst_buf,
-                        la + (uint64_t)i * s, lk,
-                        ra + (uint64_t)i * s, rk, s);
+        gicc::put_no_db(ctx, target, dst_buf,
+                        (size_t)i * bytes_per,
+                        src_buf,
+                        (size_t)i * bytes_per,
+                        bytes_per);
     }
     if (threadIdx.x == 0) {
         gicc::flush(ctx);
@@ -88,13 +89,11 @@ int main(int argc, char** argv) {
     if (rank == 0) {
         printf("=== gicc::launch unified API: %d puts of %zu bytes ===\n",
                N_PUTS, SIZE);
-        auto ri = rt.remote_buffer(peer, dst_buf.index);
         gicc::launch<put_kernel>(rt, dim3(1), dim3(1),
                                  peer, (int)dst_buf.index,
+                                 (int)src_buf.lkey,
                                  N_PUTS,
-                                 (uint64_t)src_buf.addr, src_buf.lkey,
-                                 (uint64_t)ri.addr,     ri.rkey,
-                                 (uint32_t)SIZE);
+                                 (size_t)SIZE);
         (void)hipDeviceSynchronize();
         rt.reset();
     }

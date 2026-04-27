@@ -62,14 +62,15 @@ __global__ void matmul_step_kernel(gicc::DeviceCtx* ctx,
                                    const float* __restrict__ Bs,
                                    float* __restrict__ Cs,
                                    int N, int Ns, int col_offset,
-                                   int peer, int dst_buf,
-                                   uint64_t la, uint32_t lk,
-                                   uint64_t ra, uint32_t rk, uint32_t sz)
+                                   int target, int dst_buf,
+                                   int src_buf, size_t sz)
 {
     // put_no_db must be called from all threads of block 0 (the IPC
     // route uses block-cooperative memcpy_block + __syncthreads). Other
-    // blocks early-return inside put_no_db.
-    gicc::put_no_db(ctx, peer, dst_buf, la, lk, ra, rk, sz);
+    // blocks early-return inside put_no_db. Whole-buffer copy → both
+    // dst_offset and src_offset are 0.
+    gicc::put_no_db(ctx, target, dst_buf, /*dst_off=*/(size_t)0,
+                    src_buf, /*src_off=*/(size_t)0, sz);
 
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -151,12 +152,9 @@ int main(int argc, char** argv)
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
                  (Ns + blockDim.y - 1) / blockDim.y);
 
-    // Cache the per-buf RemoteBufferInfo for the left neighbor (the put
-    // destination). The put writes my gB[cur].addr → left's gB[next].addr.
-    gicc::RemoteBufferInfo left_remote[2] = {
-        rt.remote_buffer(left_neighbor, 0),
-        rt.remote_buffer(left_neighbor, 1),
-    };
+    // v1.5: dst/src addresses + rkeys are no longer threaded through the
+    // launch — Runtime resolves them internally from (peer, dst_buf) and
+    // (src_buf, src_offset) tables built at exchange() time.
 
     // Warm-up.
     {
@@ -166,9 +164,8 @@ int main(int argc, char** argv)
         gicc::launch<matmul_step_kernel>(rt, gridDim, blockDim,
             d_As, d_B[cur_buf], d_Cs, N, Ns, col_offset,
             left_neighbor, next_buf,
-            (uint64_t)gB[cur_buf]->addr, gB[cur_buf]->lkey,
-            (uint64_t)left_remote[next_buf].addr, left_remote[next_buf].rkey,
-            (uint32_t)stripe_size);
+            (int)gB[cur_buf]->lkey,
+            (size_t)stripe_size);
         HIP_CHECK(hipDeviceSynchronize());
         rt.reset();
         HIP_CHECK(hipMemset(d_Cs, 0, stripe_size));
@@ -194,9 +191,8 @@ int main(int argc, char** argv)
             gicc::launch<matmul_step_kernel>(rt, gridDim, blockDim,
                 d_As, d_B[cur_buf], d_Cs, N, Ns, col_offset,
                 left_neighbor, next_buf,
-                (uint64_t)gB[cur_buf]->addr, gB[cur_buf]->lkey,
-                (uint64_t)left_remote[next_buf].addr, left_remote[next_buf].rkey,
-                (uint32_t)stripe_size);
+                (int)gB[cur_buf]->lkey,
+                (size_t)stripe_size);
 
             HIP_CHECK(hipDeviceSynchronize());
             rt.reset();

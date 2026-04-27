@@ -83,19 +83,18 @@ __global__ void jacobi_step_kernel(
     const bool calculate_norm,
     int top_peer,    int top_dst_buf,
     int bottom_peer, int bottom_dst_buf,
-    uint64_t top_la,    uint32_t top_lk,
-    uint64_t top_ra,    uint32_t top_rk,
-    uint64_t bottom_la, uint32_t bottom_lk,
-    uint64_t bottom_ra, uint32_t bottom_rk,
-    uint32_t halo_bytes)
+    int src_buf,
+    size_t src_off_top,    size_t src_off_bot,
+    size_t dst_off_top,    size_t dst_off_bot,
+    size_t halo_bytes)
 {
     // Two halo puts to two different peers — multi-peer in one launch.
     // put_no_db must be called from all threads of block 0 (IPC route is
     // block-cooperative). Other blocks early-return inside put_no_db.
-    gicc::put_no_db(ctx, top_peer,    top_dst_buf,
-                    top_la,    top_lk,    top_ra,    top_rk,    halo_bytes);
-    gicc::put_no_db(ctx, bottom_peer, bottom_dst_buf,
-                    bottom_la, bottom_lk, bottom_ra, bottom_rk, halo_bytes);
+    gicc::put_no_db(ctx, top_peer,    top_dst_buf,    dst_off_top,
+                    src_buf, src_off_top, halo_bytes);
+    gicc::put_no_db(ctx, bottom_peer, bottom_dst_buf, dst_off_bot,
+                    src_buf, src_off_bot, halo_bytes);
 
     int iy = blockIdx.y * blockDim.y + threadIdx.y + iy_start;
     int ix = blockIdx.x * blockDim.x + threadIdx.x + 1;
@@ -213,17 +212,8 @@ int main(int argc, char** argv)
     dim3 grid((nx + BX - 1) / BX, (chunk_size + BY - 1) / BY);
     dim3 block(BX, BY);
 
-    auto top_remote_for = [&](int next_buf) {
-        return rt.remote_buffer(top, next_buf);
-    };
-    auto bot_remote_for = [&](int next_buf) {
-        return rt.remote_buffer(bottom, next_buf);
-    };
-
     auto run_step = [&](int cur_buf, int next_buf, bool calc_norm) {
         gicc::Buffer& gnext = (next_buf == 0) ? gbuf0 : gbuf1;
-        auto top_ri = top_remote_for(next_buf);
-        auto bot_ri = bot_remote_for(next_buf);
 
         HIP_CHECK(hipMemsetAsync(l2_norm_d, 0, sizeof(real), stream));
 
@@ -232,11 +222,10 @@ int main(int argc, char** argv)
             iy_start, iy_end, nx, calc_norm,
             top,    next_buf,
             bottom, next_buf,
-            (uint64_t)gnext.addr + src_offset_top,    gnext.lkey,
-            (uint64_t)top_ri.addr + dst_offset_to_top, top_ri.rkey,
-            (uint64_t)gnext.addr + src_offset_bottom, gnext.lkey,
-            (uint64_t)bot_ri.addr + dst_offset_to_bottom, bot_ri.rkey,
-            (uint32_t)row_bytes);
+            (int)gnext.lkey,
+            src_offset_top, src_offset_bottom,
+            dst_offset_to_top, dst_offset_to_bottom,
+            (size_t)row_bytes);
 
         HIP_CHECK(hipStreamSynchronize(stream));
         rt.reset();

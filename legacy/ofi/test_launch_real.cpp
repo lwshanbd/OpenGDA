@@ -18,10 +18,9 @@
 } while (0)
 
 __global__ void put_kernel(gicc::DeviceCtx* ctx,
-                           int peer, int dst_buf,
-                           uint64_t la, uint32_t lk,
-                           uint64_t ra, uint32_t rk, uint32_t s) {
-    gicc::put_no_db(ctx, peer, dst_buf, la, lk, ra, rk, s);
+                           int target, int dst_buf, size_t dst_off,
+                           int src_buf, size_t src_off, size_t sz) {
+    gicc::put_no_db(ctx, target, dst_buf, dst_off, src_buf, src_off, sz);
     if (threadIdx.x == 0) {
         gicc::flush(ctx);
         gicc::quiet(ctx);
@@ -54,15 +53,16 @@ int main() {
     rt.boot().barrier();
 
     if (rt.rank() == 0) {
-        auto ri = rt.remote_buffer(peer, db.index);
-        // peer + dst_buf are now per-CALL on put_no_db (passed as kernel
-        // args), so launch itself doesn't need them. The kernel can issue
-        // puts to multiple peers in one launch.
+        // target + dst_buf are now per-CALL on put_no_db (passed as
+        // kernel args), so launch itself doesn't need them. v1.5 also
+        // drops absolute addr / rkey from the call — the kernel passes
+        // (dst_buf, dst_offset) and (src_buf, src_offset) instead, and
+        // Runtime resolves addresses internally via its IPC + local
+        // buffer tables.
         gicc::launch<put_kernel>(rt, dim3(1), dim3(1),
-                                 peer, (int)db.index,
-                                 (uint64_t)sb.addr, sb.lkey,
-                                 (uint64_t)ri.addr, ri.rkey,
-                                 (uint32_t)SIZE);
+                                 peer, (int)db.index, (size_t)0,
+                                 (int)sb.lkey, (size_t)0,
+                                 (size_t)SIZE);
         CHECK(hipDeviceSynchronize() == hipSuccess);
         rt.reset();
     }
