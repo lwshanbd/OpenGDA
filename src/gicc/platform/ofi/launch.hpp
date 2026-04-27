@@ -29,7 +29,7 @@ namespace detail {
 template <auto Kernel>
 struct kernel_trace {
     template <typename... Args>
-    static void run(Runtime& /*rt*/, int /*peer*/,
+    static void run(Runtime& /*rt*/, int /*peer*/, int /*dst_buf_idx*/,
                     dim3 /*grid*/, dim3 /*block*/,
                     Args... /*args*/) {}
 };
@@ -42,7 +42,7 @@ inline void launch(Runtime& rt,
                    int peer, int dst_buf_idx,
                    Args... args)
 {
-    detail::kernel_trace<Kernel>::run(rt, peer, grid, block, args...);
+    detail::kernel_trace<Kernel>::run(rt, peer, dst_buf_idx, grid, block, args...);
     DeviceCtx* ctx = rt.prepare(peer, dst_buf_idx);
     hipLaunchKernelGGL(Kernel, grid, block, 0, 0, ctx, args...);
 }
@@ -54,7 +54,7 @@ inline void launch(Runtime& rt,
                    size_t shmem_bytes, hipStream_t stream,
                    Args... args)
 {
-    detail::kernel_trace<Kernel>::run(rt, peer, grid, block, args...);
+    detail::kernel_trace<Kernel>::run(rt, peer, dst_buf_idx, grid, block, args...);
     DeviceCtx* ctx = rt.prepare(peer, dst_buf_idx);
     hipLaunchKernelGGL(Kernel, grid, block, shmem_bytes, stream, ctx, args...);
 }
