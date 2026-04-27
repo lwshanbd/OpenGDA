@@ -118,10 +118,14 @@ public:
 
         (void)hipHostMalloc(&h_dev_ctx_, sizeof(DeviceCtx), hipHostMallocMapped);
         (void)hipHostGetDevicePointer((void**)&d_dev_ctx_, h_dev_ctx_, 0);
-        h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
-        h_dev_ctx_->completion_   = nullptr;
-        h_dev_ctx_->trigger_val_  = 0;
-        h_dev_ctx_->n_ops_        = 0;
+        h_dev_ctx_->trigger_addr_      = comm_->get_trigger_addr();
+        h_dev_ctx_->completion_        = nullptr;
+        h_dev_ctx_->trigger_val_       = 0;
+        h_dev_ctx_->n_ops_             = 0;
+        h_dev_ctx_->ipc_map_           = nullptr;
+        h_dev_ctx_->max_bufs_per_rank_ = 0;
+        h_dev_ctx_->local_ops_         = nullptr;
+        h_dev_ctx_->n_local_ops_       = 0;
     }
 
     ~Runtime() {
@@ -148,6 +152,8 @@ public:
         peer_mapped_ptrs_.clear();
 
         if (h_local_ops_) (void)hipHostFree(h_local_ops_);
+
+        if (d_ipc_map_) (void)hipFree(d_ipc_map_);
 
         delete comm_;
     }
@@ -248,6 +254,31 @@ public:
                     }
                 }
             }
+        }
+
+        // Build and upload the device-side IPC map. Indexed
+        // [peer * n_bufs_ + buf_idx]; mapped_ptr is non-null only when
+        // peer's buffer is reachable via direct GPU stores. Used by the
+        // device-side put_no_db (peer + dst_buf overload) to dispatch
+        // IPC vs DWQ in-kernel without host involvement.
+        n_bufs_ = nbuf;
+        std::vector<IpcMapEntry> host_map((size_t)nranks * (size_t)nbuf);
+        for (int r = 0; r < nranks; r++) {
+            for (int b = 0; b < nbuf; b++) {
+                IpcMapEntry& e = host_map[(size_t)r * nbuf + b];
+                e.mapped_ptr  = peer_mapped_ptrs_[r][b];   // nullptr if off-node / self
+                e.remote_base = comm_->get_remote_info(r, b).rma_addr;
+            }
+        }
+        const size_t map_bytes = host_map.size() * sizeof(IpcMapEntry);
+        if (hipMalloc(&d_ipc_map_, map_bytes) != hipSuccess) {
+            fprintf(stderr, "GICC: hipMalloc(ipc_map) failed\n");
+            std::abort();
+        }
+        if (hipMemcpy(d_ipc_map_, host_map.data(), map_bytes,
+                      hipMemcpyHostToDevice) != hipSuccess) {
+            fprintf(stderr, "GICC: hipMemcpy(ipc_map) failed\n");
+            std::abort();
         }
     }
 
@@ -442,12 +473,14 @@ public:
             (void)hipDeviceSynchronize();
         }
 
-        h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
-        h_dev_ctx_->trigger_val_  = my_n_remote_ops_;
-        h_dev_ctx_->completion_   = (volatile uint64_t*)d_slot_pool_;
-        h_dev_ctx_->n_ops_        = my_n_remote_ops_;
-        h_dev_ctx_->local_ops_    = d_local_ops_;
-        h_dev_ctx_->n_local_ops_  = my_n_local_ops_;
+        h_dev_ctx_->trigger_addr_      = comm_->get_trigger_addr();
+        h_dev_ctx_->trigger_val_       = my_n_remote_ops_;
+        h_dev_ctx_->completion_        = (volatile uint64_t*)d_slot_pool_;
+        h_dev_ctx_->n_ops_             = my_n_remote_ops_;
+        h_dev_ctx_->ipc_map_           = d_ipc_map_;
+        h_dev_ctx_->max_bufs_per_rank_ = n_bufs_;
+        h_dev_ctx_->local_ops_         = d_local_ops_;
+        h_dev_ctx_->n_local_ops_       = my_n_local_ops_;
         return d_dev_ctx_;
     }
 
@@ -455,12 +488,14 @@ public:
     // prepare_trigger — overlap pattern (flush only, host polls later).
     //--------------------------------------------------------------------------
     DeviceCtx* prepare_trigger(Token /*tok*/) {
-        h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
-        h_dev_ctx_->trigger_val_  = my_n_remote_ops_;
-        h_dev_ctx_->completion_   = nullptr;
-        h_dev_ctx_->n_ops_        = 0;
-        h_dev_ctx_->local_ops_    = d_local_ops_;
-        h_dev_ctx_->n_local_ops_  = my_n_local_ops_;
+        h_dev_ctx_->trigger_addr_      = comm_->get_trigger_addr();
+        h_dev_ctx_->trigger_val_       = my_n_remote_ops_;
+        h_dev_ctx_->completion_        = nullptr;
+        h_dev_ctx_->n_ops_             = 0;
+        h_dev_ctx_->ipc_map_           = d_ipc_map_;
+        h_dev_ctx_->max_bufs_per_rank_ = n_bufs_;
+        h_dev_ctx_->local_ops_         = d_local_ops_;
+        h_dev_ctx_->n_local_ops_       = my_n_local_ops_;
         return d_dev_ctx_;
     }
 
@@ -574,6 +609,15 @@ private:
     // here; the kernel reads them via d_local_ops_ during gicc::put_local().
     LocalOp*                           h_local_ops_;
     LocalOp*                           d_local_ops_;
+
+    // Per-runtime IPC map uploaded after exchange(). Indexed
+    // [peer * n_bufs_ + buf_idx]. Each entry's mapped_ptr is non-null
+    // exactly when peer is on the same node and exposed an IPC handle
+    // for that buffer; remote_base is the peer's registered RMA base
+    // address (used to translate dst_addr in put_no_db to the local
+    // IPC-mapped pointer). nullptr until exchange() runs.
+    IpcMapEntry*                       d_ipc_map_      = nullptr;
+    int                                n_bufs_         = 0;
 };
 
 } // namespace gicc
