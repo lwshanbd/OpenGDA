@@ -471,6 +471,35 @@ void emit_rma_block(std::ostream& out, int lvl, RmaOp op,
     }
 }
 
+// Detect whether a Stmt subtree contains ANY gicc::put_no_db /
+// gicc::get_no_db call. Used to short-circuit emission of control flow
+// constructs (if / for / while / do) whose bodies have no liftable op —
+// otherwise we'd emit `if (cond) { for (...) {} }` referencing device-only
+// locals (e.g. `int k = blockIdx.x * blockDim.x + threadIdx.x;`) that
+// have no host-side definition, which fails to compile.
+class HasLiftableScanner
+    : public clang::RecursiveASTVisitor<HasLiftableScanner> {
+public:
+    bool found = false;
+    bool VisitCallExpr(clang::CallExpr* ce) {
+        auto* fd = ce->getDirectCallee();
+        if (!fd) return true;
+        const std::string qn = fd->getQualifiedNameAsString();
+        if (qn == "gicc::put_no_db" || qn == "gicc::get_no_db") {
+            found = true;
+            return false; // stop walking
+        }
+        return true;
+    }
+};
+
+bool stmt_contains_liftable(const clang::Stmt* s) {
+    if (!s) return false;
+    HasLiftableScanner sc;
+    sc.TraverseStmt(const_cast<clang::Stmt*>(s));
+    return sc.found;
+}
+
 // Forward decl — emit_stmt and emit_compound recurse mutually.
 void emit_stmt(std::ostream& out, int lvl, const clang::Stmt* s,
                const HKAnalysis& hk, const clang::FunctionDecl* kernel,
@@ -510,9 +539,14 @@ void emit_stmt(std::ostream& out, int lvl, const clang::Stmt* s,
     // ForStmt with HK cond → emit an equivalent host for-loop. The
     // init / cond / inc texts are extracted verbatim from source. If the
     // cond is NOT HK we conservatively drop the loop (any put inside
-    // would have failed E5 in the validator anyway).
+    // would have failed E5 in the validator anyway). We also drop the
+    // entire construct if its body contains no liftable op — emitting
+    // an empty host loop that references kernel-local iterators would
+    // not compile (e.g. `for (int k = blockIdx.x * blockDim.x + ...)`
+    // refers to device-only builtins).
     if (auto* fs = llvm::dyn_cast<clang::ForStmt>(s)) {
         if (!hk.isHK(fs->getCond())) return;
+        if (!stmt_contains_liftable(fs->getBody())) return;
         std::string init = strip_trailing_semicolon(
             source_text(fs->getInit(), sm, lo));
         std::string cond = source_text_expr(fs->getCond(), sm, lo);
@@ -526,6 +560,7 @@ void emit_stmt(std::ostream& out, int lvl, const clang::Stmt* s,
 
     if (auto* ws = llvm::dyn_cast<clang::WhileStmt>(s)) {
         if (!hk.isHK(ws->getCond())) return;
+        if (!stmt_contains_liftable(ws->getBody())) return;
         std::string cond = source_text_expr(ws->getCond(), sm, lo);
         indent(out, lvl); out << "while (" << cond << ") {\n";
         emit_stmt(out, lvl + 1, ws->getBody(), hk, kernel, loop_iters, sm, lo);
@@ -535,6 +570,7 @@ void emit_stmt(std::ostream& out, int lvl, const clang::Stmt* s,
 
     if (auto* ds = llvm::dyn_cast<clang::DoStmt>(s)) {
         if (!hk.isHK(ds->getCond())) return;
+        if (!stmt_contains_liftable(ds->getBody())) return;
         std::string cond = source_text_expr(ds->getCond(), sm, lo);
         indent(out, lvl); out << "do {\n";
         emit_stmt(out, lvl + 1, ds->getBody(), hk, kernel, loop_iters, sm, lo);
@@ -544,6 +580,9 @@ void emit_stmt(std::ostream& out, int lvl, const clang::Stmt* s,
 
     if (auto* is = llvm::dyn_cast<clang::IfStmt>(s)) {
         if (!hk.isHK(is->getCond())) return;
+        const bool then_has = stmt_contains_liftable(is->getThen());
+        const bool else_has = stmt_contains_liftable(is->getElse());
+        if (!then_has && !else_has) return;
         std::string cond = source_text_expr(is->getCond(), sm, lo);
         // If the condition references __device__-only builtins (a
         // common idiom: `if (threadIdx.x == 0) put_no_db(...)`), drop
@@ -554,15 +593,16 @@ void emit_stmt(std::ostream& out, int lvl, const clang::Stmt* s,
         // scope, which is harder than it's worth in v1.
         if (cond.find("threadIdx.") != std::string::npos ||
             cond.find("blockIdx.")  != std::string::npos) {
-            emit_stmt(out, lvl, is->getThen(), hk, kernel, loop_iters, sm, lo);
-            if (is->getElse()) {
+            if (then_has)
+                emit_stmt(out, lvl, is->getThen(), hk, kernel, loop_iters, sm, lo);
+            if (else_has)
                 emit_stmt(out, lvl, is->getElse(), hk, kernel, loop_iters, sm, lo);
-            }
             return;
         }
         indent(out, lvl); out << "if (" << cond << ") {\n";
-        emit_stmt(out, lvl + 1, is->getThen(), hk, kernel, loop_iters, sm, lo);
-        if (is->getElse()) {
+        if (then_has)
+            emit_stmt(out, lvl + 1, is->getThen(), hk, kernel, loop_iters, sm, lo);
+        if (else_has) {
             indent(out, lvl); out << "} else {\n";
             emit_stmt(out, lvl + 1, is->getElse(), hk, kernel, loop_iters, sm, lo);
         }
