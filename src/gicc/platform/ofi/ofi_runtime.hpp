@@ -274,6 +274,18 @@ public:
         // device-side put_no_db (peer + dst_buf overload) to dispatch
         // IPC vs DWQ in-kernel without host involvement.
         n_bufs_ = nbuf;
+
+        // Flatten the per-(peer, buf) RemoteInfo into a contiguous array
+        // so put_no_db can do an O(1) array index instead of an
+        // unordered_map.find() + RemoteInfo copy on every call.
+        remote_info_cache_.assign((size_t)nranks * (size_t)nbuf, RemoteInfo{});
+        for (int r = 0; r < nranks; r++) {
+            for (int b = 0; b < nbuf; b++) {
+                remote_info_cache_[(size_t)r * nbuf + b] =
+                    comm_->get_remote_info(r, b);
+            }
+        }
+
         std::vector<IpcMapEntry> host_map((size_t)nranks * (size_t)nbuf);
         for (int r = 0; r < nranks; r++) {
             for (int b = 0; b < nbuf; b++) {
@@ -445,19 +457,14 @@ public:
 private:
     // Fetch a recycled DwqWorkBuilder from the pool, or allocate a new one.
     // Used only by the host-wait fast path (the legacy path heap-allocates
-    // per put for backwards-compat).
+    // per put for backwards-compat). queue_rma_write overwrites every field
+    // we read, so we skip the defensive memset that the constructor does.
     DwqWorkBuilder* dwq_get_() {
         if (dwq_pool_.empty()) {
             return new DwqWorkBuilder(comm_->rank());
         }
         DwqWorkBuilder* d = dwq_pool_.back();
         dwq_pool_.pop_back();
-        // Re-zero persistent structures to avoid stale fields.
-        memset(&d->work, 0, sizeof(d->work));
-        memset(&d->op_rma, 0, sizeof(d->op_rma));
-        memset(&d->msg_rma, 0, sizeof(d->msg_rma));
-        memset(&d->iov, 0, sizeof(d->iov));
-        memset(&d->rma_iov, 0, sizeof(d->rma_iov));
         return d;
     }
 
@@ -500,7 +507,9 @@ public:
             return Token{ -1, /*is_local=*/true };
         }
 
-        RemoteInfo ri = comm_->get_remote_info(dest_rank, dest_buf_index);
+        // O(1) flat-array lookup populated at exchange() time.
+        const RemoteInfo& ri = remote_info_cache_[
+            (size_t)dest_rank * (size_t)n_bufs_ + (size_t)dest_buf_index];
         if (ri.rma_key == 0 && ri.rma_addr == 0) {
             fprintf(stderr, "gicc::Runtime: remote info not set for rank %d "
                     "buf %d (call exchange() first)\n", dest_rank, dest_buf_index);
@@ -844,6 +853,12 @@ private:
     std::thread                        monitor_thread_;
     std::atomic<bool>                  monitor_stop_   {false};
     std::atomic<uint64_t>              monitor_dispatched_ {0};
+
+    // Flat cache of RemoteInfo (av_addr / rma_addr / rma_key / base_addr)
+    // for every (peer, buf) pair, populated during exchange(). Avoids
+    // an unordered_map lookup + RemoteInfo copy on every put_no_db.
+    // Indexed [peer * n_bufs_ + buf_idx]; same indexing as d_ipc_map_.
+    std::vector<RemoteInfo>            remote_info_cache_;
 
     IpcMapEntry*                       d_ipc_map_      = nullptr;
     int                                n_bufs_         = 0;
