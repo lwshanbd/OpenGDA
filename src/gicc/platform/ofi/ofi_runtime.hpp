@@ -27,6 +27,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <thread>
+#include <atomic>
 
 #include "gicc/gicc_types.hpp"
 #include "gicc/platform/ofi/ofi_device.cuh"
@@ -40,6 +42,7 @@
 #include "internal/dwq_work_builder.hpp"
 #include "internal/ofi_barrier.hpp"
 #include "internal/fabric.hpp"
+
 
 namespace gicc {
 
@@ -63,7 +66,10 @@ public:
           d_slot_pool_(nullptr), mr_slot_pool_(nullptr),
           d_operand_pool_(nullptr), mr_operand_pool_(nullptr),
           my_n_ops_(0), my_n_remote_ops_(0),
-          atomic_signals_queued_(false)
+          atomic_signals_queued_(false),
+          host_wait_mode_(false),
+          shared_completion_cntr_(nullptr),
+          mono_total_ops_(0)
     {
         unset_rocr_visible_devices();
         comm_ = new Fabric(boot_);
@@ -148,6 +154,18 @@ public:
 
         if (d_ipc_map_) (void)hipFree(d_ipc_map_);
         if (d_local_bufs_) (void)hipFree(d_local_bufs_);
+
+        if (shared_completion_cntr_)
+            fi_close(&shared_completion_cntr_->fid);
+        for (auto* op : dwq_pool_) delete op;
+        dwq_pool_.clear();
+        if (monitor_thread_.joinable()) {
+            monitor_stop_.store(true, std::memory_order_release);
+            monitor_thread_.join();
+        }
+        if (h_ipc_head_) (void)hipHostFree(h_ipc_head_);
+        if (h_ipc_ring_) (void)hipHostFree(h_ipc_ring_);
+        if (ipc_stream_) (void)hipStreamDestroy(ipc_stream_);
 
         delete comm_;
     }
@@ -332,6 +350,125 @@ public:
     }
 
     //--------------------------------------------------------------------------
+    // enable_host_wait_mode — switch put_no_db / get_no_db to the GDA-style
+    // fast path. After enabling:
+    //   - Each put queues ONLY the RMA write (no chained atomic_signal),
+    //     halving the NIC ops per put.
+    //   - One shared completion counter, monotonic threshold across iters.
+    //   - reset() becomes a wait-then-recycle (no per-batch counter reset).
+    //   - DwqWorkBuilder objects pulled from / returned to a pool.
+    //
+    // Caller contract: kernels must NOT use device-side gicc::quiet (no
+    // GPU-side completion signalling). Host-side rt.reset() is the wait.
+    // Idempotent (safe to call multiple times).
+    //--------------------------------------------------------------------------
+    void enable_host_wait_mode() {
+        if (host_wait_mode_) return;
+        struct fi_cntr_attr cntr_attr = {};
+        cntr_attr.events = FI_CNTR_EVENTS_COMP;
+        int ret = fi_cntr_open(comm_->fabric->domain, &cntr_attr,
+                                &shared_completion_cntr_, NULL);
+        if (ret) {
+            fprintf(stderr, "GICC: fi_cntr_open(shared_completion) failed: %s\n",
+                    fi_strerror(-ret));
+            std::abort();
+        }
+        // Dedicated stream for the IPC drain kernel so it overlaps with
+        // user kernel + NIC RDMA. Non-blocking so it really runs
+        // concurrent with default stream's flush kernel.
+        if (hipStreamCreateWithFlags(&ipc_stream_, hipStreamNonBlocking)
+            != hipSuccess) {
+            fprintf(stderr, "GICC: hipStreamCreate(ipc_stream) failed\n");
+            std::abort();
+        }
+        // Pinned ring + head, both mapped to device. Device
+        // put_no_db's IPC route writes into the ring + atomic-increments
+        // the head; CPU monitor thread polls the head and dispatches
+        // hipMemcpyAsync onto ipc_stream_.
+        if (hipHostMalloc(&h_ipc_ring_,
+                          IPC_RING_SIZE_ * sizeof(IpcCmdSlot),
+                          hipHostMallocMapped) != hipSuccess) {
+            fprintf(stderr, "GICC: hipHostMalloc(ipc_ring) failed\n");
+            std::abort();
+        }
+        if (hipHostGetDevicePointer((void**)&d_ipc_ring_, h_ipc_ring_, 0)
+            != hipSuccess) {
+            fprintf(stderr, "GICC: hipHostGetDevicePointer(ipc_ring) failed\n");
+            std::abort();
+        }
+        if (hipHostMalloc(&h_ipc_head_, sizeof(uint64_t),
+                          hipHostMallocMapped) != hipSuccess) {
+            fprintf(stderr, "GICC: hipHostMalloc(ipc_head) failed\n");
+            std::abort();
+        }
+        if (hipHostGetDevicePointer((void**)&d_ipc_head_, h_ipc_head_, 0)
+            != hipSuccess) {
+            fprintf(stderr, "GICC: hipHostGetDevicePointer(ipc_head) failed\n");
+            std::abort();
+        }
+        *h_ipc_head_ = 0;
+        monitor_stop_.store(false, std::memory_order_relaxed);
+        monitor_dispatched_.store(0, std::memory_order_relaxed);
+        monitor_thread_ = std::thread([this]() { monitor_loop_(); });
+
+        host_wait_mode_ = true;
+    }
+
+private:
+    // Monitor thread loop. Polls h_ipc_head_ (GPU writes via threadfence
+    // _system); for each new entry, issues hipMemcpyAsync on ipc_stream_.
+    void monitor_loop_() {
+        uint64_t cpu_seen = 0;
+        while (!monitor_stop_.load(std::memory_order_acquire)) {
+            uint64_t head = __atomic_load_n((volatile uint64_t*)h_ipc_head_,
+                                            __ATOMIC_ACQUIRE);
+            while (cpu_seen < head) {
+                IpcCmdSlot& cmd = h_ipc_ring_[cpu_seen & (IPC_RING_SIZE_ - 1)];
+                hipError_t err = hipMemcpyAsync(cmd.dst, cmd.src, cmd.size,
+                                                hipMemcpyDeviceToDevice,
+                                                ipc_stream_);
+                if (err != hipSuccess) {
+                    fprintf(stderr,
+                        "GICC monitor: hipMemcpyAsync failed: %s\n",
+                        hipGetErrorString(err));
+                    // Keep going; reset will detect via stream sync.
+                }
+                cpu_seen++;
+            }
+            monitor_dispatched_.store(cpu_seen, std::memory_order_release);
+            // Pure spin — minimod halo is hot, sched_yield would add ms
+            // per iter. CPU usage is fine; this is a dedicated helper.
+        }
+    }
+public:
+
+private:
+    // Fetch a recycled DwqWorkBuilder from the pool, or allocate a new one.
+    // Used only by the host-wait fast path (the legacy path heap-allocates
+    // per put for backwards-compat).
+    DwqWorkBuilder* dwq_get_() {
+        if (dwq_pool_.empty()) {
+            return new DwqWorkBuilder(comm_->rank());
+        }
+        DwqWorkBuilder* d = dwq_pool_.back();
+        dwq_pool_.pop_back();
+        // Re-zero persistent structures to avoid stale fields.
+        memset(&d->work, 0, sizeof(d->work));
+        memset(&d->op_rma, 0, sizeof(d->op_rma));
+        memset(&d->msg_rma, 0, sizeof(d->msg_rma));
+        memset(&d->iov, 0, sizeof(d->iov));
+        memset(&d->rma_iov, 0, sizeof(d->rma_iov));
+        return d;
+    }
+
+    void dwq_release_all_pending_to_pool_() {
+        for (auto* op : my_pending_) dwq_pool_.push_back(op);
+        my_pending_.clear();
+    }
+
+public:
+
+    //--------------------------------------------------------------------------
     // put_no_db — queue an RMA WRITE only. Consumes one slot from the pool.
     //--------------------------------------------------------------------------
     Token put_no_db(const Buffer& src, int dest_rank, int dest_buf_index,
@@ -347,10 +484,13 @@ public:
             exit(1);
         }
 
-        // IPC fast path is now handled entirely device-side: the kernel's
-        // gicc::put_no_db reads ctx->ipc_map_ and ctx->local_bufs_ to
-        // locate peer + local pointers and does block-cooperative GPU
-        // memcpy. The host has nothing to stage.
+        // IPC fast path. host_wait_mode + Pattern C: don't do anything
+        // here — the device-side put_no_db will push a command to the
+        // GPU↔CPU ring AT THE put_no_db CALL SITE in the user kernel,
+        // and the monitor thread will dispatch hipMemcpyAsync onto
+        // ipc_stream_. This preserves "comm fires when you write
+        // put_no_db" semantics. Legacy (non-host-wait) mode: device
+        // put_no_db does in-kernel block-cooperative memcpy.
         if (dest_rank != comm_->rank()
             && local_peer_[dest_rank]
             && (int)peer_mapped_ptrs_[dest_rank].size() > dest_buf_index
@@ -359,11 +499,6 @@ public:
             (void)ob; (void)size; (void)src_offset; (void)dst_offset;
             return Token{ -1, /*is_local=*/true };
         }
-
-        const int slot_idx = (int)my_n_ops_;
-        my_n_ops_++;
-        const uint64_t trigger_threshold = my_n_remote_ops_ + 1;  // 1-based
-        my_n_remote_ops_++;
 
         RemoteInfo ri = comm_->get_remote_info(dest_rank, dest_buf_index);
         if (ri.rma_key == 0 && ri.rma_addr == 0) {
@@ -374,6 +509,36 @@ public:
         const uint64_t remote_addr = comm_->is_virt_addr_mode()
             ? (ri.rma_addr + dst_offset)
             : (ri.rma_addr - ri.base_addr) + dst_offset;
+
+        // ---------- Host-wait fast path (GDA-compatible) ----------
+        if (host_wait_mode_) {
+            ++mono_total_ops_;
+            ++my_n_remote_ops_;
+            DwqWorkBuilder* dwq = dwq_get_();
+            dwq->queue_rma_write(
+                comm_->fabric->domain, comm_->fabric->ep,
+                (char*)ob.ptr + src_offset, ob.desc_, size,
+                comm_->av_addrs[dest_rank], remote_addr, ri.rma_key,
+                comm_->fabric->trigger_cntr,
+                shared_completion_cntr_,
+                /*threshold=*/mono_total_ops_);
+            // NO atomic_signal queued — saves 1 NIC op per put.
+            my_pending_.push_back(dwq);
+            return Token{ (int)mono_total_ops_, /*is_local=*/false };
+        }
+
+        // ---------- Legacy path (per-slot + atomic_signal for device quiet) ----------
+        if ((int)my_n_ops_ >= POOL_SIZE) {
+            fprintf(stderr,
+                "gicc::Runtime::put_no_db: batch exceeds POOL_SIZE=%d. "
+                "Call rt.reset() between batches or raise POOL_SIZE.\n",
+                POOL_SIZE);
+            exit(1);
+        }
+        const int slot_idx = (int)my_n_ops_;
+        my_n_ops_++;
+        const uint64_t trigger_threshold = my_n_remote_ops_ + 1;
+        my_n_remote_ops_++;
 
         auto* dwq = new DwqWorkBuilder(comm_->rank());
         dwq->queue_rma_write(
@@ -396,10 +561,8 @@ public:
             slots_[slot_idx].completion_cntr,
             slots_[slot_idx].atomic_completion_cntr,
             1);
-
         my_pending_.push_back(dwq);
         atomic_signals_queued_ = true;
-
         return Token{ slot_idx, /*is_local=*/false };
     }
 
@@ -470,10 +633,30 @@ public:
         (void)peer_rank;
         (void)remote_buf_index;
 
+        if (host_wait_mode_) {
+            // Pattern C: device put_no_db's IPC route writes (dst,src,
+            // size) into ipc_cmd_ring_ + atomic-incs ipc_cmd_head_;
+            // monitor thread polls and dispatches hipMemcpyAsync on
+            // ipc_stream_. Comm fires AT the put_no_db line in the
+            // kernel, not at gicc::launch call site.
+            h_dev_ctx_->trigger_addr_      = comm_->get_trigger_addr();
+            h_dev_ctx_->trigger_val_       = mono_total_ops_;
+            h_dev_ctx_->completion_        = nullptr;
+            h_dev_ctx_->n_ops_             = 0;
+            h_dev_ctx_->ipc_map_           = d_ipc_map_;
+            h_dev_ctx_->max_bufs_per_rank_ = n_bufs_;
+            h_dev_ctx_->local_bufs_        = d_local_bufs_;
+            h_dev_ctx_->n_local_bufs_      = (int)local_bufs_.size();
+            h_dev_ctx_->ipc_cmd_ring_      = d_ipc_ring_;
+            h_dev_ctx_->ipc_cmd_head_      = (volatile uint64_t*)d_ipc_head_;
+            h_dev_ctx_->ipc_ring_mask_     = IPC_RING_SIZE_ - 1;
+            return d_dev_ctx_;
+        }
+
         if (my_n_remote_ops_ > 0) {
-            (void)hipMemset(d_slot_pool_, 0,
-                            my_n_remote_ops_ * sizeof(uint64_t));
-            (void)hipDeviceSynchronize();
+            (void)hipMemsetAsync(d_slot_pool_, 0,
+                                 my_n_remote_ops_ * sizeof(uint64_t),
+                                 /*stream=*/0);
         }
 
         h_dev_ctx_->trigger_addr_      = comm_->get_trigger_addr();
@@ -520,9 +703,35 @@ public:
     // reset — drain the current batch and recycle the slots.
     //--------------------------------------------------------------------------
     void reset() {
-        // my_n_ops_ only counts remote (DWQ) ops; IPC-routed puts execute
-        // entirely device-side and consume no slot, so the existing
-        // fi_cntr drain covers the right slots.
+        if (host_wait_mode_) {
+            // Fast path: poll the SHARED completion counter against the
+            // monotonic threshold. No per-slot loop, no counter reset.
+            // DwqWorkBuilders go back to the pool instead of being deleted.
+            if (mono_total_ops_ > 0) {
+                while (fi_cntr_read(shared_completion_cntr_) < mono_total_ops_) {
+                    fi_cq_read(comm_->fabric->cq, NULL, 0);
+                }
+            }
+            dwq_release_all_pending_to_pool_();
+            my_n_remote_ops_ = 0;   // per-iter accounting clears (mono is global)
+
+            // IPC monitor handoff: caller has already done
+            // hipDeviceSynchronize, so all GPU writes to the ring head
+            // are visible. Wait for the monitor thread to dispatch every
+            // command the kernel pushed, then drain the IPC SDMA stream
+            // so all peer writes are committed before MPI_Barrier.
+            uint64_t target = __atomic_load_n((volatile uint64_t*)h_ipc_head_,
+                                              __ATOMIC_ACQUIRE);
+            while (monitor_dispatched_.load(std::memory_order_acquire) < target) {
+                // spin
+            }
+            if (target > 0) {
+                (void)hipStreamSynchronize(ipc_stream_);
+            }
+            return;
+        }
+
+        // ---------- Legacy path ----------
         for (uint64_t i = 0; i < my_n_ops_; i++) {
             while (fi_cntr_read(slots_[i].completion_cntr) < 1) {
                 fi_cq_read(comm_->fabric->cq, NULL, 0);
@@ -535,20 +744,14 @@ public:
                 }
             }
         }
-
         for (auto* op : my_pending_) delete op;
         my_pending_.clear();
-
         fi_cntr_set(comm_->fabric->trigger_cntr, 0);
         for (uint64_t i = 0; i < my_n_ops_; i++) {
             fi_cntr_set(slots_[i].completion_cntr, 0);
             if (atomic_signals_queued_)
                 fi_cntr_set(slots_[i].atomic_completion_cntr, 0);
         }
-
-        // IPC-routed puts: the copies fired inside the caller's kernel.
-        // Caller is required to have synchronised the kernel before
-        // reset(), so there is no host-side state to drain.
         my_n_ops_              = 0;
         my_n_remote_ops_       = 0;
         atomic_signals_queued_ = false;
@@ -613,6 +816,35 @@ private:
     // [peer * n_bufs_ + buf_idx]. Each entry's mapped_ptr is non-null
     // exactly when peer is on the same node and exposed an IPC handle
     // for that buffer. nullptr until exchange() runs.
+    // Host-wait mode (GDA-compatible fast path):
+    //   - Skip per-slot atomic_signal queueing (saves 1 NIC op per put)
+    //   - One shared completion counter, monotonic threshold, no per-batch reset
+    //   - DwqWorkBuilder objects pooled instead of new/delete per iter
+    // Enabled via enable_host_wait_mode(). Required: user kernel must NOT
+    // call gicc::quiet (no GPU-side completion polling); host gates via
+    // rt.reset() which becomes a fi_cntr_read busy-poll on the shared cntr.
+    bool                               host_wait_mode_;
+    struct fid_cntr*                   shared_completion_cntr_;
+    uint64_t                           mono_total_ops_;          // monotonic across batches
+    std::vector<DwqWorkBuilder*>       dwq_pool_;                // recycled builders
+
+    // GPU→CPU command ring + monitor thread for the IPC fast path.
+    // Device-side put_no_db (host_wait_mode + IPC peer) pushes a
+    // command slot onto ipc_ring_; monitor_thread_ polls the head and
+    // dispatches hipMemcpyAsync on ipc_stream_. This preserves "comm
+    // fires AT the put_no_db line" semantics — the SDMA dispatch is
+    // triggered by the GPU thread via threadfence_system, not by the
+    // host trace function.
+    static constexpr int               IPC_RING_SIZE_ = 64;   // power of 2
+    hipStream_t                        ipc_stream_     = nullptr;
+    IpcCmdSlot*                        h_ipc_ring_     = nullptr;
+    IpcCmdSlot*                        d_ipc_ring_     = nullptr;
+    uint64_t*                          h_ipc_head_     = nullptr;
+    uint64_t*                          d_ipc_head_     = nullptr;
+    std::thread                        monitor_thread_;
+    std::atomic<bool>                  monitor_stop_   {false};
+    std::atomic<uint64_t>              monitor_dispatched_ {0};
+
     IpcMapEntry*                       d_ipc_map_      = nullptr;
     int                                n_bufs_         = 0;
 

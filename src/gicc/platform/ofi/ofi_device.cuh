@@ -79,6 +79,23 @@ struct LocalBufView {
 };
 
 //==============================================================================
+// IpcCmdSlot — entry in the GPU→CPU command ring used by host_wait_mode +
+// monitor-thread IPC. Device-side put_no_db's IPC branch atomically claims
+// a slot, writes (dst, src, size), threadfence_system to publish to host.
+// A CPU monitor thread polls the head, sees new entries, and issues the
+// real hipMemcpyAsync onto the dedicated ipc_stream_.
+//
+// This preserves "comm fires AT the put_no_db line" semantics — the device
+// write happens at the call site in the user's kernel, not at gicc::launch
+// call time on the host.
+//==============================================================================
+struct IpcCmdSlot {
+    void*    dst;
+    void*    src;
+    uint64_t size;
+};
+
+//==============================================================================
 // DeviceCtx — GPU-accessible context for the libfabric/CXI backend.
 //
 // completion_ points to the BASE of an n_ops_-element array. Each slot
@@ -102,6 +119,16 @@ struct DeviceCtx {
 
     const LocalBufView* local_bufs_;        // [n_local_bufs_]
     int                 n_local_bufs_;
+
+    // Monitor-thread IPC ring (host_wait_mode + Pattern C). When
+    // ipc_cmd_ring_ != nullptr, device put_no_db's IPC route pushes a
+    // command to the ring (atomically incrementing ipc_cmd_head_) and
+    // returns. CPU monitor thread polls the head and issues
+    // hipMemcpyAsync on Runtime::ipc_stream_. Ring size must be a
+    // power of 2; ipc_ring_mask_ = size - 1.
+    IpcCmdSlot*         ipc_cmd_ring_;
+    volatile uint64_t*  ipc_cmd_head_;
+    int                 ipc_ring_mask_;
 };
 
 //==============================================================================
@@ -217,19 +244,79 @@ void put_no_db(DeviceCtx* ctx,
                int src_buf, size_t src_offset,
                size_t size, bool /*signaled*/ = false)
 {
-    if (blockIdx.x != 0 || blockIdx.y != 0 || blockIdx.z != 0) return;
     if (ctx->ipc_map_ == nullptr) return;   // no IPC table; everything is DWQ
 
     int idx = target_rank * ctx->max_bufs_per_rank_ + dst_buf;
     void* peer_mapped = ctx->ipc_map_[idx].mapped_ptr;
     if (peer_mapped == nullptr) return;     // DWQ route: pre-staged on host
 
-    // IPC route: direct GPU memcpy.
-    void* src_ptr = (char*)ctx->local_bufs_[src_buf].base + src_offset;
-    void* dst_ptr = (char*)peer_mapped + dst_offset;
-    memcpy_block(dst_ptr, src_ptr, size);
-    __syncthreads();
-    if (detail::tid_in_block() == 0) __threadfence_system();
+    // Pattern C — push command to host ring, CPU monitor thread will
+    // pick it up and dispatch hipMemcpyAsync on the IPC stream.
+    // Single-thread atomic claim; only thread (0,0,0) of block (0,0,0)
+    // writes the command. Other threads early-return.
+    if (ctx->ipc_cmd_ring_ != nullptr) {
+        if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0
+            && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+            uint64_t slot = atomicAdd((unsigned long long*)ctx->ipc_cmd_head_,
+                                      1ULL);
+            int ring_idx = (int)(slot & (uint64_t)ctx->ipc_ring_mask_);
+            void* src_ptr = (char*)ctx->local_bufs_[src_buf].base + src_offset;
+            void* dst_ptr = (char*)peer_mapped + dst_offset;
+            ctx->ipc_cmd_ring_[ring_idx].dst  = dst_ptr;
+            ctx->ipc_cmd_ring_[ring_idx].src  = src_ptr;
+            ctx->ipc_cmd_ring_[ring_idx].size = (uint64_t)size;
+            __threadfence_system();   // publish to host monitor
+        }
+        return;
+    }
+
+    // Fallback: legacy in-kernel block-cooperative memcpy (slower but
+    // self-contained, used when monitor thread / ring isn't set up).
+
+    // IPC route: grid-cooperative GPU memcpy. EVERY thread of EVERY
+    // block participates, striped by (gridDim * blockDim). This lets
+    // halo-only kernels launched with multi-block grids saturate
+    // xGMI bandwidth instead of being limited to one CU. Cross-block
+    // ordering relies on the host hipDeviceSynchronize() that follows
+    // the kernel; no in-kernel grid sync is required because peer
+    // ranks won't read this data until after MPI_Barrier (which
+    // implies hipDeviceSynchronize on our side).
+    char* dst = (char*)peer_mapped + dst_offset;
+    const char* src = (const char*)ctx->local_bufs_[src_buf].base + src_offset;
+
+    int gtid_in_block = threadIdx.x
+                      + threadIdx.y * blockDim.x
+                      + threadIdx.z * blockDim.x * blockDim.y;
+    int block_threads = blockDim.x * blockDim.y * blockDim.z;
+    int block_id = blockIdx.x
+                 + blockIdx.y * gridDim.x
+                 + blockIdx.z * gridDim.x * gridDim.y;
+    int total_blocks = gridDim.x * gridDim.y * gridDim.z;
+    uint64_t gtid = (uint64_t)block_id * block_threads + gtid_in_block;
+    uint64_t gnth = (uint64_t)total_blocks * block_threads;
+
+    if (((uintptr_t)dst % 16 == 0) && ((uintptr_t)src % 16 == 0) && size >= 16) {
+        uint64_t n = size / 16;
+        int4* d = (int4*)dst; const int4* s = (const int4*)src;
+        for (uint64_t i = gtid; i < n; i += gnth) d[i] = s[i];
+        size -= n * 16; dst += n * 16; src += n * 16;
+        if (size == 0) return;
+    }
+    if (((uintptr_t)dst % 8 == 0) && ((uintptr_t)src % 8 == 0) && size >= 8) {
+        uint64_t n = size / 8;
+        uint64_t* d = (uint64_t*)dst; const uint64_t* s = (const uint64_t*)src;
+        for (uint64_t i = gtid; i < n; i += gnth) d[i] = s[i];
+        size -= n * 8; dst += n * 8; src += n * 8;
+        if (size == 0) return;
+    }
+    if (((uintptr_t)dst % 4 == 0) && ((uintptr_t)src % 4 == 0) && size >= 4) {
+        uint64_t n = size / 4;
+        uint32_t* d = (uint32_t*)dst; const uint32_t* s = (const uint32_t*)src;
+        for (uint64_t i = gtid; i < n; i += gnth) d[i] = s[i];
+        size -= n * 4; dst += n * 4; src += n * 4;
+        if (size == 0) return;
+    }
+    for (uint64_t i = gtid; i < size; i += gnth) dst[i] = src[i];
 }
 
 //==============================================================================
