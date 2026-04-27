@@ -121,10 +121,57 @@ void memcpy_block(void* __restrict__ dst_v, const void* __restrict__ src_v,
 }
 
 //==============================================================================
-// put_local — execute all IPC copies queued by Runtime::put_no_db().
-// Call from exactly one block (all threads cooperate). Does nothing if no
-// local ops were queued. Issues a __threadfence_system() at the end so peers
-// observe the writes before flush() rings the remote DWQ doorbell.
+// flush — block-cooperative commit of all pre-staged ops.
+//
+// Block 0 only. Two phases:
+//   1. Execute IPC fast-path copies that Runtime::put_no_db staged for
+//      same-node peers (block-cooperative GPU memcpy + threadfence_system
+//      so the receiver observes the writes).
+//   2. Single-thread MMIO write to the DWQ trigger counter (the NIC then
+//      fires every RMA queued by Runtime::put_no_db since the last reset).
+//
+// Calling contract:
+//   - Always call from block (0,0,0).
+//   - When n_local_ops_ > 0 (i.e. when the runtime staged any IPC copies),
+//     ALL threads of block 0 must enter — phase 1 uses __syncthreads.
+//     Single-thread call is only safe when n_local_ops_ == 0 (typical for
+//     inter-node-only configurations) OR blockDim == 1.
+//   - For source portability with the MLX5 backend (whose flush has no
+//     IPC phase and tolerates either calling form), the recommended
+//     pattern is to ALWAYS call flush from all threads of block 0.
+//==============================================================================
+__device__ __forceinline__
+void flush(DeviceCtx* ctx) {
+    if (blockIdx.x != 0 || blockIdx.y != 0 || blockIdx.z != 0) return;
+
+    // Phase 1: IPC fast-path copies (no-op when nothing staged).
+    if (ctx->n_local_ops_ > 0) {
+        for (uint64_t i = 0; i < ctx->n_local_ops_; i++) {
+            memcpy_block(ctx->local_ops_[i].dst,
+                         ctx->local_ops_[i].src,
+                         ctx->local_ops_[i].size);
+        }
+        __syncthreads();
+        if (detail::tid_in_block() == 0) __threadfence_system();
+    }
+
+    // Phase 2: ring the DWQ trigger doorbell.
+    if (detail::tid_in_block() == 0) {
+        *ctx->trigger_addr_ = ctx->trigger_val_;
+        __threadfence_system();
+    }
+}
+
+//==============================================================================
+// put_local — DEPRECATED low-level entry: now subsumed by flush().
+//
+// Retained for backwards compatibility with kernels that explicitly invoked
+// the IPC phase before the DWQ trigger. New code must NOT call this — flush()
+// already runs the IPC copies. Calling both performs the IPC memcpys twice
+// and is a bug.
+//
+// Will be removed in a future release; new device API surface is just
+// put_no_db / get_no_db / flush / quiet (per spec §5.4).
 //==============================================================================
 __device__ __forceinline__
 void put_local(DeviceCtx* ctx) {
@@ -136,20 +183,6 @@ void put_local(DeviceCtx* ctx) {
     }
     __syncthreads();
     if (detail::tid_in_block() == 0) __threadfence_system();
-}
-
-//==============================================================================
-// flush — ring the (virtual) doorbell.
-// Writes the CXI trigger counter MMIO; the NIC then executes every RMA that
-// was queued by Runtime::put_no_db() since the last reset(). Call from
-// exactly one thread (e.g. threadIdx.x == 0 with a single-block launch).
-//==============================================================================
-__device__ __forceinline__
-void flush(DeviceCtx* ctx) {
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        *ctx->trigger_addr_ = ctx->trigger_val_;
-        __threadfence_system();
-    }
 }
 
 //==============================================================================
