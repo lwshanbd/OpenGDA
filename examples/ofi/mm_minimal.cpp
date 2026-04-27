@@ -1,16 +1,21 @@
 /**
- * mm_minimal.cpp - Distributed matrix multiplication on the unified gicc::
- * high-level API. Same algorithm and timing methodology as the legacy
- * mm_gda_minimal.cpp, but the communication path is built entirely on
- * gicc::Runtime / gicc::Token / gicc::flush / Runtime::wait.
+ * mm_minimal.cpp - Distributed matmul on the unified gicc::launch API.
  *
- * Per ring step:
- *   - tok = rt.put_no_db(B[cur], left, next_buf, stripe)   // host-side DWQ enqueue
- *   - ctx = rt.prepare_trigger(tok)
- *   - trigger_kernel<<<1,1>>>(ctx)        // calls gicc::flush(ctx)
- *   - matmul_kernel<<<>>>(...)            // overlaps with the in-flight RDMA
- *   - hipDeviceSynchronize()
- *   - rt.wait(tok)                        // host wait for that specific op
+ * Same npes-step ring algorithm as before, but expressed in the
+ * spec-canonical form: one fused kernel that does
+ *   put_no_db (single thread, host-staged on OFI / device WQE on MLX5)
+ *     → flush (block-cooperative; on OFI also runs IPC fast-path copies)
+ *     → matmul body (overlaps with the in-flight RDMA)
+ *     → quiet (block-cooperative wait for RDMA to land).
+ *
+ * Compared to the previous explicit form, this drops:
+ *   - Hand-rolled hipIpcGetMemHandle / OpenMemHandle dance
+ *     (rt.exchange() captures and opens IPC handles automatically;
+ *      flush() executes the staged IPC copies cooperatively).
+ *   - The need_dwq / left_is_local / right_is_local branching
+ *     (rt.put_no_db internally chooses IPC fast-path vs DWQ).
+ *   - The standalone gicc_trigger_kernel.
+ *   - The prepare_trigger + per-op Token + host wait pattern.
  *
  * Run:
  *   FI_MR_CACHE_MAX_COUNT=0 \
@@ -20,8 +25,6 @@
  */
 #include <iostream>
 #include <ctime>
-#include <cstring>
-#include <unistd.h>
 #include <vector>
 
 #include <hip/hip_runtime.h>
@@ -47,13 +50,27 @@ float timediff_us(const timespec& a, const timespec& b) {
 }
 
 // =============================================================================
-// HIP kernels
+// Fused matmul + RDMA-forward kernel.
+//
+// Thread (0,0) of block (0,0) issues the put. flush() and quiet() are called
+// unguarded — they internally restrict to block 0 and run block-cooperatively
+// (flush executes any IPC fast-path copies; quiet stripes the per-op
+// completion poll across block-0 threads).
 // =============================================================================
-__global__ void matmul_stripe_kernel(const float* __restrict__ As,
-                                     const float* __restrict__ Bs,
-                                     float* __restrict__ Cs,
-                                     int N, int Ns, int col_offset)
+__global__ void matmul_step_kernel(gicc::DeviceCtx* ctx,
+                                   const float* __restrict__ As,
+                                   const float* __restrict__ Bs,
+                                   float* __restrict__ Cs,
+                                   int N, int Ns, int col_offset,
+                                   uint64_t la, uint32_t lk,
+                                   uint64_t ra, uint32_t rk, uint32_t sz)
 {
+    if (threadIdx.x == 0 && threadIdx.y == 0
+        && blockIdx.x == 0 && blockIdx.y == 0) {
+        gicc::put_no_db(ctx, la, lk, ra, rk, sz);
+    }
+    gicc::flush(ctx);   // block-cooperative: IPC copies + DWQ trigger.
+
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
     if (k < N && j < Ns) {
@@ -62,12 +79,8 @@ __global__ void matmul_stripe_kernel(const float* __restrict__ As,
             atomicAdd(&Cs[i * N + col_offset + j], As[i * N + k] * b_kj);
         }
     }
-}
 
-// Trigger-only kernel: writes the DWQ trigger MMIO via gicc::flush(ctx).
-// The host has already populated ctx->trigger_val_ via prepare_trigger(token).
-__global__ void gicc_trigger_kernel(gicc::DeviceCtx* ctx) {
-    gicc::flush(ctx);
+    gicc::quiet(ctx);   // block-cooperative wait.
 }
 
 // =============================================================================
@@ -86,21 +99,11 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    int left_neighbor  = (npes + mype - 1) % npes;
-    int right_neighbor = (mype + 1) % npes;
-
-    // On-node neighbor detection via Bootstrap's locality map.
-    std::vector<bool> locality_map = rt.boot().locality_map();
-
-    bool use_ipc = (getenv("GICC_DISABLE_IPC") == nullptr);
-    bool left_is_local  = use_ipc && locality_map[left_neighbor];
-    bool right_is_local = use_ipc && locality_map[right_neighbor];
+    int left_neighbor = (npes + mype - 1) % npes;
 
     if (mype < 8) {
         std::cerr << "Rank " << mype << " gpu " << rt.gpu_id()
-                  << ": left=" << left_neighbor << (left_is_local ? "(local)" : "(REMOTE)")
-                  << ", right=" << right_neighbor << (right_is_local ? "(local)" : "(REMOTE)")
-                  << "\n";
+                  << ": forwarding to left=" << left_neighbor << "\n";
     }
 
     int N = (argc > 1) ? atoi(argv[1]) : 4096;
@@ -108,8 +111,6 @@ int main(int argc, char** argv)
     const int Ns = N / npes;
     const size_t stripe_size = (size_t)N * Ns * sizeof(float);
 
-    // Scale iterations with problem size: large Ns (few ranks) → fewer runs
-    // to avoid 80+ minute atomicAdd-heavy matmul.
     const int TOTAL_RUNS  = 10;
     const int WARMUP_RUNS = 2;
 
@@ -117,7 +118,6 @@ int main(int argc, char** argv)
         std::cerr << "Matrix stripe: " << N << 'x' << Ns << ", " << stripe_size
                   << " bytes, " << TOTAL_RUNS << " runs\n";
 
-    // Host init
     auto h_As = new float[N * Ns];
     auto h_Bs = new float[N * Ns];
     auto h_Cs = new float[N * Ns];
@@ -127,7 +127,6 @@ int main(int argc, char** argv)
         h_Cs[i] = 0;
     }
 
-    // Device buffers (double-buffered B)
     float *d_As, *d_Cs;
     float *d_B[2];
     HIP_CHECK(hipMalloc(&d_As,   stripe_size));
@@ -139,36 +138,6 @@ int main(int argc, char** argv)
     HIP_CHECK(hipMemcpy(d_Cs,   h_Cs, stripe_size, hipMemcpyHostToDevice));
     HIP_CHECK(hipMemset(d_B[1], 0, stripe_size));
 
-    // Same-node IPC setup: exchange HIP IPC handles with the right neighbor
-    // through Bootstrap (point-to-point), separate from the Bootstrap's
-    // own KVS namespace.
-    float* right_d_B[2] = {nullptr, nullptr};
-    {
-        hipIpcMemHandle_t my_handles[2];
-        HIP_CHECK(hipIpcGetMemHandle(&my_handles[0], d_B[0]));
-        HIP_CHECK(hipIpcGetMemHandle(&my_handles[1], d_B[1]));
-
-        // Ring exchange: send to left, recv from right. All ranks calling a
-        // blocking send first would deadlock once payload exceeds the eager
-        // threshold, so order by rank parity to break the cycle.
-        hipIpcMemHandle_t right_handles[2];
-        if ((mype & 1) == 0) {
-            rt.boot().send(my_handles, (int)sizeof(my_handles), left_neighbor, 0);
-            rt.boot().recv(right_handles, (int)sizeof(right_handles), right_neighbor, 0);
-        } else {
-            rt.boot().recv(right_handles, (int)sizeof(right_handles), right_neighbor, 0);
-            rt.boot().send(my_handles, (int)sizeof(my_handles), left_neighbor, 0);
-        }
-
-        if (right_is_local) {
-            HIP_CHECK(hipIpcOpenMemHandle((void**)&right_d_B[0], right_handles[0],
-                                           hipIpcMemLazyEnablePeerAccess));
-            HIP_CHECK(hipIpcOpenMemHandle((void**)&right_d_B[1], right_handles[1],
-                                           hipIpcMemLazyEnablePeerAccess));
-        }
-    }
-
-    // Register the two B buffers with gicc::Runtime
     auto gB0 = rt.register_buffer(d_B[0], stripe_size, true);
     auto gB1 = rt.register_buffer(d_B[1], stripe_size, true);
     gicc::Buffer* gB[2] = { &gB0, &gB1 };
@@ -181,21 +150,27 @@ int main(int argc, char** argv)
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
                  (Ns + blockDim.y - 1) / blockDim.y);
 
-    // Warm-up
-    {
-        int col_offset = mype * Ns;
-        hipLaunchKernelGGL(matmul_stripe_kernel, gridDim, blockDim, 0, 0,
-                           d_As, d_B[0], d_Cs, N, Ns, col_offset);
-        HIP_CHECK(hipDeviceSynchronize());
-        HIP_CHECK(hipMemset(d_Cs, 0, stripe_size));
+    // Cache the per-buf RemoteBufferInfo for the left neighbor (the put
+    // destination). The put writes my gB[cur].addr → left's gB[next].addr.
+    gicc::RemoteBufferInfo left_remote[2] = {
+        rt.remote_buffer(left_neighbor, 0),
+        rt.remote_buffer(left_neighbor, 1),
+    };
 
-        // Warm-up DWQ: a single put + flush + host wait
-        auto wtok = rt.put_no_db(*gB[0], left_neighbor, /*dst_idx=*/0, stripe_size);
-        auto* tctx = rt.prepare_trigger(wtok);
-        hipLaunchKernelGGL(gicc_trigger_kernel, dim3(1), dim3(1), 0, 0, tctx);
+    // Warm-up.
+    {
+        const int cur_buf  = 0;
+        const int next_buf = 1;
+        const int col_offset = mype * Ns;
+        gicc::launch<matmul_step_kernel>(rt, gridDim, blockDim,
+            left_neighbor, next_buf,
+            d_As, d_B[cur_buf], d_Cs, N, Ns, col_offset,
+            (uint64_t)gB[cur_buf]->addr, gB[cur_buf]->lkey,
+            (uint64_t)left_remote[next_buf].addr, left_remote[next_buf].rkey,
+            (uint32_t)stripe_size);
         HIP_CHECK(hipDeviceSynchronize());
-        rt.wait(wtok);
         rt.reset();
+        HIP_CHECK(hipMemset(d_Cs, 0, stripe_size));
     }
     rt.boot().barrier();
 
@@ -213,37 +188,24 @@ int main(int argc, char** argv)
             const int block_num = (mype + s) % npes;
             const int cur_buf   = s % 2;
             const int next_buf  = (s + 1) % 2;
+            const int col_offset = block_num * Ns;
 
-            bool need_dwq = !left_is_local;
-            gicc::Token tok{0};
-            if (need_dwq) {
-                tok = rt.put_no_db(*gB[cur_buf], left_neighbor, next_buf, stripe_size);
-                auto* tctx = rt.prepare_trigger(tok);
-                hipLaunchKernelGGL(gicc_trigger_kernel, dim3(1), dim3(1), 0, 0, tctx);
-            }
-
-            if (right_is_local) {
-                HIP_CHECK(hipMemcpyAsync(d_B[next_buf], right_d_B[cur_buf],
-                                         stripe_size, hipMemcpyDeviceToDevice));
-            }
-
-            int col_offset = block_num * Ns;
-            hipLaunchKernelGGL(matmul_stripe_kernel, gridDim, blockDim, 0, 0,
-                               d_As, d_B[cur_buf], d_Cs, N, Ns, col_offset);
+            gicc::launch<matmul_step_kernel>(rt, gridDim, blockDim,
+                left_neighbor, next_buf,
+                d_As, d_B[cur_buf], d_Cs, N, Ns, col_offset,
+                (uint64_t)gB[cur_buf]->addr, gB[cur_buf]->lkey,
+                (uint64_t)left_remote[next_buf].addr, left_remote[next_buf].rkey,
+                (uint32_t)stripe_size);
 
             HIP_CHECK(hipDeviceSynchronize());
-            if (need_dwq) {
-                rt.wait(tok);
-                rt.reset();
-            }
-
+            rt.reset();
             rt.boot().barrier();
         }
 
         clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
         times[run] = timediff_us(t0, t1);
 
-        if (mype == 0 && run % 100 == 0) {
+        if (mype == 0) {
             std::cout << "Run " << run << ": " << times[run] << " us"
                       << (run < WARMUP_RUNS ? " (warmup)" : "") << "\n";
         }
@@ -253,17 +215,12 @@ int main(int argc, char** argv)
     for (int i = WARMUP_RUNS; i < TOTAL_RUNS; i++) sum += times[i];
     double avg = sum / (TOTAL_RUNS - WARMUP_RUNS);
     if (mype == 0) {
-        std::cout << "DWQ + HIP average (runs " << WARMUP_RUNS << "-" << (TOTAL_RUNS - 1)
-                  << "): " << avg << " us\n";
+        std::cout << "gicc::launch average (runs " << WARMUP_RUNS << "-"
+                  << (TOTAL_RUNS - 1) << "): " << avg << " us\n";
     }
 
     HIP_CHECK(hipMemcpy(h_Cs, d_Cs, stripe_size, hipMemcpyDeviceToHost));
 
-    // Cleanup
-    if (right_is_local) {
-        HIP_CHECK(hipIpcCloseMemHandle(right_d_B[0]));
-        HIP_CHECK(hipIpcCloseMemHandle(right_d_B[1]));
-    }
     HIP_CHECK(hipFree(d_B[1]));
     HIP_CHECK(hipFree(d_B[0]));
     HIP_CHECK(hipFree(d_Cs));

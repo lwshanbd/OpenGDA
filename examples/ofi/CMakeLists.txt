@@ -100,6 +100,7 @@ if(GICC_BUILD_PLUGIN OR GICC_OFI_PLUGIN_PATH)
     gicc_ofi_example(test_launch_real ${CMAKE_SOURCE_DIR}/legacy/ofi/test_launch_real.cpp)
     gicc_target_plugin(test_launch_real)
     gicc_target_plugin(test_gicc)
+    gicc_target_plugin(mm_minimal)
 endif()
 
 # Pure MPI barrier reference benchmark (CPU-triggered, no HIP/libfabric).
