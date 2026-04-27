@@ -101,6 +101,7 @@ if(GICC_BUILD_PLUGIN OR GICC_OFI_PLUGIN_PATH)
     gicc_target_plugin(test_launch_real)
     gicc_target_plugin(test_gicc)
     gicc_target_plugin(mm_minimal)
+    gicc_target_plugin(jacobi)
 endif()
 
 # Pure MPI barrier reference benchmark (CPU-triggered, no HIP/libfabric).

@@ -1,14 +1,16 @@
 /**
- * jacobi.cpp - Jacobi solver on the OFI/CXI backend of GICC.
+ * jacobi.cpp - Jacobi solver on the unified gicc::launch API.
  *
- * Port of examples/gicc/jacobi.cu (MLX5 backend) to HIP + libfabric/CXI.
+ * One fused kernel per iter:
+ *   1. put_no_db(top neighbor, top halo row)   <-- IPC or DWQ, dispatched in put_no_db
+ *   2. put_no_db(bottom neighbor, bottom halo row)
+ *   3. compute interior + L2 norm reduction
+ *   4. flush(ctx)  <-- ring DWQ trigger for any DWQ-routed puts
+ *   5. quiet(ctx)  <-- wait for DWQ completion
  *
- * Per iteration:
- *   - Host queues 2 puts (top halo row, bottom halo row) via rt.put_no_db()
- *   - rt.prepare_trigger(tok) returns a flush-only DeviceCtx
- *   - fused jacobi kernel: compute interior + last block writes trigger MMIO
- *   - host syncs stream, rt.wait(top_tok), rt.wait(bottom_tok), rt.reset()
- *   - rt.barrier(), optional L2 norm allreduce
+ * The two halo puts target DIFFERENT peers (multi-peer in one launch);
+ * v1.5 makes peer + dst_buf per-CALL on put_no_db, so this works
+ * naturally without launch_multi or two separate launches.
  *
  * Run:
  *   FI_MR_CACHE_MAX_COUNT=0 \
@@ -17,7 +19,6 @@
  */
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -65,18 +66,37 @@ __global__ void initialize_boundaries_kernel(
     }
 }
 
-// Compute-only jacobi kernel. After it completes, a separate single-block
-// trigger kernel runs gicc::flush() — flush itself does the IPC fast-path
-// copies block-cooperatively and rings the remote DWQ doorbell. Splitting
-// from compute keeps this trigger launch's grid at one block as required by
-// flush's "block 0 only" rule.
+void launch_initialize_boundaries(real* a_new, real* a, real pi, int offset,
+                                   int nx, int my_ny, int ny) {
+    initialize_boundaries_kernel<<<(my_ny + 127) / 128, 128>>>(
+        a_new, a, pi, offset, nx, my_ny, ny);
+    HIP_CHECK(hipGetLastError());
+}
+
+// Fused jacobi step: two halo puts (different peers!) + compute + flush + quiet.
 template <int BX, int BY>
-__global__ void jacobi_kernel_compute(
+__global__ void jacobi_step_kernel(
+    gicc::DeviceCtx* ctx,
     real* __restrict__ a_new, const real* __restrict__ a,
     real* __restrict__ l2_norm,
     const int iy_start, const int iy_end, const int nx,
-    const bool calculate_norm)
+    const bool calculate_norm,
+    int top_peer,    int top_dst_buf,
+    int bottom_peer, int bottom_dst_buf,
+    uint64_t top_la,    uint32_t top_lk,
+    uint64_t top_ra,    uint32_t top_rk,
+    uint64_t bottom_la, uint32_t bottom_lk,
+    uint64_t bottom_ra, uint32_t bottom_rk,
+    uint32_t halo_bytes)
 {
+    // Two halo puts to two different peers — multi-peer in one launch.
+    // put_no_db must be called from all threads of block 0 (IPC route is
+    // block-cooperative). Other blocks early-return inside put_no_db.
+    gicc::put_no_db(ctx, top_peer,    top_dst_buf,
+                    top_la,    top_lk,    top_ra,    top_rk,    halo_bytes);
+    gicc::put_no_db(ctx, bottom_peer, bottom_dst_buf,
+                    bottom_la, bottom_lk, bottom_ra, bottom_rk, halo_bytes);
+
     int iy = blockIdx.y * blockDim.y + threadIdx.y + iy_start;
     int ix = blockIdx.x * blockDim.x + threadIdx.x + 1;
     real local_l2 = 0.0f;
@@ -97,30 +117,9 @@ __global__ void jacobi_kernel_compute(
         if ((threadIdx.x % 32) == 0 && (threadIdx.y % 32) == 0)
             atomicAdd(l2_norm, local_l2);
     }
-}
 
-// Single-block kernel: flush() runs IPC copies cooperatively, then rings
-// the remote DWQ trigger doorbell.
-__global__ void jacobi_trigger_kernel(gicc::DeviceCtx* ctx) {
-    gicc::flush(ctx);
-}
-
-void launch_initialize_boundaries(real* a_new, real* a, real pi, int offset,
-                                   int nx, int my_ny, int ny) {
-    initialize_boundaries_kernel<<<(my_ny + 127) / 128, 128>>>(
-        a_new, a, pi, offset, nx, my_ny, ny);
-    HIP_CHECK(hipGetLastError());
-}
-
-void launch_jacobi_compute(
-    real* a_new, const real* a, real* l2_norm,
-    int iy_start, int iy_end, int nx, bool calc_norm, hipStream_t stream)
-{
-    constexpr int BX = 32, BY = 32;
-    dim3 grid((nx + BX - 1) / BX, (iy_end - iy_start + BY - 1) / BY);
-    jacobi_kernel_compute<BX, BY><<<grid, dim3(BX, BY), 0, stream>>>(
-        a_new, a, l2_norm, iy_start, iy_end, nx, calc_norm);
-    HIP_CHECK(hipGetLastError());
+    gicc::flush(ctx);   // single-thread MMIO trigger for any DWQ-routed puts
+    gicc::quiet(ctx);   // poll DWQ completion
 }
 
 // =============================================================================
@@ -145,7 +144,6 @@ bool get_arg(char** begin, char** end, const std::string& arg) {
 
 int main(int argc, char** argv)
 {
-    // Must run before Bootstrap init on Tioga/Flux multi-rank-per-node.
     unset_rocr_visible_devices();
 
     gicc::Runtime rt;
@@ -158,7 +156,6 @@ int main(int argc, char** argv)
     const int ny_cli   = get_argval<int>(argv, argv + argc, "-ny", 1024);
     const bool csv     = get_arg(argv, argv + argc, "-csv");
 
-    // Force ny-2 divisible by size for uniform chunk size (simplifies offsets).
     const int nx = nx_cli;
     int chunk_size = (ny_cli - 2) / size;
     if (chunk_size < 2) chunk_size = 2;
@@ -168,11 +165,11 @@ int main(int argc, char** argv)
     const size_t buf_size  = (size_t)nx * buf_rows * sizeof(real);
 
     if (rank == 0 && !csv) {
-        printf("GICC/OFI Jacobi: %d ranks, mesh %d x %d, chunk %d, buf %zu bytes, %d iters\n",
+        printf("GICC/OFI Jacobi (unified launch): %d ranks, mesh %d x %d, "
+               "chunk %d, buf %zu bytes, %d iters\n",
                size, ny, nx, chunk_size, buf_size, iter_max);
     }
 
-    // Device buffers (double-buffered).
     real* buf[2];
     HIP_CHECK(hipMalloc(&buf[0], buf_size));
     HIP_CHECK(hipMalloc(&buf[1], buf_size));
@@ -189,7 +186,6 @@ int main(int argc, char** argv)
                                  nx, chunk_size, ny - 2);
     HIP_CHECK(hipDeviceSynchronize());
 
-    // Register with gicc::Runtime.
     auto gbuf0 = rt.register_buffer(buf[0], buf_size, true);
     auto gbuf1 = rt.register_buffer(buf[1], buf_size, true);
     rt.exchange();
@@ -197,12 +193,13 @@ int main(int argc, char** argv)
 
     const int top    = (rank > 0) ? rank - 1 : size - 1;
     const int bottom = (rank + 1) % size;
-    const bool has_top    = (size > 1);
-    const bool has_bottom = (size > 1);
 
     // Uniform chunks => top neighbor's bottom halo row is at iy_end on their buf.
     const size_t dst_offset_to_top    = (size_t)iy_end * row_bytes;  // their "bottom halo"
     const size_t dst_offset_to_bottom = 0;                           // their "top halo" (row 0)
+
+    const size_t src_offset_top    = (size_t)iy_start * row_bytes;       // my row 1
+    const size_t src_offset_bottom = (size_t)(iy_end - 1) * row_bytes;   // my last interior
 
     real* l2_norm_d;
     real* l2_norm_h;
@@ -212,43 +209,41 @@ int main(int argc, char** argv)
     hipStream_t stream;
     HIP_CHECK(hipStreamCreate(&stream));
 
-    auto do_halo_and_kernel = [&](int cur_buf, int next_buf, bool calc_norm) {
-        gicc::Buffer& gnext = (next_buf == 0) ? gbuf0 : gbuf1;
+    constexpr int BX = 32, BY = 32;
+    dim3 grid((nx + BX - 1) / BX, (chunk_size + BY - 1) / BY);
+    dim3 block(BX, BY);
 
-        gicc::Token tok_top{0}, tok_bot{0};
-        if (has_top) {
-            tok_top = rt.put_no_db(gnext, top, next_buf, row_bytes,
-                                   /*src_offset=*/(size_t)iy_start * row_bytes,
-                                   /*dst_offset=*/dst_offset_to_top);
-        }
-        if (has_bottom) {
-            tok_bot = rt.put_no_db(gnext, bottom, next_buf, row_bytes,
-                                   /*src_offset=*/(size_t)(iy_end - 1) * row_bytes,
-                                   /*dst_offset=*/dst_offset_to_bottom);
-        }
-        gicc::DeviceCtx* ctx = rt.prepare_trigger(has_top ? tok_top : tok_bot);
+    auto top_remote_for = [&](int next_buf) {
+        return rt.remote_buffer(top, next_buf);
+    };
+    auto bot_remote_for = [&](int next_buf) {
+        return rt.remote_buffer(bottom, next_buf);
+    };
+
+    auto run_step = [&](int cur_buf, int next_buf, bool calc_norm) {
+        gicc::Buffer& gnext = (next_buf == 0) ? gbuf0 : gbuf1;
+        auto top_ri = top_remote_for(next_buf);
+        auto bot_ri = bot_remote_for(next_buf);
 
         HIP_CHECK(hipMemsetAsync(l2_norm_d, 0, sizeof(real), stream));
 
-        launch_jacobi_compute(buf[next_buf], buf[cur_buf], l2_norm_d,
-                              iy_start, iy_end, nx, calc_norm, stream);
-
-        // Single-block trigger kernel: fires IPC copies then remote DWQ.
-        // Must come AFTER compute since the halo row is what compute produced.
-        if (has_top || has_bottom) {
-            jacobi_trigger_kernel<<<1, 256, 0, stream>>>(ctx);
-            HIP_CHECK(hipGetLastError());
-        }
+        gicc::launch<jacobi_step_kernel<BX, BY>>(rt, grid, block, (size_t)0, stream,
+            buf[next_buf], buf[cur_buf], l2_norm_d,
+            iy_start, iy_end, nx, calc_norm,
+            top,    next_buf,
+            bottom, next_buf,
+            (uint64_t)gnext.addr + src_offset_top,    gnext.lkey,
+            (uint64_t)top_ri.addr + dst_offset_to_top, top_ri.rkey,
+            (uint64_t)gnext.addr + src_offset_bottom, gnext.lkey,
+            (uint64_t)bot_ri.addr + dst_offset_to_bottom, bot_ri.rkey,
+            (uint32_t)row_bytes);
 
         HIP_CHECK(hipStreamSynchronize(stream));
-        if (has_top)    rt.wait(tok_top);
-        if (has_bottom) rt.wait(tok_bot);
         rt.reset();
     };
 
-    // Warm-up (no norm, ignore result).
     for (int w = 0; w < 3; w++) {
-        do_halo_and_kernel(/*cur=*/0, /*next=*/1, /*calc=*/false);
+        run_step(/*cur=*/0, /*next=*/1, /*calc_norm=*/false);
         rt.boot().barrier();
     }
 
@@ -263,7 +258,7 @@ int main(int argc, char** argv)
     int iter = 0;
     for (; iter < iter_max && l2 > tol; iter++) {
         bool calc_norm = (iter % nccheck) == 0 || (!csv && (iter % 50) == 0);
-        do_halo_and_kernel(cur, nxt, calc_norm);
+        run_step(cur, nxt, calc_norm);
 
         if (calc_norm) {
             HIP_CHECK(hipMemcpy(l2_norm_h, l2_norm_d, sizeof(real),
