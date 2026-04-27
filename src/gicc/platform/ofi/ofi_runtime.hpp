@@ -270,13 +270,17 @@ public:
         return buffers_[lkey];
     }
 
-    // O(1) — rkey == peer's buf_index on this backend.
-    uint64_t peer_buffer_base(int peer, uint32_t rkey) const {
-        auto ri = const_cast<Fabric*>(comm_)->get_remote_info(peer, (int)rkey);
+    // Peer's registered base address for buffer index `dst_buf_idx`.
+    // Looked up by buffer index (NOT by libfabric MR key) — buf indices are
+    // dense and stable across ranks, MR keys are not. The host-side trace
+    // gets dst_buf_idx from the gicc::launch call site, not from the
+    // user's `rkey` arg in the device-side put_no_db call.
+    uint64_t peer_buffer_base(int peer, int dst_buf_idx) const {
+        auto ri = const_cast<Fabric*>(comm_)->get_remote_info(peer, dst_buf_idx);
         if (ri.rma_key == 0 && ri.rma_addr == 0) {
             fprintf(stderr,
-                "gicc::Runtime::peer_buffer_base(peer=%d, rkey=%u): not exchanged.\n",
-                peer, rkey);
+                "gicc::Runtime::peer_buffer_base(peer=%d, buf_idx=%d): not exchanged.\n",
+                peer, dst_buf_idx);
             std::abort();
         }
         return ri.rma_addr;
