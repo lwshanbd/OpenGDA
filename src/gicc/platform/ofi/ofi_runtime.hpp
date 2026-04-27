@@ -62,24 +62,19 @@ public:
           h_dev_ctx_(nullptr), d_dev_ctx_(nullptr),
           d_slot_pool_(nullptr), mr_slot_pool_(nullptr),
           d_operand_pool_(nullptr), mr_operand_pool_(nullptr),
-          my_n_ops_(0), my_n_remote_ops_(0), my_n_local_ops_(0),
-          atomic_signals_queued_(false),
-          h_local_ops_(nullptr), d_local_ops_(nullptr)
+          my_n_ops_(0), my_n_remote_ops_(0),
+          atomic_signals_queued_(false)
     {
         unset_rocr_visible_devices();
         comm_ = new Fabric(boot_);
 
         // Locality map from Bootstrap: [rank] = true iff rank shares our node.
-        // put_no_db() routes same-node writes through HIP IPC — the copy is
-        // done INSIDE the user's kernel by gicc::put_local(), using
-        // IPC-mapped peer pointers. Remote peers keep the DWQ/CXI path.
+        // put_no_db() routes same-node writes through HIP IPC entirely
+        // device-side: the kernel reads peer_mapped_ptrs_ exposed via
+        // DeviceCtx->ipc_map_ and does block-cooperative GPU stores
+        // directly. Remote peers keep the DWQ/CXI path.
         local_peer_ = boot_.locality_map();
         peer_mapped_ptrs_.assign(boot_.size(), {});
-
-        // Host-mapped array of local-op descriptors the kernel reads.
-        (void)hipHostMalloc(&h_local_ops_, POOL_SIZE * sizeof(LocalOp),
-                            hipHostMallocMapped);
-        (void)hipHostGetDevicePointer((void**)&d_local_ops_, h_local_ops_, 0);
 
         // ONE shared GPU buffer holds POOL_SIZE × uint64_t atomic_result
         // slots, registered with ONE MemoryRegion.
@@ -124,8 +119,8 @@ public:
         h_dev_ctx_->n_ops_             = 0;
         h_dev_ctx_->ipc_map_           = nullptr;
         h_dev_ctx_->max_bufs_per_rank_ = 0;
-        h_dev_ctx_->local_ops_         = nullptr;
-        h_dev_ctx_->n_local_ops_       = 0;
+        h_dev_ctx_->local_bufs_        = nullptr;
+        h_dev_ctx_->n_local_bufs_      = 0;
     }
 
     ~Runtime() {
@@ -151,9 +146,8 @@ public:
         }
         peer_mapped_ptrs_.clear();
 
-        if (h_local_ops_) (void)hipHostFree(h_local_ops_);
-
         if (d_ipc_map_) (void)hipFree(d_ipc_map_);
+        if (d_local_bufs_) (void)hipFree(d_local_bufs_);
 
         delete comm_;
     }
@@ -267,7 +261,6 @@ public:
             for (int b = 0; b < nbuf; b++) {
                 IpcMapEntry& e = host_map[(size_t)r * nbuf + b];
                 e.mapped_ptr  = peer_mapped_ptrs_[r][b];   // nullptr if off-node / self
-                e.remote_base = comm_->get_remote_info(r, b).rma_addr;
             }
         }
         const size_t map_bytes = host_map.size() * sizeof(IpcMapEntry);
@@ -279,6 +272,27 @@ public:
                       hipMemcpyHostToDevice) != hipSuccess) {
             fprintf(stderr, "GICC: hipMemcpy(ipc_map) failed\n");
             std::abort();
+        }
+
+        // Build and upload device-side local buffer base table. This is a
+        // snapshot at exchange() time — register_buffer calls made AFTER
+        // exchange() will not appear here (v1 limitation; matches the IPC
+        // map's snapshot semantics).
+        {
+            std::vector<LocalBufView> host_lb(local_bufs_.size());
+            for (size_t i = 0; i < local_bufs_.size(); i++) {
+                host_lb[i].base = local_bufs_[i].ptr;
+            }
+            const size_t lb_bytes = host_lb.size() * sizeof(LocalBufView);
+            if (hipMalloc(&d_local_bufs_, lb_bytes) != hipSuccess) {
+                fprintf(stderr, "GICC: hipMalloc(local_bufs) failed\n");
+                std::abort();
+            }
+            if (hipMemcpy(d_local_bufs_, host_lb.data(), lb_bytes,
+                          hipMemcpyHostToDevice) != hipSuccess) {
+                fprintf(stderr, "GICC: hipMemcpy(local_bufs) failed\n");
+                std::abort();
+            }
         }
     }
 
@@ -333,28 +347,17 @@ public:
             exit(1);
         }
 
-        // IPC fast path: dest_rank shares our node and its buffer was IPC-
-        // mapped during exchange(). Stage a {dst,src,size} descriptor into
-        // host-mapped memory; the user's kernel will execute the copy via
-        // gicc::put_local(ctx) using direct GPU stores to the peer's
-        // IPC-mapped buffer. No DWQ op, no trigger slot consumed.
+        // IPC fast path is now handled entirely device-side: the kernel's
+        // gicc::put_no_db reads ctx->ipc_map_ and ctx->local_bufs_ to
+        // locate peer + local pointers and does block-cooperative GPU
+        // memcpy. The host has nothing to stage.
         if (dest_rank != comm_->rank()
             && local_peer_[dest_rank]
             && (int)peer_mapped_ptrs_[dest_rank].size() > dest_buf_index
             && peer_mapped_ptrs_[dest_rank][dest_buf_index] != nullptr)
         {
-            if ((int)my_n_local_ops_ >= POOL_SIZE) {
-                fprintf(stderr, "gicc::Runtime::put_no_db: local batch "
-                        "exceeds POOL_SIZE=%d\n", POOL_SIZE);
-                exit(1);
-            }
-            const int local_idx = (int)my_n_local_ops_;
-            h_local_ops_[local_idx].dst =
-                (char*)peer_mapped_ptrs_[dest_rank][dest_buf_index] + dst_offset;
-            h_local_ops_[local_idx].src = (char*)ob.ptr + src_offset;
-            h_local_ops_[local_idx].size = size;
-            my_n_local_ops_++;
-            return Token{ local_idx, /*is_local=*/true };
+            (void)ob; (void)size; (void)src_offset; (void)dst_offset;
+            return Token{ -1, /*is_local=*/true };
         }
 
         const int slot_idx = (int)my_n_ops_;
@@ -479,8 +482,8 @@ public:
         h_dev_ctx_->n_ops_             = my_n_remote_ops_;
         h_dev_ctx_->ipc_map_           = d_ipc_map_;
         h_dev_ctx_->max_bufs_per_rank_ = n_bufs_;
-        h_dev_ctx_->local_ops_         = d_local_ops_;
-        h_dev_ctx_->n_local_ops_       = my_n_local_ops_;
+        h_dev_ctx_->local_bufs_        = d_local_bufs_;
+        h_dev_ctx_->n_local_bufs_      = (int)local_bufs_.size();
         return d_dev_ctx_;
     }
 
@@ -494,8 +497,8 @@ public:
         h_dev_ctx_->n_ops_             = 0;
         h_dev_ctx_->ipc_map_           = d_ipc_map_;
         h_dev_ctx_->max_bufs_per_rank_ = n_bufs_;
-        h_dev_ctx_->local_ops_         = d_local_ops_;
-        h_dev_ctx_->n_local_ops_       = my_n_local_ops_;
+        h_dev_ctx_->local_bufs_        = d_local_bufs_;
+        h_dev_ctx_->n_local_bufs_      = (int)local_bufs_.size();
         return d_dev_ctx_;
     }
 
@@ -503,10 +506,12 @@ public:
     // Host-side wait for a specific token.
     //--------------------------------------------------------------------------
     void wait(Token tok) {
-        // Local ops are executed INSIDE the user's kernel by gicc::put_local().
-        // The caller is expected to have already synchronised the kernel (e.g.
-        // hipStreamSynchronize / hipDeviceSynchronize) before calling wait(),
-        // so the copy has landed and no host-side polling is required.
+        // IPC-routed ops are executed INSIDE the user's kernel by the
+        // device-side gicc::put_no_db (block-cooperative GPU stores
+        // through ctx->ipc_map_). The caller is expected to have already
+        // synchronised the kernel (e.g. hipStreamSynchronize /
+        // hipDeviceSynchronize) before calling wait(), so the copy has
+        // landed and no host-side polling is required.
         if (tok.is_local) return;
         while (fi_cntr_read(slots_[tok.slot_idx].completion_cntr) < 1) {}
     }
@@ -515,8 +520,9 @@ public:
     // reset — drain the current batch and recycle the slots.
     //--------------------------------------------------------------------------
     void reset() {
-        // my_n_ops_ only counts remote ops (locals live in a parallel pool),
-        // so the existing fi_cntr drain covers the right slots.
+        // my_n_ops_ only counts remote (DWQ) ops; IPC-routed puts execute
+        // entirely device-side and consume no slot, so the existing
+        // fi_cntr drain covers the right slots.
         for (uint64_t i = 0; i < my_n_ops_; i++) {
             while (fi_cntr_read(slots_[i].completion_cntr) < 1) {
                 fi_cq_read(comm_->fabric->cq, NULL, 0);
@@ -540,12 +546,11 @@ public:
                 fi_cntr_set(slots_[i].atomic_completion_cntr, 0);
         }
 
-        // Local ops: the copies fired inside the caller's kernel. Caller is
-        // required to have synchronised the kernel before reset(), so the
-        // staged descriptors can be discarded outright.
+        // IPC-routed puts: the copies fired inside the caller's kernel.
+        // Caller is required to have synchronised the kernel before
+        // reset(), so there is no host-side state to drain.
         my_n_ops_              = 0;
         my_n_remote_ops_       = 0;
-        my_n_local_ops_        = 0;
         atomic_signals_queued_ = false;
     }
 
@@ -589,7 +594,6 @@ private:
 
     uint64_t                      my_n_ops_;         // remote ops queued
     uint64_t                      my_n_remote_ops_;  // mirrors my_n_ops_
-    uint64_t                      my_n_local_ops_;   // IPC ops queued
     bool                          atomic_signals_queued_;
     std::vector<DwqWorkBuilder*>  my_pending_;
 
@@ -605,19 +609,18 @@ private:
     std::vector<bool>                  local_peer_;
     std::vector<std::vector<void*>>    peer_mapped_ptrs_;
 
-    // Host-mapped array of LocalOp descriptors. put_no_db() fills entries
-    // here; the kernel reads them via d_local_ops_ during gicc::put_local().
-    LocalOp*                           h_local_ops_;
-    LocalOp*                           d_local_ops_;
-
     // Per-runtime IPC map uploaded after exchange(). Indexed
     // [peer * n_bufs_ + buf_idx]. Each entry's mapped_ptr is non-null
     // exactly when peer is on the same node and exposed an IPC handle
-    // for that buffer; remote_base is the peer's registered RMA base
-    // address (used to translate dst_addr in put_no_db to the local
-    // IPC-mapped pointer). nullptr until exchange() runs.
+    // for that buffer. nullptr until exchange() runs.
     IpcMapEntry*                       d_ipc_map_      = nullptr;
     int                                n_bufs_         = 0;
+
+    // Per-runtime local-buffer base table uploaded after exchange().
+    // Indexed [buf_idx]; base is the GPU pointer registered via
+    // register_buffer. Used by the device-side put_no_db / get_no_db to
+    // resolve (src_buf, src_offset) → real GPU pointer.
+    LocalBufView*                      d_local_bufs_   = nullptr;
 };
 
 } // namespace gicc
