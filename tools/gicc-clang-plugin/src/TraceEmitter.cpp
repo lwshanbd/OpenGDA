@@ -18,12 +18,16 @@
  *     references in the emitted source. blockDim.* / gridDim.* are
  *     rewritten to the host-side `block.*` / `grid.*` dim3 fields.
  *
- * F5 (this commit): lift gicc::get_no_db the same way as put_no_db.
- *     Identical lookup machinery (buffer_by_lkey + peer_buffer_base);
- *     emits rt.get_no_db(local_dst, peer, dst_buf_idx, size, local_off,
- *     remote_off). local_addr/lkey is the read DESTINATION, not source —
- *     reflected in the emitted variable names (_gicc_dst / _gicc_loff /
- *     _gicc_roff) for readability.
+ * F5: lift gicc::get_no_db the same way as put_no_db. Identical lookup
+ *     (rt.buffer_by_lkey gives the local Buffer); emits rt.get_no_db(
+ *     local_dst, src_rank, src_buf, size, local_off, remote_off).
+ *     The local buffer is the read DESTINATION (not source) for a get.
+ *
+ * v1.5 simplification: put_no_db / get_no_db now take 7 args
+ *   put_no_db(ctx, target_rank, dst_buf, dst_offset, src_buf, src_offset, size)
+ *   get_no_db(ctx, source_rank, src_buf, src_offset, dst_buf, dst_offset, size)
+ * The user passes offsets directly — the emitter no longer needs to
+ * reverse-engineer them from absolute addr / base.
  */
 #include "TraceEmitter.h"
 
@@ -327,62 +331,68 @@ enum class RmaOp { Put, Get };
 struct OpNames {
     const char* rt_method;
     const char* local_var;   // _gicc_src for put, _gicc_dst for get
-    const char* local_off;   // _gicc_soff for put, _gicc_loff for get
-    const char* remote_off;  // _gicc_doff for put, _gicc_roff for get
 };
 
 OpNames names_for(RmaOp op) {
     if (op == RmaOp::Put) {
-        return {"put_no_db", "_gicc_src", "_gicc_soff", "_gicc_doff"};
+        return {"put_no_db", "_gicc_src"};
     }
-    return {"get_no_db", "_gicc_dst", "_gicc_loff", "_gicc_roff"};
+    return {"get_no_db", "_gicc_dst"};
 }
 
 // Emit the rt.put_no_db / rt.get_no_db call body itself (no synthetic
 // loop wrapping). Each emitted sub-expression has builtin substitution
 // applied so references to blockIdx.x etc. become _gicc_bx etc.
 //
-// New (v1.5) put/get signature with PER-CALL peer + dst_buf:
+// v1.5 7-arg layout. For put_no_db:
 //   ce->getArg(0)  ctx
-//   ce->getArg(1)  peer       <-- per-call destination rank
-//   ce->getArg(2)  dst_buf    <-- per-call destination buffer index
-//   ce->getArg(3)  local_addr (src for put, dst for get)
-//   ce->getArg(4)  local_lkey
-//   ce->getArg(5)  remote_addr
-//   ce->getArg(6)  remote_rkey  (ignored by host trace; consumed only by MLX5)
-//   ce->getArg(7)  size
-//   ce->getArg(8)  signaled (optional)
+//   ce->getArg(1)  target_rank   <-- per-call destination rank
+//   ce->getArg(2)  dst_buf       <-- per-call destination buffer index
+//   ce->getArg(3)  dst_offset
+//   ce->getArg(4)  src_buf       <-- caller's local buffer index
+//   ce->getArg(5)  src_offset
+//   ce->getArg(6)  size
+//   ce->getArg(7)  signaled (optional)
 //
-// peer + dst_buf come from the put_no_db call's own args (HK kernel
-// params), NOT from the kernel_trace::run signature, so a single kernel
-// can issue puts to multiple peers (e.g. jacobi halo: top + bottom).
+// For get_no_db the layout is symmetric:
+//   (ctx, source_rank, src_buf, src_offset, dst_buf, dst_offset, size)
+// In both cases the local buffer is the FIFTH non-ctx arg (idx 4) and
+// the local offset is the SIXTH (idx 5); the lift is identical aside
+// from rt method name + local-var name (Buffer comes from rt.buffer_by_lkey
+// on the local-side index regardless of direction).
+//
+// target/source_rank + dst/src_buf come from the call's own args (HK
+// kernel params), NOT from the kernel_trace::run signature, so a single
+// kernel can issue puts to multiple peers (e.g. jacobi halo: top + bottom).
 void emit_rma_call(std::ostream& out, int lvl, RmaOp op,
                    const clang::CallExpr* ce,
                    const clang::SourceManager& sm,
                    const clang::LangOptions& lo) {
     const OpNames n = names_for(op);
+    // For put: arg1 = target_rank, arg2 = dst_buf, arg3 = dst_offset,
+    //          arg4 = src_buf, arg5 = src_offset, arg6 = size.
+    // For get: arg1 = source_rank, arg2 = src_buf, arg3 = src_offset,
+    //          arg4 = dst_buf, arg5 = dst_offset, arg6 = size.
+    // The local-side buffer key is always arg4; remote-side rank/buf/offset
+    // are args 1/2/3; local offset is arg5; size is arg6.
     const std::string PEER = substitute_builtins(source_text_expr(ce->getArg(1), sm, lo));
-    const std::string DBUF = substitute_builtins(source_text_expr(ce->getArg(2), sm, lo));
-    const std::string A    = substitute_builtins(source_text_expr(ce->getArg(3), sm, lo));
-    const std::string LK   = substitute_builtins(source_text_expr(ce->getArg(4), sm, lo));
-    const std::string RA   = substitute_builtins(source_text_expr(ce->getArg(5), sm, lo));
-    const std::string S    = substitute_builtins(source_text_expr(ce->getArg(7), sm, lo));
+    const std::string RBUF = substitute_builtins(source_text_expr(ce->getArg(2), sm, lo));
+    const std::string ROFF = substitute_builtins(source_text_expr(ce->getArg(3), sm, lo));
+    const std::string LBUF = substitute_builtins(source_text_expr(ce->getArg(4), sm, lo));
+    const std::string LOFF = substitute_builtins(source_text_expr(ce->getArg(5), sm, lo));
+    const std::string SZ   = substitute_builtins(source_text_expr(ce->getArg(6), sm, lo));
 
     indent(out, lvl);     out << "{\n";
-    indent(out, lvl + 1); out << "int _gicc_peer = (int)(" << PEER << ");\n";
-    indent(out, lvl + 1); out << "int _gicc_dbuf = (int)(" << DBUF << ");\n";
     indent(out, lvl + 1); out << "auto& " << n.local_var
                               << " = rt.buffer_by_lkey((uint32_t)("
-                              << LK << "));\n";
-    indent(out, lvl + 1); out << "size_t " << n.local_off << " = (uint64_t)(" << A
-                              << ") - (uint64_t)" << n.local_var << ".addr;\n";
-    indent(out, lvl + 1); out << "uint64_t _gicc_base = rt.peer_buffer_base(_gicc_peer, _gicc_dbuf);\n";
-    indent(out, lvl + 1); out << "size_t " << n.remote_off << " = (uint64_t)(" << RA
-                              << ") - _gicc_base;\n";
+                              << LBUF << "));\n";
     indent(out, lvl + 1); out << "rt." << n.rt_method << "("
-                              << n.local_var << ", _gicc_peer, _gicc_dbuf, (size_t)("
-                              << S << "), "
-                              << n.local_off << ", " << n.remote_off << ");\n";
+                              << n.local_var << ", "
+                              << "(int)(" << PEER << "), "
+                              << "(int)(" << RBUF << "), "
+                              << "(size_t)(" << SZ << "), "
+                              << "(size_t)(" << LOFF << "), "
+                              << "(size_t)(" << ROFF << "));\n";
     indent(out, lvl);     out << "}\n";
 }
 
@@ -627,11 +637,11 @@ void emit_stmt(std::ostream& out, int lvl, const clang::Stmt* s,
         if (!fd) return;
         const std::string qn = fd->getQualifiedNameAsString();
         if (qn == "gicc::put_no_db") {
-            if (ce->getNumArgs() < 6) return;
+            if (ce->getNumArgs() < 7) return;
             emit_rma_block(out, lvl, RmaOp::Put, ce, hk, kernel,
                            loop_iters, sm, lo);
         } else if (qn == "gicc::get_no_db") {
-            if (ce->getNumArgs() < 6) return;
+            if (ce->getNumArgs() < 7) return;
             emit_rma_block(out, lvl, RmaOp::Get, ce, hk, kernel,
                            loop_iters, sm, lo);
         }

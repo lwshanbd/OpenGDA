@@ -2,19 +2,24 @@
  * Validator.cpp — see Validator.h for design intent.
  *
  * E3: every put_no_db / get_no_db call has all non-ctx, non-signaled
- * arguments host-known. v1.5 argument layout (per-call peer + dst_buf):
+ * arguments host-known. v1.5 7-arg layout. For put_no_db:
  *   0 ctx          (skip)
- *   1 peer
+ *   1 target_rank
  *   2 dst_buf
- *   3 local_addr
- *   4 local_lkey
- *   5 remote_addr
- *   6 remote_rkey
- *   7 size
- *   8 signaled     (optional, skip)
+ *   3 dst_offset
+ *   4 src_buf
+ *   5 src_offset
+ *   6 size
+ *   7 signaled     (optional, skip)
  *
- * Later commits add E4 (whitelist), E5 (non-HK control flow), and E6
- * (first-arg type) checks.
+ * For get_no_db the layout is symmetric: (ctx, source_rank, src_buf,
+ * src_offset, dst_buf, dst_offset, size, signaled). Validator treats
+ * arg-name labels as put_no_db's; users who saw a get_no_db diagnostic
+ * about "dst_offset" can mentally swap to "src_offset" — this is a
+ * cosmetic limitation we leave to v2.
+ *
+ * E4 (whitelist), E5 (non-HK control flow), and E6 (first-arg type)
+ * checks live below.
  */
 #include "Validator.h"
 
@@ -28,10 +33,8 @@ namespace {
 // Used in the diagnostic message to point the user at the wrong arg.
 const char* arg_name_for_put(unsigned i) {
     static const char* names[] = {
-        "ctx", "peer", "dst_buf",
-        "local_addr", "local_lkey",
-        "remote_addr", "remote_rkey",
-        "size", "signaled"
+        "ctx", "target_rank", "dst_buf", "dst_offset",
+        "src_buf", "src_offset", "size", "signaled"
     };
     if (i < sizeof(names) / sizeof(names[0])) return names[i];
     return "<?>";
@@ -220,9 +223,9 @@ bool Validator::validate(const KernelInfo& ki, const HKAnalysis& hk) {
         auto* ce = call.expr;
         const unsigned n = ce->getNumArgs();
 
-        // Skip ctx (arg 0). signaled (arg 8) is allowed to be any bool
-        // literal, so exclude it explicitly. v1.5 args 1..7 must be HK.
-        for (unsigned i = 1; i < n && i < 8; i++) {
+        // Skip ctx (arg 0). signaled (arg 7) is allowed to be any bool
+        // literal, so exclude it explicitly. v1.5 args 1..6 must be HK.
+        for (unsigned i = 1; i < n && i < 7; i++) {
             auto* a = ce->getArg(i);
             if (!hk.isHK(a)) {
                 diag.Report(a->getBeginLoc(), diags_.non_hk_arg)
