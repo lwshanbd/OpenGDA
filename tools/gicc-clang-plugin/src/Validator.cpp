@@ -1,15 +1,17 @@
 /**
  * Validator.cpp — see Validator.h for design intent.
  *
- * E3 (this commit): every put_no_db / get_no_db call has all non-ctx,
- * non-signaled arguments host-known. Argument names by index:
+ * E3: every put_no_db / get_no_db call has all non-ctx, non-signaled
+ * arguments host-known. v1.5 argument layout (per-call peer + dst_buf):
  *   0 ctx          (skip)
- *   1 local_addr
- *   2 local_lkey
- *   3 remote_addr
- *   4 remote_rkey
- *   5 size
- *   6 signaled     (optional, skip)
+ *   1 peer
+ *   2 dst_buf
+ *   3 local_addr
+ *   4 local_lkey
+ *   5 remote_addr
+ *   6 remote_rkey
+ *   7 size
+ *   8 signaled     (optional, skip)
  *
  * Later commits add E4 (whitelist), E5 (non-HK control flow), and E6
  * (first-arg type) checks.
@@ -26,8 +28,10 @@ namespace {
 // Used in the diagnostic message to point the user at the wrong arg.
 const char* arg_name_for_put(unsigned i) {
     static const char* names[] = {
-        "ctx", "local_addr", "local_lkey", "remote_addr",
-        "remote_rkey", "size", "signaled"
+        "ctx", "peer", "dst_buf",
+        "local_addr", "local_lkey",
+        "remote_addr", "remote_rkey",
+        "size", "signaled"
     };
     if (i < sizeof(names) / sizeof(names[0])) return names[i];
     return "<?>";
@@ -216,11 +220,9 @@ bool Validator::validate(const KernelInfo& ki, const HKAnalysis& hk) {
         auto* ce = call.expr;
         const unsigned n = ce->getNumArgs();
 
-        // Skip ctx (arg 0). We check arg 6 (signaled) only if the
-        // user passes a 7th arg, but per the spec it is allowed to be
-        // any bool literal — still, exclude index 6 explicitly so a
-        // common pattern like `, /*signaled*/ false` is never flagged.
-        for (unsigned i = 1; i < n && i < 6; i++) {
+        // Skip ctx (arg 0). signaled (arg 8) is allowed to be any bool
+        // literal, so exclude it explicitly. v1.5 args 1..7 must be HK.
+        for (unsigned i = 1; i < n && i < 8; i++) {
             auto* a = ce->getArg(i);
             if (!hk.isHK(a)) {
                 diag.Report(a->getBeginLoc(), diags_.non_hk_arg)

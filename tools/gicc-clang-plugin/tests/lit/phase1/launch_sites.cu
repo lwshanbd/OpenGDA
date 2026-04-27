@@ -5,5 +5,5 @@
 #include "gicc/gicc.hpp"
 __global__ void my_kernel(gicc::DeviceCtx*) {}
 void caller(gicc::Runtime& rt) {
-    gicc::launch<my_kernel>(rt, dim3(1), dim3(1), 0, 0);
+    gicc::launch<my_kernel>(rt, dim3(1), dim3(1));
 }

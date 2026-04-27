@@ -10,14 +10,15 @@
 // the local buffer is the read DESTINATION (not the source) for a get.
 //
 // CHECK: rt.buffer_by_lkey
-// CHECK: rt.peer_buffer_base(peer
+// CHECK: rt.peer_buffer_base(_gicc_peer
 // CHECK: rt.get_no_db
 #include <hip/hip_runtime.h>
 #include "gicc/gicc.hpp"
 #include "gicc/gicc_device.cuh"
-__global__ void k(gicc::DeviceCtx* ctx, uint64_t la, uint32_t lkey,
+__global__ void k(gicc::DeviceCtx* ctx, int peer, int src_buf,
+                  uint64_t la, uint32_t lkey,
                   uint64_t ra, uint32_t rkey, uint32_t s) {
-    gicc::get_no_db(ctx, la, lkey, ra, rkey, s);
+    gicc::get_no_db(ctx, peer, src_buf, la, lkey, ra, rkey, s);
     gicc::flush(ctx);
     gicc::quiet(ctx);
 }

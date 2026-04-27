@@ -6,7 +6,9 @@
 #include "gicc/gicc.hpp"
 #include "gicc/gicc_device.cuh"
 __global__ void k(gicc::DeviceCtx* ctx, uint64_t* dev_arr) {
-    gicc::put_no_db(ctx, 0, 0, dev_arr[0], 0, 0);
+    gicc::put_no_db(ctx, /*peer=*/0, /*dst_buf=*/0,
+                    /*la=*/0, /*lk=*/0,
+                    /*ra=*/dev_arr[0], /*rk=*/0, /*sz=*/0);
     gicc::flush(ctx);
     gicc::quiet(ctx);
 }

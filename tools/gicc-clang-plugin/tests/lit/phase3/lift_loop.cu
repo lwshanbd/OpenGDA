@@ -14,10 +14,12 @@
 #include <hip/hip_runtime.h>
 #include "gicc/gicc.hpp"
 #include "gicc/gicc_device.cuh"
-__global__ void k(gicc::DeviceCtx* ctx, int N, uint64_t la, uint32_t lkey,
+__global__ void k(gicc::DeviceCtx* ctx, int peer, int dst_buf,
+                  int N, uint64_t la, uint32_t lkey,
                   uint64_t ra, uint32_t rkey, uint32_t s) {
     for (int i = 0; i < N; i++) {
-        gicc::put_no_db(ctx, la + i*s, lkey, ra + i*s, rkey, s);
+        gicc::put_no_db(ctx, peer, dst_buf,
+                        la + i*s, lkey, ra + i*s, rkey, s);
     }
     gicc::flush(ctx);
     gicc::quiet(ctx);

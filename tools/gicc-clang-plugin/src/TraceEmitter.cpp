@@ -337,39 +337,47 @@ OpNames names_for(RmaOp op) {
 
 // Emit the rt.put_no_db / rt.get_no_db call body itself (no synthetic
 // loop wrapping). Each emitted sub-expression has builtin substitution
-// applied so references to blockIdx.x etc. become _gicc_bx etc. The
-// arg layout is identical for put and get (ctx, local_addr, local_lkey,
-// remote_addr, remote_rkey, size [, signaled]); only the variable
-// naming differs to reflect data flow direction.
+// applied so references to blockIdx.x etc. become _gicc_bx etc.
 //
-// The user's `remote_rkey` arg (ce->getArg(4)) is intentionally IGNORED on
-// the OFI host trace — the libfabric MR key is not a stable buffer index
-// and there's no reverse map. Instead we use `dst_buf_idx`, which the
-// gicc::launch call site already passed into this kernel_trace::run, to
-// locate the peer's registered base address. The MLX5 backend still
-// consumes the `rkey` arg device-side to build its WQE, so user code
-// stays portable.
+// New (v1.5) put/get signature with PER-CALL peer + dst_buf:
+//   ce->getArg(0)  ctx
+//   ce->getArg(1)  peer       <-- per-call destination rank
+//   ce->getArg(2)  dst_buf    <-- per-call destination buffer index
+//   ce->getArg(3)  local_addr (src for put, dst for get)
+//   ce->getArg(4)  local_lkey
+//   ce->getArg(5)  remote_addr
+//   ce->getArg(6)  remote_rkey  (ignored by host trace; consumed only by MLX5)
+//   ce->getArg(7)  size
+//   ce->getArg(8)  signaled (optional)
+//
+// peer + dst_buf come from the put_no_db call's own args (HK kernel
+// params), NOT from the kernel_trace::run signature, so a single kernel
+// can issue puts to multiple peers (e.g. jacobi halo: top + bottom).
 void emit_rma_call(std::ostream& out, int lvl, RmaOp op,
                    const clang::CallExpr* ce,
                    const clang::SourceManager& sm,
                    const clang::LangOptions& lo) {
     const OpNames n = names_for(op);
-    const std::string A  = substitute_builtins(source_text_expr(ce->getArg(1), sm, lo));
-    const std::string LK = substitute_builtins(source_text_expr(ce->getArg(2), sm, lo));
-    const std::string RA = substitute_builtins(source_text_expr(ce->getArg(3), sm, lo));
-    const std::string S  = substitute_builtins(source_text_expr(ce->getArg(5), sm, lo));
+    const std::string PEER = substitute_builtins(source_text_expr(ce->getArg(1), sm, lo));
+    const std::string DBUF = substitute_builtins(source_text_expr(ce->getArg(2), sm, lo));
+    const std::string A    = substitute_builtins(source_text_expr(ce->getArg(3), sm, lo));
+    const std::string LK   = substitute_builtins(source_text_expr(ce->getArg(4), sm, lo));
+    const std::string RA   = substitute_builtins(source_text_expr(ce->getArg(5), sm, lo));
+    const std::string S    = substitute_builtins(source_text_expr(ce->getArg(7), sm, lo));
 
     indent(out, lvl);     out << "{\n";
+    indent(out, lvl + 1); out << "int _gicc_peer = (int)(" << PEER << ");\n";
+    indent(out, lvl + 1); out << "int _gicc_dbuf = (int)(" << DBUF << ");\n";
     indent(out, lvl + 1); out << "auto& " << n.local_var
                               << " = rt.buffer_by_lkey((uint32_t)("
                               << LK << "));\n";
     indent(out, lvl + 1); out << "size_t " << n.local_off << " = (uint64_t)(" << A
                               << ") - (uint64_t)" << n.local_var << ".addr;\n";
-    indent(out, lvl + 1); out << "uint64_t _gicc_base = rt.peer_buffer_base(peer, dst_buf_idx);\n";
+    indent(out, lvl + 1); out << "uint64_t _gicc_base = rt.peer_buffer_base(_gicc_peer, _gicc_dbuf);\n";
     indent(out, lvl + 1); out << "size_t " << n.remote_off << " = (uint64_t)(" << RA
                               << ") - _gicc_base;\n";
     indent(out, lvl + 1); out << "rt." << n.rt_method << "("
-                              << n.local_var << ", peer, dst_buf_idx, (size_t)("
+                              << n.local_var << ", _gicc_peer, _gicc_dbuf, (size_t)("
                               << S << "), "
                               << n.local_off << ", " << n.remote_off << ");\n";
     indent(out, lvl);     out << "}\n";
@@ -733,12 +741,11 @@ std::string TraceEmitter::emit(const KernelInfo& ki, const HKAnalysis& hk) {
     out << "namespace gicc {\n";
     out << "namespace detail {\n";
     out << "template<> struct kernel_trace<&" << kname << "> {\n";
-    out << "    static void run(gicc::Runtime& rt, int peer, int dst_buf_idx, "
+    out << "    static void run(gicc::Runtime& rt, "
            "dim3 grid, dim3 block";
     if (!params.empty()) out << ", " << params;
     out << ") {\n";
-    out << "        (void)rt; (void)peer; (void)dst_buf_idx; "
-           "(void)grid; (void)block;\n";
+    out << "        (void)rt; (void)grid; (void)block;\n";
     for (unsigned i = 1; i < ki.decl->getNumParams(); i++) {
         out << "        (void)" << ki.decl->getParamDecl(i)->getNameAsString()
             << ";\n";
