@@ -6,7 +6,7 @@
 // Validates Phase F.3: a put_no_db inside an HK for-loop is wrapped in
 // the matching host-side for-loop in the sidecar trace specialization.
 // The loop variable `i` is HK because its init is a literal and the
-// cond uses kernel param N (HK), so the put's args (la + i*s, etc.) are
+// cond uses kernel param N (HK), so the put's args (i*s offsets) are
 // all HK and pass E3.
 //
 // CHECK: for (int i = 0; i < N; i++)
@@ -14,12 +14,10 @@
 #include <hip/hip_runtime.h>
 #include "gicc/gicc.hpp"
 #include "gicc/gicc_device.cuh"
-__global__ void k(gicc::DeviceCtx* ctx, int peer, int dst_buf,
-                  int N, uint64_t la, uint32_t lkey,
-                  uint64_t ra, uint32_t rkey, uint32_t s) {
+__global__ void k(gicc::DeviceCtx* ctx, int target, int dst_buf,
+                  int src_buf, int N, size_t s) {
     for (int i = 0; i < N; i++) {
-        gicc::put_no_db(ctx, peer, dst_buf,
-                        la + i*s, lkey, ra + i*s, rkey, s);
+        gicc::put_no_db(ctx, target, dst_buf, i*s, src_buf, i*s, s);
     }
     gicc::flush(ctx);
     gicc::quiet(ctx);

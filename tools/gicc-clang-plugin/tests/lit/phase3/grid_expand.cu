@@ -15,12 +15,10 @@
 #include <hip/hip_runtime.h>
 #include "gicc/gicc.hpp"
 #include "gicc/gicc_device.cuh"
-__global__ void k(gicc::DeviceCtx* ctx, int peer, int dst_buf,
-                  uint64_t base, uint32_t lkey,
-                  uint64_t rbase, uint32_t rkey, uint32_t s) {
+__global__ void k(gicc::DeviceCtx* ctx, int target, int dst_buf,
+                  int src_buf, size_t s) {
     int i = blockIdx.x;
-    gicc::put_no_db(ctx, peer, dst_buf,
-                    base + i*s, lkey, rbase + i*s, rkey, s);
+    gicc::put_no_db(ctx, target, dst_buf, i*s, src_buf, i*s, s);
     gicc::flush(ctx);
     gicc::quiet(ctx);
 }

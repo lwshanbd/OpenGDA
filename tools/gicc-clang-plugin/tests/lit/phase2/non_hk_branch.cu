@@ -7,7 +7,7 @@
 #include "gicc/gicc_device.cuh"
 __global__ void k(gicc::DeviceCtx* ctx, int* dev) {
     if (*dev > 0) {
-        gicc::put_no_db(ctx, 0, 0, 0, 0, 0, 0, 0);
+        gicc::put_no_db(ctx, 0, 0, 0, 0, 0, 0);
     }
     gicc::flush(ctx);
     gicc::quiet(ctx);
