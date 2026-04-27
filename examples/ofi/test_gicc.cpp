@@ -1,10 +1,14 @@
 /**
- * test_gicc.cpp - Smoke test for the unified gicc:: API on the libfabric/CXI backend.
+ * test_gicc.cpp - Smoke test for the unified gicc::launch API on the
+ * libfabric/CXI backend.
  *
- * The user-visible code below is structurally identical to what one would
- * write for the NVIB/mlx5 backend: gicc::Runtime, register_buffer, exchange,
- * put_no_db (host on cxi, device on mlx5), prepare, kernel { flush; quiet; },
- * reset.
+ * The kernel below is structurally identical to what one would write for
+ * the NVIB/mlx5 backend: an HK for-loop calling gicc::put_no_db inline,
+ * followed by gicc::flush(ctx) + gicc::quiet(ctx). On OFI the
+ * gicc-clang-plugin lifts the put_no_db loop into a host-side
+ * kernel_trace<&put_kernel> specialization that pre-stages each RDMA
+ * write via the DWQ; gicc::launch invokes that trace, then prepare(),
+ * then the kernel itself (where flush + quiet take over device-side).
  *
  * Run: FI_MR_CACHE_MAX_COUNT=0 srun -N 2 -n 2 --ntasks-per-node=1 ./test_gicc
  */
@@ -15,10 +19,17 @@
 #include "gicc/gicc.hpp"
 #include "gicc/gicc_device.cuh"
 
-__global__ void put_kernel(gicc::DeviceCtx* ctx) {
+__global__ void put_kernel(gicc::DeviceCtx* ctx,
+                           int n, uint64_t la, uint32_t lk,
+                           uint64_t ra, uint32_t rk, uint32_t s)
+{
     if (threadIdx.x == 0) {
-        gicc::flush(ctx);   // CXI: writes trigger MMIO; mlx5: rings BlueFlame doorbell
-        gicc::quiet(ctx);   // wait for completion
+        for (int i = 0; i < n; i++) {
+            gicc::put_no_db(ctx, la + (uint64_t)i * s, lk,
+                                 ra + (uint64_t)i * s, rk, s);
+        }
+        gicc::flush(ctx);
+        gicc::quiet(ctx);
     }
 }
 
@@ -57,7 +68,7 @@ int main(int argc, char** argv) {
 
     int peer = 1 - rank;
     constexpr size_t SIZE = 4096;
-    constexpr size_t N_PUTS = 4;
+    constexpr int    N_PUTS = 4;
 
     void* d_src = nullptr;
     void* d_dst = nullptr;
@@ -73,18 +84,19 @@ int main(int argc, char** argv) {
     rt.boot().barrier();
 
     if (rank == 0) {
-        printf("=== gicc unified API: %zu puts of %zu bytes ===\n", N_PUTS, SIZE);
-        for (size_t i = 0; i < N_PUTS; i++) {
-            // Host-side queue (CXI). On mlx5 this same call lives inside the kernel.
-            rt.put_no_db(src_buf, peer, dst_buf.index, SIZE, i * SIZE, i * SIZE);
-        }
-        auto* ctx = rt.prepare(peer, dst_buf.index);
-        hipLaunchKernelGGL(put_kernel, dim3(1), dim3(1), 0, 0, ctx);
+        printf("=== gicc::launch unified API: %d puts of %zu bytes ===\n",
+               N_PUTS, SIZE);
+        auto ri = rt.remote_buffer(peer, dst_buf.index);
+        gicc::launch<put_kernel>(rt, dim3(1), dim3(1), peer, dst_buf.index,
+                                 N_PUTS,
+                                 (uint64_t)src_buf.addr, src_buf.lkey,
+                                 (uint64_t)ri.addr,     ri.rkey,
+                                 (uint32_t)SIZE);
         (void)hipDeviceSynchronize();
         rt.reset();
     }
     rt.boot().barrier();
-    verify_dst(rank, d_dst, SIZE * N_PUTS, "gicc put_no_db + flush + quiet");
+    verify_dst(rank, d_dst, SIZE * N_PUTS, "gicc::launch + put_no_db loop");
     rt.boot().barrier();
 
     (void)hipFree(d_src);
