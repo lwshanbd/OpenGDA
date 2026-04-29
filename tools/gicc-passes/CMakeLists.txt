@@ -32,6 +32,11 @@ target_include_directories(gicc-passes PRIVATE
 )
 target_compile_definitions(gicc-passes PRIVATE ${LLVM_DEFINITIONS})
 
+# LLVM is built with -fno-rtti by default; using RTTI in the plugin causes
+# undefined typeinfo references at dlopen time (e.g. _ZTIN4llvm13ErrorInfoBaseE
+# from Expected<>). Match LLVM's build configuration.
+target_compile_options(gicc-passes PRIVATE -fno-rtti)
+
 # Don't link LLVM libs — the loading process (clang/opt) provides the symbols.
 # Default MODULE library naming gives libgicc-passes.so on Linux.
 
