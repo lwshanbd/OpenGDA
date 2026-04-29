@@ -29,3 +29,21 @@ target_compile_definitions(gicc-passes PRIVATE ${LLVM_DEFINITIONS})
 
 # Don't link LLVM libs — the loading process (clang/opt) provides the symbols.
 # Default MODULE library naming gives libgicc-passes.so on Linux.
+
+# ---------------------------------------------------------------------------
+# Lit tests
+# ---------------------------------------------------------------------------
+find_program(LIT_EXE lit HINTS ${LLVM_TOOLS_BINARY_DIR})
+if(LIT_EXE)
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/lit/lit.site.cfg.py.in
+        ${CMAKE_CURRENT_BINARY_DIR}/tests/lit/lit.site.cfg.py
+        @ONLY)
+    add_custom_target(check-gicc-passes
+        COMMAND ${LIT_EXE} -v ${CMAKE_CURRENT_BINARY_DIR}/tests/lit
+        DEPENDS gicc-passes
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+        USES_TERMINAL)
+else()
+    message(STATUS "gicc-passes: lit not found; skipping check-gicc-passes target")
+endif()
