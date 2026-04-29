@@ -1,3 +1,4 @@
+#include "GICCDeviceDiscovery.h"
 #include "GICCPassConfig.h"
 
 #include "llvm/IR/Module.h"
@@ -37,12 +38,16 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     MPM.addPass(GICCSentinelPass());
                 });
             // Named-pass registration so tests can drive the plugin via
-            // opt -passes='gicc-sentinel'.
+            // opt -passes='gicc-sentinel' / 'gicc-device-discovery'.
             PB.registerPipelineParsingCallback(
                 [](StringRef Name, ModulePassManager &MPM,
                    ArrayRef<PassBuilder::PipelineElement>) -> bool {
                     if (Name == "gicc-sentinel") {
                         MPM.addPass(GICCSentinelPass());
+                        return true;
+                    }
+                    if (Name == "gicc-device-discovery") {
+                        MPM.addPass(GICCDeviceDiscoveryPass());
                         return true;
                     }
                     return false;

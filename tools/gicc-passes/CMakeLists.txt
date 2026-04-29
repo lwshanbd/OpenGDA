@@ -21,6 +21,7 @@ add_library(gicc-passes MODULE
     src/PluginEntry.cpp
     src/GICCPassConfig.cpp
     src/SiteId.cpp
+    src/GICCDeviceDiscovery.cpp
 )
 target_include_directories(gicc-passes PRIVATE
     ${LLVM_INCLUDE_DIRS}
