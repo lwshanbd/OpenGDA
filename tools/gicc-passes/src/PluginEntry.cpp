@@ -1,4 +1,5 @@
 #include "GICCDeviceDiscovery.h"
+#include "GICCDeviceLowering.h"
 #include "GICCHKAnalysis.h"
 #include "GICCPassConfig.h"
 
@@ -53,6 +54,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-hk-analysis") {
                         MPM.addPass(GICCHKAnalysisPass());
+                        return true;
+                    }
+                    if (Name == "gicc-device-lowering") {
+                        MPM.addPass(GICCDeviceLoweringPass());
                         return true;
                     }
                     return false;
