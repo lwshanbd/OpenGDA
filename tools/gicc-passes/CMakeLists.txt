@@ -22,6 +22,8 @@ add_library(gicc-passes MODULE
     src/GICCPassConfig.cpp
     src/SiteId.cpp
     src/GICCDeviceDiscovery.cpp
+    src/HKAnalysis.cpp
+    src/GICCHKAnalysis.cpp
 )
 target_include_directories(gicc-passes PRIVATE
     ${LLVM_INCLUDE_DIRS}
