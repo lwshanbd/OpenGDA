@@ -42,6 +42,15 @@ elseif(GICC_BACKEND STREQUAL "ofi")
     endif()
 endif()
 
+# ============================================================================
+# LTO pass plugin (separate build because of Clang ABI requirements;
+# also buildable standalone via tools/gicc-passes/CMakeLists.txt).
+# ============================================================================
+option(GICC_BUILD_PASSES "Build the LTO pass plugin (libgicc-passes.so)" OFF)
+if(GICC_BUILD_PASSES)
+    add_subdirectory(tools/gicc-passes)
+endif()
+
 message(STATUS "")
 message(STATUS "========================================")
 message(STATUS "GICC Configuration Summary")
