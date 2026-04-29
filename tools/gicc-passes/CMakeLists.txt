@@ -19,6 +19,7 @@ message(STATUS "gicc-passes: using LLVM ${LLVM_VERSION_MAJOR} from ${LLVM_DIR}")
 
 add_library(gicc-passes MODULE
     src/PluginEntry.cpp
+    src/GICCPassConfig.cpp
 )
 target_include_directories(gicc-passes PRIVATE
     ${LLVM_INCLUDE_DIRS}

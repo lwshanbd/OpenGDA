@@ -7,13 +7,19 @@
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
+using namespace gicc::pass;
 
 namespace {
 
 struct GICCSentinelPass : PassInfoMixin<GICCSentinelPass> {
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
-        errs() << "[gicc-pass] ran on triple=" << M.getTargetTriple()
-               << " module=" << M.getName() << "\n";
+        const auto &cfg = getConfig();
+        errs() << "[gicc-pass] mode=" << modeName(cfg.mode)
+               << " target=" << targetName(cfg.target)
+               << " triple=" << M.getTargetTriple()
+               << " meta-dir=" << cfg.metaDir
+               << " module=" << M.getName()
+               << "\n";
         return PreservedAnalyses::all();
     }
     static StringRef name() { return "GICCSentinelPass"; }
