@@ -24,6 +24,7 @@ add_library(gicc-passes MODULE
     src/GICCDeviceDiscovery.cpp
     src/HKAnalysis.cpp
     src/GICCHKAnalysis.cpp
+    src/MetadataIO.cpp
 )
 target_include_directories(gicc-passes PRIVATE
     ${LLVM_INCLUDE_DIRS}
