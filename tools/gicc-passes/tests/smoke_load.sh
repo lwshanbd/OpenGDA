@@ -38,7 +38,7 @@ echo "${OUT}"
 echo
 
 # Plugin must run on at least one module (host or device).
-COUNT=$(echo "${OUT}" | grep -c "\[gicc-pass\] ran" || true)
+COUNT=$(echo "${OUT}" | grep -c "\[gicc-pass\] mode=" || true)
 if [[ "${COUNT}" -eq 0 ]]; then
     echo "FAIL: plugin did not run on any module" >&2
     exit 1
@@ -46,8 +46,8 @@ fi
 echo "PASS: plugin ran ${COUNT} times"
 
 # Document which triples we observed (helps diagnose risk R1).
-HOST_RAN=$(echo "${OUT}" | grep -c "\[gicc-pass\] ran on triple=x86_64" || true)
-DEV_RAN=$(echo "${OUT}" | grep -c "\[gicc-pass\] ran on triple=amdgcn" || true)
+HOST_RAN=$(echo "${OUT}" | grep -c "triple=x86_64" || true)
+DEV_RAN=$(echo "${OUT}" | grep -c "triple=amdgcn" || true)
 echo "  host module runs: ${HOST_RAN}"
 echo "  device module runs: ${DEV_RAN}"
 if [[ "${DEV_RAN}" -eq 0 ]]; then
