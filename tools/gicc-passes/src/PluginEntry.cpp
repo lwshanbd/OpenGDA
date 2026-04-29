@@ -34,7 +34,21 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
     return {LLVM_PLUGIN_API_VERSION, "gicc-passes", "0.1",
         [](PassBuilder &PB) {
             // Auto-attach to the default optimizer pipeline so -fpass-plugin
-            // builds get the sentinel for free.
+            // builds get the device-side analyses without naming each pass.
+            // Each pass internally checks Mode (passthrough = no-op) and the
+            // module triple (host modules are short-circuited).
+            //
+            // The device-side passes register at PipelineStart so they
+            // observe the original gicc:: API calls BEFORE the inliner
+            // expands them into the legacy device-side IPC ring writes.
+            PB.registerPipelineStartEPCallback(
+                [](ModulePassManager &MPM, OptimizationLevel) {
+                    MPM.addPass(GICCDeviceDiscoveryPass());
+                    MPM.addPass(GICCHKAnalysisPass());
+                    MPM.addPass(GICCDeviceLoweringPass());
+                });
+            // Sentinel stays at OptimizerLast — it's just a debug probe
+            // and we want to see the post-optimization module triple.
             PB.registerOptimizerLastEPCallback(
                 [](ModulePassManager &MPM, OptimizationLevel) {
                     MPM.addPass(GICCSentinelPass());
