@@ -25,6 +25,7 @@ add_library(gicc-passes MODULE
     src/HKAnalysis.cpp
     src/GICCHKAnalysis.cpp
     src/MetadataIO.cpp
+    src/TraceTemplateBuilder.cpp
 )
 target_include_directories(gicc-passes PRIVATE
     ${LLVM_INCLUDE_DIRS}
