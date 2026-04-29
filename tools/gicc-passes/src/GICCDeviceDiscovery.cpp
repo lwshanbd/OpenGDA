@@ -1,7 +1,9 @@
 #include "KernelInventory.h"
+#include "MetadataIO.h"
 #include "SiteId.h"
 #include "GICCPassConfig.h"
 #include "GICCDeviceDiscovery.h"
+#include "TraceTemplateBuilder.h"
 
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
@@ -32,6 +34,18 @@ PreservedAnalyses GICCDeviceDiscoveryPass::run(Module &M, ModuleAnalysisManager 
             errs() << "[discovery]   site_id=" << s.siteId
                    << " kind=" << opKindName(s.kind) << "\n";
         }
+
+        if (cfg.mode == Mode::FeatureExtract || cfg.mode == Mode::Lower) {
+            KernelTemplate t = buildKernelTemplate(info);
+            if (!writeKernelTemplate(cfg.metaDir, t)) {
+                errs() << "[discovery] WARN: failed to write template for "
+                       << info.mangledName << " under " << cfg.metaDir << "\n";
+            } else {
+                errs() << "[discovery]   wrote " << cfg.metaDir << '/'
+                       << info.mangledName << ".json\n";
+            }
+        }
+
         Inventory.kernels.push_back(std::move(info));
     }
     Inventory.valid = true;
