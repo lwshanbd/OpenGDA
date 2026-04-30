@@ -20,12 +20,10 @@
 
 namespace gicc {
 
-/// Number of signal slots per round. The host's `start_continuous` pre-queues
-/// up to this many barriers' worth of DWQ ops at once, so concurrent in-flight
-/// barriers each need their own slot to avoid clobbering each other's signals
-/// in `signals[]` and in the peer's IPC-mapped signals array. Must match
-/// gicc::Barrier::PREFETCH_DEPTH on the host side.
-constexpr int BARRIER_SIGNAL_SLOTS = 8;
+// Maximum sliding-window depth supported. Runtime W <= this value.
+// Rationale: per-slot signal buffers/builders are statically sized; we
+// allocate room for the max W and only use the first `window_size` slots.
+constexpr int BARRIER_SIGNAL_SLOTS = 32;
 
 /**
  * GPU-accessible context for the dissemination barrier.
