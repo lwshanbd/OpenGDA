@@ -38,14 +38,21 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
     return {LLVM_PLUGIN_API_VERSION, "gicc-passes", "0.1",
         [](PassBuilder &PB) {
             // Auto-attach to the default optimizer pipeline so -fpass-plugin
-            // builds get the device-side analyses without naming each pass.
-            // Each pass internally checks Mode (passthrough = no-op) and the
-            // module triple (host modules are short-circuited).
+            // builds get the analyses without naming each pass. Each pass
+            // internally checks Mode (passthrough = no-op) and the module
+            // triple (the wrong-side passes short-circuit harmlessly).
             //
-            // The device-side passes register at PipelineStart so they
-            // observe the original gicc:: API calls BEFORE the inliner
-            // expands them into the legacy device-side IPC ring writes.
-            PB.registerPipelineStartEPCallback(
+            // PipelineEarlySimplification fires after the early function
+            // simplification (mem2reg, SROA, EarlyCSE, simple instcombine)
+            // but BEFORE the inliner. We need:
+            //   - mem2reg done so kernel formals aren't hidden behind
+            //     alloca/store/load pairs (HK analysis would otherwise
+            //     reject every loaded operand as "device memory load").
+            //   - inliner NOT yet run so gicc::put_no_db / get_no_db /
+            //     flush / quiet calls are still callable functions.
+            // PipelineStart is too early (mem2reg hasn't run yet);
+            // OptimizerLast is too late (inliner has consumed the calls).
+            PB.registerPipelineEarlySimplificationEPCallback(
                 [](ModulePassManager &MPM, OptimizationLevel) {
                     MPM.addPass(GICCDeviceDiscoveryPass());
                     MPM.addPass(GICCHKAnalysisPass());
