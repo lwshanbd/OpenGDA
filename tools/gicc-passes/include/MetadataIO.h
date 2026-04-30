@@ -33,7 +33,9 @@ struct GuardSpec {
 // arguments at the call site are stored as ArgRef expressions whose
 // leaves are ArgRef::Kind::LoopIv (instead of a kernel formal); the
 // host-side trace function substitutes the materialized loop counter.
-struct LoopInfo {
+//
+// (Named OpLoopInfo to avoid collision with llvm::LoopInfo in callers.)
+struct OpLoopInfo {
     bool      inLoop      = false;  // false → op runs once unconditionally
     unsigned  ivParamIdx  = 0;      // kernel formal that bounds the loop
     bool      ivBoundKnown = false; // true if ivParamIdx is meaningful
@@ -49,7 +51,7 @@ struct OpTemplate {
     std::string                  siteId;
     std::string                  kind;          // "put_no_db" / "get_no_db" / "flush" / "quiet"
     GuardSpec                    guard;
-    LoopInfo                     loop;          // loop containing this op (if any)
+    OpLoopInfo                   loop;          // loop containing this op (if any)
     // Map from canonical arg-name (e.g. "target_rank", "size") to its
     // ArgRef expression. Order is not significant; readers should look
     // up by name.

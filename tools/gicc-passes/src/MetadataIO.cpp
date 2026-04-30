@@ -154,7 +154,7 @@ bool guardFromJSON(const json::Value &v, GuardSpec &out) {
     return true;
 }
 
-json::Value loopToJSON(const LoopInfo &L) {
+json::Value loopToJSON(const OpLoopInfo &L) {
     json::Object o;
     o["in_loop"]  = L.inLoop;
     if (L.inLoop) {
@@ -168,7 +168,7 @@ json::Value loopToJSON(const LoopInfo &L) {
     return json::Value(std::move(o));
 }
 
-bool loopFromJSON(const json::Value &v, LoopInfo &out) {
+bool loopFromJSON(const json::Value &v, OpLoopInfo &out) {
     const auto *o = v.getAsObject();
     if (!o) return false;
     if (auto b = o->getBoolean("in_loop")) out.inLoop = *b;
