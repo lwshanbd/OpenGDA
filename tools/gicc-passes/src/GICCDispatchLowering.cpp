@@ -2,6 +2,7 @@
 #include "GICCPassConfig.h"
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -21,17 +22,35 @@ namespace gicc::pass {
 
 namespace {
 
-enum class DispatchKind { IpcPush, DwqTrigger, DwqBatched, Unknown };
+// IpcOrDwq: hybrid runtime branch. If the peer's IPC base ptr is non-null
+// (peer is on the same node and the buffer is mapped), do an IPC
+// hipMemcpyAsync on the IPC stream. Otherwise fall through to a DWQ
+// enqueue. This is the new default when no hint.json is provided —
+// matches the AST plugin's runtime behavior and avoids DWQ's per-op
+// libfabric overhead on same-node halos.
+enum class DispatchKind {
+    IpcPush,    // force IPC path (assumes peer is mapped)
+    DwqTrigger, // force DWQ path
+    DwqBatched, // currently lowered same as DwqTrigger
+    IpcOrDwq,   // runtime branch: IPC if mapped else DWQ
+    Unknown,
+};
 
 DispatchKind parseDispatch(StringRef s) {
     if (s == "IPC_PUSH")    return DispatchKind::IpcPush;
     if (s == "DWQ_TRIGGER") return DispatchKind::DwqTrigger;
     if (s == "DWQ_BATCHED") return DispatchKind::DwqBatched;
+    if (s == "IPC_OR_DWQ")  return DispatchKind::IpcOrDwq;
     return DispatchKind::Unknown;
 }
 
 struct HintFile {
-    DispatchKind                          defaultDispatch = DispatchKind::DwqTrigger;
+    // When no hint.json is supplied we default to the hybrid runtime
+    // branch. Same-node peers go through IPC (low latency / high BW
+    // SDMA) and off-node peers fall back to DWQ. Lit tests that
+    // expect a hard DWQ default explicitly set GICC_HINT_IN to a
+    // hint.json with default_dispatch="DWQ_TRIGGER".
+    DispatchKind                          defaultDispatch = DispatchKind::IpcOrDwq;
     std::unordered_map<std::string,
                        DispatchKind>      sites;
 };
@@ -74,79 +93,192 @@ StringRef siteIdOf(CallInst *CI) {
     return {};
 }
 
-// Materialize the IPC_PUSH lowering. Replaces
+// Helper bundle: IR types + the runtime helper function callees that
+// the three lowerings share. Looked up once per placeholder.
+struct LoweringHelpers {
+    Type *ptrTy;
+    Type *i32Ty;
+    Type *i64Ty;
+    Type *i8Ty;
+    Type *i1Ty;
+    FunctionCallee peerBaseFn;
+    FunctionCallee localBaseFn;
+    FunctionCallee streamFn;
+    FunctionCallee memcpyFn;
+    FunctionCallee enqFn;
+};
+
+LoweringHelpers makeHelpers(Module *M) {
+    LLVMContext &Ctx = M->getContext();
+    LoweringHelpers H;
+    H.ptrTy = PointerType::getUnqual(Ctx);
+    H.i32Ty = Type::getInt32Ty(Ctx);
+    H.i64Ty = Type::getInt64Ty(Ctx);
+    H.i8Ty  = Type::getInt8Ty(Ctx);
+    H.i1Ty  = Type::getInt1Ty(Ctx);
+    Type *voidTy = Type::getVoidTy(Ctx);
+    H.peerBaseFn = M->getOrInsertFunction(
+        "gicc_runtime_peer_ipc_base",
+        FunctionType::get(H.ptrTy, {H.ptrTy, H.i32Ty, H.i32Ty}, false));
+    H.localBaseFn = M->getOrInsertFunction(
+        "gicc_runtime_local_buf_base",
+        FunctionType::get(H.ptrTy, {H.ptrTy, H.i32Ty}, false));
+    H.streamFn = M->getOrInsertFunction(
+        "gicc_runtime_ipc_stream",
+        FunctionType::get(H.ptrTy, {H.ptrTy}, false));
+    H.memcpyFn = M->getOrInsertFunction(
+        "hipMemcpyAsync",
+        FunctionType::get(H.i32Ty,
+            {H.ptrTy, H.ptrTy, H.i64Ty, H.i32Ty, H.ptrTy}, false));
+    H.enqFn = M->getOrInsertFunction(
+        "gicc_runtime_dwq_enqueue",
+        FunctionType::get(voidTy,
+            {H.ptrTy, H.i32Ty, H.i32Ty, H.i64Ty, H.i32Ty, H.i64Ty, H.i64Ty},
+            false));
+    return H;
+}
+
+// Emit the IPC body at IRBuilder B's insertion point:
+//   %dst       = getelementptr i8, ptr %peerBase, i64 dst_off
+//   %src_base  = call ptr @gicc_runtime_local_buf_base(rt, src_buf)
+//   %src       = getelementptr i8, ptr %src_base, i64 src_off
+//   %stream    = call ptr @gicc_runtime_ipc_stream(rt)
+//   call i32 @hipMemcpyAsync(ptr %dst, ptr %src, i64 size, i32 3, ptr %stream)
+//
+// peerBase must already be a non-null ptr to the peer's mapped buffer.
+void emitIpcBody(IRBuilder<> &B,
+                 const LoweringHelpers &H,
+                 Value *rt, Value *peerBase,
+                 Value *dstOff, Value *srcBuf, Value *srcOff,
+                 Value *size) {
+    Value *dst     = B.CreateGEP(H.i8Ty, peerBase, dstOff);
+    Value *srcBase = B.CreateCall(H.localBaseFn, {rt, srcBuf});
+    Value *src     = B.CreateGEP(H.i8Ty, srcBase, srcOff);
+    Value *stream  = B.CreateCall(H.streamFn, {rt});
+    // hipMemcpyDeviceToDevice = 3.
+    B.CreateCall(H.memcpyFn,
+                 {dst, src, size, B.getInt32(3), stream});
+}
+
+// Emit the DWQ enqueue at IRBuilder B's insertion point.
+void emitDwqBody(IRBuilder<> &B,
+                 const LoweringHelpers &H,
+                 ArrayRef<Value *> args) {
+    B.CreateCall(H.enqFn, args);
+}
+
+// Materialize the IPC_PUSH lowering: caller asserts the peer is
+// IPC-mapped, so we issue the memcpy unconditionally. Replaces
 //   call void @gicc.runtime.put_no_db.placeholder(rt, peer, dst_buf,
 //                                                 dst_off, src_buf,
 //                                                 src_off, size), !site_id
 // with
 //   %peer_base = call ptr @gicc_runtime_peer_ipc_base(rt, peer, dst_buf)
-//   %dst       = getelementptr i8, ptr %peer_base, i64 dst_off
-//   %src_base  = call ptr @gicc_runtime_local_buf_base(rt, src_buf)
-//   %src       = getelementptr i8, ptr %src_base, i64 src_off
-//   %stream    = call ptr @gicc_runtime_ipc_stream(rt)
-//   call i32 @hipMemcpyAsync(ptr %dst, ptr %src, i64 size, i32 3, ptr %stream)
+//   <emitIpcBody>
 void lowerIpcPush(CallInst *placeholder) {
-    LLVMContext &Ctx = placeholder->getContext();
-    Module      *M   = placeholder->getModule();
+    Module      *M = placeholder->getModule();
     IRBuilder<>  B(placeholder);
+    LoweringHelpers H = makeHelpers(M);
 
-    Value *rt      = placeholder->getArgOperand(0);
-    Value *peer    = placeholder->getArgOperand(1);
-    Value *dstBuf  = placeholder->getArgOperand(2);
-    Value *dstOff  = placeholder->getArgOperand(3);
-    Value *srcBuf  = placeholder->getArgOperand(4);
-    Value *srcOff  = placeholder->getArgOperand(5);
-    Value *size    = placeholder->getArgOperand(6);
+    Value *rt     = placeholder->getArgOperand(0);
+    Value *peer   = placeholder->getArgOperand(1);
+    Value *dstBuf = placeholder->getArgOperand(2);
+    Value *dstOff = placeholder->getArgOperand(3);
+    Value *srcBuf = placeholder->getArgOperand(4);
+    Value *srcOff = placeholder->getArgOperand(5);
+    Value *size   = placeholder->getArgOperand(6);
 
-    Type *ptrTy = PointerType::getUnqual(Ctx);
-    Type *i32Ty = Type::getInt32Ty(Ctx);
-    Type *i64Ty = Type::getInt64Ty(Ctx);
-    Type *i8Ty  = Type::getInt8Ty(Ctx);
-
-    auto peerBaseFn = M->getOrInsertFunction(
-        "gicc_runtime_peer_ipc_base",
-        FunctionType::get(ptrTy, {ptrTy, i32Ty, i32Ty}, false));
-    auto localBaseFn = M->getOrInsertFunction(
-        "gicc_runtime_local_buf_base",
-        FunctionType::get(ptrTy, {ptrTy, i32Ty}, false));
-    auto streamFn = M->getOrInsertFunction(
-        "gicc_runtime_ipc_stream",
-        FunctionType::get(ptrTy, {ptrTy}, false));
-    auto memcpyFn = M->getOrInsertFunction(
-        "hipMemcpyAsync",
-        FunctionType::get(i32Ty,
-            {ptrTy, ptrTy, i64Ty, i32Ty, ptrTy}, false));
-
-    Value *peerBase = B.CreateCall(peerBaseFn,  {rt, peer, dstBuf});
-    Value *dst      = B.CreateGEP(i8Ty, peerBase, dstOff);
-    Value *srcBase  = B.CreateCall(localBaseFn, {rt, srcBuf});
-    Value *src      = B.CreateGEP(i8Ty, srcBase, srcOff);
-    Value *stream   = B.CreateCall(streamFn, {rt});
-    // hipMemcpyDeviceToDevice = 3.
-    B.CreateCall(memcpyFn,
-                 {dst, src, size, B.getInt32(3), stream});
+    Value *peerBase = B.CreateCall(H.peerBaseFn, {rt, peer, dstBuf});
+    emitIpcBody(B, H, rt, peerBase, dstOff, srcBuf, srcOff, size);
     placeholder->eraseFromParent();
 }
 
 // Materialize the DWQ_TRIGGER lowering. Replaces the placeholder with
 // a single call to gicc_runtime_dwq_enqueue.
 void lowerDwqTrigger(CallInst *placeholder) {
-    LLVMContext &Ctx = placeholder->getContext();
-    Module      *M   = placeholder->getModule();
+    Module      *M = placeholder->getModule();
     IRBuilder<>  B(placeholder);
-
-    Type *ptrTy = PointerType::getUnqual(Ctx);
-    Type *i32Ty = Type::getInt32Ty(Ctx);
-    Type *i64Ty = Type::getInt64Ty(Ctx);
-    auto enqFn = M->getOrInsertFunction(
-        "gicc_runtime_dwq_enqueue",
-        FunctionType::get(B.getVoidTy(),
-            {ptrTy, i32Ty, i32Ty, i64Ty, i32Ty, i64Ty, i64Ty}, false));
+    LoweringHelpers H = makeHelpers(M);
 
     SmallVector<Value *, 7> args(placeholder->args().begin(),
                                   placeholder->args().begin() + 7);
-    B.CreateCall(enqFn, args);
+    emitDwqBody(B, H, args);
     placeholder->eraseFromParent();
+}
+
+// Materialize the IPC_OR_DWQ hybrid lowering. The placeholder is
+// replaced by a runtime branch:
+//
+//   %peer_base = call ptr @gicc_runtime_peer_ipc_base(rt, peer, dst_buf)
+//   %has_ipc   = icmp ne ptr %peer_base, null
+//   br i1 %has_ipc, label %ipc, label %dwq
+//   ipc:
+//     <emitIpcBody using %peer_base>
+//     br label %done
+//   dwq:
+//     <emitDwqBody>
+//     br label %done
+//   done:
+//     <continuation of the original block>
+//
+// This lets the compiler emit one trace function that handles both
+// same-node IPC peers and off-node DWQ peers without needing a hint.
+void lowerIpcOrDwq(CallInst *placeholder) {
+    Module      *M  = placeholder->getModule();
+    IRBuilder<>  B(placeholder);
+    LoweringHelpers H = makeHelpers(M);
+
+    Value *rt     = placeholder->getArgOperand(0);
+    Value *peer   = placeholder->getArgOperand(1);
+    Value *dstBuf = placeholder->getArgOperand(2);
+    Value *dstOff = placeholder->getArgOperand(3);
+    Value *srcBuf = placeholder->getArgOperand(4);
+    Value *srcOff = placeholder->getArgOperand(5);
+    Value *size   = placeholder->getArgOperand(6);
+
+    // Compute %peer_base + branch condition before splitting the block.
+    Value *peerBase = B.CreateCall(H.peerBaseFn, {rt, peer, dstBuf});
+    Value *nullPtr  = ConstantPointerNull::get(
+        cast<PointerType>(H.ptrTy));
+    Value *hasIpc   = B.CreateICmpNE(peerBase, nullPtr, "has_ipc");
+
+    // Split the placeholder's BB at the placeholder. SplitBlock returns
+    // the successor block; the original block keeps everything before
+    // the split (including %peer_base + %has_ipc) plus an unconditional
+    // br to the successor that we'll replace.
+    BasicBlock *origBB = placeholder->getParent();
+    BasicBlock *doneBB = origBB->splitBasicBlock(placeholder, "ipc_or_dwq.done");
+
+    // SplitBlock dropped the placeholder into doneBB. Erase it now —
+    // the IPC/DWQ branches will emit the real work.
+    placeholder->eraseFromParent();
+
+    // Make the IPC + DWQ blocks. They both unconditionally jump to
+    // doneBB so the rest of the original function falls through.
+    Function   *F     = origBB->getParent();
+    LLVMContext &Ctx  = F->getContext();
+    BasicBlock *ipcBB = BasicBlock::Create(Ctx, "ipc", F, doneBB);
+    BasicBlock *dwqBB = BasicBlock::Create(Ctx, "dwq", F, doneBB);
+
+    // Replace origBB's tail (the unconditional br created by splitBB)
+    // with a conditional br on %has_ipc.
+    Instruction *origTerm = origBB->getTerminator();
+    BranchInst::Create(ipcBB, dwqBB, hasIpc, origTerm);
+    origTerm->eraseFromParent();
+
+    // ipcBB: hipMemcpyAsync, then jump to done.
+    {
+        IRBuilder<> IB(ipcBB);
+        emitIpcBody(IB, H, rt, peerBase, dstOff, srcBuf, srcOff, size);
+        IB.CreateBr(doneBB);
+    }
+    // dwqBB: gicc_runtime_dwq_enqueue, then jump to done.
+    {
+        IRBuilder<> DB(dwqBB);
+        Value *args[7] = {rt, peer, dstBuf, dstOff, srcBuf, srcOff, size};
+        emitDwqBody(DB, H, args);
+        DB.CreateBr(doneBB);
+    }
 }
 
 }  // namespace
@@ -188,6 +320,9 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
         switch (d) {
             case DispatchKind::IpcPush:
                 lowerIpcPush(PH);
+                break;
+            case DispatchKind::IpcOrDwq:
+                lowerIpcOrDwq(PH);
                 break;
             case DispatchKind::DwqTrigger:
             case DispatchKind::DwqBatched:   // v1 falls back to single-trigger
