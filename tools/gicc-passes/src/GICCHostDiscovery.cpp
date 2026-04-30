@@ -77,29 +77,15 @@ std::string extractKernelMangledName(StringRef launchWrapperMangled) {
     return launchWrapperMangled.substr(start, i - start).str();
 }
 
-PreservedAnalyses GICCHostDiscoveryPass::run(Module &M,
-                                             ModuleAnalysisManager &) {
-    const auto &cfg = getConfig();
-    if (cfg.mode == Mode::Passthrough) return PreservedAnalyses::all();
-
-    Inventory.sites.clear();
-    Inventory.valid = false;
-
+GICCLaunchInventory collectLaunchInventory(Module &M,
+                                           const std::string &metaDir) {
+    GICCLaunchInventory inv;
     auto wrappers = findLaunchWrappers(M);
-    if (wrappers.empty()) {
-        Inventory.valid = true;
-        return PreservedAnalyses::all();
-    }
 
     for (Function *W : wrappers) {
         std::string kernelMangled = extractKernelMangledName(W->getName());
-        if (kernelMangled.empty()) {
-            errs() << "[host-discovery] skip wrapper " << W->getName()
-                   << " (no kernel NTTP)\n";
-            continue;
-        }
+        if (kernelMangled.empty()) continue;
 
-        unsigned siteCount = 0;
         for (User *U : W->users()) {
             auto *CI = dyn_cast<CallInst>(U);
             if (!CI || CI->getCalledFunction() != W) continue;
@@ -110,28 +96,49 @@ PreservedAnalyses GICCHostDiscoveryPass::run(Module &M,
             site.kernelMangled = kernelMangled;
 
             KernelTemplate t;
-            if (readKernelTemplate(cfg.metaDir, kernelMangled, t)) {
+            if (readKernelTemplate(metaDir, kernelMangled, t)) {
                 site.kernelTemplate = std::move(t);
                 site.haveTemplate   = true;
-            } else {
-                errs() << "[host-discovery] WARN: no template for "
-                       << kernelMangled << " under " << cfg.metaDir << "\n";
             }
-            Inventory.sites.push_back(std::move(site));
-            ++siteCount;
+            inv.sites.push_back(std::move(site));
         }
-
-        // Recover the kernel's simple name from the loaded template if
-        // available; otherwise fall back to the mangled name for logs.
-        StringRef simple = !Inventory.sites.empty() &&
-                           Inventory.sites.back().haveTemplate
-            ? StringRef(Inventory.sites.back().kernelTemplate.simpleName)
-            : StringRef(kernelMangled);
-        errs() << "[host-discovery] found " << siteCount
-               << " launch site(s) for kernel " << simple << "\n";
     }
+    inv.valid = true;
+    return inv;
+}
 
-    Inventory.valid = true;
+PreservedAnalyses GICCHostDiscoveryPass::run(Module &M,
+                                             ModuleAnalysisManager &) {
+    const auto &cfg = getConfig();
+    if (cfg.mode == Mode::Passthrough) return PreservedAnalyses::all();
+
+    Inventory = collectLaunchInventory(M, cfg.metaDir);
+    if (Inventory.sites.empty()) return PreservedAnalyses::all();
+
+    // Group log lines by wrapper for readability.
+    Function *cur = nullptr;
+    unsigned   count = 0;
+    StringRef  lastSimple;
+    auto flush = [&] {
+        if (!cur) return;
+        errs() << "[host-discovery] found " << count
+               << " launch site(s) for kernel " << lastSimple << "\n";
+    };
+    for (const auto &s : Inventory.sites) {
+        if (s.launchWrapper != cur) {
+            flush();
+            cur   = s.launchWrapper;
+            count = 0;
+            lastSimple = s.haveTemplate ? StringRef(s.kernelTemplate.simpleName)
+                                        : StringRef(s.kernelMangled);
+            if (!s.haveTemplate) {
+                errs() << "[host-discovery] WARN: no template for "
+                       << s.kernelMangled << " under " << cfg.metaDir << "\n";
+            }
+        }
+        ++count;
+    }
+    flush();
     return PreservedAnalyses::all();
 }
 
