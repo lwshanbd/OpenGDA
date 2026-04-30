@@ -27,6 +27,7 @@ add_library(gicc-passes MODULE
     src/MetadataIO.cpp
     src/TraceTemplateBuilder.cpp
     src/GICCDeviceLowering.cpp
+    src/GICCHostDiscovery.cpp
 )
 target_include_directories(gicc-passes PRIVATE
     ${LLVM_INCLUDE_DIRS}

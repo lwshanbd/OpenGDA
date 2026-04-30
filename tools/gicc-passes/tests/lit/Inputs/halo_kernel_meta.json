@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "kernel_mangled": "_Z11halo_kernelPN4gicc9DeviceCtxEiiimmmmmii",
+  "kernel_simple":  "halo_kernel",
+  "params": [
+    { "idx": 0,  "name": "ctx",          "type": "ptr" },
+    { "idx": 1,  "name": "left_target",  "type": "i32" },
+    { "idx": 2,  "name": "right_target", "type": "i32" },
+    { "idx": 3,  "name": "my_buf",       "type": "i32" },
+    { "idx": 4,  "name": "left_src_off", "type": "i64" },
+    { "idx": 5,  "name": "left_dst_off", "type": "i64" },
+    { "idx": 6,  "name": "right_src_off","type": "i64" },
+    { "idx": 7,  "name": "right_dst_off","type": "i64" },
+    { "idx": 8,  "name": "halo_bytes",   "type": "i64" },
+    { "idx": 9,  "name": "has_left",     "type": "i32" },
+    { "idx": 10, "name": "has_right",    "type": "i32" }
+  ],
+  "ops": [
+    {
+      "site_id": "target_3d.cpp:299:halo_kernel::0",
+      "kind":    "put_no_db",
+      "guard":   { "kind": "param_truthy", "param": 9 },
+      "args": {
+        "target_rank": { "kind": "param", "param": 1 },
+        "dst_buf":     { "kind": "param", "param": 3 },
+        "dst_off":     { "kind": "param", "param": 5 },
+        "src_buf":     { "kind": "param", "param": 3 },
+        "src_off":     { "kind": "param", "param": 4 },
+        "size":        { "kind": "param", "param": 8 }
+      }
+    },
+    {
+      "site_id": "target_3d.cpp:303:halo_kernel::1",
+      "kind":    "put_no_db",
+      "guard":   { "kind": "param_truthy", "param": 10 },
+      "args": {
+        "target_rank": { "kind": "param", "param": 2 },
+        "dst_buf":     { "kind": "param", "param": 3 },
+        "dst_off":     { "kind": "param", "param": 7 },
+        "src_buf":     { "kind": "param", "param": 3 },
+        "src_off":     { "kind": "param", "param": 6 },
+        "size":        { "kind": "param", "param": 8 }
+      }
+    },
+    {
+      "site_id": "target_3d.cpp:305:halo_kernel::2",
+      "kind":    "flush",
+      "guard":   { "kind": "always" },
+      "args":    { }
+    }
+  ]
+}
