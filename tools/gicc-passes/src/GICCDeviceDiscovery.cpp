@@ -5,6 +5,9 @@
 #include "GICCDeviceDiscovery.h"
 #include "TraceTemplateBuilder.h"
 
+#include "llvm/Analysis/LoopAnalysisManager.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -14,12 +17,14 @@ using namespace llvm;
 
 namespace gicc::pass {
 
-PreservedAnalyses GICCDeviceDiscoveryPass::run(Module &M, ModuleAnalysisManager &) {
+PreservedAnalyses GICCDeviceDiscoveryPass::run(Module &M, ModuleAnalysisManager &MAM) {
     const auto &cfg = getConfig();
     if (cfg.mode == Mode::Passthrough) return PreservedAnalyses::all();
 
     Inventory.kernels.clear();
     Inventory.valid = false;
+
+    auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
 
     for (Function &F : M) {
         if (F.isDeclaration() || !isGPUKernel(F)) continue;
@@ -36,7 +41,11 @@ PreservedAnalyses GICCDeviceDiscoveryPass::run(Module &M, ModuleAnalysisManager 
         }
 
         if (cfg.mode == Mode::FeatureExtract || cfg.mode == Mode::Lower) {
-            KernelTemplate t = buildKernelTemplate(info);
+            // LoopAnalysis lets buildKernelTemplate detect call sites
+            // wrapped by a canonical for-loop and lower iv-dependent
+            // arguments to ArgRef::LoopIv.
+            LoopInfo &LI = FAM.getResult<LoopAnalysis>(F);
+            KernelTemplate t = buildKernelTemplate(info, &LI);
             if (!writeKernelTemplate(cfg.metaDir, t)) {
                 errs() << "[discovery] WARN: failed to write template for "
                        << info.mangledName << " under " << cfg.metaDir << "\n";

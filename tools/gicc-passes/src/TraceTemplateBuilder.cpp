@@ -1,8 +1,10 @@
 #include "TraceTemplateBuilder.h"
 
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Type.h"
@@ -82,10 +84,18 @@ const char *castName(unsigned op) {
     }
 }
 
-ArgRef toArgRef(Value *V, const Function *K) {
+// `ivPhi` (optional): if non-null, walking encounters this PHI we emit
+// an ArgRef::Kind::LoopIv leaf so the host trace synthesizer can
+// substitute the host-side loop counter instead of treating the PHI
+// as a kernel formal (which it is not).
+ArgRef toArgRef(Value *V, const Function *K, const Value *ivPhi = nullptr) {
     ArgRef out;
     if (!V) {
         out.kind = ArgRef::Kind::Derived;
+        return out;
+    }
+    if (ivPhi && V == ivPhi) {
+        out.kind = ArgRef::Kind::LoopIv;
         return out;
     }
     if (auto *C = dyn_cast<ConstantInt>(V)) {
@@ -103,21 +113,21 @@ ArgRef toArgRef(Value *V, const Function *K) {
     if (auto *BO = dyn_cast<BinaryOperator>(V)) {
         out.kind = ArgRef::Kind::BinOp;
         out.opStr = binopName(BO->getOpcode());
-        out.children.push_back(toArgRef(BO->getOperand(0), K));
-        out.children.push_back(toArgRef(BO->getOperand(1), K));
+        out.children.push_back(toArgRef(BO->getOperand(0), K, ivPhi));
+        out.children.push_back(toArgRef(BO->getOperand(1), K, ivPhi));
         return out;
     }
     if (auto *CI = dyn_cast<CastInst>(V)) {
         out.kind = ArgRef::Kind::Cast;
         out.opStr = castName(CI->getOpcode());
-        out.children.push_back(toArgRef(CI->getOperand(0), K));
+        out.children.push_back(toArgRef(CI->getOperand(0), K, ivPhi));
         return out;
     }
     if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
         out.kind = ArgRef::Kind::Cast;
         out.opStr = "gep";
         for (Value *op : GEP->operands()) {
-            out.children.push_back(toArgRef(op, K));
+            out.children.push_back(toArgRef(op, K, ivPhi));
         }
         return out;
     }
@@ -187,7 +197,7 @@ GuardSpec deriveGuard(const CallInst *CI, const Function *K) {
 }
 
 void fillArgs(const CallInst *CI, GICCOpKind kind, OpTemplate &op,
-              const Function *K) {
+              const Function *K, const Value *ivPhi = nullptr) {
     const auto *names =
         (kind == GICCOpKind::PutNoDb || kind == GICCOpKind::GetNoDb)
             ? reinterpret_cast<const char *const *>(putGetArgNames().data())
@@ -199,13 +209,134 @@ void fillArgs(const CallInst *CI, GICCOpKind kind, OpTemplate &op,
 
     // Skip arg 0 (ctx) — not part of the trace template.
     for (unsigned i = 1; i < CI->arg_size() && i < maxArgs; ++i) {
-        op.args[names[i]] = toArgRef(CI->getArgOperand(i), K);
+        op.args[names[i]] = toArgRef(CI->getArgOperand(i), K, ivPhi);
     }
+}
+
+// Check if a Value is a kernel-formal Argument or a sign/zero-extend of
+// one. Used while sniffing the loop bound out of `icmp slt %iv, %bound`.
+bool isKernelFormal(const Value *V, const Function *K, unsigned &paramOut) {
+    if (!V) return false;
+    if (auto *A = dyn_cast<Argument>(V)) {
+        if (A->getParent() == K) {
+            paramOut = A->getArgNo();
+            return true;
+        }
+        return false;
+    }
+    if (auto *CI = dyn_cast<CastInst>(V)) {
+        return isKernelFormal(CI->getOperand(0), K, paramOut);
+    }
+    return false;
+}
+
+// Identify the canonical induction PHI of a loop. Returns the PHI and
+// fills `start`/`step` if both are integer constants. Pattern matched:
+//
+//   loop.header:
+//     %iv = phi <ty> [ <const start>, %preheader ],
+//                   [ %iv.next,       %latch ]
+//     %cmp = icmp <pred> %iv (or sext/zext %iv), <bound>
+//     br i1 %cmp, label %body, label %exit   ; OR exit/body
+//   ...
+//   loop.latch:
+//     %iv.next = add nsw <ty> %iv, <const step>
+//     br label %loop.header
+//
+// On success returns (phi, start, step, boundParamIdx).
+struct LoopShape {
+    PHINode *iv         = nullptr;
+    int64_t  start      = 0;
+    int64_t  step       = 1;
+    bool     ivBoundKnown = false;
+    unsigned ivParamIdx = 0;
+    bool     valid      = false;   // true → safe to emit a loop in the trace
+};
+
+LoopShape analyzeLoop(const Loop *L, const Function *K) {
+    LoopShape S;
+    if (!L) return S;
+    BasicBlock *header   = L->getHeader();
+    BasicBlock *latch    = L->getLoopLatch();
+    BasicBlock *preheader = L->getLoopPreheader();
+    if (!header || !latch || !preheader) return S;
+
+    // Find a PHI in the header whose incoming pair is
+    //   [ const, preheader ], [ <user>, latch ]
+    for (PHINode &phi : header->phis()) {
+        if (phi.getNumIncomingValues() != 2) continue;
+        Value *fromPreheader = phi.getIncomingValueForBlock(preheader);
+        Value *fromLatch     = phi.getIncomingValueForBlock(latch);
+        if (!fromPreheader || !fromLatch) continue;
+        auto *startC = dyn_cast<ConstantInt>(fromPreheader);
+        if (!startC) continue;
+
+        auto *bo = dyn_cast<BinaryOperator>(fromLatch);
+        if (!bo || bo->getOpcode() != Instruction::Add) continue;
+        Value *bo0 = bo->getOperand(0);
+        Value *bo1 = bo->getOperand(1);
+        ConstantInt *stepC = nullptr;
+        if (bo0 == &phi)      stepC = dyn_cast<ConstantInt>(bo1);
+        else if (bo1 == &phi) stepC = dyn_cast<ConstantInt>(bo0);
+        if (!stepC) continue;
+
+        S.iv    = &phi;
+        S.start = startC->getSExtValue();
+        S.step  = stepC->getSExtValue();
+        break;
+    }
+    if (!S.iv) return S;
+
+    // Find the loop's exit-branching icmp. Prefer the latch's icmp (do/while
+    // shape) or the header's icmp (canonical for-loop). Walk the conditional
+    // branches in the loop blocks looking for `icmp <pred> %iv-or-cast,
+    // <kernel formal-or-cast>` whose outcome controls a loop exit.
+    SmallVector<BasicBlock *, 4> exiting;
+    L->getExitingBlocks(exiting);
+    for (BasicBlock *EB : exiting) {
+        auto *br = dyn_cast<BranchInst>(EB->getTerminator());
+        if (!br || !br->isConditional()) continue;
+        auto *icmp = dyn_cast<ICmpInst>(br->getCondition());
+        if (!icmp) continue;
+        Value *l = icmp->getOperand(0);
+        Value *r = icmp->getOperand(1);
+
+        // Strip casts when matching against the IV (so `sext i32 %iv to
+        // i64` still resolves as the iv).
+        auto stripsToIV = [&](Value *V) -> bool {
+            if (V == S.iv) return true;
+            if (auto *CI = dyn_cast<CastInst>(V))
+                if (CI->getOperand(0) == S.iv) return true;
+            return false;
+        };
+
+        unsigned boundParam = 0;
+        bool ivOnLeft = stripsToIV(l);
+        bool ivOnRight = stripsToIV(r);
+        if (ivOnLeft && isKernelFormal(r, K, boundParam)) {
+            S.ivParamIdx   = boundParam;
+            S.ivBoundKnown = true;
+            break;
+        }
+        if (ivOnRight && isKernelFormal(l, K, boundParam)) {
+            S.ivParamIdx   = boundParam;
+            S.ivBoundKnown = true;
+            break;
+        }
+    }
+
+    // We accept "ivBoundKnown=false" paths (e.g. constant trip count)
+    // as degraded so the host trace skips the op rather than emitting
+    // wrong code. valid=true means we have all the pieces needed to
+    // emit a host-side loop.
+    S.valid = (S.iv != nullptr && S.ivBoundKnown);
+    return S;
 }
 
 }  // namespace
 
-KernelTemplate buildKernelTemplate(const GICCKernelInfo &info) {
+KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
+                                   LoopInfo *LI) {
     KernelTemplate t;
     t.mangledName = info.mangledName;
     t.simpleName  = info.simpleName;
@@ -224,7 +355,32 @@ KernelTemplate buildKernelTemplate(const GICCKernelInfo &info) {
         op.siteId = site.siteId;
         op.kind   = opKindName(site.kind);
         op.guard  = deriveGuard(site.CI, info.kernel);
-        fillArgs(site.CI, site.kind, op, info.kernel);
+
+        // If a LoopInfo is available, see whether this call is inside a
+        // loop. We accept only the innermost loop and require canonical
+        // shape (constant start/step + kernel-formal bound). Anything
+        // else marks the op `degraded` so the host trace synthesizer
+        // refuses to emit it (rather than silently emitting wrong code).
+        const Value *ivPhi = nullptr;
+        if (LI) {
+            BasicBlock *parent = site.CI->getParent();
+            Loop      *L       = LI->getLoopFor(parent);
+            if (L) {
+                LoopShape s = analyzeLoop(L, info.kernel);
+                op.loop.inLoop = true;
+                if (s.valid) {
+                    op.loop.ivBoundKnown = true;
+                    op.loop.ivParamIdx   = s.ivParamIdx;
+                    op.loop.ivStart      = s.start;
+                    op.loop.ivStep       = s.step;
+                    ivPhi                = s.iv;
+                } else {
+                    op.loop.degraded = true;
+                }
+            }
+        }
+
+        fillArgs(site.CI, site.kind, op, info.kernel, ivPhi);
         t.ops.push_back(std::move(op));
     }
     return t;
