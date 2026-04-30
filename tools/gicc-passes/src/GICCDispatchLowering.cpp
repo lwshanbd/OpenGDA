@@ -106,6 +106,7 @@ struct LoweringHelpers {
     FunctionCallee streamFn;
     FunctionCallee memcpyFn;
     FunctionCallee enqFn;
+    FunctionCallee enqBatchedFn;
 };
 
 LoweringHelpers makeHelpers(Module *M) {
@@ -134,6 +135,14 @@ LoweringHelpers makeHelpers(Module *M) {
         "gicc_runtime_dwq_enqueue",
         FunctionType::get(voidTy,
             {H.ptrTy, H.i32Ty, H.i32Ty, H.i64Ty, H.i32Ty, H.i64Ty, H.i64Ty},
+            false));
+    // Batched enqueue: void(rt, n_ops, peers[], dst_bufs[], dst_offs[],
+    // src_bufs[], src_offs[], sizes[]). All array params are ptr.
+    H.enqBatchedFn = M->getOrInsertFunction(
+        "gicc_runtime_dwq_enqueue_batched",
+        FunctionType::get(voidTy,
+            {H.ptrTy, H.i32Ty,
+             H.ptrTy, H.ptrTy, H.ptrTy, H.ptrTy, H.ptrTy, H.ptrTy},
             false));
     return H;
 }
@@ -281,6 +290,65 @@ void lowerIpcOrDwq(CallInst *placeholder) {
     }
 }
 
+// Materialize a DWQ_BATCHED group: collapse N consecutive placeholders
+// in the same BB into a single gicc_runtime_dwq_enqueue_batched call.
+//
+// Stack-allocates 6 arrays of N entries each at the entry block of the
+// containing function (so the allocas dominate every store). At the
+// FIRST placeholder's position, stores each placeholder's args into
+// the corresponding array slot, then issues one batched call. Erases
+// all N placeholders.
+//
+// For N == 1, this is functionally equivalent to gicc_runtime_dwq_enqueue
+// with a slight allocation/store penalty — used uniformly so the IR
+// pattern is recognizable regardless of group size.
+void lowerDwqBatched(ArrayRef<CallInst *> group) {
+    if (group.empty()) return;
+    Module      *M     = group.front()->getModule();
+    Function    *F     = group.front()->getFunction();
+    LLVMContext &Ctx   = M->getContext();
+    LoweringHelpers H  = makeHelpers(M);
+    const unsigned N   = group.size();
+
+    // Stack arrays at function entry so they dominate every BB.
+    IRBuilder<> EB(&F->getEntryBlock(), F->getEntryBlock().getFirstInsertionPt());
+    auto allocArr = [&](Type *eltTy, const Twine &name) {
+        return EB.CreateAlloca(eltTy, EB.getInt32(N), name);
+    };
+    Value *peerArr   = allocArr(H.i32Ty, "dwq.peers");
+    Value *dstBufArr = allocArr(H.i32Ty, "dwq.dst_bufs");
+    Value *dstOffArr = allocArr(H.i64Ty, "dwq.dst_offs");
+    Value *srcBufArr = allocArr(H.i32Ty, "dwq.src_bufs");
+    Value *srcOffArr = allocArr(H.i64Ty, "dwq.src_offs");
+    Value *sizeArr   = allocArr(H.i64Ty, "dwq.sizes");
+
+    // Insert stores + the batched call right BEFORE the first placeholder.
+    IRBuilder<> B(group.front());
+    Value *rt = group.front()->getArgOperand(0);
+    for (unsigned i = 0; i < N; ++i) {
+        CallInst *PH = group[i];
+        Value *idx   = B.getInt32(i);
+        Value *peer   = PH->getArgOperand(1);
+        Value *dstBuf = PH->getArgOperand(2);
+        Value *dstOff = PH->getArgOperand(3);
+        Value *srcBuf = PH->getArgOperand(4);
+        Value *srcOff = PH->getArgOperand(5);
+        Value *size   = PH->getArgOperand(6);
+        B.CreateStore(peer,   B.CreateGEP(H.i32Ty, peerArr,   idx));
+        B.CreateStore(dstBuf, B.CreateGEP(H.i32Ty, dstBufArr, idx));
+        B.CreateStore(dstOff, B.CreateGEP(H.i64Ty, dstOffArr, idx));
+        B.CreateStore(srcBuf, B.CreateGEP(H.i32Ty, srcBufArr, idx));
+        B.CreateStore(srcOff, B.CreateGEP(H.i64Ty, srcOffArr, idx));
+        B.CreateStore(size,   B.CreateGEP(H.i64Ty, sizeArr,   idx));
+    }
+    B.CreateCall(H.enqBatchedFn,
+                 {rt, B.getInt32(static_cast<int32_t>(N)),
+                  peerArr, dstBufArr, dstOffArr,
+                  srcBufArr, srcOffArr, sizeArr});
+
+    for (CallInst *PH : group) PH->eraseFromParent();
+}
+
 }  // namespace
 
 PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
@@ -314,9 +382,33 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
     }
     if (placeholders.empty()) return PreservedAnalyses::all();
 
+    // Group consecutive same-BB placeholders that all want DwqBatched
+    // into a single batched call. Walk in IR order so groups are
+    // contiguous; flush a group whenever we hit a placeholder with a
+    // different dispatch kind, a different BB, or the end of the list.
+    SmallVector<CallInst *, 4> batchGroup;
+    auto flushBatch = [&] {
+        if (!batchGroup.empty()) {
+            lowerDwqBatched(batchGroup);
+            batchGroup.clear();
+        }
+    };
+
     for (auto *PH : placeholders) {
         StringRef siteId = siteIdOf(PH);
         DispatchKind d   = hintFor(hints, siteId);
+
+        if (d == DispatchKind::DwqBatched) {
+            // Same BB as the running group? Add. Otherwise flush + start fresh.
+            if (!batchGroup.empty() &&
+                batchGroup.back()->getParent() != PH->getParent()) {
+                flushBatch();
+            }
+            batchGroup.push_back(PH);
+            continue;
+        }
+        flushBatch();
+
         switch (d) {
             case DispatchKind::IpcPush:
                 lowerIpcPush(PH);
@@ -325,12 +417,15 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
                 lowerIpcOrDwq(PH);
                 break;
             case DispatchKind::DwqTrigger:
-            case DispatchKind::DwqBatched:   // v1 falls back to single-trigger
             case DispatchKind::Unknown:
                 lowerDwqTrigger(PH);
                 break;
+            case DispatchKind::DwqBatched:
+                // Unreachable — handled above.
+                break;
         }
     }
+    flushBatch();
 
     // Drop the now-unused placeholder declaration so the linker doesn't
     // need a definition.
