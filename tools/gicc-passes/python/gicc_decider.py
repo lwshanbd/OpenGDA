@@ -54,10 +54,17 @@ def main() -> int:
         return 1
 
     features = json.loads(feat_path.read_text())
+    # Default to IPC_OR_DWQ — the hybrid runtime-branch lowering. Each
+    # placeholder becomes a runtime check: if the peer's IPC base ptr is
+    # non-null (same node + buffer mapped), do IPC hipMemcpyAsync;
+    # otherwise fall back to DWQ. This matches the no-hint plugin
+    # default and keeps the 3-pass build's perf parity with single-pass
+    # builds. Decider rules below can still pin specific sites to
+    # IPC_PUSH or DWQ_TRIGGER when features make the choice deterministic.
     hint: dict[str, Any] = {
         "version": 1,
         "schema_version": "gicc-hint-v1",
-        "default_dispatch": "DWQ_TRIGGER",
+        "default_dispatch": "IPC_OR_DWQ",
         "sites": {},
     }
 
