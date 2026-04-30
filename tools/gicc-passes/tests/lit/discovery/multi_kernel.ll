@@ -28,7 +28,7 @@
 
 target triple = "amdgcn-amd-amdhsa"
 
-declare void @_ZN4gicc10put_no_dbEPN4gicc9DeviceCtxEiimimm(ptr, i32, i32, i64, i32, i64, i64)
+declare void @_ZN4gicc9put_no_dbEPN4gicc9DeviceCtxEiimimm(ptr, i32, i32, i64, i32, i64, i64)
 declare void @_ZN4gicc5flushEPN4gicc9DeviceCtxE(ptr)
 
 define amdgpu_kernel void @halo_kernel(ptr %ctx,
@@ -47,7 +47,7 @@ entry:
   br i1 %cl, label %put_left, label %check_right
 
 put_left:
-  call void @_ZN4gicc10put_no_dbEPN4gicc9DeviceCtxEiimimm(
+  call void @_ZN4gicc9put_no_dbEPN4gicc9DeviceCtxEiimimm(
       ptr %ctx, i32 %left_target, i32 %my_buf, i64 %left_dst_off,
       i32 %my_buf, i64 %left_src_off, i64 %halo_bytes)
   br label %check_right
@@ -57,7 +57,7 @@ check_right:
   br i1 %cr, label %put_right, label %do_flush
 
 put_right:
-  call void @_ZN4gicc10put_no_dbEPN4gicc9DeviceCtxEiimimm(
+  call void @_ZN4gicc9put_no_dbEPN4gicc9DeviceCtxEiimimm(
       ptr %ctx, i32 %right_target, i32 %my_buf, i64 %right_dst_off,
       i32 %my_buf, i64 %right_src_off, i64 %halo_bytes)
   br label %do_flush

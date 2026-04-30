@@ -34,10 +34,15 @@ bool classifyGICCCall(const CallInst &CI, GICCOpKind &out) {
     auto *F = CI.getCalledFunction();
     if (!F) return false;
     StringRef n = F->getName();
-    if (n.contains("10put_no_db")) { out = GICCOpKind::PutNoDb; return true; }
-    if (n.contains("10get_no_db")) { out = GICCOpKind::GetNoDb; return true; }
-    if (n.contains("5flushE"))     { out = GICCOpKind::Flush;   return true; }
-    if (n.contains("5quietE"))     { out = GICCOpKind::Quiet;   return true; }
+    // Itanium length-prefixes the unmangled identifier:
+    //   put_no_db / get_no_db are 9 chars  → "9put_no_db" / "9get_no_db"
+    //   flush / quiet      are 5 chars     → "5flushE"   / "5quietE"
+    // The trailing E for flush/quiet rules out accidental matches against
+    // longer identifiers that happen to start with "flush" / "quiet".
+    if (n.contains("9put_no_db")) { out = GICCOpKind::PutNoDb; return true; }
+    if (n.contains("9get_no_db")) { out = GICCOpKind::GetNoDb; return true; }
+    if (n.contains("5flushE"))    { out = GICCOpKind::Flush;   return true; }
+    if (n.contains("5quietE"))    { out = GICCOpKind::Quiet;   return true; }
     return false;
 }
 
