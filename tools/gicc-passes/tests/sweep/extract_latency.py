@@ -22,10 +22,16 @@ elif workload == "barrier_bench":
     if not m: sys.exit("no barrier_bench latency found")
     val, unit = float(m.group(1)), (m.group(2) or "us")
     latency_ms = {"us": 1e-3, "ms": 1.0, "s": 1e3}[unit] * val
-elif workload in ("jacobi", "mm_minimal"):
-    m = re.search(r"(?:elapsed|kernel|comm)\s*[:=]?\s*([\d.eE+-]+)\s*(us|ms|s)?", text, re.I)
-    if not m: sys.exit(f"no {workload} latency found")
-    val, unit = float(m.group(1)), (m.group(2) or "ms")
+elif workload == "jacobi":
+    # Output: "Done: N iters in Y s, final l2=Z"
+    m = re.search(r"Done:.*?in\s+([\d.eE+-]+)\s*s", text)
+    if not m: sys.exit("no jacobi latency found")
+    latency_ms = float(m.group(1)) * 1000.0
+elif workload == "mm_minimal":
+    # Output: "gicc::launch average (runs 2-9): Y us"
+    m = re.search(r"gicc::launch average[^:]*:\s*([\d.eE+-]+)\s*(us|ms|s)?", text)
+    if not m: sys.exit("no mm_minimal latency found")
+    val, unit = float(m.group(1)), (m.group(2) or "us")
     latency_ms = {"us": 1e-3, "ms": 1.0, "s": 1e3}[unit] * val
 else:
     sys.exit(f"unknown workload: {workload}")
