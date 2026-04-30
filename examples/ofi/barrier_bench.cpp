@@ -73,6 +73,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    int window_size = 8;
+    if (const char* env = std::getenv("GICC_WINDOW")) {
+        int w = std::atoi(env);
+        if (w >= 1 && w <= 32) {
+            window_size = w;
+        } else {
+            fprintf(stderr, "GICC: GICC_WINDOW=%s out of range [1,32], using default %d\n",
+                    env, window_size);
+        }
+    }
+
     gicc::Bootstrap boot;
     gicc::Fabric comm(boot);
     int rank = comm.rank();
@@ -90,7 +101,7 @@ int main(int argc, char** argv) {
     std::vector<double> per_iter(iters);
 
     if (use_gicc) {
-        gicc::Barrier barrier(comm);
+        gicc::Barrier barrier(comm, window_size);
 
         if (rank == 0) {
             printf("barrier_bench --gicc: %d ranks, %d iters ... ", size, iters);

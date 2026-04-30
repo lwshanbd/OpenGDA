@@ -44,6 +44,18 @@ __global__ void continuous_barrier_kernel(gicc::BarrierCtx* bctx,
 int main(int argc, char** argv) {
     unset_rocr_visible_devices();
     const int n_continuous = (argc > 1) ? atoi(argv[1]) : 50;
+
+    int window_size = 8;
+    if (const char* env = std::getenv("GICC_WINDOW")) {
+        int w = std::atoi(env);
+        if (w >= 1 && w <= 32) {
+            window_size = w;
+        } else {
+            fprintf(stderr, "GICC: GICC_WINDOW=%s out of range [1,32], using default %d\n",
+                    env, window_size);
+        }
+    }
+
     gicc::Bootstrap boot;
     gicc::Fabric comm(boot);
     int rank = comm.rank();
@@ -58,7 +70,7 @@ int main(int argc, char** argv) {
     // Test 1: Single barrier mode (no monitor thread needed)
     // =========================================================================
     {
-        gicc::Barrier barrier(comm);
+        gicc::Barrier barrier(comm, window_size);
 
         volatile uint64_t* h_flag = nullptr;
         hipHostMalloc((void**)&h_flag, sizeof(uint64_t), hipHostMallocDefault);
@@ -98,7 +110,7 @@ int main(int argc, char** argv) {
     // Test 2: Continuous mode (needs monitor thread)
     // =========================================================================
     {
-        gicc::Barrier barrier(comm);
+        gicc::Barrier barrier(comm, window_size);
         barrier.init();
 
         boot.barrier();
