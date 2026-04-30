@@ -199,7 +199,13 @@ void memcpy_block(void* __restrict__ dst_v, const void* __restrict__ src_v,
 // flushed here — they were already executed in put_no_db's device-side
 // body via direct GPU stores to the peer's IPC-mapped pointer.
 //==============================================================================
-__device__ __forceinline__
+// User-visible API (flush / quiet / put_no_db / get_no_db): we drop
+// __forceinline so the call sites survive AST → IR translation. The
+// LTO host/device passes pattern-match on the mangled name and either
+// erase the call or replace it with a target-specific lowering. For
+// non-LTO (AST-plugin) builds the optimizer's normal inliner still
+// inlines the small bodies at -O3, so there's no measurable cost.
+__device__ inline
 void flush(DeviceCtx* ctx) {
     if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0
         && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
@@ -213,7 +219,7 @@ void flush(DeviceCtx* ctx) {
 // Each thread polls a stride of slots starting at threadIdx.x. With 1 thread
 // the polling is sequential. With n_ops_ threads each thread polls one slot.
 //==============================================================================
-__device__ __forceinline__
+__device__ inline
 void quiet(DeviceCtx* ctx) {
     if (ctx->completion_ == nullptr) return;   // overlap pattern, no quiet
     for (uint64_t i = threadIdx.x; i < ctx->n_ops_; i += blockDim.x) {
@@ -237,7 +243,7 @@ void quiet(DeviceCtx* ctx) {
 //     DwqWorkBuilder; here we do nothing. flush() will ring the trigger
 //     and the NIC executes the queued op.
 //==============================================================================
-__device__ __forceinline__
+__device__ inline
 void put_no_db(DeviceCtx* ctx,
                int target_rank,
                int dst_buf, size_t dst_offset,
@@ -329,7 +335,7 @@ void put_no_db(DeviceCtx* ctx,
 // through DWQ. (See unified-compiler-codegen design §12 "Out of Scope".)
 // Falls through to no-op so the host-trace DWQ pre-staging takes effect.
 //==============================================================================
-__device__ __forceinline__
+__device__ inline
 void get_no_db(DeviceCtx* /*ctx*/,
                int /*source_rank*/,
                int /*src_buf*/, size_t /*src_offset*/,
