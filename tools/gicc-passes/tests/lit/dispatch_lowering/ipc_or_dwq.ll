@@ -30,7 +30,7 @@ define void @t(ptr %rt, i32 %peer, i64 %size) {
 ; CHECK: [[IPC]]:
 ; CHECK: getelementptr i8, ptr %[[BASE]], i64 0
 ; CHECK: call ptr @gicc_runtime_local_buf_base(ptr %rt, i32 0)
-; CHECK: call ptr @gicc_runtime_ipc_stream(ptr %rt)
+; CHECK: call ptr @gicc_runtime_ipc_stream_indexed(ptr %rt, i32 0)
 ; CHECK: call i32 @hipMemcpyAsync(ptr %{{.*}}, ptr %{{.*}}, i64 %size, i32 3, ptr %{{.*}})
 ; CHECK: br label %[[DONE:.*]]
 ;

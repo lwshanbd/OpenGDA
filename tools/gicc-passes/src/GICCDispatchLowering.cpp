@@ -44,6 +44,11 @@ DispatchKind parseDispatch(StringRef s) {
     return DispatchKind::Unknown;
 }
 
+struct SiteHint {
+    DispatchKind dispatch     = DispatchKind::Unknown;
+    int          streamIndex  = 0;  // 0 default; set by decider for IPC_PUSH dispatch
+};
+
 struct HintFile {
     // When no hint.json is supplied we default to the hybrid runtime
     // branch. Same-node peers go through IPC (low latency / high BW
@@ -52,7 +57,7 @@ struct HintFile {
     // hint.json with default_dispatch="DWQ_TRIGGER".
     DispatchKind                          defaultDispatch = DispatchKind::IpcOrDwq;
     std::unordered_map<std::string,
-                       DispatchKind>      sites;
+                       SiteHint>          sites;
 };
 
 bool readHintFile(const std::string &path, HintFile &out) {
@@ -73,16 +78,23 @@ bool readHintFile(const std::string &path, HintFile &out) {
             if (!entry) continue;
             auto disp = entry->getString("dispatch");
             if (!disp) continue;
-            out.sites[kv.first.str()] = parseDispatch(*disp);
+            SiteHint sh;
+            sh.dispatch = parseDispatch(*disp);
+            if (auto v = entry->getInteger("stream_index"))
+                sh.streamIndex = static_cast<int>(*v);
+            out.sites[kv.first.str()] = sh;
         }
     }
     return true;
 }
 
-DispatchKind hintFor(const HintFile &h, StringRef siteId) {
+SiteHint hintFor(const HintFile &h, StringRef siteId) {
     auto it = h.sites.find(siteId.str());
-    if (it == h.sites.end()) return h.defaultDispatch;
-    return it->second;
+    if (it != h.sites.end()) return it->second;
+    SiteHint sh;
+    sh.dispatch    = h.defaultDispatch;
+    sh.streamIndex = 0;
+    return sh;
 }
 
 // Recover the site_id metadata string attached to a placeholder call.
@@ -103,7 +115,8 @@ struct LoweringHelpers {
     Type *i1Ty;
     FunctionCallee peerBaseFn;
     FunctionCallee localBaseFn;
-    FunctionCallee streamFn;
+    FunctionCallee streamFn;         // gicc_runtime_ipc_stream(rt) — kept for legacy
+    FunctionCallee indexedStreamFn;  // gicc_runtime_ipc_stream_indexed(rt, idx)
     FunctionCallee memcpyFn;
     FunctionCallee enqFn;
     FunctionCallee enqBatchedFn;
@@ -127,6 +140,9 @@ LoweringHelpers makeHelpers(Module *M) {
     H.streamFn = M->getOrInsertFunction(
         "gicc_runtime_ipc_stream",
         FunctionType::get(H.ptrTy, {H.ptrTy}, false));
+    H.indexedStreamFn = M->getOrInsertFunction(
+        "gicc_runtime_ipc_stream_indexed",
+        FunctionType::get(H.ptrTy, {H.ptrTy, H.i32Ty}, false));
     H.memcpyFn = M->getOrInsertFunction(
         "hipMemcpyAsync",
         FunctionType::get(H.i32Ty,
@@ -151,19 +167,21 @@ LoweringHelpers makeHelpers(Module *M) {
 //   %dst       = getelementptr i8, ptr %peerBase, i64 dst_off
 //   %src_base  = call ptr @gicc_runtime_local_buf_base(rt, src_buf)
 //   %src       = getelementptr i8, ptr %src_base, i64 src_off
-//   %stream    = call ptr @gicc_runtime_ipc_stream(rt)
+//   %stream    = call ptr @gicc_runtime_ipc_stream_indexed(rt, stream_index)
 //   call i32 @hipMemcpyAsync(ptr %dst, ptr %src, i64 size, i32 3, ptr %stream)
 //
 // peerBase must already be a non-null ptr to the peer's mapped buffer.
+// streamIndex selects which IPC stream to use (0 = default single-stream).
 void emitIpcBody(IRBuilder<> &B,
                  const LoweringHelpers &H,
                  Value *rt, Value *peerBase,
                  Value *dstOff, Value *srcBuf, Value *srcOff,
-                 Value *size) {
+                 Value *size, int streamIndex = 0) {
     Value *dst     = B.CreateGEP(H.i8Ty, peerBase, dstOff);
     Value *srcBase = B.CreateCall(H.localBaseFn, {rt, srcBuf});
     Value *src     = B.CreateGEP(H.i8Ty, srcBase, srcOff);
-    Value *stream  = B.CreateCall(H.streamFn, {rt});
+    Value *idxVal  = ConstantInt::get(H.i32Ty, streamIndex);
+    Value *stream  = B.CreateCall(H.indexedStreamFn, {rt, idxVal});
     // hipMemcpyDeviceToDevice = 3.
     B.CreateCall(H.memcpyFn,
                  {dst, src, size, B.getInt32(3), stream});
@@ -183,8 +201,8 @@ void emitDwqBody(IRBuilder<> &B,
 //                                                 src_off, size), !site_id
 // with
 //   %peer_base = call ptr @gicc_runtime_peer_ipc_base(rt, peer, dst_buf)
-//   <emitIpcBody>
-void lowerIpcPush(CallInst *placeholder) {
+//   <emitIpcBody using stream_index from hint>
+void lowerIpcPush(CallInst *placeholder, int streamIndex) {
     Module      *M = placeholder->getModule();
     IRBuilder<>  B(placeholder);
     LoweringHelpers H = makeHelpers(M);
@@ -198,7 +216,7 @@ void lowerIpcPush(CallInst *placeholder) {
     Value *size   = placeholder->getArgOperand(6);
 
     Value *peerBase = B.CreateCall(H.peerBaseFn, {rt, peer, dstBuf});
-    emitIpcBody(B, H, rt, peerBase, dstOff, srcBuf, srcOff, size);
+    emitIpcBody(B, H, rt, peerBase, dstOff, srcBuf, srcOff, size, streamIndex);
     placeholder->eraseFromParent();
 }
 
@@ -232,7 +250,7 @@ void lowerDwqTrigger(CallInst *placeholder) {
 //
 // This lets the compiler emit one trace function that handles both
 // same-node IPC peers and off-node DWQ peers without needing a hint.
-void lowerIpcOrDwq(CallInst *placeholder) {
+void lowerIpcOrDwq(CallInst *placeholder, int streamIndex) {
     Module      *M  = placeholder->getModule();
     IRBuilder<>  B(placeholder);
     LoweringHelpers H = makeHelpers(M);
@@ -278,7 +296,7 @@ void lowerIpcOrDwq(CallInst *placeholder) {
     // ipcBB: hipMemcpyAsync, then jump to done.
     {
         IRBuilder<> IB(ipcBB);
-        emitIpcBody(IB, H, rt, peerBase, dstOff, srcBuf, srcOff, size);
+        emitIpcBody(IB, H, rt, peerBase, dstOff, srcBuf, srcOff, size, streamIndex);
         IB.CreateBr(doneBB);
     }
     // dwqBB: gicc_runtime_dwq_enqueue, then jump to done.
@@ -395,8 +413,9 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
     };
 
     for (auto *PH : placeholders) {
-        StringRef siteId = siteIdOf(PH);
-        DispatchKind d   = hintFor(hints, siteId);
+        StringRef siteId  = siteIdOf(PH);
+        SiteHint  sh      = hintFor(hints, siteId);
+        DispatchKind d    = sh.dispatch;
 
         if (d == DispatchKind::DwqBatched) {
             // Same BB as the running group? Add. Otherwise flush + start fresh.
@@ -411,10 +430,10 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
 
         switch (d) {
             case DispatchKind::IpcPush:
-                lowerIpcPush(PH);
+                lowerIpcPush(PH, sh.streamIndex);
                 break;
             case DispatchKind::IpcOrDwq:
-                lowerIpcOrDwq(PH);
+                lowerIpcOrDwq(PH, sh.streamIndex);
                 break;
             case DispatchKind::DwqTrigger:
             case DispatchKind::Unknown:
