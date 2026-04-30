@@ -90,6 +90,18 @@ public:
           shared_completion_cntr_(nullptr),
           mono_total_ops_(0)
     {
+        // Read W from env var; hint.json override is applied later when
+        // the dispatch-lowering pass produces final hint.
+        if (const char* env = std::getenv("GICC_WINDOW")) {
+            int w = std::atoi(env);
+            if (w >= 1 && w <= 32) {
+                window_size_ = w;
+            } else {
+                fprintf(stderr, "GICC: GICC_WINDOW=%s out of range [1,32], using default %d\n",
+                        env, window_size_);
+            }
+        }
+
         unset_rocr_visible_devices();
         comm_ = new Fabric(boot_);
 
@@ -641,8 +653,9 @@ public:
 
     void barrier() { comm_->barrier(); }
 
-    int rank()   const { return comm_->rank(); }
-    int size()   const { return comm_->size(); }
+    int rank()        const { return comm_->rank(); }
+    int size()        const { return comm_->size(); }
+    int window_size() const { return window_size_; }
     Bootstrap& boot() noexcept { return boot_; }
     const Bootstrap& boot() const noexcept { return boot_; }
     int gpu_id() const { return comm_->gpu_id(); }
@@ -709,6 +722,11 @@ private:
     struct fid_cntr*                   shared_completion_cntr_;
     uint64_t                           mono_total_ops_;          // monotonic across batches
     std::vector<DwqWorkBuilder*>       dwq_pool_;                // recycled builders
+
+    // Sliding-window depth passed to Barrier construction. Default 8;
+    // overridden by GICC_WINDOW env var (range [1, 32]) or a future
+    // hint.json from the dispatch-lowering pass.
+    int                                window_size_    = 8;
 
     // Dedicated stream for host-driven IPC dispatches. The LTO host
     // trace queues hipMemcpyAsync's on this stream BEFORE the kernel
