@@ -38,6 +38,7 @@
 
 #include <hip/hip_runtime.h>
 #include <array>
+#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -55,17 +56,20 @@ class Barrier {
 public:
     static constexpr int MAX_ROUNDS = 12;  // up to 4096 ranks
 
-    explicit Barrier(Fabric& comm_)
-        : comm_(comm_),
-          barrier_count_(0),
+    explicit Barrier(Fabric& comm_, int window_size = 8)
+        : prefetch_depth_(window_size),
+          comm_(comm_),
           n_rounds_(0),
+          barrier_count_(0),
           d_signals_(nullptr), mr_signals_(nullptr),
           d_trigger_addrs_(nullptr), d_context_(nullptr),
-          h_signal_values_{nullptr, nullptr},
-          mr_signal_values_{nullptr, nullptr},
+          h_signal_values_{},
+          mr_signal_values_{},
           h_done_counter_(nullptr),
           h_ready_counter_(nullptr)
     {
+        assert(window_size >= 1 && window_size <= BARRIER_SIGNAL_SLOTS &&
+               "window_size out of range [1, 32]");
         // ceil(log2(size))
         int sz = comm_.size();
         while ((1 << n_rounds_) < sz) n_rounds_++;
@@ -147,8 +151,8 @@ public:
         peer_mapped_bases_.clear();
         round_is_local_.clear();
 
-        // Signal source buffers (double-buffered)
-        for (int i = 0; i < N_SIGNAL_BUFFERS; i++) {
+        // Signal source buffers (one per slot, up to BARRIER_SIGNAL_SLOTS)
+        for (int i = 0; i < BARRIER_SIGNAL_SLOTS; i++) {
             delete mr_signal_values_[i];
             mr_signal_values_[i] = nullptr;
             if (h_signal_values_[i]) hipHostFree(h_signal_values_[i]);
@@ -178,7 +182,7 @@ public:
      *  once per kernel launch and the head/tail stay one apart, exactly the
      *  pre-Plan-B behaviour. In continuous mode `start_continuous` and
      *  `monitor_loop` may call this several times back-to-back to keep up to
-     *  `PREFETCH_DEPTH` barriers queued ahead of the kernel; each call
+     *  `prefetch_depth_` barriers queued ahead of the kernel; each call
      *  consumes a different rotating slot, so payload buffers and DWQ
      *  builders never collide.
      */
@@ -193,7 +197,7 @@ public:
             return;
         }
 
-        int buf_idx = (threshold - 1) % N_SIGNAL_BUFFERS;
+        int buf_idx = (threshold - 1) % prefetch_depth_;
         uint64_t* h_sig = h_signal_values_[buf_idx];
         MemoryRegion* mr_sig = mr_signal_values_[buf_idx];
 
@@ -203,9 +207,9 @@ public:
         int builder_idx = (threshold - 1) % BUILDER_PIPELINE;
 
         // Slot-reuse wait. The slot we're about to fill last held the WQE for
-        // threshold = (threshold - PREFETCH_DEPTH). In steady continuous mode
+        // threshold = (threshold - prefetch_depth_). In steady continuous mode
         // that send completed long ago, so this loop is a no-op; on the first
-        // PREFETCH_DEPTH barriers of a run there is no prior WQE to wait for.
+        // prefetch_depth_ barriers of a run there is no prior WQE to wait for.
         if (threshold > BUILDER_PIPELINE) {
             uint64_t prev_threshold = threshold - BUILDER_PIPELINE;
             for (int k = 0; k < n_rounds_; k++) {
@@ -295,14 +299,14 @@ public:
 
         continuous_mode_ = true;
 
-        // Pre-queue up to PREFETCH_DEPTH barriers ahead of the kernel. On
+        // Pre-queue up to prefetch_depth_ barriers ahead of the kernel. On
         // entry the kernel sees ready_counter = queued_count_, dev_seen = 0,
         // and can run that many barriers back-to-back without waiting on the
         // host. The monitor thread refills the window one barrier per
         // detected GPU completion so the depth stays roughly constant.
-        uint64_t prefetch = num_barriers < (uint64_t)PREFETCH_DEPTH
+        uint64_t prefetch = num_barriers < (uint64_t)prefetch_depth_
                               ? num_barriers
-                              : (uint64_t)PREFETCH_DEPTH;
+                              : (uint64_t)prefetch_depth_;
         for (uint64_t i = 0; i < prefetch; i++) setup();
     }
 
@@ -322,25 +326,23 @@ public:
     uint64_t    count()      const { return barrier_count_; }
 
 private:
-    // Sliding-window depth. The host keeps up to PREFETCH_DEPTH DWQ ops queued
-    // ahead of the GPU at all times in continuous mode, so the kernel never
-    // has to round-trip to host memory between barriers in steady state. All
-    // three rotating resources (host payload buffers, device signal slots,
-    // DwqWorkBuilders) share this period so they alternate in lock-step.
+    // Sliding-window depth, runtime parameter. The host keeps up to
+    // prefetch_depth_ DWQ ops queued ahead of the GPU at all times in
+    // continuous mode, so the kernel never has to round-trip to host memory
+    // between barriers in steady state. All three rotating resources (host
+    // payload buffers, device signal slots, DwqWorkBuilders) share this period
+    // so they alternate in lock-step.
     //
-    // Constraint: BARRIER_SIGNAL_SLOTS in ofi_barrier_device.cuh must equal
-    // this value — peers index our signals[] by `expected % SLOTS` and we
-    // must stay coherent with that.
-    static constexpr int PREFETCH_DEPTH    = 8;
-    static constexpr int N_SIGNAL_BUFFERS  = PREFETCH_DEPTH;
-    static_assert(BARRIER_SIGNAL_SLOTS == PREFETCH_DEPTH,
-                  "BARRIER_SIGNAL_SLOTS must equal Barrier::PREFETCH_DEPTH");
+    // Bounded by BARRIER_SIGNAL_SLOTS (compile-time array cap). Peers index
+    // our signals[] by `expected % BARRIER_SIGNAL_SLOTS`; that modulus is
+    // always BARRIER_SIGNAL_SLOTS regardless of the active depth.
+    const int prefetch_depth_;
 
     Fabric& comm_;
     int      n_rounds_;
     uint64_t barrier_count_;     ///< completed barriers (tail of window)
     uint64_t queued_count_ = 0;  ///< barriers queued to libfabric (head)
-                                 ///< queued_count_ - barrier_count_ ≤ PREFETCH_DEPTH
+                                 ///< queued_count_ - barrier_count_ ≤ prefetch_depth_
 
     // Signal buffers (host-pinned, RDMA-registered)
     uint64_t*      d_signals_;
@@ -370,18 +372,19 @@ private:
     BarrierCtx  h_context_;
     BarrierCtx* d_context_;
 
-    // Double-buffered signal source
-    uint64_t*     h_signal_values_[N_SIGNAL_BUFFERS];
-    MemoryRegion* mr_signal_values_[N_SIGNAL_BUFFERS];
+    // Per-slot signal source buffers; allocated up to BARRIER_SIGNAL_SLOTS
+    // (the static cap); only prefetch_depth_ slots are active at runtime.
+    uint64_t*     h_signal_values_[BARRIER_SIGNAL_SLOTS];
+    MemoryRegion* mr_signal_values_[BARRIER_SIGNAL_SLOTS];
 
     // Sliding-window pool of DWQ work builders. Outer dim is per-round; inner
-    // dim is PREFETCH_DEPTH slots. setup() picks a slot by
-    // queued_count_ % PREFETCH_DEPTH so that the K most recently queued
-    // barriers each have their own persistent fi_deferred_work struct. The
-    // OFI completion-counter wait runs once per slot reuse (depth lag), which
-    // in steady state is a no-op because the WQE we are reusing finished long
-    // ago.
-    static constexpr int BUILDER_PIPELINE = PREFETCH_DEPTH;
+    // dim is BARRIER_SIGNAL_SLOTS (static cap). setup() picks a slot by
+    // queued_count_ % prefetch_depth_ so that the active-depth most recently
+    // queued barriers each have their own persistent fi_deferred_work struct.
+    // The OFI completion-counter wait runs once per slot reuse (depth lag),
+    // which in steady state is a no-op because the WQE we are reusing finished
+    // long ago.
+    static constexpr int BUILDER_PIPELINE = BARRIER_SIGNAL_SLOTS;
     std::vector<std::array<DwqWorkBuilder*, BUILDER_PIPELINE>> dwq_ops_;
 
     // Host-visible counters
@@ -419,12 +422,12 @@ private:
             if (gpu_done > barrier_count_) {
                 reset();
 
-                // Refill the sliding window: keep up to PREFETCH_DEPTH
+                // Refill the sliding window: keep up to prefetch_depth_
                 // barriers queued ahead of barrier_count_, capped by the
                 // remaining barriers in this continuous run.
                 uint64_t target = target_barrier_count_.load(std::memory_order_relaxed);
                 while (queued_count_ < target &&
-                       (queued_count_ - barrier_count_) < (uint64_t)PREFETCH_DEPTH) {
+                       (queued_count_ - barrier_count_) < (uint64_t)prefetch_depth_) {
                     setup();
                 }
 
@@ -471,7 +474,7 @@ private:
         if (hipIpcGetMemHandle(&ipc_handle_, d_signals_) == hipSuccess)
             have_ipc_handle_ = true;
 
-        for (int i = 0; i < N_SIGNAL_BUFFERS; i++) {
+        for (int i = 0; i < BARRIER_SIGNAL_SLOTS; i++) {
             hipHostMalloc(&h_signal_values_[i], sizeof(uint64_t), hipHostMallocDefault);
             *h_signal_values_[i] = 0;
             mr_signal_values_[i] = new MemoryRegion(
