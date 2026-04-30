@@ -11,7 +11,10 @@
 namespace gicc::pass {
 
 struct GICCLaunchSite {
-    llvm::CallInst   *callsite       = nullptr;
+    // CallBase covers both CallInst (regular call) and InvokeInst
+    // (exception-aware invoke). Real C++ source compiles to invoke for
+    // any function the optimizer can't prove nothrow.
+    llvm::CallBase   *callsite       = nullptr;
     llvm::Function   *launchWrapper  = nullptr;   // gicc::launch<K> instantiation
     std::string       kernelMangled;              // _Z11halo_kernel...
     KernelTemplate    kernelTemplate;             // loaded from meta JSON

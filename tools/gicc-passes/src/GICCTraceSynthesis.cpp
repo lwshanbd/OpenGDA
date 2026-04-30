@@ -254,7 +254,7 @@ void emitTraceBody(Module &M, Function *traceFn, const KernelTemplate &t) {
 // In IR the kernel_user_args land at the END of the call, so we take
 // the last (params.size() - 1) arguments of the launch CallInst and
 // prepend the Runtime* (always arg 0).
-SmallVector<Value *, 16> buildTraceCallArgs(CallInst *launch,
+SmallVector<Value *, 16> buildTraceCallArgs(CallBase *launch,
                                             const KernelTemplate &t) {
     SmallVector<Value *, 16> out;
     out.push_back(launch->getArgOperand(0));            // Runtime*
@@ -271,7 +271,7 @@ SmallVector<Value *, 16> buildTraceCallArgs(CallInst *launch,
     return out;
 }
 
-void insertTraceCall(CallInst *launch, Function *traceFn,
+void insertTraceCall(CallBase *launch, Function *traceFn,
                      const KernelTemplate &t) {
     IRBuilder<> B(launch);
     auto args = buildTraceCallArgs(launch, t);
