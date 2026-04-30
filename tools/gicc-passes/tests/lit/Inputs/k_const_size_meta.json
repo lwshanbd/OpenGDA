@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "kernel_mangled": "_Z9k_const_szPN4gicc9DeviceCtxE",
+  "kernel_simple":  "k_const_sz",
+  "params": [
+    { "idx": 0, "name": "ctx", "type": "ptr" }
+  ],
+  "ops": [
+    {
+      "site_id": "k.cpp:10:k_const_sz::0",
+      "kind":    "put_no_db",
+      "guard":   { "kind": "always" },
+      "args": {
+        "target_rank": { "kind": "const_i64", "value": 0 },
+        "dst_buf":     { "kind": "const_i64", "value": 0 },
+        "dst_off":     { "kind": "const_i64", "value": 0 },
+        "src_buf":     { "kind": "const_i64", "value": 0 },
+        "src_off":     { "kind": "const_i64", "value": 0 },
+        "size":        { "kind": "const_i64", "value": 4096 }
+      }
+    }
+  ]
+}

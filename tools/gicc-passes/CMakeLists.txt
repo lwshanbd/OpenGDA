@@ -28,6 +28,7 @@ add_library(gicc-passes MODULE
     src/TraceTemplateBuilder.cpp
     src/GICCDeviceLowering.cpp
     src/GICCHostDiscovery.cpp
+    src/GICCFeatureExtraction.cpp
 )
 target_include_directories(gicc-passes PRIVATE
     ${LLVM_INCLUDE_DIRS}

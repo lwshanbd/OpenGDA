@@ -1,5 +1,6 @@
 #include "GICCDeviceDiscovery.h"
 #include "GICCDeviceLowering.h"
+#include "GICCFeatureExtraction.h"
 #include "GICCHKAnalysis.h"
 #include "GICCHostDiscovery.h"
 #include "GICCPassConfig.h"
@@ -47,6 +48,8 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     MPM.addPass(GICCDeviceDiscoveryPass());
                     MPM.addPass(GICCHKAnalysisPass());
                     MPM.addPass(GICCDeviceLoweringPass());
+                    MPM.addPass(GICCHostDiscoveryPass());
+                    MPM.addPass(GICCFeatureExtractionPass());
                 });
             // Sentinel stays at OptimizerLast — it's just a debug probe
             // and we want to see the post-optimization module triple.
@@ -77,6 +80,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-host-discovery") {
                         MPM.addPass(GICCHostDiscoveryPass());
+                        return true;
+                    }
+                    if (Name == "gicc-feature-extraction") {
+                        MPM.addPass(GICCFeatureExtractionPass());
                         return true;
                     }
                     return false;
