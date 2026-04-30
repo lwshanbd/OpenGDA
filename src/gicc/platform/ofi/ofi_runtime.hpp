@@ -70,6 +70,11 @@ class Runtime {
                                                             std::size_t, int,
                                                             std::size_t,
                                                             std::size_t);
+    friend void             (::gicc_runtime_dwq_enqueue_batched)
+                                       (Runtime *, int,
+                                        const int *, const int *,
+                                        const std::size_t *, const int *,
+                                        const std::size_t *, const std::size_t *);
     friend volatile std::uint64_t *(::gicc_runtime_trigger_addr)(Runtime *);
     friend std::uint64_t           (::gicc_runtime_trigger_val) (Runtime *);
 

@@ -59,6 +59,52 @@ void gicc_runtime_dwq_enqueue(gicc::Runtime *rt,
     rt->my_pending_.push_back(dwq);
 }
 
+// Batched form: queues N RMA writes in one host call. Each descriptor's
+// trigger threshold is its 1-based slot within the batch (the kernel's
+// single trigger MMIO write at flush-time fires all of them). Saves the
+// per-op IR call overhead and combines the mono_total_ops_ /
+// my_n_remote_ops_ counter updates. libfabric still gets one
+// fi_control(FI_QUEUE_WORK) per descriptor — that's a per-op limit
+// inherent to the deferred-work API, no batched FI_QUEUE_WORK exists.
+void gicc_runtime_dwq_enqueue_batched(gicc::Runtime    *rt,
+                                       int               n_ops,
+                                       const int        *peers,
+                                       const int        *dst_bufs,
+                                       const std::size_t *dst_offs,
+                                       const int        *src_bufs,
+                                       const std::size_t *src_offs,
+                                       const std::size_t *sizes) {
+    if (!rt || n_ops <= 0) return;
+    rt->mono_total_ops_   += static_cast<std::uint64_t>(n_ops);
+    rt->my_n_remote_ops_  += static_cast<std::uint64_t>(n_ops);
+    const std::uint64_t batch_top = rt->mono_total_ops_;
+    for (int i = 0; i < n_ops; ++i) {
+        auto &ob = rt->local_bufs_[src_bufs[i]];
+        auto &ri = rt->remote_info_cache_[
+            static_cast<std::size_t>(peers[i]) *
+                static_cast<std::size_t>(rt->n_bufs_) +
+            static_cast<std::size_t>(dst_bufs[i])];
+        const std::uint64_t remote_addr = rt->comm_->is_virt_addr_mode()
+            ? (ri.rma_addr + dst_offs[i])
+            : (ri.rma_addr - ri.base_addr) + dst_offs[i];
+
+        // Each descriptor's threshold is sequential within the batch.
+        // The kernel writes trigger_val_ = batch_top, satisfying all.
+        const std::uint64_t threshold =
+            batch_top - static_cast<std::uint64_t>(n_ops - 1 - i);
+
+        auto *dwq = rt->dwq_get_();
+        dwq->queue_rma_write(
+            rt->comm_->fabric->domain, rt->comm_->fabric->ep,
+            static_cast<char *>(ob.ptr) + src_offs[i], ob.desc_, sizes[i],
+            rt->comm_->av_addrs[peers[i]], remote_addr, ri.rma_key,
+            rt->comm_->fabric->trigger_cntr,
+            rt->shared_completion_cntr_,
+            threshold);
+        rt->my_pending_.push_back(dwq);
+    }
+}
+
 volatile std::uint64_t *gicc_runtime_trigger_addr(gicc::Runtime *rt) {
     return rt ? rt->comm_->get_trigger_addr() : nullptr;
 }

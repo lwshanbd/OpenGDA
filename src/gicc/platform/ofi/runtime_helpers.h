@@ -35,6 +35,24 @@ void gicc_runtime_dwq_enqueue(gicc::Runtime *rt,
                                std::size_t  src_off,
                                std::size_t  size);
 
+// DWQ batched dispatch helper (used by the DWQ_BATCHED lowering).
+// Queues N RMA WRITE descriptors in one host call. All N descriptors
+// share the same trigger threshold (mono_total_ops_ after += n_ops),
+// so the NIC fires a single trigger after the kernel terminates and
+// the libfabric per-call overhead is amortized across the batch.
+//
+// The arrays are caller-owned, all of length n_ops. Element i
+// corresponds to the i'th queued op:
+//   peers[i], dst_bufs[i], dst_offs[i], src_bufs[i], src_offs[i], sizes[i]
+void gicc_runtime_dwq_enqueue_batched(gicc::Runtime    *rt,
+                                       int               n_ops,
+                                       const int        *peers,
+                                       const int        *dst_bufs,
+                                       const std::size_t *dst_offs,
+                                       const int        *src_bufs,
+                                       const std::size_t *src_offs,
+                                       const std::size_t *sizes);
+
 // Device-side helpers (called from device IR emitted by GICCDeviceLowering).
 volatile std::uint64_t *gicc_runtime_trigger_addr(gicc::Runtime *rt);
 std::uint64_t           gicc_runtime_trigger_val (gicc::Runtime *rt);
