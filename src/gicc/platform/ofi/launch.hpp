@@ -26,6 +26,7 @@
 
 #include <hip/hip_runtime.h>
 
+#include "gicc/launch.hpp"
 #include "gicc/platform/ofi/ofi_runtime.hpp"
 
 namespace gicc {
@@ -42,6 +43,7 @@ struct kernel_trace {
 } // namespace detail
 
 template <auto Kernel, typename... Args>
+GICC_LAUNCH_SITE
 inline void launch(Runtime& rt,
                    dim3 grid, dim3 block,
                    Args... args)
@@ -52,6 +54,7 @@ inline void launch(Runtime& rt,
 }
 
 template <auto Kernel, typename... Args>
+GICC_LAUNCH_SITE
 inline void launch(Runtime& rt,
                    dim3 grid, dim3 block,
                    size_t shmem_bytes, hipStream_t stream,

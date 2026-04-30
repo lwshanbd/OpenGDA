@@ -18,11 +18,13 @@
 
 #include <cuda_runtime.h>
 
+#include "gicc/launch.hpp"
 #include "gicc/platform/mlx5/mlx5_runtime.hpp"
 
 namespace gicc {
 
 template <auto Kernel, typename... Args>
+GICC_LAUNCH_SITE
 inline void launch(Runtime& rt,
                    dim3 grid, dim3 block,
                    Args... args)
@@ -32,6 +34,7 @@ inline void launch(Runtime& rt,
 }
 
 template <auto Kernel, typename... Args>
+GICC_LAUNCH_SITE
 inline void launch(Runtime& rt,
                    dim3 grid, dim3 block,
                    size_t shmem_bytes, cudaStream_t stream,

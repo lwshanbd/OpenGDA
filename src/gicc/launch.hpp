@@ -7,6 +7,15 @@
  */
 #pragma once
 
+// Marker for the LTO host pass: every gicc::launch wrapper carries this
+// attribute so GICCHostDiscovery can identify launch instantiation
+// sites in IR via @llvm.global.annotations.
+#if defined(__clang__)
+  #define GICC_LAUNCH_SITE [[clang::annotate("gicc.launch_site")]]
+#else
+  #define GICC_LAUNCH_SITE
+#endif
+
 #if defined(GICC_PLATFORM_MLX5)
   #include "platform/mlx5/launch.hpp"
 #elif defined(GICC_PLATFORM_OFI)
