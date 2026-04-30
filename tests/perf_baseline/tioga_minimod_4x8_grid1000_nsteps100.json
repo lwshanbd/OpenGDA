@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "benchmark": "Minimod_MPI / hip_gicc_lto vs hip_gda",
+  "system": {
+    "cluster": "Tioga (LLNL)",
+    "partition": "pci",
+    "nodes": 4,
+    "ranks_per_node": 8,
+    "total_ranks": 32,
+    "gpu": "AMD MI250X (gfx90a)",
+    "fabric": "HPE Slingshot / CXI (libfabric 2.1)",
+    "rocm": "6.4.0"
+  },
+  "problem": {
+    "grid": 1000,
+    "nsteps": 100,
+    "halo_pattern": "1D X-axis decomposition, halo to left + right neighbor"
+  },
+  "method": "Time comm (rank 0), 3 runs each, median reported. Same compute node allocation across all runs to amortize cold-cache effects.",
+  "captured_at": "2026-04-30",
+  "results": {
+    "hip_gda_hipcc": {
+      "description": "GDA reference path — direct libfabric DWQ submission from device",
+      "runs_ms": [88.33, 88.28, 88.21],
+      "median_ms": 88.28
+    },
+    "hip_gicc_lto": {
+      "description": "GICC LTO pass pipeline (tools/gicc-passes/), default IPC_OR_DWQ hybrid lowering",
+      "runs_ms": [86.44, 86.38, 86.64],
+      "median_ms": 86.44,
+      "speedup_vs_gda": 1.021
+    }
+  },
+  "v1_acceptance": {
+    "spec_target_ms": 92.5,
+    "actual_median_ms": 86.44,
+    "passed": true,
+    "notes": "spec §2.6 target was median ≤ 92.5 ms (≤ 1.05× GDA). LTO median is 86.44 ms — 6.6% below the target and 2.1% FASTER than the GDA reference, exceeding the v1 acceptance bar."
+  },
+  "regenerate": {
+    "command": [
+      "cd benchmarks/Minimod_MPI",
+      "make TARGET=hip_gicc COMPILER=hipcc_gicc GICC_USE_LTO_PASS=1 clean",
+      "GICC_MODE=lower GICC_META_DIR=/tmp/gicc-meta-baseline make TARGET=hip_gicc COMPILER=hipcc_gicc GICC_USE_LTO_PASS=1",
+      "for i in 1 2 3; do PMI_MAX_KVS_ENTRIES=512 FI_MR_CACHE_MAX_COUNT=0 srun -p pci -N 4 -n 32 --ntasks-per-node=8 -t 2 ./run.sh ./main_hip_gicc_hipcc_gicc --ngpus 32 --grid 1000 --nsteps 100 2>&1 | grep 'rank 0 Time comm'; done"
+    ]
+  }
+}
