@@ -20,6 +20,7 @@ const char *argRefKindStr(ArgRef::Kind k) {
         case ArgRef::Kind::BinOp:    return "binop";
         case ArgRef::Kind::Cast:     return "cast";
         case ArgRef::Kind::Derived:  return "derived";
+        case ArgRef::Kind::LoopIv:   return "loop_iv";
     }
     return "derived";
 }
@@ -30,6 +31,7 @@ bool parseArgRefKind(StringRef s, ArgRef::Kind &out) {
     if (s == "binop")     { out = ArgRef::Kind::BinOp;    return true; }
     if (s == "cast")      { out = ArgRef::Kind::Cast;     return true; }
     if (s == "derived")   { out = ArgRef::Kind::Derived;  return true; }
+    if (s == "loop_iv")   { out = ArgRef::Kind::LoopIv;   return true; }
     return false;
 }
 
@@ -72,6 +74,7 @@ json::Value argRefToJSON(const ArgRef &a) {
             break;
         }
         case ArgRef::Kind::Derived:
+        case ArgRef::Kind::LoopIv:
             break;
     }
     return json::Value(std::move(o));
@@ -112,6 +115,7 @@ bool argRefFromJSON(const json::Value &v, ArgRef &out) {
             break;
         }
         case ArgRef::Kind::Derived:
+        case ArgRef::Kind::LoopIv:
             break;
     }
     return true;
@@ -150,6 +154,36 @@ bool guardFromJSON(const json::Value &v, GuardSpec &out) {
     return true;
 }
 
+json::Value loopToJSON(const LoopInfo &L) {
+    json::Object o;
+    o["in_loop"]  = L.inLoop;
+    if (L.inLoop) {
+        if (L.ivBoundKnown) {
+            o["iv_param"] = static_cast<int64_t>(L.ivParamIdx);
+        }
+        o["iv_start"] = L.ivStart;
+        o["iv_step"]  = L.ivStep;
+        if (L.degraded) o["degraded"] = true;
+    }
+    return json::Value(std::move(o));
+}
+
+bool loopFromJSON(const json::Value &v, LoopInfo &out) {
+    const auto *o = v.getAsObject();
+    if (!o) return false;
+    if (auto b = o->getBoolean("in_loop")) out.inLoop = *b;
+    else                                    out.inLoop = false;
+    if (!out.inLoop) return true;
+    if (auto p = o->getInteger("iv_param")) {
+        out.ivParamIdx   = static_cast<unsigned>(*p);
+        out.ivBoundKnown = true;
+    }
+    if (auto s = o->getInteger("iv_start")) out.ivStart = *s;
+    if (auto s = o->getInteger("iv_step"))  out.ivStep  = *s;
+    if (auto d = o->getBoolean("degraded")) out.degraded = *d;
+    return true;
+}
+
 json::Value templateToJSON(const KernelTemplate &t) {
     json::Object root;
     root["version"]         = 1;
@@ -172,6 +206,7 @@ json::Value templateToJSON(const KernelTemplate &t) {
         o["site_id"] = op.siteId;
         o["kind"]    = op.kind;
         o["guard"]   = guardToJSON(op.guard);
+        if (op.loop.inLoop) o["loop"] = loopToJSON(op.loop);
 
         json::Object args;
         for (const auto &kv : op.args) {
@@ -215,6 +250,9 @@ bool templateFromJSON(const json::Value &v, KernelTemplate &out) {
             if (auto k = oo->getString("kind"))    op.kind   = k->str();
             if (const auto *g = oo->get("guard")) {
                 if (!guardFromJSON(*g, op.guard)) return false;
+            }
+            if (const auto *l = oo->get("loop")) {
+                if (!loopFromJSON(*l, op.loop)) return false;
             }
             if (const auto *a = oo->getObject("args")) {
                 for (const auto &kv : *a) {

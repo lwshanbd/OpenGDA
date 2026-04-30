@@ -29,6 +29,7 @@ const char *argKindTag(ArgRef::Kind k) {
         case ArgRef::Kind::BinOp:    return "binop";
         case ArgRef::Kind::Cast:     return "cast";
         case ArgRef::Kind::Derived:  return "derived";
+        case ArgRef::Kind::LoopIv:   return "loop_iv";
     }
     return "derived";
 }
