@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "schema_version": "gicc-hint-v1",
+  "default_dispatch": "DWQ_TRIGGER",
+  "sites": {
+    "k.cpp:1:k_one_put::0": { "dispatch": "IPC_PUSH" }
+  }
+}
