@@ -30,6 +30,7 @@ add_library(gicc-passes MODULE
     src/GICCHostDiscovery.cpp
     src/GICCFeatureExtraction.cpp
     src/GICCTraceSynthesis.cpp
+    src/GICCDispatchLowering.cpp
 )
 target_include_directories(gicc-passes PRIVATE
     ${LLVM_INCLUDE_DIRS}
