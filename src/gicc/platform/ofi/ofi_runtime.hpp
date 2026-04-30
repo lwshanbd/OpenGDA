@@ -27,8 +27,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
-#include <thread>
-#include <atomic>
 
 #include "gicc/gicc_types.hpp"
 #include "gicc/platform/ofi/ofi_device.cuh"
@@ -140,14 +138,8 @@ public:
 
         (void)hipHostMalloc(&h_dev_ctx_, sizeof(DeviceCtx), hipHostMallocMapped);
         (void)hipHostGetDevicePointer((void**)&d_dev_ctx_, h_dev_ctx_, 0);
-        h_dev_ctx_->trigger_addr_      = comm_->get_trigger_addr();
-        h_dev_ctx_->completion_        = nullptr;
-        h_dev_ctx_->trigger_val_       = 0;
-        h_dev_ctx_->n_ops_             = 0;
-        h_dev_ctx_->ipc_map_           = nullptr;
-        h_dev_ctx_->max_bufs_per_rank_ = 0;
-        h_dev_ctx_->local_bufs_        = nullptr;
-        h_dev_ctx_->n_local_bufs_      = 0;
+        h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
+        h_dev_ctx_->trigger_val_  = 0;
     }
 
     ~Runtime() {
@@ -173,19 +165,10 @@ public:
         }
         peer_mapped_ptrs_.clear();
 
-        if (d_ipc_map_) (void)hipFree(d_ipc_map_);
-        if (d_local_bufs_) (void)hipFree(d_local_bufs_);
-
         if (shared_completion_cntr_)
             fi_close(&shared_completion_cntr_->fid);
         for (auto* op : dwq_pool_) delete op;
         dwq_pool_.clear();
-        if (monitor_thread_.joinable()) {
-            monitor_stop_.store(true, std::memory_order_release);
-            monitor_thread_.join();
-        }
-        if (h_ipc_head_) (void)hipHostFree(h_ipc_head_);
-        if (h_ipc_ring_) (void)hipHostFree(h_ipc_ring_);
         if (ipc_stream_) (void)hipStreamDestroy(ipc_stream_);
 
         delete comm_;
@@ -307,44 +290,10 @@ public:
             }
         }
 
-        std::vector<IpcMapEntry> host_map((size_t)nranks * (size_t)nbuf);
-        for (int r = 0; r < nranks; r++) {
-            for (int b = 0; b < nbuf; b++) {
-                IpcMapEntry& e = host_map[(size_t)r * nbuf + b];
-                e.mapped_ptr  = peer_mapped_ptrs_[r][b];   // nullptr if off-node / self
-            }
-        }
-        const size_t map_bytes = host_map.size() * sizeof(IpcMapEntry);
-        if (hipMalloc(&d_ipc_map_, map_bytes) != hipSuccess) {
-            fprintf(stderr, "GICC: hipMalloc(ipc_map) failed\n");
-            std::abort();
-        }
-        if (hipMemcpy(d_ipc_map_, host_map.data(), map_bytes,
-                      hipMemcpyHostToDevice) != hipSuccess) {
-            fprintf(stderr, "GICC: hipMemcpy(ipc_map) failed\n");
-            std::abort();
-        }
-
-        // Build and upload device-side local buffer base table. This is a
-        // snapshot at exchange() time — register_buffer calls made AFTER
-        // exchange() will not appear here (v1 limitation; matches the IPC
-        // map's snapshot semantics).
-        {
-            std::vector<LocalBufView> host_lb(local_bufs_.size());
-            for (size_t i = 0; i < local_bufs_.size(); i++) {
-                host_lb[i].base = local_bufs_[i].ptr;
-            }
-            const size_t lb_bytes = host_lb.size() * sizeof(LocalBufView);
-            if (hipMalloc(&d_local_bufs_, lb_bytes) != hipSuccess) {
-                fprintf(stderr, "GICC: hipMalloc(local_bufs) failed\n");
-                std::abort();
-            }
-            if (hipMemcpy(d_local_bufs_, host_lb.data(), lb_bytes,
-                          hipMemcpyHostToDevice) != hipSuccess) {
-                fprintf(stderr, "GICC: hipMemcpy(local_bufs) failed\n");
-                std::abort();
-            }
-        }
+        // Pattern C deleted: device-side IPC table + local-buf table no
+        // longer needed. The LTO host trace consults peer_mapped_ptrs_
+        // and local_bufs_ on the host via the gicc_runtime_*_base
+        // helpers; the kernel never reads an IPC map.
     }
 
     RemoteBufferInfo remote_buffer(int rank, int buf_index) const {
@@ -414,66 +363,9 @@ public:
             fprintf(stderr, "GICC: hipStreamCreate(ipc_stream) failed\n");
             std::abort();
         }
-        // Pinned ring + head, both mapped to device. Device
-        // put_no_db's IPC route writes into the ring + atomic-increments
-        // the head; CPU monitor thread polls the head and dispatches
-        // hipMemcpyAsync onto ipc_stream_.
-        if (hipHostMalloc(&h_ipc_ring_,
-                          IPC_RING_SIZE_ * sizeof(IpcCmdSlot),
-                          hipHostMallocMapped) != hipSuccess) {
-            fprintf(stderr, "GICC: hipHostMalloc(ipc_ring) failed\n");
-            std::abort();
-        }
-        if (hipHostGetDevicePointer((void**)&d_ipc_ring_, h_ipc_ring_, 0)
-            != hipSuccess) {
-            fprintf(stderr, "GICC: hipHostGetDevicePointer(ipc_ring) failed\n");
-            std::abort();
-        }
-        if (hipHostMalloc(&h_ipc_head_, sizeof(uint64_t),
-                          hipHostMallocMapped) != hipSuccess) {
-            fprintf(stderr, "GICC: hipHostMalloc(ipc_head) failed\n");
-            std::abort();
-        }
-        if (hipHostGetDevicePointer((void**)&d_ipc_head_, h_ipc_head_, 0)
-            != hipSuccess) {
-            fprintf(stderr, "GICC: hipHostGetDevicePointer(ipc_head) failed\n");
-            std::abort();
-        }
-        *h_ipc_head_ = 0;
-        monitor_stop_.store(false, std::memory_order_relaxed);
-        monitor_dispatched_.store(0, std::memory_order_relaxed);
-        monitor_thread_ = std::thread([this]() { monitor_loop_(); });
-
         host_wait_mode_ = true;
     }
 
-private:
-    // Monitor thread loop. Polls h_ipc_head_ (GPU writes via threadfence
-    // _system); for each new entry, issues hipMemcpyAsync on ipc_stream_.
-    void monitor_loop_() {
-        uint64_t cpu_seen = 0;
-        while (!monitor_stop_.load(std::memory_order_acquire)) {
-            uint64_t head = __atomic_load_n((volatile uint64_t*)h_ipc_head_,
-                                            __ATOMIC_ACQUIRE);
-            while (cpu_seen < head) {
-                IpcCmdSlot& cmd = h_ipc_ring_[cpu_seen & (IPC_RING_SIZE_ - 1)];
-                hipError_t err = hipMemcpyAsync(cmd.dst, cmd.src, cmd.size,
-                                                hipMemcpyDeviceToDevice,
-                                                ipc_stream_);
-                if (err != hipSuccess) {
-                    fprintf(stderr,
-                        "GICC monitor: hipMemcpyAsync failed: %s\n",
-                        hipGetErrorString(err));
-                    // Keep going; reset will detect via stream sync.
-                }
-                cpu_seen++;
-            }
-            monitor_dispatched_.store(cpu_seen, std::memory_order_release);
-            // Pure spin — minimod halo is hot, sched_yield would add ms
-            // per iter. CPU usage is fine; this is a dedicated helper.
-        }
-    }
-public:
 
 private:
     // Fetch a recycled DwqWorkBuilder from the pool, or allocate a new one.
@@ -663,40 +555,14 @@ public:
         (void)peer_rank;
         (void)remote_buf_index;
 
-        if (host_wait_mode_) {
-            // Pattern C: device put_no_db's IPC route writes (dst,src,
-            // size) into ipc_cmd_ring_ + atomic-incs ipc_cmd_head_;
-            // monitor thread polls and dispatches hipMemcpyAsync on
-            // ipc_stream_. Comm fires AT the put_no_db line in the
-            // kernel, not at gicc::launch call site.
-            h_dev_ctx_->trigger_addr_      = comm_->get_trigger_addr();
-            h_dev_ctx_->trigger_val_       = mono_total_ops_;
-            h_dev_ctx_->completion_        = nullptr;
-            h_dev_ctx_->n_ops_             = 0;
-            h_dev_ctx_->ipc_map_           = d_ipc_map_;
-            h_dev_ctx_->max_bufs_per_rank_ = n_bufs_;
-            h_dev_ctx_->local_bufs_        = d_local_bufs_;
-            h_dev_ctx_->n_local_bufs_      = (int)local_bufs_.size();
-            h_dev_ctx_->ipc_cmd_ring_      = d_ipc_ring_;
-            h_dev_ctx_->ipc_cmd_head_      = (volatile uint64_t*)d_ipc_head_;
-            h_dev_ctx_->ipc_ring_mask_     = IPC_RING_SIZE_ - 1;
-            return d_dev_ctx_;
-        }
-
-        if (my_n_remote_ops_ > 0) {
-            (void)hipMemsetAsync(d_slot_pool_, 0,
-                                 my_n_remote_ops_ * sizeof(uint64_t),
-                                 /*stream=*/0);
-        }
-
-        h_dev_ctx_->trigger_addr_      = comm_->get_trigger_addr();
-        h_dev_ctx_->trigger_val_       = my_n_remote_ops_;
-        h_dev_ctx_->completion_        = (volatile uint64_t*)d_slot_pool_;
-        h_dev_ctx_->n_ops_             = my_n_remote_ops_;
-        h_dev_ctx_->ipc_map_           = d_ipc_map_;
-        h_dev_ctx_->max_bufs_per_rank_ = n_bufs_;
-        h_dev_ctx_->local_bufs_        = d_local_bufs_;
-        h_dev_ctx_->n_local_bufs_      = (int)local_bufs_.size();
+        // Y' (host-driven) lowering: the LTO host trace function has
+        // already pre-staged DWQ writes / IPC memcpys via the runtime
+        // helper C ABI. The kernel only needs the trigger MMIO addr
+        // and the threshold value so its lead thread can fire all
+        // queued DWQ ops with one volatile store at flush() time.
+        h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
+        h_dev_ctx_->trigger_val_  = host_wait_mode_ ? mono_total_ops_
+                                                    : my_n_remote_ops_;
         return d_dev_ctx_;
     }
 
@@ -704,14 +570,8 @@ public:
     // prepare_trigger — overlap pattern (flush only, host polls later).
     //--------------------------------------------------------------------------
     DeviceCtx* prepare_trigger(Token /*tok*/) {
-        h_dev_ctx_->trigger_addr_      = comm_->get_trigger_addr();
-        h_dev_ctx_->trigger_val_       = my_n_remote_ops_;
-        h_dev_ctx_->completion_        = nullptr;
-        h_dev_ctx_->n_ops_             = 0;
-        h_dev_ctx_->ipc_map_           = d_ipc_map_;
-        h_dev_ctx_->max_bufs_per_rank_ = n_bufs_;
-        h_dev_ctx_->local_bufs_        = d_local_bufs_;
-        h_dev_ctx_->n_local_bufs_      = (int)local_bufs_.size();
+        h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
+        h_dev_ctx_->trigger_val_  = my_n_remote_ops_;
         return d_dev_ctx_;
     }
 
@@ -745,19 +605,11 @@ public:
             dwq_release_all_pending_to_pool_();
             my_n_remote_ops_ = 0;   // per-iter accounting clears (mono is global)
 
-            // IPC monitor handoff: caller has already done
-            // hipDeviceSynchronize, so all GPU writes to the ring head
-            // are visible. Wait for the monitor thread to dispatch every
-            // command the kernel pushed, then drain the IPC SDMA stream
-            // so all peer writes are committed before MPI_Barrier.
-            uint64_t target = __atomic_load_n((volatile uint64_t*)h_ipc_head_,
-                                              __ATOMIC_ACQUIRE);
-            while (monitor_dispatched_.load(std::memory_order_acquire) < target) {
-                // spin
-            }
-            if (target > 0) {
-                (void)hipStreamSynchronize(ipc_stream_);
-            }
+            // IPC handoff: the LTO host trace dispatched any same-node
+            // ops via hipMemcpyAsync on ipc_stream_ BEFORE the kernel
+            // launch, so simply draining the stream guarantees all peer
+            // writes are committed before the upcoming MPI_Barrier.
+            if (ipc_stream_) (void)hipStreamSynchronize(ipc_stream_);
             return;
         }
 
@@ -858,37 +710,17 @@ private:
     uint64_t                           mono_total_ops_;          // monotonic across batches
     std::vector<DwqWorkBuilder*>       dwq_pool_;                // recycled builders
 
-    // GPU→CPU command ring + monitor thread for the IPC fast path.
-    // Device-side put_no_db (host_wait_mode + IPC peer) pushes a
-    // command slot onto ipc_ring_; monitor_thread_ polls the head and
-    // dispatches hipMemcpyAsync on ipc_stream_. This preserves "comm
-    // fires AT the put_no_db line" semantics — the SDMA dispatch is
-    // triggered by the GPU thread via threadfence_system, not by the
-    // host trace function.
-    static constexpr int               IPC_RING_SIZE_ = 64;   // power of 2
+    // Dedicated stream for host-driven IPC dispatches. The LTO host
+    // trace queues hipMemcpyAsync's on this stream BEFORE the kernel
+    // launch (Y' / GDA-style); rt.reset() drains it after the kernel.
     hipStream_t                        ipc_stream_     = nullptr;
-    IpcCmdSlot*                        h_ipc_ring_     = nullptr;
-    IpcCmdSlot*                        d_ipc_ring_     = nullptr;
-    uint64_t*                          h_ipc_head_     = nullptr;
-    uint64_t*                          d_ipc_head_     = nullptr;
-    std::thread                        monitor_thread_;
-    std::atomic<bool>                  monitor_stop_   {false};
-    std::atomic<uint64_t>              monitor_dispatched_ {0};
 
     // Flat cache of RemoteInfo (av_addr / rma_addr / rma_key / base_addr)
     // for every (peer, buf) pair, populated during exchange(). Avoids
     // an unordered_map lookup + RemoteInfo copy on every put_no_db.
-    // Indexed [peer * n_bufs_ + buf_idx]; same indexing as d_ipc_map_.
+    // Indexed [peer * n_bufs_ + buf_idx].
     std::vector<RemoteInfo>            remote_info_cache_;
-
-    IpcMapEntry*                       d_ipc_map_      = nullptr;
     int                                n_bufs_         = 0;
-
-    // Per-runtime local-buffer base table uploaded after exchange().
-    // Indexed [buf_idx]; base is the GPU pointer registered via
-    // register_buffer. Used by the device-side put_no_db / get_no_db to
-    // resolve (src_buf, src_offset) → real GPU pointer.
-    LocalBufView*                      d_local_bufs_   = nullptr;
 };
 
 } // namespace gicc
