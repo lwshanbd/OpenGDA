@@ -73,9 +73,16 @@ set(GICC_OFI_LIBS
     ${GICC_BOOTSTRAP_LIBS}
 )
 
+# Runtime helper C ABI consumed by LTO-emitted IR. Built once and linked
+# into every example so the gicc_runtime_* symbols resolve at link time.
+set(GICC_OFI_RUNTIME_HELPERS
+    ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp)
+set_source_files_properties(${GICC_OFI_RUNTIME_HELPERS}
+    PROPERTIES LANGUAGE HIP)
+
 function(gicc_ofi_example name source)
     set_source_files_properties(${source} PROPERTIES LANGUAGE HIP)
-    add_executable(${name} ${source})
+    add_executable(${name} ${source} ${GICC_OFI_RUNTIME_HELPERS})
     target_include_directories(${name} PRIVATE ${GICC_OFI_INCLUDES})
     target_compile_definitions(${name} PRIVATE GICC_PLATFORM_OFI ${GICC_BOOTSTRAP_DEFINE})
     target_link_libraries(${name} PRIVATE ${GICC_OFI_LIBS})

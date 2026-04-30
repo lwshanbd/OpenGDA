@@ -32,6 +32,7 @@
 
 #include "gicc/gicc_types.hpp"
 #include "gicc/platform/ofi/ofi_device.cuh"
+#include "gicc/platform/ofi/runtime_helpers.h"   // C ABI consumed by LTO IR
 
 // OFI backend internals (Fabric, FabricDwqContext, MemoryRegion, etc.)
 #include "internal/hip_device_context.hpp"
@@ -57,6 +58,21 @@ struct Token {
 };
 
 class Runtime {
+    // C ABI helpers consumed by LTO-emitted IR (see
+    // src/gicc/platform/ofi/runtime_helpers.h). They reach into private
+    // state — peer_mapped_ptrs_, local_bufs_, remote_info_cache_, the
+    // DWQ pool, and the monotonic counter — so granting friendship is
+    // simpler than exposing each accessor.
+    friend void *           (::gicc_runtime_peer_ipc_base) (Runtime *, int, int);
+    friend void *           (::gicc_runtime_local_buf_base)(Runtime *, int);
+    friend ::hipStream_t    (::gicc_runtime_ipc_stream)    (Runtime *);
+    friend void             (::gicc_runtime_dwq_enqueue)   (Runtime *, int, int,
+                                                            std::size_t, int,
+                                                            std::size_t,
+                                                            std::size_t);
+    friend volatile std::uint64_t *(::gicc_runtime_trigger_addr)(Runtime *);
+    friend std::uint64_t           (::gicc_runtime_trigger_val) (Runtime *);
+
 public:
     static constexpr int POOL_SIZE = 32;   // max ops per batch
 
