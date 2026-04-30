@@ -54,7 +54,7 @@ infers it lazily from `peer_kind` + runtime context.
 {
   "version": 1,
   "schema_version": "gicc-hint-v1",
-  "default_dispatch": "DWQ_TRIGGER",         // | IPC_PUSH | DWQ_BATCHED
+  "default_dispatch": "IPC_OR_DWQ",           // | IPC_PUSH | DWQ_TRIGGER | DWQ_BATCHED
   "sites": {
     "<site_id>": {
       "dispatch":     "IPC_PUSH",            // required
@@ -90,8 +90,16 @@ op_kind in {put_no_db, get_no_db} and peer_kind == "const"
                                   and peer_locality == "same_node"
    →  IPC_PUSH
 otherwise
-   →  inherit hint.default_dispatch (DWQ_TRIGGER)
+   →  inherit hint.default_dispatch (IPC_OR_DWQ)
 ```
+
+The default is `IPC_OR_DWQ`: a hybrid runtime branch in the lowered
+trace function. If the peer's IPC base pointer is non-null (i.e. the
+peer is on the same node and the buffer is mapped via
+`hipIpcOpenMemHandle`) the trace issues a `hipMemcpyAsync`; otherwise
+it falls through to `gicc_runtime_dwq_enqueue`. This matches what
+the no-hint default in `GICCDispatchLowering` already does, so 3-pass
+builds inherit the same perf as single-pass builds.
 
 v2 will swap `decide_one()` for an ML model trained on per-rank
 profiling data. The pass-side schema will not change.
