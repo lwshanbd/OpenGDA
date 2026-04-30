@@ -27,7 +27,13 @@ void *gicc_runtime_local_buf_base(gicc::Runtime *rt, int buf_idx) {
 }
 
 hipStream_t gicc_runtime_ipc_stream(gicc::Runtime *rt) {
-    return rt ? rt->ipc_stream_ : nullptr;
+    return rt && !rt->ipc_streams_.empty() ? rt->ipc_streams_[0] : nullptr;
+}
+
+hipStream_t gicc_runtime_ipc_stream_indexed(gicc::Runtime *rt, int idx) {
+    if (!rt || rt->ipc_streams_.empty()) return nullptr;
+    if (idx < 0 || idx >= (int)rt->ipc_streams_.size()) return rt->ipc_streams_[0];
+    return rt->ipc_streams_[idx];
 }
 
 void gicc_runtime_dwq_enqueue(gicc::Runtime *rt,

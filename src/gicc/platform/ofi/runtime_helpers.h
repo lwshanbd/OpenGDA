@@ -24,6 +24,9 @@ void* gicc_runtime_peer_ipc_base(gicc::Runtime *rt, int peer, int buf_idx);
 void* gicc_runtime_local_buf_base(gicc::Runtime *rt, int buf_idx);
 hipStream_t gicc_runtime_ipc_stream(gicc::Runtime *rt);
 
+// Returns ipc_streams_[idx], or ipc_streams_[0] if idx is out of range.
+hipStream_t gicc_runtime_ipc_stream_indexed(gicc::Runtime *rt, int idx);
+
 // DWQ dispatch helper (used by the DWQ_TRIGGER lowering). Mirrors the
 // Runtime::put_no_db DWQ host-stage path: queues an RMA WRITE descriptor
 // against the shared completion counter at threshold mono_total_ops_.

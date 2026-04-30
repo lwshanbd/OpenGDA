@@ -63,7 +63,8 @@ class Runtime {
     // simpler than exposing each accessor.
     friend void *           (::gicc_runtime_peer_ipc_base) (Runtime *, int, int);
     friend void *           (::gicc_runtime_local_buf_base)(Runtime *, int);
-    friend ::hipStream_t    (::gicc_runtime_ipc_stream)    (Runtime *);
+    friend ::hipStream_t    (::gicc_runtime_ipc_stream)        (Runtime *);
+    friend ::hipStream_t    (::gicc_runtime_ipc_stream_indexed)(Runtime *, int);
     friend void             (::gicc_runtime_dwq_enqueue)   (Runtime *, int, int,
                                                             std::size_t, int,
                                                             std::size_t,
@@ -99,6 +100,15 @@ public:
             } else {
                 fprintf(stderr, "GICC: GICC_WINDOW=%s out of range [1,32], using default %d\n",
                         env, window_size_);
+            }
+        }
+        if (const char* env = std::getenv("GICC_STREAMS_MAX")) {
+            int n = std::atoi(env);
+            if (n >= 1 && n <= 32) {
+                n_streams_max_ = n;
+            } else {
+                fprintf(stderr, "GICC: GICC_STREAMS_MAX=%s out of range [1,32], using default %d\n",
+                        env, n_streams_max_);
             }
         }
 
@@ -181,7 +191,10 @@ public:
             fi_close(&shared_completion_cntr_->fid);
         for (auto* op : dwq_pool_) delete op;
         dwq_pool_.clear();
-        if (ipc_stream_) (void)hipStreamDestroy(ipc_stream_);
+        for (auto s : ipc_streams_) {
+            if (s) (void)hipStreamDestroy(s);
+        }
+        ipc_streams_.clear();
 
         delete comm_;
     }
@@ -367,13 +380,16 @@ public:
                     fi_strerror(-ret));
             std::abort();
         }
-        // Dedicated stream for the IPC drain kernel so it overlaps with
-        // user kernel + NIC RDMA. Non-blocking so it really runs
-        // concurrent with default stream's flush kernel.
-        if (hipStreamCreateWithFlags(&ipc_stream_, hipStreamNonBlocking)
-            != hipSuccess) {
-            fprintf(stderr, "GICC: hipStreamCreate(ipc_stream) failed\n");
-            std::abort();
+        // Pool of IPC streams for host-driven dispatches. Non-blocking so
+        // they overlap with user kernel + NIC RDMA. Pool size set by
+        // n_streams_max_ (read from GICC_STREAMS_MAX or default 8).
+        ipc_streams_.resize(n_streams_max_);
+        for (int i = 0; i < n_streams_max_; i++) {
+            if (hipStreamCreateWithFlags(&ipc_streams_[i], hipStreamNonBlocking)
+                != hipSuccess) {
+                fprintf(stderr, "GICC: hipStreamCreate(ipc_streams_[%d]) failed\n", i);
+                std::abort();
+            }
         }
         host_wait_mode_ = true;
     }
@@ -420,7 +436,7 @@ public:
         // here — the device-side put_no_db will push a command to the
         // GPU↔CPU ring AT THE put_no_db CALL SITE in the user kernel,
         // and the monitor thread will dispatch hipMemcpyAsync onto
-        // ipc_stream_. This preserves "comm fires when you write
+        // one of ipc_streams_. This preserves "comm fires when you write
         // put_no_db" semantics. Legacy (non-host-wait) mode: device
         // put_no_db does in-kernel block-cooperative memcpy.
         if (dest_rank != comm_->rank()
@@ -618,10 +634,12 @@ public:
             my_n_remote_ops_ = 0;   // per-iter accounting clears (mono is global)
 
             // IPC handoff: the LTO host trace dispatched any same-node
-            // ops via hipMemcpyAsync on ipc_stream_ BEFORE the kernel
-            // launch, so simply draining the stream guarantees all peer
+            // ops via hipMemcpyAsync on ipc_streams_ BEFORE the kernel
+            // launch, so draining all streams guarantees all peer
             // writes are committed before the upcoming MPI_Barrier.
-            if (ipc_stream_) (void)hipStreamSynchronize(ipc_stream_);
+            for (auto s : ipc_streams_) {
+                if (s) (void)hipStreamSynchronize(s);
+            }
             return;
         }
 
@@ -728,10 +746,12 @@ private:
     // hint.json from the dispatch-lowering pass.
     int                                window_size_    = 8;
 
-    // Dedicated stream for host-driven IPC dispatches. The LTO host
-    // trace queues hipMemcpyAsync's on this stream BEFORE the kernel
-    // launch (Y' / GDA-style); rt.reset() drains it after the kernel.
-    hipStream_t                        ipc_stream_     = nullptr;
+    // Pool of streams for host-driven IPC dispatches. The LTO host
+    // trace queues hipMemcpyAsync's on these streams BEFORE the kernel
+    // launch (Y' / GDA-style); rt.reset() drains all of them.
+    // Pool size is controlled by GICC_STREAMS_MAX (default 8, range [1,32]).
+    std::vector<hipStream_t>           ipc_streams_;
+    int                                n_streams_max_  = 8;
 
     // Flat cache of RemoteInfo (av_addr / rma_addr / rma_key / base_addr)
     // for every (peer, buf) pair, populated during exchange(). Avoids
