@@ -123,10 +123,46 @@ HKResult check(Value *V, Function *K, SmallPtrSetImpl<Value *> &visited) {
         return checkAllOperands(I, K, visited);
 
     if (auto *PHI = dyn_cast<PHINode>(I)) {
+        // Only canonical induction-variable PHIs are HK in v1: exactly
+        // two incoming edges, one a host-knowable initial value (const
+        // or kernel formal, possibly through casts/binops over those),
+        // the other a `phi + const_step` self-recurrence. This matches
+        // what TraceTemplateBuilder recognizes and what TraceSynthesis
+        // can materialize as a host loop with `add i64 %iv, step`.
+        //
+        // Other PHI shapes (multi-incoming reductions, ternary
+        // selections, non-constant step) might be host-knowable in
+        // principle but the trace synthesizer would silently emit
+        // wrong code for them. Reject conservatively.
+        if (PHI->getNumIncomingValues() != 2)
+            return fail("PHI has != 2 incoming values "
+                        "(only canonical loop iv supported)", I);
+
+        // Find the self-recurrence edge (`phi + const_step`).
+        Value *initVal = nullptr;
+        Value *recVal  = nullptr;
         for (Value *inc : PHI->incoming_values()) {
-            HKResult r = check(inc, K, visited);
-            if (!r.ok) return r;
+            auto *bo = dyn_cast<BinaryOperator>(inc);
+            if (bo && bo->getOpcode() == Instruction::Add) {
+                Value *lhs = bo->getOperand(0);
+                Value *rhs = bo->getOperand(1);
+                bool   lhsIsPhi = (lhs == PHI);
+                bool   rhsIsPhi = (rhs == PHI);
+                Value *other    = lhsIsPhi ? rhs : (rhsIsPhi ? lhs : nullptr);
+                if (other && isa<ConstantInt>(other)) {
+                    recVal = inc;
+                    continue;
+                }
+            }
+            initVal = inc;
         }
+        if (!recVal || !initVal)
+            return fail("PHI is not a canonical loop iv "
+                        "(no `phi + const_step` self-recurrence)", I);
+
+        // Init value must be host-knowable.
+        HKResult r = check(initVal, K, visited);
+        if (!r.ok) return r;
         return {};
     }
 
