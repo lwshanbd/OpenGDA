@@ -27,16 +27,6 @@ if(GICC_BACKEND STREQUAL "mlx5")
         add_subdirectory(examples/gicc)
     endif()
 elseif(GICC_BACKEND STREQUAL "ofi")
-    option(GICC_BUILD_PLUGIN "Build the gicc-clang-plugin" OFF)
-    set(GICC_OFI_PLUGIN_PATH "" CACHE FILEPATH "Path to gicc-clang-plugin.so")
-    if(GICC_BUILD_PLUGIN)
-        add_subdirectory(tools/gicc-clang-plugin)
-    endif()
-    # gicc_target_plugin(<tgt>) helper. Always available under the OFI
-    # branch; errors at call time if neither GICC_BUILD_PLUGIN nor
-    # GICC_OFI_PLUGIN_PATH is set, so projects that don't use the plugin
-    # are unaffected.
-    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/GiccPluginTarget.cmake)
     if(BUILD_EXAMPLES)
         add_subdirectory(examples/ofi)
     endif()

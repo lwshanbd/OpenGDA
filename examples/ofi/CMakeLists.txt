@@ -99,18 +99,6 @@ gicc_ofi_example(test_ofi_get        ${CMAKE_SOURCE_DIR}/legacy/ofi/test_ofi_get
 gicc_ofi_example(test_lookup         ${CMAKE_SOURCE_DIR}/legacy/ofi/test_lookup.cpp)
 gicc_ofi_example(test_launch_skeleton ${CMAKE_SOURCE_DIR}/legacy/ofi/test_launch_skeleton.cpp)
 
-# Phase G smoke test: gicc::launch + plugin-generated kernel_trace must
-# carry an actual put_no_db across two ranks. Only built when the plugin
-# is available. test_gicc demonstrates the same API with an HK for-loop
-# inside the kernel, which the plugin lifts into a host-side trace loop.
-if(GICC_BUILD_PLUGIN OR GICC_OFI_PLUGIN_PATH)
-    gicc_ofi_example(test_launch_real ${CMAKE_SOURCE_DIR}/legacy/ofi/test_launch_real.cpp)
-    gicc_target_plugin(test_launch_real)
-    gicc_target_plugin(test_gicc)
-    gicc_target_plugin(mm_minimal)
-    gicc_target_plugin(jacobi)
-endif()
-
 # Pure MPI barrier reference benchmark (CPU-triggered, no HIP/libfabric).
 if(GICC_BOOTSTRAP STREQUAL "mpi")
     add_executable(mpi_barrier_bench mpi_barrier_bench.cpp)
