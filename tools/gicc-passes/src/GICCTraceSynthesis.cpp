@@ -83,8 +83,13 @@ Value *coerceInt(IRBuilder<> &B, Value *v, Type *target) {
 
 // Evaluate an ArgRef in the trace function context. `traceFn->getArg(0)`
 // is `rt`; `traceFn->getArg(k)` for k>=1 corresponds to kernel formal k.
+//
+// `currentIv` (optional): the live host-side loop induction variable for
+// the enclosing loop. When `a.kind == LoopIv`, this value is substituted
+// (and coerced to `expected` if needed). If null, a LoopIv leaf evaluates
+// to undef — that's a malformed template and should never reach lowering.
 Value *evalArgRef(IRBuilder<> &B, Function *traceFn, const ArgRef &a,
-                  Type *expected) {
+                  Type *expected, Value *currentIv = nullptr) {
     LLVMContext &Ctx = B.getContext();
     switch (a.kind) {
         case ArgRef::Kind::ConstI64: {
@@ -105,14 +110,19 @@ Value *evalArgRef(IRBuilder<> &B, Function *traceFn, const ArgRef &a,
             Value *v = traceFn->getArg(ti);
             return expected ? coerceInt(B, v, expected) : v;
         }
+        case ArgRef::Kind::LoopIv: {
+            Type *t = expected ? expected : Type::getInt64Ty(Ctx);
+            if (!currentIv) return UndefValue::get(t);
+            return coerceInt(B, currentIv, t);
+        }
         case ArgRef::Kind::BinOp: {
             if (a.children.size() != 2) {
                 return UndefValue::get(expected ? expected
                                                  : Type::getInt64Ty(Ctx));
             }
             Type *t = expected ? expected : Type::getInt64Ty(Ctx);
-            Value *l = evalArgRef(B, traceFn, a.children[0], t);
-            Value *r = evalArgRef(B, traceFn, a.children[1], t);
+            Value *l = evalArgRef(B, traceFn, a.children[0], t, currentIv);
+            Value *r = evalArgRef(B, traceFn, a.children[1], t, currentIv);
             if (a.opStr == "add") return B.CreateAdd(l, r);
             if (a.opStr == "sub") return B.CreateSub(l, r);
             if (a.opStr == "mul") return B.CreateMul(l, r);
@@ -129,7 +139,7 @@ Value *evalArgRef(IRBuilder<> &B, Function *traceFn, const ArgRef &a,
             if (a.children.empty())
                 return UndefValue::get(expected ? expected
                                                  : Type::getInt64Ty(Ctx));
-            return evalArgRef(B, traceFn, a.children[0], expected);
+            return evalArgRef(B, traceFn, a.children[0], expected, currentIv);
         }
         case ArgRef::Kind::Derived:
         default:
@@ -187,26 +197,14 @@ GICCOpKind opKindFromStr(StringRef s) {
     return GICCOpKind::Quiet;
 }
 
-void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,
-            const OpTemplate &op, const KernelTemplate &t,
-            BasicBlock *contBB) {
+// Emit the placeholder call into the current insertion point, evaluating
+// each ArgRef in `op.args`. If `currentIv` is non-null, ArgRef::LoopIv
+// leaves are substituted with it. Caller is responsible for branching to
+// the next block after this returns.
+void emitPlaceholderCall(Module &M, IRBuilder<> &B, Function *traceFn,
+                         const OpTemplate &op, GICCOpKind kind,
+                         Value *currentIv) {
     LLVMContext &Ctx = M.getContext();
-    GICCOpKind   kind = opKindFromStr(op.kind);
-
-    // flush / quiet are device-side responsibilities (DeviceLowering
-    // emits the lead-thread MMIO trigger in Phase 1); host trace skips
-    // them.
-    if (kind == GICCOpKind::Flush || kind == GICCOpKind::Quiet) {
-        B.CreateBr(contBB);
-        return;
-    }
-
-    Value *guard = evalGuard(B, traceFn, op.guard);
-    BasicBlock *doBB = BasicBlock::Create(Ctx, "op." + op.siteId,
-                                          traceFn, contBB);
-    B.CreateCondBr(guard, doBB, contBB);
-    B.SetInsertPoint(doBB);
-
     auto callee = getPlaceholder(M, kind);
     SmallVector<Value *, 8> args;
     args.push_back(traceFn->getArg(0));  // rt
@@ -221,13 +219,118 @@ void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,
         if (it == op.args.end())
             v = ConstantInt::get(expected, 0);
         else
-            v = evalArgRef(B, traceFn, it->second, expected);
+            v = evalArgRef(B, traceFn, it->second, expected, currentIv);
         args.push_back(v);
     }
 
     auto *CI = B.CreateCall(callee, args);
     auto *md = MDNode::get(Ctx, MDString::get(Ctx, op.siteId));
     CI->setMetadata("gicc.site_id", md);
+}
+
+// Emit a host-side loop around `op`: bound = evalArgRef(Param(ivParamIdx))
+// coerced to i64; iv starts at op.loop.ivStart, increments by op.loop.ivStep.
+//
+//   bb_in  ──▶ %bound = …
+//              br loop.head
+//   loop.head:
+//     %iv = phi i64 [ start, bb_in ], [ %iv.next, loop.body ]
+//     %cmp = icmp slt i64 %iv, %bound
+//     br i1 %cmp, label loop.body, label loop.exit
+//   loop.body:
+//     <emit placeholder with currentIv=%iv>
+//     %iv.next = add i64 %iv, step
+//     br label loop.head
+//   loop.exit: (caller branches to contBB from here)
+//
+// On entry the IRBuilder is positioned at the bb where the bound expression
+// should be materialized. On return the builder is positioned at the
+// freshly-created loop.exit block; caller must terminate it.
+void emitOpInLoop(Module &M, IRBuilder<> &B, Function *traceFn,
+                  const OpTemplate &op, GICCOpKind kind) {
+    LLVMContext &Ctx = M.getContext();
+    Type *i64Ty = Type::getInt64Ty(Ctx);
+
+    // Materialize the bound (kernel formal `ivParamIdx`) as i64.
+    ArgRef boundRef;
+    boundRef.kind     = ArgRef::Kind::Param;
+    boundRef.paramIdx = op.loop.ivParamIdx;
+    Value *bound = evalArgRef(B, traceFn, boundRef, i64Ty, nullptr);
+
+    BasicBlock *headBB = BasicBlock::Create(Ctx, "loop.head." + op.siteId,
+                                            traceFn);
+    BasicBlock *bodyBB = BasicBlock::Create(Ctx, "loop.body." + op.siteId,
+                                            traceFn);
+    BasicBlock *exitBB = BasicBlock::Create(Ctx, "loop.exit." + op.siteId,
+                                            traceFn);
+
+    // Capture the predecessor (where we currently sit) so the head PHI
+    // can reference it as the start incoming.
+    BasicBlock *preBB = B.GetInsertBlock();
+    B.CreateBr(headBB);
+
+    // loop.head: PHI + icmp + cond-br
+    B.SetInsertPoint(headBB);
+    PHINode *iv = B.CreatePHI(i64Ty, 2, "iv");
+    iv->addIncoming(ConstantInt::get(i64Ty, op.loop.ivStart, /*signed=*/true),
+                    preBB);
+    Value *cmp = B.CreateICmpSLT(iv, bound, "cmp");
+    B.CreateCondBr(cmp, bodyBB, exitBB);
+
+    // loop.body: placeholder call + increment + back-edge
+    B.SetInsertPoint(bodyBB);
+    emitPlaceholderCall(M, B, traceFn, op, kind, /*currentIv=*/iv);
+    Value *next = B.CreateAdd(
+        iv, ConstantInt::get(i64Ty, op.loop.ivStep, /*signed=*/true),
+        "iv.next");
+    B.CreateBr(headBB);
+    iv->addIncoming(next, bodyBB);
+
+    // Caller continues at exitBB.
+    B.SetInsertPoint(exitBB);
+}
+
+void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,
+            const OpTemplate &op, const KernelTemplate &t,
+            BasicBlock *contBB) {
+    LLVMContext &Ctx = M.getContext();
+    GICCOpKind   kind = opKindFromStr(op.kind);
+
+    // flush / quiet are device-side responsibilities (DeviceLowering
+    // emits the lead-thread MMIO trigger in Phase 1); host trace skips
+    // them.
+    if (kind == GICCOpKind::Flush || kind == GICCOpKind::Quiet) {
+        B.CreateBr(contBB);
+        return;
+    }
+
+    // Degraded loop: builder recognized the call as loop-wrapped but
+    // couldn't recover iv/bound. Emitting wrong code (e.g. one IPC for
+    // the whole loop or N copies of the same offset) would silently
+    // corrupt data; skip the op entirely instead.
+    if (op.loop.inLoop && op.loop.degraded) {
+        B.CreateBr(contBB);
+        return;
+    }
+
+    // Always emit the guard branch first, even when wrapping in a loop:
+    // the user pattern `if (cond) for(i=0;i<n;i++) put(...)` is common
+    // (HK guard + HK loop) and we want both to be honored.
+    Value *guard = evalGuard(B, traceFn, op.guard);
+    BasicBlock *doBB = BasicBlock::Create(Ctx, "op." + op.siteId,
+                                          traceFn, contBB);
+    B.CreateCondBr(guard, doBB, contBB);
+    B.SetInsertPoint(doBB);
+
+    if (op.loop.inLoop && op.loop.ivBoundKnown) {
+        emitOpInLoop(M, B, traceFn, op, kind);
+        // Builder is now at loop.exit; thread to contBB.
+        B.CreateBr(contBB);
+        return;
+    }
+
+    // Non-loop path: single call inside doBB, branch to contBB.
+    emitPlaceholderCall(M, B, traceFn, op, kind, /*currentIv=*/nullptr);
     B.CreateBr(contBB);
 }
 
