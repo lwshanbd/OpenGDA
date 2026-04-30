@@ -4,6 +4,7 @@
 #include "GICCHKAnalysis.h"
 #include "GICCHostDiscovery.h"
 #include "GICCPassConfig.h"
+#include "GICCTraceSynthesis.h"
 
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -50,6 +51,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     MPM.addPass(GICCDeviceLoweringPass());
                     MPM.addPass(GICCHostDiscoveryPass());
                     MPM.addPass(GICCFeatureExtractionPass());
+                    MPM.addPass(GICCTraceSynthesisPass());
                 });
             // Sentinel stays at OptimizerLast — it's just a debug probe
             // and we want to see the post-optimization module triple.
@@ -84,6 +86,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-feature-extraction") {
                         MPM.addPass(GICCFeatureExtractionPass());
+                        return true;
+                    }
+                    if (Name == "gicc-trace-synthesis") {
+                        MPM.addPass(GICCTraceSynthesisPass());
                         return true;
                     }
                     return false;

@@ -29,6 +29,7 @@ add_library(gicc-passes MODULE
     src/GICCDeviceLowering.cpp
     src/GICCHostDiscovery.cpp
     src/GICCFeatureExtraction.cpp
+    src/GICCTraceSynthesis.cpp
 )
 target_include_directories(gicc-passes PRIVATE
     ${LLVM_INCLUDE_DIRS}
