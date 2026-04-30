@@ -26,16 +26,36 @@ FunctionCallee getRuntimeHelper(Module &M, StringRef name, Type *ret,
     return M.getOrInsertFunction(name, FT);
 }
 
+// Byte offsets of the relevant DeviceCtx fields (see
+// src/gicc/platform/ofi/ofi_device.cuh):
+//
+//   struct DeviceCtx {
+//       volatile uint64_t *trigger_addr_;   // offset 0
+//       volatile uint64_t *completion_;     // offset 8
+//       uint64_t           trigger_val_;    // offset 16
+//       ...
+//   };
+//
+// Loading these inline via byte-offset GEPs avoids cross-side helper
+// calls (the device-side IR cannot link against host-only symbols) and
+// avoids needing a parallel device-resident helper TU. If the struct
+// shrinks in Phase 6 (Pattern C removal), keep these in sync — a
+// static_assert on the C++ side guards the layout.
+constexpr unsigned kTriggerAddrOffset = 0;
+constexpr unsigned kTriggerValOffset  = 16;
+
 // Lower gicc::flush(ctx) on AMDGCN to:
 //   %tid = call i32 @llvm.amdgcn.workitem.id.x()
 //   %bid = call i32 @llvm.amdgcn.workgroup.id.x()
 //   %lead = and (icmp eq %tid, 0) (icmp eq %bid, 0)
 //   br i1 %lead, label %do, label %skip
 // do:
-//   %addr = call ptr @gicc_runtime_trigger_addr(ptr %ctx)
-//   %val  = call i64 @gicc_runtime_trigger_val(ptr %ctx)
+//   %addr_ptr = getelementptr i8, ptr %ctx, i64 0
+//   %addr     = load ptr, ptr %addr_ptr, align 8
+//   %val_ptr  = getelementptr i8, ptr %ctx, i64 16
+//   %val      = load i64, ptr %val_ptr,  align 8
 //   store volatile i64 %val, ptr %addr, align 8, !nontemporal !1
-//   fence syncscope("agent-system") release
+//   fence release
 //   br label %skip
 // skip:
 void lowerFlushAMDGCN(CallInst *CI) {
@@ -68,18 +88,26 @@ void lowerFlushAMDGCN(CallInst *CI) {
 
     B.SetInsertPoint(doBB);
     Type *ptrTy = PointerType::getUnqual(Ctx);
-    auto trigAddrFn = getRuntimeHelper(*M, "gicc_runtime_trigger_addr",
-                                       ptrTy, {ptrTy});
-    auto trigValFn  = getRuntimeHelper(*M, "gicc_runtime_trigger_val",
-                                       B.getInt64Ty(), {ptrTy});
-    Value *addr = B.CreateCall(trigAddrFn, {ctxArg});
-    Value *val  = B.CreateCall(trigValFn,  {ctxArg});
+    Type *i64Ty = Type::getInt64Ty(Ctx);
+    Type *i8Ty  = Type::getInt8Ty(Ctx);
+
+    Value *addrFieldPtr = B.CreateGEP(i8Ty, ctxArg,
+                                      B.getInt64(kTriggerAddrOffset),
+                                      "trigger.addr.ptr");
+    Value *addr = B.CreateAlignedLoad(ptrTy, addrFieldPtr, Align(8),
+                                      /*isVolatile=*/false, "trigger.addr");
+
+    Value *valFieldPtr = B.CreateGEP(i8Ty, ctxArg,
+                                     B.getInt64(kTriggerValOffset),
+                                     "trigger.val.ptr");
+    Value *val = B.CreateAlignedLoad(i64Ty, valFieldPtr, Align(8),
+                                     /*isVolatile=*/false, "trigger.val");
+
     auto *st = B.CreateAlignedStore(val, addr, Align(8), /*isVolatile=*/true);
     auto *nt = MDNode::get(Ctx,
         {ConstantAsMetadata::get(ConstantInt::get(B.getInt32Ty(), 1))});
     st->setMetadata(LLVMContext::MD_nontemporal, nt);
-    B.CreateFence(AtomicOrdering::Release,
-                  Ctx.getOrInsertSyncScopeID("agent-system"));
+    B.CreateFence(AtomicOrdering::Release, SyncScope::System);
     B.CreateBr(skipBB);
 
     CI->eraseFromParent();

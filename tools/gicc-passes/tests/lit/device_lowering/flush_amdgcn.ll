@@ -18,8 +18,10 @@ define amdgpu_kernel void @k(ptr %ctx) {
 ; CHECK-LABEL: define amdgpu_kernel void @k
 ; CHECK: call i32 @llvm.amdgcn.workitem.id.x()
 ; CHECK: call i32 @llvm.amdgcn.workgroup.id.x()
-; CHECK: call ptr @gicc_runtime_trigger_addr(ptr %ctx)
-; CHECK: call i64 @gicc_runtime_trigger_val(ptr %ctx)
+; CHECK: getelementptr i8, ptr %ctx, i64 0
+; CHECK: load ptr, ptr %{{.*}}, align 8
+; CHECK: getelementptr i8, ptr %ctx, i64 16
+; CHECK: load i64, ptr %{{.*}}, align 8
 ; CHECK: store volatile i64
-; CHECK: fence syncscope("agent-system") release
+; CHECK: fence release
 ; CHECK-NOT: call void @_ZN4gicc5flush
