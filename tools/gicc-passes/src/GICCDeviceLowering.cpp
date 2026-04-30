@@ -27,22 +27,18 @@ FunctionCallee getRuntimeHelper(Module &M, StringRef name, Type *ret,
 }
 
 // Byte offsets of the relevant DeviceCtx fields (see
-// src/gicc/platform/ofi/ofi_device.cuh):
+// src/gicc/platform/ofi/ofi_device.cuh, post-Phase-6 layout):
 //
 //   struct DeviceCtx {
 //       volatile uint64_t *trigger_addr_;   // offset 0
-//       volatile uint64_t *completion_;     // offset 8
-//       uint64_t           trigger_val_;    // offset 16
-//       ...
+//       uint64_t           trigger_val_;    // offset 8
 //   };
 //
 // Loading these inline via byte-offset GEPs avoids cross-side helper
-// calls (the device-side IR cannot link against host-only symbols) and
-// avoids needing a parallel device-resident helper TU. If the struct
-// shrinks in Phase 6 (Pattern C removal), keep these in sync — a
-// static_assert on the C++ side guards the layout.
+// calls (the device-side IR cannot link against host-only symbols).
+// Kept stable by static_asserts on the C++ side.
 constexpr unsigned kTriggerAddrOffset = 0;
-constexpr unsigned kTriggerValOffset  = 16;
+constexpr unsigned kTriggerValOffset  = 8;
 
 // Lower gicc::flush(ctx) on AMDGCN to:
 //   %tid = call i32 @llvm.amdgcn.workitem.id.x()

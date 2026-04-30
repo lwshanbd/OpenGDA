@@ -20,7 +20,7 @@ define amdgpu_kernel void @k(ptr %ctx) {
 ; CHECK: call i32 @llvm.amdgcn.workgroup.id.x()
 ; CHECK: getelementptr i8, ptr %ctx, i64 0
 ; CHECK: load ptr, ptr %{{.*}}, align 8
-; CHECK: getelementptr i8, ptr %ctx, i64 16
+; CHECK: getelementptr i8, ptr %ctx, i64 8
 ; CHECK: load i64, ptr %{{.*}}, align 8
 ; CHECK: store volatile i64
 ; CHECK: fence release
