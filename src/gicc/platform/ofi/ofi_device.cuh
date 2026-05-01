@@ -94,16 +94,41 @@ void flush(DeviceCtx* ctx) {
 }
 
 //==============================================================================
-// quiet — NO-OP in the LTO-only world.
+// quiet — completion fence.
 //
-// Completion is owned by the host: rt.reset() (called immediately after
-// hipDeviceSynchronize on the host) busy-polls the shared completion
-// counter until every queued op finishes. The kernel doesn't need to
-// wait for anything. Empty so non-LTO builds compile; the LTO pass
-// erases the call entirely.
+// LTO-only world (no CPU proxy): NO-OP. Completion is owned by the host;
+// rt.reset() (called after hipDeviceSynchronize) busy-polls the shared
+// completion counter until every queued op finishes. The kernel doesn't
+// need to wait for anything; the LTO pass erases the call entirely.
+//
+// CPU proxy world (GICC_CPU_PROXY): pushes a QUIET cmd into the proxy
+// ring and spins until the host-published tail moves past our slot. This
+// is the in-kernel completion fence required by proxy-aware kernels that
+// want to read peer-written data without returning to the host first.
+// __threadfence_system() after the spin guarantees that subsequent
+// device reads observe the proxy's writes.
 //==============================================================================
 __device__ inline
-void quiet(DeviceCtx* /*ctx*/) {}
+void quiet(DeviceCtx* ctx) {
+#ifdef GICC_CPU_PROXY
+    if (!ctx || !ctx->proxy_ring) return;
+    auto* ring = reinterpret_cast<gicc::proxy::ProxyRing*>(ctx->proxy_ring);
+    gicc::proxy::TransferCmd c{};
+    c.cmd_type = gicc::proxy::CmdType::QUIET;
+    uint64_t my_slot = ring->atomic_push(c);
+    while (ring->device_tail_volatile() <= my_slot) {
+#if defined(__CUDA_ARCH__)
+        __nanosleep(64);
+#elif defined(__HIP_DEVICE_COMPILE__)
+        // HIP / AMDGCN: s_sleep takes "cycles / 64" — 1 ~= 64 cycles.
+        __builtin_amdgcn_s_sleep(1);
+#endif
+    }
+    __threadfence_system();
+#else
+    (void)ctx;
+#endif
+}
 
 //==============================================================================
 // put_no_db / get_no_db — NO-OPs in the LTO-only world.
