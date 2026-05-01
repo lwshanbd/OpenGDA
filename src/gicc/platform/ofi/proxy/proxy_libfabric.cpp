@@ -100,7 +100,10 @@ int ProxyLibfabric::submit_write(const TransferCmd& c, uint64_t slot)
 
 int ProxyLibfabric::poll(Completion* out, int max)
 {
-    constexpr int kMaxBatch = 64;
+    // 256 fi_cq_entry slots = 4 KiB on stack. UCCL-EP polls 2048 per call;
+    // 256 is the minimum bump that absorbs a typical 50-cmd bench burst in
+    // one syscall while keeping the on-stack array modest.
+    constexpr int kMaxBatch = 256;
     struct fi_cq_entry entries[kMaxBatch];
 
     int n = (int)fi_cq_read(proxy_cq_, entries,
