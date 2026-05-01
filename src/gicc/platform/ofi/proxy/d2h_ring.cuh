@@ -76,8 +76,14 @@ struct alignas(128) D2HRing {
     // NVCC and HIP-Clang both parse the full body during the host pass; the
     // intrinsics survive parsing but error if instantiated for the host.
 
-    // Atomically reserve a slot, write the command, and threadfence_system to
-    // publish it to the host. Returns the absolute slot index claimed.
+    // Atomically reserve a slot, write the command, and publish via cmd_type
+    // (the per-slot "ready" flag). Returns the absolute slot index claimed.
+    //
+    // CRITICAL ordering: the CAS that bumps `head` makes the new head visible
+    // to the host BEFORE the slot data is written. If the consumer trusted
+    // head alone, it would race and read stale/empty buf[idx]. So the
+    // consumer instead waits for cmd_type != EMPTY (mirrors UCCL-EP's
+    // ring_buffer.cuh atomic_set_and_commit pattern).
     __device__ uint64_t atomic_push(const TransferCmd& c) {
         unsigned long long h, prev;
         do {
@@ -99,10 +105,26 @@ struct alignas(128) D2HRing {
         } while (prev != h);
 
         uint32_t idx = static_cast<uint32_t>(h) & mask();
-        buf[idx] = c;
-        // Publish the slot's bytes to the host before the host observes the
-        // bumped head (which it will via mapped-host-memory reads).
+
+        // Write everything EXCEPT cmd_type first. cmd_type is the per-slot
+        // ready flag — the consumer polls it to know the rest of the slot
+        // is fully written.
+        buf[idx].dst_rank   = c.dst_rank;
+        buf[idx].src_buf    = c.src_buf;
+        buf[idx].dst_buf    = c.dst_buf;
+        buf[idx].bytes      = c.bytes;
+        buf[idx].src_offset = c.src_offset;
+        buf[idx].dst_offset = c.dst_offset;
+
         __threadfence_system();
+
+        // Publish via cmd_type. After this store the consumer will see a
+        // fully-written slot. The earlier threadfence_system already
+        // ordered the field stores; the cmd_type store + the consumer's
+        // acquire-load form the release/acquire pair, so a second fence
+        // here is redundant (UCCL-EP atomic_set_and_commit also uses one).
+        buf[idx].cmd_type = c.cmd_type;
+
         return h;
     }
 
@@ -144,6 +166,19 @@ struct alignas(128) D2HRing {
         if (proxy_read_cursor >= h) return false;
         uint64_t s = proxy_read_cursor;
         uint32_t idx = static_cast<uint32_t>(s) & mask();
+        // The producer (atomic_push) bumps `head` BEFORE writing the slot,
+        // so seeing a new head does NOT guarantee the slot is fully written.
+        // Wait for cmd_type != EMPTY (the per-slot ready flag the producer
+        // writes LAST, after threadfence_system). This pairs with the cmd_type
+        // store at the end of atomic_push.
+        auto raw = __atomic_load_n(
+            reinterpret_cast<const uint8_t*>(&buf[idx].cmd_type),
+            __ATOMIC_ACQUIRE);
+        if (raw == static_cast<uint8_t>(CmdType::EMPTY)) {
+            // Slot reserved by producer but not yet published. Treat as
+            // "no command available right now"; caller will retry.
+            return false;
+        }
         out       = buf[idx];
         *out_slot = s;
         ++proxy_read_cursor;
@@ -168,6 +203,12 @@ struct alignas(128) D2HRing {
             size_t bit  = idx & 63;
             if (!((ack_mask[word] >> bit) & 1ull)) break;
             ack_mask[word] &= ~(1ull << bit);
+            // Reset slot for reuse: clear cmd_type to EMPTY so when the
+            // producer wraps around and writes here again, the consumer
+            // correctly waits for the new cmd_type publish (release-store
+            // of `tail` below makes this clear visible to the producer
+            // before the producer can claim space).
+            buf[idx].cmd_type = CmdType::EMPTY;
             ++t;
         }
         __atomic_store_n(&tail, t, __ATOMIC_RELEASE);
