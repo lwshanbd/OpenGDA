@@ -42,6 +42,11 @@
 #include "internal/ofi_barrier.hpp"
 #include "internal/fabric.hpp"
 
+#ifdef GICC_CPU_PROXY
+#include <memory>
+#include "proxy/proxy_thread.hpp"
+#endif
+
 
 namespace gicc {
 
@@ -165,6 +170,11 @@ public:
     }
 
     ~Runtime() {
+#ifdef GICC_CPU_PROXY
+        // Stop the proxy worker before tearing down any libfabric state it
+        // may still be polling. ProxyThread::stop() joins the worker thread.
+        if (proxy_thread_) proxy_thread_->stop();
+#endif
         for (auto* op : my_pending_) delete op;
         my_pending_.clear();
         for (int i = 0; i < POOL_SIZE; i++) {
@@ -414,6 +424,26 @@ private:
         my_pending_.clear();
     }
 
+#ifdef GICC_CPU_PROXY
+    // Snapshot the proxy-ring head once, then spin until the worker advances
+    // tail past it. Pairs with put_no_db's atomic_push on the device side.
+    // No-op when the proxy thread was never started (no kernel has called
+    // ensure_proxy_ring() yet).
+    void drain_proxy_ring_() {
+        if (!proxy_thread_) return;
+        auto* ring = proxy_thread_->ring_host();
+        if (!ring) return;
+        const uint64_t snap = ring->head_volatile();
+        while (ring->tail_volatile() < snap) {
+#if defined(__x86_64__)
+            __asm__ __volatile__("pause" ::: "memory");
+#else
+            __asm__ __volatile__("" ::: "memory");
+#endif
+        }
+    }
+#endif
+
 public:
 
     //--------------------------------------------------------------------------
@@ -591,6 +621,11 @@ public:
         h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
         h_dev_ctx_->trigger_val_  = host_wait_mode_ ? mono_total_ops_
                                                     : my_n_remote_ops_;
+#ifdef GICC_CPU_PROXY
+        // Lazy-start the CPU proxy worker on first prepare() and stash the
+        // device-mapped ring pointer so kernel-side put_no_db can push.
+        h_dev_ctx_->proxy_ring = ensure_proxy_ring();
+#endif
         return d_dev_ctx_;
     }
 
@@ -600,6 +635,9 @@ public:
     DeviceCtx* prepare_trigger(Token /*tok*/) {
         h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
         h_dev_ctx_->trigger_val_  = my_n_remote_ops_;
+#ifdef GICC_CPU_PROXY
+        h_dev_ctx_->proxy_ring = ensure_proxy_ring();
+#endif
         return d_dev_ctx_;
     }
 
@@ -633,6 +671,14 @@ public:
             dwq_release_all_pending_to_pool_();
             my_n_remote_ops_ = 0;   // per-iter accounting clears (mono is global)
 
+#ifdef GICC_CPU_PROXY
+            // Drain the CPU proxy ring: snapshot the producer head at this
+            // moment, then spin until tail catches up. Guarantees every
+            // command the kernel emitted before this reset() has been
+            // libfabric-submitted AND CQ-acked by the proxy worker.
+            drain_proxy_ring_();
+#endif
+
             // IPC handoff: the LTO host trace dispatched any same-node
             // ops via hipMemcpyAsync on ipc_streams_ BEFORE the kernel
             // launch, so draining all streams guarantees all peer
@@ -656,6 +702,12 @@ public:
                 }
             }
         }
+#ifdef GICC_CPU_PROXY
+        // Same drain as the host-wait path. Doing it AFTER the slot-counter
+        // wait is fine: the proxy worker's progress doesn't depend on those
+        // counters; the snapshot+spin only blocks on its own ring.
+        drain_proxy_ring_();
+#endif
         for (auto* op : my_pending_) delete op;
         my_pending_.clear();
         fi_cntr_set(comm_->fabric->trigger_cntr, 0);
@@ -716,6 +768,21 @@ public:
 
     bool      is_virt_addr_mode() const { return comm_->is_virt_addr_mode(); }
     fi_addr_t av_addr(int rank)   const { return comm_->av_addrs.at(rank); }
+
+#ifdef GICC_CPU_PROXY
+    //--------------------------------------------------------------------------
+    // ensure_proxy_ring — lazy-construct + start the CPU proxy worker, returning
+    // the device-mapped ProxyRing pointer to be stored in DeviceCtx::proxy_ring.
+    // Idempotent — second-and-subsequent calls return the cached ring pointer.
+    //--------------------------------------------------------------------------
+    gicc::proxy::ProxyRing* ensure_proxy_ring() {
+        if (!proxy_thread_) {
+            proxy_thread_ = std::make_unique<gicc::proxy::ProxyThread>(*this);
+            proxy_thread_->start();
+        }
+        return proxy_thread_->ring_device();
+    }
+#endif
 
 private:
     // Internal buffer metadata (replaces gda::Buffer).
@@ -796,6 +863,14 @@ private:
     // Indexed [peer * n_bufs_ + buf_idx].
     std::vector<RemoteInfo>            remote_info_cache_;
     int                                n_bufs_         = 0;
+
+#ifdef GICC_CPU_PROXY
+    // Lazy-initialized CPU proxy worker. ensure_proxy_ring() constructs it
+    // on demand and start()s the worker thread; ~Runtime() stops it before
+    // tearing down libfabric state so the worker doesn't dereference a
+    // freed Fabric.
+    std::unique_ptr<gicc::proxy::ProxyThread> proxy_thread_;
+#endif
 };
 
 } // namespace gicc
