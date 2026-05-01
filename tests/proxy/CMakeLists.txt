@@ -104,14 +104,23 @@ elseif(GICC_BOOTSTRAP STREQUAL "pmi2")
     set(PROXY_BOOTSTRAP_LIBS     ${PMI2_LIBRARY})
 endif()
 
+# Proxy thread sources are now linked into the loopback test as well: with
+# Task 7 wiring the ProxyThread into Runtime, every Runtime destructor needs
+# the ProxyThread dtor symbol available, even if the test never starts a
+# proxy worker.
+set(PROXY_THREAD_SRC_FOR_LOOPBACK
+    ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/proxy/proxy_thread.cpp)
+
 if(GICC_GPU_API STREQUAL "hip")
     # Tioga path: build the .cpp's as HIP so hipMalloc/hipHostMalloc resolve.
     set_source_files_properties(test_proxy_libfabric_loopback.cpp
                                 ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC_FOR_LOOPBACK}
         PROPERTIES LANGUAGE HIP)
     add_executable(test_proxy_libfabric_loopback
         test_proxy_libfabric_loopback.cpp
-        ${PROXY_LIBFABRIC_SRC})
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC_FOR_LOOPBACK})
     list(APPEND CMAKE_PREFIX_PATH "/opt/rocm")
     find_package(hip REQUIRED)
     target_link_libraries(test_proxy_libfabric_loopback PRIVATE
@@ -127,10 +136,12 @@ elseif(GICC_GPU_API STREQUAL "cuda")
     # parsing, so compile the test sources as CUDA.
     set_source_files_properties(test_proxy_libfabric_loopback.cpp
                                 ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC_FOR_LOOPBACK}
         PROPERTIES LANGUAGE CUDA)
     add_executable(test_proxy_libfabric_loopback
         test_proxy_libfabric_loopback.cpp
-        ${PROXY_LIBFABRIC_SRC})
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC_FOR_LOOPBACK})
     find_package(CUDAToolkit REQUIRED)
     target_link_libraries(test_proxy_libfabric_loopback PRIVATE
         CUDA::cudart
