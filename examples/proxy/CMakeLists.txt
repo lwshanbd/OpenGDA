@@ -1,0 +1,167 @@
+# examples/proxy/CMakeLists.txt - Task 7 L1/L2 examples for the CPU Proxy.
+# Mirrors tests/proxy/CMakeLists.txt's libfabric / hwloc / MPI / hip /
+# CUDA discovery; gated on GICC_ENABLE_CPU_PROXY.
+
+if(NOT GICC_ENABLE_CPU_PROXY)
+    return()
+endif()
+
+# ---------------------------------------------------------------------------
+# Source bundles (one of each per example, plus the proxy implementation).
+# ---------------------------------------------------------------------------
+set(PROXY_LIBFABRIC_SRC
+    ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/proxy/proxy_libfabric.cpp)
+set(PROXY_THREAD_SRC
+    ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/proxy/proxy_thread.cpp)
+
+# libfabric (Cray on Tioga, CXI 1.22 on Delta).
+if(NOT DEFINED LIBFABRIC_ROOT)
+    set(LIBFABRIC_ROOT "/opt/cray/libfabric/1.22.0" CACHE PATH "libfabric path")
+endif()
+find_path(PROXY_EX_LIBFABRIC_INCLUDE_DIR rdma/fabric.h
+    PATHS ${LIBFABRIC_ROOT} /opt/cray/libfabric/2.1
+    PATH_SUFFIXES include)
+find_library(PROXY_EX_LIBFABRIC_LIBRARY fabric
+    PATHS ${LIBFABRIC_ROOT} /opt/cray/libfabric/2.1
+    PATH_SUFFIXES lib lib64)
+if(NOT PROXY_EX_LIBFABRIC_INCLUDE_DIR OR NOT PROXY_EX_LIBFABRIC_LIBRARY)
+    message(WARNING "examples/proxy: libfabric not found, skipping")
+    return()
+endif()
+
+# hwloc.
+find_path(PROXY_EX_HWLOC_INCLUDE_DIR hwloc.h)
+find_library(PROXY_EX_HWLOC_LIBRARY hwloc)
+if(NOT PROXY_EX_HWLOC_INCLUDE_DIR OR NOT PROXY_EX_HWLOC_LIBRARY)
+    message(WARNING "examples/proxy: hwloc not found, skipping")
+    return()
+endif()
+
+# Bootstrap (mirror tests/proxy/CMakeLists.txt).
+set(GICC_BOOTSTRAP "mpi" CACHE STRING "Bootstrap backend: mpi | pmi2")
+if(GICC_BOOTSTRAP STREQUAL "mpi")
+    find_package(MPI REQUIRED)
+    set(PROXY_EX_BOOTSTRAP_DEFINE GICC_BOOTSTRAP_MPI=1)
+    set(PROXY_EX_BOOTSTRAP_INCLUDES ${MPI_CXX_INCLUDE_DIRS})
+    if(NOT PROXY_EX_BOOTSTRAP_INCLUDES)
+        find_path(_PROXY_EX_MPI_H mpi.h
+            PATHS /opt/cray/pe/mpich/8.1.32/ofi/gnu/11.2/include
+                  /opt/cray/pe/mpich/9.0.1/ofi/cray/20.0/include
+                  /opt/cray/pe/mpich/8.1.32/ofi/cray/18.0/include
+            NO_DEFAULT_PATH)
+        if(_PROXY_EX_MPI_H)
+            set(PROXY_EX_BOOTSTRAP_INCLUDES ${_PROXY_EX_MPI_H})
+        endif()
+    endif()
+    set(PROXY_EX_BOOTSTRAP_LIBS MPI::MPI_CXX)
+    find_library(_PROXY_EX_MPI_LIB
+        NAMES mpi_gnu_112 mpi
+        PATHS /opt/cray/pe/mpich/8.1.32/ofi/gnu/11.2/lib
+              /opt/cray/pe/mpich/9.0.1/ofi/cray/20.0/lib
+        NO_DEFAULT_PATH)
+    if(_PROXY_EX_MPI_LIB)
+        list(APPEND PROXY_EX_BOOTSTRAP_LIBS ${_PROXY_EX_MPI_LIB})
+    endif()
+elseif(GICC_BOOTSTRAP STREQUAL "pmi2")
+    set(PMI_ROOT "/opt/cray/pe/pmi/6.1.15" CACHE PATH "Cray PMI path")
+    find_path(PMI2_INCLUDE_DIR pmi2.h
+        PATHS ${PMI_ROOT} PATH_SUFFIXES include)
+    find_library(PMI2_LIBRARY pmi2
+        PATHS ${PMI_ROOT} PATH_SUFFIXES lib lib64)
+    if(NOT PMI2_INCLUDE_DIR OR NOT PMI2_LIBRARY)
+        message(FATAL_ERROR "PMI2 not found (set PMI_ROOT)")
+    endif()
+    set(PROXY_EX_BOOTSTRAP_DEFINE GICC_BOOTSTRAP_PMI2=1)
+    set(PROXY_EX_BOOTSTRAP_INCLUDES ${PMI2_INCLUDE_DIR})
+    set(PROXY_EX_BOOTSTRAP_LIBS     ${PMI2_LIBRARY})
+endif()
+
+# ---------------------------------------------------------------------------
+# Helper: shared common settings for both examples.
+# ---------------------------------------------------------------------------
+function(_proxy_example_setup tgt)
+    target_include_directories(${tgt} PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/internal
+        ${PROXY_EX_LIBFABRIC_INCLUDE_DIR}
+        ${PROXY_EX_HWLOC_INCLUDE_DIR}
+        ${PROXY_EX_BOOTSTRAP_INCLUDES})
+    target_compile_definitions(${tgt} PRIVATE
+        GICC_PLATFORM_OFI
+        ${PROXY_EX_BOOTSTRAP_DEFINE})
+endfunction()
+
+# ---------------------------------------------------------------------------
+# put_loopback (L1) - single-rank.
+# ---------------------------------------------------------------------------
+if(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(put_loopback.cu
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(put_loopback
+        put_loopback.cu
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    find_package(CUDAToolkit REQUIRED)
+    target_link_libraries(put_loopback PRIVATE
+        CUDA::cudart
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+elseif(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(put_loopback.hip.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE HIP)
+    add_executable(put_loopback
+        put_loopback.hip.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    list(APPEND CMAKE_PREFIX_PATH "/opt/rocm")
+    find_package(hip REQUIRED)
+    target_link_libraries(put_loopback PRIVATE
+        hip::device
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+endif()
+_proxy_example_setup(put_loopback)
+
+# ---------------------------------------------------------------------------
+# put_two_rank_intranode (L2) - 2 MPI ranks.
+# ---------------------------------------------------------------------------
+if(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(put_two_rank_intranode.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(put_two_rank_intranode
+        put_two_rank_intranode.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(put_two_rank_intranode PRIVATE
+        CUDA::cudart
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+elseif(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(put_two_rank_intranode.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE HIP)
+    add_executable(put_two_rank_intranode
+        put_two_rank_intranode.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(put_two_rank_intranode PRIVATE
+        hip::device
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+endif()
+_proxy_example_setup(put_two_rank_intranode)

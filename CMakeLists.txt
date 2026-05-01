@@ -57,12 +57,19 @@ if(GICC_BACKEND STREQUAL "mlx5")
     endif()
 elseif(GICC_BACKEND STREQUAL "ofi")
     if(BUILD_EXAMPLES)
-        add_subdirectory(examples/ofi)
+        # examples/ofi is HIP-only (Tioga). Skip under the CUDA build path
+        # so the proxy CUDA examples can configure on Delta.
+        if(GICC_GPU_API STREQUAL "hip")
+            add_subdirectory(examples/ofi)
+        endif()
     endif()
 endif()
 
 if(GICC_ENABLE_CPU_PROXY)
     add_subdirectory(tests/proxy)
+    if(BUILD_EXAMPLES)
+        add_subdirectory(examples/proxy)
+    endif()
 endif()
 
 # ============================================================================
