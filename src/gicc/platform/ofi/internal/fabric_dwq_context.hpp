@@ -218,9 +218,17 @@ private:
         av_attr.type = FI_AV_TABLE;
         check(fi_av_open(domain, &av_attr, &av, NULL), "fi_av_open");
 
-        // Create CQ
+        // Create CQ. Size from env GICC_CQ_SIZE (default 128, range [16, 16384]).
         struct fi_cq_attr cq_attr = {};
         cq_attr.size = 128;
+        if (const char* env = std::getenv("GICC_CQ_SIZE")) {
+            int n = std::atoi(env);
+            if (n >= 16 && n <= 16384) {
+                cq_attr.size = n;
+            } else {
+                fprintf(stderr, "GICC: GICC_CQ_SIZE=%s out of range [16,16384], using default 128\n", env);
+            }
+        }
         cq_attr.format = FI_CQ_FORMAT_CONTEXT;
         check(fi_cq_open(domain, &cq_attr, &cq, NULL), "fi_cq_open");
 
