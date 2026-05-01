@@ -244,3 +244,47 @@ elseif(GICC_GPU_API STREQUAL "hip")
         pthread)
 endif()
 _proxy_example_setup(quiet_pingpong)
+
+# ---------------------------------------------------------------------------
+# bench_pingpong - latency benchmark comparing CPU Proxy and Cray MPI for
+# unidirectional GPU-buffer-to-GPU-buffer transfers across a size sweep.
+# Selects mode at runtime via --mode={mpi,proxy}.
+# ---------------------------------------------------------------------------
+if(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(bench_pingpong.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(bench_pingpong
+        bench_pingpong.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(bench_pingpong PRIVATE
+        CUDA::cudart
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+    # Cray MPICH GPU-aware link: requires the GTL library when
+    # MPICH_GPU_SUPPORT_ENABLED=1 (enables sending GPU pointers via MPI).
+    if(EXISTS "/opt/cray/pe/lib64/libmpi_gtl_cuda.so")
+        target_link_libraries(bench_pingpong PRIVATE
+            "/opt/cray/pe/lib64/libmpi_gtl_cuda.so")
+    endif()
+elseif(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(bench_pingpong.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE HIP)
+    add_executable(bench_pingpong
+        bench_pingpong.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(bench_pingpong PRIVATE
+        hip::device
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+endif()
+_proxy_example_setup(bench_pingpong)
