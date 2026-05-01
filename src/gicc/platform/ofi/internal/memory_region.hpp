@@ -33,8 +33,15 @@ public:
                          FI_REMOTE_READ | FI_REMOTE_WRITE;
 
         if (is_device_mem) {
+#if defined(GICC_GPU_HIP)
             mr_attr.iface = FI_HMEM_ROCR;
             mr_attr.device.reserved = device_id;
+#elif defined(GICC_GPU_CUDA)
+            mr_attr.iface = FI_HMEM_CUDA;
+            mr_attr.device.cuda = device_id;
+#else
+#error "GICC_GPU_HIP or GICC_GPU_CUDA must be defined"
+#endif
         } else {
             mr_attr.iface = FI_HMEM_SYSTEM;
         }
