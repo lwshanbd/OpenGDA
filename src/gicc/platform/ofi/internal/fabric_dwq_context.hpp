@@ -83,7 +83,19 @@ public:
     {
         init_fabric();
         init_counters();
-        init_mmio_mapping();
+        // GICC_SKIP_DWQ_INIT=1 lets CPU-proxy-only callers bypass the
+        // CXI MMIO -> GPU mapping, which fails on platforms whose CUDA
+        // runtime cannot cudaHostRegister the trigger BAR (notably
+        // Grace Hopper / GH200 + CXI). The proxy path does not use
+        // dev_trigger_cntr; DWQ-trigger callers must NOT set this.
+        if (std::getenv("GICC_SKIP_DWQ_INIT") == nullptr) {
+            init_mmio_mapping();
+        } else if (rank == 0) {
+            fprintf(stderr,
+                    "[gicc] GICC_SKIP_DWQ_INIT=1: skipping CXI trigger MMIO "
+                    "mapping (DWQ-trigger path will not work on this "
+                    "Runtime; CPU-proxy path is unaffected)\n");
+        }
         get_local_address();
         start_cq_progress_thread();
     }
