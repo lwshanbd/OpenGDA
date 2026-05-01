@@ -17,7 +17,7 @@
 #include <hip/hip_runtime.h>
 
 #include "gicc/bootstrap/bootstrap.hpp"
-#include "gicc/platform/ofi/internal/hip_device_context.hpp"
+#include "gicc/platform/ofi/internal/gpu_device_context.hpp"
 #include "gicc/platform/ofi/internal/fabric.hpp"
 #include "gicc/platform/ofi/internal/am.hpp"
 

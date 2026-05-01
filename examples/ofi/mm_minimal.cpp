@@ -34,7 +34,7 @@
 
 // For unset_rocr_visible_devices() — must run before Bootstrap init on
 // Tioga/Flux, otherwise multi-rank-per-node jobs see "invalid device ordinal".
-#include "gicc/platform/ofi/internal/hip_device_context.hpp"
+#include "gicc/platform/ofi/internal/gpu_device_context.hpp"
 
 #define HIP_CHECK(cmd) do {                                                    \
     hipError_t err = cmd;                                                      \

@@ -33,7 +33,7 @@
 #include "gicc/platform/ofi/runtime_helpers.h"   // C ABI consumed by LTO IR
 
 // OFI backend internals (Fabric, FabricDwqContext, MemoryRegion, etc.)
-#include "internal/hip_device_context.hpp"
+#include "internal/gpu_device_context.hpp"
 #include "gicc/bootstrap/bootstrap.hpp"
 #include "internal/device_affinity.hpp"
 #include "internal/fabric_dwq_context.hpp"

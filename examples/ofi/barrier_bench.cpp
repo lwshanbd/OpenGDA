@@ -25,7 +25,7 @@
 #include "gicc/bootstrap/bootstrap.hpp"
 #include "gicc/platform/ofi/ofi_barrier_device.cuh"
 #include "gicc/platform/ofi/internal/gicc_barrier.hpp"
-#include "gicc/platform/ofi/internal/hip_device_context.hpp"
+#include "gicc/platform/ofi/internal/gpu_device_context.hpp"
 
 // =============================================================================
 // Shared tiny compute: each thread bumps one element with a few flops.

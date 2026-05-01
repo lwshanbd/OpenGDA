@@ -32,7 +32,7 @@
 #include "gicc/gicc.hpp"
 #include "gicc/gicc_device.cuh"
 #include "gicc/coll.hpp"
-#include "gicc/platform/ofi/internal/hip_device_context.hpp"
+#include "gicc/platform/ofi/internal/gpu_device_context.hpp"
 
 #define HIP_CHECK(cmd) do {                                                    \
     hipError_t err = cmd;                                                      \
