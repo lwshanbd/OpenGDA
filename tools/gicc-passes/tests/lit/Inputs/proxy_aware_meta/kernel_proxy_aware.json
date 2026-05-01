@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "kernel_mangled": "kernel_proxy_aware",
+  "kernel_simple":  "kernel_proxy_aware",
+  "proxy_aware": true,
+  "params": [
+    { "idx": 0, "name": "ctx",  "type": "ptr" },
+    { "idx": 1, "name": "peer", "type": "i32" },
+    { "idx": 2, "name": "size", "type": "i64" }
+  ],
+  "ops": [
+    {
+      "site_id": "k.cpp:1:kernel_proxy_aware::0",
+      "kind":    "put_no_db",
+      "guard":   { "kind": "always" },
+      "hk_capable": true,
+      "args": {
+        "target_rank": { "kind": "param",     "param": 1 },
+        "dst_buf":     { "kind": "const_i64", "value": 0 },
+        "dst_off":     { "kind": "const_i64", "value": 0 },
+        "src_buf":     { "kind": "const_i64", "value": 0 },
+        "src_off":     { "kind": "const_i64", "value": 0 },
+        "size":        { "kind": "param",     "param": 2 }
+      }
+    }
+  ]
+}
