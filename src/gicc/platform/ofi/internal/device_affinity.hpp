@@ -6,7 +6,7 @@
  */
 #pragma once
 
-#include <hip/hip_runtime.h>
+#include "gpu_device_context.hpp"
 #include <hwloc.h>
 #include <rdma/fabric.h>
 
@@ -25,7 +25,7 @@ struct DeviceAffinity {
 
 class DeviceAffinityDetector {
 public:
-    int selected_gpu_id;             // HIP device ID to use
+    int selected_gpu_id;             // GPU device ID to use
     std::string selected_cxi_domain; // CXI domain name (e.g., "cxi0")
     bool affinity_matched;           // True if GPU-NIC affinity was found
 
@@ -159,9 +159,9 @@ private:
     void detect_affinity() {
         // Get all available GPUs and their affinities
         int gpu_count = 0;
-        hipError_t hip_err = hipGetDeviceCount(&gpu_count);
-        if (hip_err != hipSuccess || gpu_count == 0) {
-            fprintf(stderr, "Warning: No HIP devices found\n");
+        GpuError gpu_err = gpuGetDeviceCount(&gpu_count);
+        if (gpu_err != GPU_SUCCESS || gpu_count == 0) {
+            fprintf(stderr, "Warning: No GPU devices found\n");
             return;
         }
 
@@ -171,8 +171,8 @@ private:
 
         for (int gpu_id = 0; gpu_id < gpu_count; gpu_id++) {
             char pci_bus_id[32] = {0};
-            hip_err = hipDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), gpu_id);
-            if (hip_err != hipSuccess) {
+            gpu_err = gpuDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), gpu_id);
+            if (gpu_err != GPU_SUCCESS) {
                 continue;
             }
             gpu_pci_ids[gpu_id] = pci_bus_id;
@@ -259,8 +259,8 @@ private:
     void detect_affinity_for_gpu(int target_gpu_id) {
         // Get GPU PCI ID
         char pci_bus_id[32] = {0};
-        hipError_t hip_err = hipDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), target_gpu_id);
-        if (hip_err != hipSuccess) {
+        GpuError gpu_err = gpuDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), target_gpu_id);
+        if (gpu_err != GPU_SUCCESS) {
             fprintf(stderr, "Warning: Cannot get PCI ID for GPU %d\n", target_gpu_id);
             return;
         }
