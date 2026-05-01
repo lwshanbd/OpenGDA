@@ -17,10 +17,12 @@
 
 #include "d2h_ring.cuh"
 #include "proxy_libfabric.hpp"
+#include "proxy_ring_defs.hpp"
 #include "transfer_cmd.hpp"
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <thread>
 #include <unordered_set>
 
@@ -28,9 +30,6 @@ namespace gicc { class Runtime; }
 
 namespace gicc {
 namespace proxy {
-
-constexpr uint32_t kProxyRingCapacity = 4096;
-using ProxyRing = D2HRing<kProxyRingCapacity>;
 
 class ProxyThread {
 public:
@@ -50,6 +49,15 @@ private:
     void main_loop();
     void handle_quiet(uint64_t quiet_slot);
 
+    // A single pending retry: when submit_write returns -FI_EAGAIN, pop()
+    // has already advanced proxy_read_cursor, so the (cmd, slot) must be
+    // stashed here and reattempted on the next iteration before any new
+    // pop. The proxy is single-threaded, so at most one retry is pending.
+    struct PendingRetry {
+        TransferCmd cmd;
+        uint64_t    slot;
+    };
+
     ::gicc::Runtime&             rt_;
     ProxyRing*                   ring_host_;
     ProxyRing*                   ring_device_;
@@ -57,6 +65,7 @@ private:
     std::thread                  thr_;
     ProxyLibfabric               lf_;
     std::unordered_set<uint64_t> in_flight_;
+    std::optional<PendingRetry>  pending_retry_;
 };
 
 } // namespace proxy
