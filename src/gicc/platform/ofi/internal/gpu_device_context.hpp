@@ -17,6 +17,8 @@
 #include <hip/hip_runtime.h>
 using GpuError      = hipError_t;
 using GpuDeviceProp = hipDeviceProp_t;
+using GpuStream_t   = hipStream_t;
+using GpuIpcMemHandle_t = hipIpcMemHandle_t;
 #define GPU_SUCCESS              hipSuccess
 #define gpuGetDeviceCount        hipGetDeviceCount
 #define gpuSetDevice             hipSetDevice
@@ -27,8 +29,36 @@ using GpuDeviceProp = hipDeviceProp_t;
 #define gpuMalloc                hipMalloc
 #define gpuFree                  hipFree
 #define gpuMemcpy                hipMemcpy
+#define gpuMemcpyAsync           hipMemcpyAsync
 #define gpuMemcpyHostToDevice    hipMemcpyHostToDevice
+#define gpuMemcpyDeviceToHost    hipMemcpyDeviceToHost
 #define gpuMemset                hipMemset
+#define gpuDeviceSynchronize     hipDeviceSynchronize
+
+// Host-pinned memory (mapped into the device address space).
+#define gpuHostMalloc            hipHostMalloc
+#define gpuHostFree              hipHostFree
+#define gpuHostMallocMapped      hipHostMallocMapped
+#define gpuHostMallocDefault     hipHostMallocDefault
+#define gpuHostGetDevicePointer  hipHostGetDevicePointer
+#define gpuHostRegister          hipHostRegister
+#define gpuHostUnregister        hipHostUnregister
+#define gpuHostRegisterMapped    hipHostRegisterMapped
+
+// Streams.
+#define gpuStreamCreateWithFlags hipStreamCreateWithFlags
+#define gpuStreamDestroy         hipStreamDestroy
+#define gpuStreamSynchronize     hipStreamSynchronize
+#define gpuStreamNonBlocking     hipStreamNonBlocking
+
+// IPC handles (same-node peer mapping).
+#define gpuIpcGetMemHandle       hipIpcGetMemHandle
+#define gpuIpcOpenMemHandle      hipIpcOpenMemHandle
+#define gpuIpcCloseMemHandle     hipIpcCloseMemHandle
+#define gpuIpcMemLazyEnablePeerAccess hipIpcMemLazyEnablePeerAccess
+
+// Device PCI helpers.
+#define gpuDeviceGetPCIBusId     hipDeviceGetPCIBusId
 
 // Kernel launch wrapper. Expands to the exact same hipLaunchKernelGGL
 // invocation under HIP, and to the CUDA triple-chevron form under CUDA.
@@ -43,6 +73,8 @@ inline void unset_rocr_visible_devices() { unsetenv("ROCR_VISIBLE_DEVICES"); }
 #include <cuda_runtime.h>
 using GpuError      = cudaError_t;
 using GpuDeviceProp = cudaDeviceProp;
+using GpuStream_t   = cudaStream_t;
+using GpuIpcMemHandle_t = cudaIpcMemHandle_t;
 #define GPU_SUCCESS              cudaSuccess
 #define gpuGetDeviceCount        cudaGetDeviceCount
 #define gpuSetDevice             cudaSetDevice
@@ -53,8 +85,38 @@ using GpuDeviceProp = cudaDeviceProp;
 #define gpuMalloc                cudaMalloc
 #define gpuFree                  cudaFree
 #define gpuMemcpy                cudaMemcpy
+#define gpuMemcpyAsync           cudaMemcpyAsync
 #define gpuMemcpyHostToDevice    cudaMemcpyHostToDevice
+#define gpuMemcpyDeviceToHost    cudaMemcpyDeviceToHost
 #define gpuMemset                cudaMemset
+#define gpuDeviceSynchronize     cudaDeviceSynchronize
+
+// Host-pinned memory (mapped into the device address space). CUDA's
+// equivalent of hipHostMalloc(p, n, hipHostMallocMapped) is
+// cudaHostAlloc(p, n, cudaHostAllocMapped). The flag names also differ.
+#define gpuHostMalloc            cudaHostAlloc
+#define gpuHostFree              cudaFreeHost
+#define gpuHostMallocMapped      cudaHostAllocMapped
+#define gpuHostMallocDefault     cudaHostAllocDefault
+#define gpuHostGetDevicePointer  cudaHostGetDevicePointer
+#define gpuHostRegister          cudaHostRegister
+#define gpuHostUnregister        cudaHostUnregister
+#define gpuHostRegisterMapped    cudaHostRegisterMapped
+
+// Streams.
+#define gpuStreamCreateWithFlags cudaStreamCreateWithFlags
+#define gpuStreamDestroy         cudaStreamDestroy
+#define gpuStreamSynchronize     cudaStreamSynchronize
+#define gpuStreamNonBlocking     cudaStreamNonBlocking
+
+// IPC handles (same-node peer mapping).
+#define gpuIpcGetMemHandle       cudaIpcGetMemHandle
+#define gpuIpcOpenMemHandle      cudaIpcOpenMemHandle
+#define gpuIpcCloseMemHandle     cudaIpcCloseMemHandle
+#define gpuIpcMemLazyEnablePeerAccess cudaIpcMemLazyEnablePeerAccess
+
+// Device PCI helpers.
+#define gpuDeviceGetPCIBusId     cudaDeviceGetPCIBusId
 
 // Kernel launch wrapper. CUDA uses triple-chevron syntax; nvcc parses this
 // just like a normal kernel launch.
