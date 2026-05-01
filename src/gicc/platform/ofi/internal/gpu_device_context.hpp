@@ -30,6 +30,11 @@ using GpuDeviceProp = hipDeviceProp_t;
 #define gpuMemcpyHostToDevice    hipMemcpyHostToDevice
 #define gpuMemset                hipMemset
 
+// Kernel launch wrapper. Expands to the exact same hipLaunchKernelGGL
+// invocation under HIP, and to the CUDA triple-chevron form under CUDA.
+#define gpuLaunchKernel(kernel, grid, block, shmem, stream, ...) \
+    hipLaunchKernelGGL(kernel, grid, block, shmem, stream, __VA_ARGS__)
+
 // CRITICAL: Call this BEFORE any HIP/PMI2 initialization
 // Must be called at the very start of main()
 inline void unset_rocr_visible_devices() { unsetenv("ROCR_VISIBLE_DEVICES"); }
@@ -50,6 +55,11 @@ using GpuDeviceProp = cudaDeviceProp;
 #define gpuMemcpy                cudaMemcpy
 #define gpuMemcpyHostToDevice    cudaMemcpyHostToDevice
 #define gpuMemset                cudaMemset
+
+// Kernel launch wrapper. CUDA uses triple-chevron syntax; nvcc parses this
+// just like a normal kernel launch.
+#define gpuLaunchKernel(kernel, grid, block, shmem, stream, ...) \
+    kernel<<<grid, block, shmem, stream>>>(__VA_ARGS__)
 
 // CUDA path has no equivalent of ROCR_VISIBLE_DEVICES; keep the symbol
 // available so call sites can stay GPU-agnostic.

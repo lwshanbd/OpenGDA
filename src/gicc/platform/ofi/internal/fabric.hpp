@@ -301,8 +301,8 @@ public:
      * @param threshold The threshold value returned by put()
      */
     void trigger(uint64_t threshold) {
-        hipLaunchKernelGGL(gda_trigger_kernel, dim3(1), dim3(1), 0, 0,
-                           fabric->dev_trigger_cntr, threshold);
+        gpuLaunchKernel(gda_trigger_kernel, dim3(1), dim3(1), 0, 0,
+                        fabric->dev_trigger_cntr, threshold);
     }
 
     /**
