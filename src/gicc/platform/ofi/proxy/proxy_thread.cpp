@@ -13,6 +13,7 @@
 
 #include <rdma/fi_errno.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 
@@ -26,6 +27,14 @@ namespace proxy {
 namespace {
 constexpr int kSubmitBatch = 32;
 constexpr int kCqBatch     = 32;
+
+// Bounded drain timeouts. Without these, a dropped completion (peer dead,
+// provider stuck) would hang ~ProxyThread() forever, and a hung QUIET would
+// deadlock the GPU's quiet() spin. On timeout we log and bail; the lost
+// completions are leaked at the libfabric level but the host stays
+// responsive.
+constexpr auto kShutdownDrainTimeout = std::chrono::seconds(5);
+constexpr auto kQuietDrainTimeout    = std::chrono::seconds(30);
 
 inline void cpu_relax() {
 #if defined(__x86_64__) || defined(_M_X64)
@@ -150,8 +159,12 @@ void ProxyThread::main_loop() {
         }
     }
 
-    // Drain remaining completions on shutdown so we don't leak in-flight ops.
-    while (!in_flight_.empty()) {
+    // Drain remaining completions on shutdown so we don't leak in-flight ops,
+    // bounded by kShutdownDrainTimeout so a dropped completion can't hang
+    // the destructor forever.
+    auto drain_deadline = std::chrono::steady_clock::now() + kShutdownDrainTimeout;
+    while (!in_flight_.empty() &&
+           std::chrono::steady_clock::now() < drain_deadline) {
         Completion comps[kCqBatch];
         int n = lf_.poll(comps, kCqBatch);
         for (int i = 0; i < n; ++i) {
@@ -165,14 +178,22 @@ void ProxyThread::main_loop() {
             cpu_relax();
         }
     }
+    if (!in_flight_.empty()) {
+        fprintf(stderr,
+                "ProxyThread: shutdown drain timeout, %zu completions still in flight (leaked)\n",
+                in_flight_.size());
+    }
 }
 
 void ProxyThread::handle_quiet(uint64_t quiet_slot) {
     // Wait for every currently in-flight slot to ack. Snapshot the set so
     // erasing entries from in_flight_ during the loop doesn't invalidate
-    // our termination condition.
+    // our termination condition. Bounded by kQuietDrainTimeout so a dropped
+    // completion doesn't hang the GPU's quiet() spin forever.
     auto target = in_flight_;
-    while (!target.empty()) {
+    auto deadline = std::chrono::steady_clock::now() + kQuietDrainTimeout;
+    while (!target.empty() &&
+           std::chrono::steady_clock::now() < deadline) {
         Completion comps[kCqBatch];
         int n = lf_.poll(comps, kCqBatch);
         for (int i = 0; i < n; ++i) {
@@ -183,7 +204,16 @@ void ProxyThread::handle_quiet(uint64_t quiet_slot) {
         }
         if (n == 0) cpu_relax();
     }
-    // Ack the QUIET slot itself once the prior submits are quiesced.
+    if (!target.empty()) {
+        fprintf(stderr,
+                "ProxyThread: QUIET drain timeout (slot=%lu, %zu still in flight)\n",
+                (unsigned long)quiet_slot, target.size());
+        // Still ack the QUIET slot below so the GPU's quiet() spin doesn't
+        // deadlock. The unfinished puts are now considered lost; production
+        // code should surface this as an error to the caller (out of MVP).
+    }
+    // Ack the QUIET slot itself once the prior submits are quiesced (or on
+    // timeout, to release the GPU spin).
     ring_host_->mark_acked(quiet_slot);
     ring_host_->advance_tail_from_mask();
 }
