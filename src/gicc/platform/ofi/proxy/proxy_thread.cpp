@@ -26,7 +26,9 @@ namespace proxy {
 
 namespace {
 constexpr int kSubmitBatch = 32;
-constexpr int kCqBatch     = 32;
+// CQ poll batch — bumped up from 32 (UCCL-EP polls up to 2048). 256 drains
+// a typical burst in one syscall and amortizes the per-fi_cq_read overhead.
+constexpr int kCqBatch     = 256;
 
 // Bounded drain timeouts. Without these, a dropped completion (peer dead,
 // provider stuck) would hang ~ProxyThread() forever, and a hung QUIET would
@@ -84,6 +86,14 @@ void ProxyThread::stop() {
     }
 }
 
+// Helpers to map a monotonic slot index to its ring-bitset position and
+// to mutate in_flight_ + in_flight_count_ together.
+namespace {
+constexpr size_t ring_idx(uint64_t slot) {
+    return static_cast<size_t>(slot) & (kProxyRingCapacity - 1);
+}
+} // namespace
+
 void ProxyThread::main_loop() {
     while (running_.load(std::memory_order_acquire)) {
         bool stop_submitting = false;
@@ -99,7 +109,9 @@ void ProxyThread::main_loop() {
             if (ret == -FI_EAGAIN) {
                 stop_submitting = true;   // still no room; just poll CQ.
             } else {
-                in_flight_.insert(pending_retry_->slot);
+                size_t bit = ring_idx(pending_retry_->slot);
+                in_flight_.set(bit);
+                ++in_flight_count_;
                 pending_retry_.reset();
             }
         }
@@ -112,7 +124,8 @@ void ProxyThread::main_loop() {
             // Defensive: pop() advances proxy_read_cursor, so the same slot
             // shouldn't be returned twice. If it ever is, log + skip (don't
             // bail the whole batch — that would starve the next slots).
-            if (in_flight_.count(slot)) {
+            size_t bit = ring_idx(slot);
+            if (in_flight_.test(bit)) {
                 fprintf(stderr,
                         "ProxyThread: pop returned in-flight slot %lu (invariant violation)\n",
                         (unsigned long)slot);
@@ -130,7 +143,8 @@ void ProxyThread::main_loop() {
                         stop_submitting = true;
                         break;
                     }
-                    in_flight_.insert(slot);
+                    in_flight_.set(bit);
+                    ++in_flight_count_;
                     break;
                 }
                 case CmdType::QUIET:
@@ -150,7 +164,11 @@ void ProxyThread::main_loop() {
         for (int i = 0; i < n; ++i) {
             uint64_t s = reinterpret_cast<uint64_t>(comps[i].context);
             ring_host_->mark_acked(s);
-            in_flight_.erase(s);
+            size_t bit = ring_idx(s);
+            if (in_flight_.test(bit)) {
+                in_flight_.reset(bit);
+                --in_flight_count_;
+            }
         }
         if (n > 0) {
             ring_host_->advance_tail_from_mask();
@@ -163,14 +181,18 @@ void ProxyThread::main_loop() {
     // bounded by kShutdownDrainTimeout so a dropped completion can't hang
     // the destructor forever.
     auto drain_deadline = std::chrono::steady_clock::now() + kShutdownDrainTimeout;
-    while (!in_flight_.empty() &&
+    while (in_flight_count_ > 0 &&
            std::chrono::steady_clock::now() < drain_deadline) {
         Completion comps[kCqBatch];
         int n = lf_.poll(comps, kCqBatch);
         for (int i = 0; i < n; ++i) {
             uint64_t s = reinterpret_cast<uint64_t>(comps[i].context);
             ring_host_->mark_acked(s);
-            in_flight_.erase(s);
+            size_t bit = ring_idx(s);
+            if (in_flight_.test(bit)) {
+                in_flight_.reset(bit);
+                --in_flight_count_;
+            }
         }
         if (n > 0) {
             ring_host_->advance_tail_from_mask();
@@ -178,36 +200,43 @@ void ProxyThread::main_loop() {
             cpu_relax();
         }
     }
-    if (!in_flight_.empty()) {
+    if (in_flight_count_ > 0) {
         fprintf(stderr,
                 "ProxyThread: shutdown drain timeout, %zu completions still in flight (leaked)\n",
-                in_flight_.size());
+                in_flight_count_);
     }
 }
 
 void ProxyThread::handle_quiet(uint64_t quiet_slot) {
-    // Wait for every currently in-flight slot to ack. Snapshot the set so
-    // erasing entries from in_flight_ during the loop doesn't invalidate
-    // our termination condition. Bounded by kQuietDrainTimeout so a dropped
-    // completion doesn't hang the GPU's quiet() spin forever.
-    auto target = in_flight_;
+    // Wait for the slots in-flight at QUIET-arrival time to all complete.
+    // The proxy is single-threaded, so nothing else can ADD to in_flight_
+    // while we are inside this function (we are inside main_loop's submit
+    // batch loop and have not yet popped further). So we don't need a
+    // snapshot copy — we just remember the count we entered with and
+    // wait for it to drain to zero. Bounded by kQuietDrainTimeout so a
+    // dropped completion doesn't hang the GPU's quiet() spin forever.
+    size_t target_remaining = in_flight_count_;
     auto deadline = std::chrono::steady_clock::now() + kQuietDrainTimeout;
-    while (!target.empty() &&
+    while (target_remaining > 0 &&
            std::chrono::steady_clock::now() < deadline) {
         Completion comps[kCqBatch];
         int n = lf_.poll(comps, kCqBatch);
         for (int i = 0; i < n; ++i) {
             uint64_t s = reinterpret_cast<uint64_t>(comps[i].context);
             ring_host_->mark_acked(s);
-            in_flight_.erase(s);
-            target.erase(s);
+            size_t bit = ring_idx(s);
+            if (in_flight_.test(bit)) {
+                in_flight_.reset(bit);
+                --in_flight_count_;
+                --target_remaining;
+            }
         }
         if (n == 0) cpu_relax();
     }
-    if (!target.empty()) {
+    if (target_remaining > 0) {
         fprintf(stderr,
                 "ProxyThread: QUIET drain timeout (slot=%lu, %zu still in flight)\n",
-                (unsigned long)quiet_slot, target.size());
+                (unsigned long)quiet_slot, target_remaining);
         // Still ack the QUIET slot below so the GPU's quiet() spin doesn't
         // deadlock. The unfinished puts are now considered lost; production
         // code should surface this as an error to the caller (out of MVP).

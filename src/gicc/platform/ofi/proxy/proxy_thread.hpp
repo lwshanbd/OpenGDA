@@ -21,10 +21,10 @@
 #include "transfer_cmd.hpp"
 
 #include <atomic>
+#include <bitset>
 #include <cstdint>
 #include <optional>
 #include <thread>
-#include <unordered_set>
 
 namespace gicc { class Runtime; }
 
@@ -64,7 +64,17 @@ private:
     std::atomic<bool>            running_;
     std::thread                  thr_;
     ProxyLibfabric               lf_;
-    std::unordered_set<uint64_t> in_flight_;
+    // In-flight slots, indexed by (slot & ring_mask). Bitset is allocation-
+    // free and gives O(1) set/clear/test (1 instr each) — replaces the prior
+    // std::unordered_set whose insert/erase on hot path triggered allocator
+    // calls and pointer chasing. Capacity matches the ring (kProxyRingCapacity)
+    // because ring back-pressure guarantees no two in-flight slots collide
+    // on the same ring index.
+    std::bitset<kProxyRingCapacity> in_flight_;
+    // Tracks how many bits are set in in_flight_ — std::bitset::count() is
+    // popcount over all words, but we want O(1) emptiness checks in the
+    // hot QUIET drain. Updated alongside set/reset.
+    size_t                       in_flight_count_ = 0;
     std::optional<PendingRetry>  pending_retry_;
 };
 
