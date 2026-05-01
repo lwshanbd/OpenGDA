@@ -1,6 +1,7 @@
 ; The 'size' argument is a PHI feeding from a loop counter that loads
 ; from device memory each iteration — non-HK in v1 (per-thread loop
-; bound). HK pass must reject.
+; bound). HK pass surfaces a warning so the dispatch lowering routes
+; this site to CPU_PROXY_ENQUEUE.
 ;
 ; RUN: env GICC_MODE=feature-extract \
 ; RUN:     %opt -load-pass-plugin=%gicc_passes_so \
@@ -29,4 +30,5 @@ exit:
   ret void
 }
 
-; CHECK: error: gicc::put_no_db: argument 'size' is not host-knowable
+; CHECK: warning: gicc::put_no_db: argument 'size' is not host-knowable
+; CHECK-SAME: CPU_PROXY_ENQUEUE

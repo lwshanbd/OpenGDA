@@ -1,5 +1,7 @@
 ; The 'size' argument is the result of llvm.amdgcn.workitem.id.x — non-HK.
-; HK pass must report a source-line-precise error.
+; HK pass must surface a source-line-precise warning (no longer fatal —
+; non-HK sites are softened to a capability bit so the dispatch lowering
+; can route them to CPU_PROXY_ENQUEUE).
 ;
 ; RUN: env GICC_MODE=feature-extract \
 ; RUN:     %opt -load-pass-plugin=%gicc_passes_so \
@@ -20,5 +22,6 @@ entry:
   ret void
 }
 
-; CHECK: error: gicc::put_no_db: argument 'size' is not host-knowable
+; CHECK: warning: gicc::put_no_db: argument 'size' is not host-knowable
+; CHECK-SAME: CPU_PROXY_ENQUEUE
 ; CHECK: note: depends on llvm.amdgcn.workitem.id.x

@@ -2,6 +2,7 @@
 #include "GICCPassConfig.h"
 #include "HKAnalysis.h"
 #include "KernelInventory.h"
+#include "MetadataIO.h"
 
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DebugLoc.h"
@@ -10,6 +11,8 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include <string>
 
 using namespace llvm;
 
@@ -50,6 +53,9 @@ PreservedAnalyses GICCHKAnalysisPass::run(Module &M, ModuleAnalysisManager &) {
     const auto &cfg = getConfig();
     if (cfg.mode == Mode::Passthrough) return PreservedAnalyses::all();
 
+    // Reset capability bit. Kept on the pass instance for backwards
+    // compatibility with code that read it; in the soft-failure regime
+    // it is informational only — the pass never returns an error.
     sawError = false;
     StringRef tuName = M.getName();
 
@@ -60,8 +66,13 @@ PreservedAnalyses GICCHKAnalysisPass::run(Module &M, ModuleAnalysisManager &) {
         collectGICCSites(F, info);
         if (info.sites.empty()) continue;
 
-        for (const auto &site : info.sites) {
+        for (auto &site : info.sites) {
             CallInst *CI = site.CI;
+            bool        siteHK   = true;
+            std::string failReason;
+            unsigned    failArg  = 0;
+            HKResult    failHK;
+
             // Skip the Runtime context pointer (arg 0). HK analysis only
             // matters for the data-shape arguments that the host-side
             // trace function will consume.
@@ -70,12 +81,22 @@ PreservedAnalyses GICCHKAnalysisPass::run(Module &M, ModuleAnalysisManager &) {
                 HKResult r = isHK(operand, &F);
                 if (r.ok) continue;
 
-                sawError = true;
+                // Record the first failing argument as the canonical
+                // reason; surface a per-arg warning for each so users
+                // can see the full diagnostic surface.
+                if (siteHK) {
+                    siteHK     = false;
+                    failArg    = ai;
+                    failHK     = r;
+                    failReason = "argument '" + std::string(argName(site.kind, ai))
+                                 + "' is not host-knowable: " + r.failReason;
+                }
 
                 printSourceLocation(errs(), CI, tuName.empty() ? "?" : tuName.data());
-                errs() << ": error: gicc::" << opKindName(site.kind)
+                errs() << ": warning: gicc::" << opKindName(site.kind)
                        << ": argument '" << argName(site.kind, ai)
-                       << "' is not host-knowable\n";
+                       << "' is not host-knowable"
+                       << " (will require CPU_PROXY_ENQUEUE dispatch)\n";
 
                 if (r.failOrigin) {
                     printSourceLocation(errs(), r.failOrigin,
@@ -83,6 +104,44 @@ PreservedAnalyses GICCHKAnalysisPass::run(Module &M, ModuleAnalysisManager &) {
                     errs() << ": note: " << r.failReason << "\n";
                 } else {
                     errs() << "note: " << r.failReason << "\n";
+                }
+            }
+
+            site.hk_capable     = siteHK;
+            site.hk_fail_reason = failReason;
+            if (!siteHK) sawError = true;
+            (void)failArg;
+            (void)failHK;
+        }
+
+        // Propagate the per-site capability bits into the on-disk
+        // kernel template (written by GICCDeviceDiscovery) so the
+        // host-side passes can read hk_capable directly. Match by
+        // siteId — the only stable join key between in-memory
+        // GICCCallSite and on-disk OpTemplate.
+        if ((cfg.mode == Mode::FeatureExtract || cfg.mode == Mode::Lower)
+            && !cfg.metaDir.empty()) {
+            KernelTemplate t;
+            if (readKernelTemplate(cfg.metaDir, info.mangledName, t)) {
+                bool changed = false;
+                for (auto &op : t.ops) {
+                    for (const auto &site : info.sites) {
+                        if (op.siteId != site.siteId) continue;
+                        if (op.hk_capable != site.hk_capable
+                            || op.hk_fail_reason != site.hk_fail_reason) {
+                            op.hk_capable     = site.hk_capable;
+                            op.hk_fail_reason = site.hk_fail_reason;
+                            changed = true;
+                        }
+                        break;
+                    }
+                }
+                if (changed) {
+                    if (!writeKernelTemplate(cfg.metaDir, t)) {
+                        errs() << "[hk-analysis] WARN: failed to update template "
+                               << "for " << info.mangledName << " under "
+                               << cfg.metaDir << "\n";
+                    }
                 }
             }
         }
