@@ -46,6 +46,11 @@
 #include "internal/gpu_device_context.hpp"
 #include <cstdint>
 
+#ifdef GICC_CPU_PROXY
+#include "proxy/proxy_ring_defs.hpp"
+#include "proxy/transfer_cmd.hpp"
+#endif
+
 namespace gicc {
 
 //==============================================================================
@@ -57,6 +62,14 @@ namespace gicc {
 struct DeviceCtx {
     volatile uint64_t* trigger_addr_;       // MMIO trigger counter
     uint64_t           trigger_val_;        // value to write to trigger_addr_
+#ifdef GICC_CPU_PROXY
+    // Device-mapped pointer to the host-pinned ProxyRing. Set by
+    // Runtime::prepare() to the result of ensure_proxy_ring(). put_no_db
+    // (proxy variant below) atomic_pushes a TransferCmd into this ring;
+    // the CPU proxy worker drains it and submits via libfabric. nullptr
+    // if the proxy thread hasn't been started yet.
+    void*              proxy_ring;          // gicc::proxy::ProxyRing*
+#endif
 };
 
 //==============================================================================
@@ -104,11 +117,30 @@ void quiet(DeviceCtx* /*ctx*/) {}
 // pass erases every call site at LTO time.
 //==============================================================================
 __device__ inline
-void put_no_db(DeviceCtx* /*ctx*/,
-               int /*target_rank*/,
-               int /*dst_buf*/, size_t /*dst_offset*/,
-               int /*src_buf*/, size_t /*src_offset*/,
-               size_t /*size*/, bool /*signaled*/ = false) {}
+void put_no_db(DeviceCtx* ctx,
+               int target_rank,
+               int dst_buf, size_t dst_offset,
+               int src_buf, size_t src_offset,
+               size_t size, bool /*signaled*/ = false) {
+#ifdef GICC_CPU_PROXY
+    if (!ctx || !ctx->proxy_ring) return;
+    auto* ring = reinterpret_cast<gicc::proxy::ProxyRing*>(ctx->proxy_ring);
+    gicc::proxy::TransferCmd c;
+    c.cmd_type   = gicc::proxy::CmdType::WRITE;
+    c.dst_rank   = static_cast<uint8_t>(target_rank);
+    c.src_buf    = static_cast<uint8_t>(src_buf);
+    c.dst_buf    = static_cast<uint8_t>(dst_buf);
+    c.bytes      = static_cast<uint32_t>(size);
+    c.src_offset = src_offset;
+    c.dst_offset = dst_offset;
+    ring->atomic_push(c);
+#else
+    (void)ctx; (void)target_rank;
+    (void)dst_buf; (void)dst_offset;
+    (void)src_buf; (void)src_offset;
+    (void)size;
+#endif
+}
 
 __device__ inline
 void get_no_db(DeviceCtx* /*ctx*/,
