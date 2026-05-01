@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 #include "gicc/gicc_types.hpp"
@@ -776,6 +777,11 @@ public:
     // Idempotent — second-and-subsequent calls return the cached ring pointer.
     //--------------------------------------------------------------------------
     gicc::proxy::ProxyRing* ensure_proxy_ring() {
+        // Two host threads racing into prepare() could both observe
+        // !proxy_thread_, both construct a ProxyThread, and one would leak
+        // (with its pinned ring + worker thread). Serialize the
+        // check-and-construct under proxy_init_mutex_ to close that TOCTOU.
+        std::lock_guard<std::mutex> g(proxy_init_mutex_);
         if (!proxy_thread_) {
             proxy_thread_ = std::make_unique<gicc::proxy::ProxyThread>(*this);
             proxy_thread_->start();
@@ -870,6 +876,10 @@ private:
     // tearing down libfabric state so the worker doesn't dereference a
     // freed Fabric.
     std::unique_ptr<gicc::proxy::ProxyThread> proxy_thread_;
+    // Serializes lazy construction of proxy_thread_ in ensure_proxy_ring().
+    // Without it, two host threads racing into prepare() could each see
+    // !proxy_thread_, each construct a ProxyThread, and leak one of them.
+    std::mutex                                proxy_init_mutex_;
 #endif
 };
 
