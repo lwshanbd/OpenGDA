@@ -5,10 +5,9 @@ if(NOT GICC_ENABLE_CPU_PROXY)
     return()
 endif()
 
-# The ring is header-only — we don't link against the gicc runtime library
-# because that would pull in the rest of the OFI backend, which may not
-# compile under all GPU API selections during early bring-up.
-
+# ---------------------------------------------------------------------------
+# test_d2h_ring (Task 4) - header-only ring producer/consumer microtest.
+# ---------------------------------------------------------------------------
 if(GICC_GPU_API STREQUAL "cuda")
     set_source_files_properties(test_d2h_ring.cu PROPERTIES LANGUAGE CUDA)
     add_executable(test_d2h_ring test_d2h_ring.cu)
@@ -22,3 +21,127 @@ endif()
 
 target_include_directories(test_d2h_ring PRIVATE
     ${CMAKE_SOURCE_DIR}/src)
+
+# ---------------------------------------------------------------------------
+# test_proxy_libfabric_loopback (Task 5) - exercises ProxyLibfabric end to end.
+#
+# There is no shared `gicc` library target under the OFI backend (each example
+# is built standalone), so we compile proxy_libfabric.cpp directly into the
+# test executable. The test transitively pulls in ofi_runtime.hpp, which is
+# still HIP-only as of Task 5; the CUDA build target is therefore expected to
+# fail at compile time of ofi_runtime.hpp until Task 7 lands the
+# Runtime GPU-API split. The HIP build is the one that should work today.
+# ---------------------------------------------------------------------------
+set(PROXY_LIBFABRIC_SRC
+    ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/proxy/proxy_libfabric.cpp)
+
+# libfabric (Cray on Tioga, CXI 1.22 on Delta).
+if(NOT DEFINED LIBFABRIC_ROOT)
+    set(LIBFABRIC_ROOT "/opt/cray/libfabric/1.22.0" CACHE PATH "libfabric path")
+endif()
+find_path(PROXY_LIBFABRIC_INCLUDE_DIR rdma/fabric.h
+    PATHS ${LIBFABRIC_ROOT} /opt/cray/libfabric/2.1
+    PATH_SUFFIXES include)
+find_library(PROXY_LIBFABRIC_LIBRARY fabric
+    PATHS ${LIBFABRIC_ROOT} /opt/cray/libfabric/2.1
+    PATH_SUFFIXES lib lib64)
+if(NOT PROXY_LIBFABRIC_INCLUDE_DIR OR NOT PROXY_LIBFABRIC_LIBRARY)
+    message(WARNING "tests/proxy: libfabric not found, skipping "
+                    "test_proxy_libfabric_loopback")
+    return()
+endif()
+
+# hwloc (pulled in by Fabric -> DeviceAffinityDetector).
+find_path(PROXY_HWLOC_INCLUDE_DIR hwloc.h)
+find_library(PROXY_HWLOC_LIBRARY hwloc)
+if(NOT PROXY_HWLOC_INCLUDE_DIR OR NOT PROXY_HWLOC_LIBRARY)
+    message(WARNING "tests/proxy: hwloc not found, skipping "
+                    "test_proxy_libfabric_loopback")
+    return()
+endif()
+
+# Bootstrap (mirrors examples/ofi/CMakeLists.txt logic).
+set(GICC_BOOTSTRAP "mpi" CACHE STRING "Bootstrap backend: mpi | pmi2")
+if(GICC_BOOTSTRAP STREQUAL "mpi")
+    find_package(MPI REQUIRED)
+    set(PROXY_BOOTSTRAP_DEFINE GICC_BOOTSTRAP_MPI=1)
+    # Cray's `CC` wrapper resolves mpi.h implicitly; CMake's find_package
+    # then leaves MPI_CXX_INCLUDE_DIRS empty. Probe common Cray locations
+    # so plain clang++ / nvcc invocations also see mpi.h.
+    set(PROXY_BOOTSTRAP_INCLUDES ${MPI_CXX_INCLUDE_DIRS})
+    if(NOT PROXY_BOOTSTRAP_INCLUDES)
+        find_path(_PROXY_MPI_H mpi.h
+            PATHS /opt/cray/pe/mpich/8.1.32/ofi/gnu/11.2/include
+                  /opt/cray/pe/mpich/9.0.1/ofi/cray/20.0/include
+                  /opt/cray/pe/mpich/8.1.32/ofi/cray/18.0/include
+            NO_DEFAULT_PATH)
+        if(_PROXY_MPI_H)
+            set(PROXY_BOOTSTRAP_INCLUDES ${_PROXY_MPI_H})
+        endif()
+    endif()
+    set(PROXY_BOOTSTRAP_LIBS     MPI::MPI_CXX)
+    # Cray's MPI::MPI_CXX target carries no library file when CC is the wrapper.
+    # Probe the canonical Cray location and link it explicitly when needed.
+    find_library(_PROXY_MPI_LIB
+        NAMES mpi_gnu_112 mpi
+        PATHS /opt/cray/pe/mpich/8.1.32/ofi/gnu/11.2/lib
+              /opt/cray/pe/mpich/9.0.1/ofi/cray/20.0/lib
+        NO_DEFAULT_PATH)
+    if(_PROXY_MPI_LIB)
+        list(APPEND PROXY_BOOTSTRAP_LIBS ${_PROXY_MPI_LIB})
+    endif()
+elseif(GICC_BOOTSTRAP STREQUAL "pmi2")
+    set(PMI_ROOT "/opt/cray/pe/pmi/6.1.15" CACHE PATH "Cray PMI path")
+    find_path(PMI2_INCLUDE_DIR pmi2.h
+        PATHS ${PMI_ROOT} PATH_SUFFIXES include)
+    find_library(PMI2_LIBRARY pmi2
+        PATHS ${PMI_ROOT} PATH_SUFFIXES lib lib64)
+    if(NOT PMI2_INCLUDE_DIR OR NOT PMI2_LIBRARY)
+        message(FATAL_ERROR "PMI2 not found (set PMI_ROOT)")
+    endif()
+    set(PROXY_BOOTSTRAP_DEFINE GICC_BOOTSTRAP_PMI2=1)
+    set(PROXY_BOOTSTRAP_INCLUDES ${PMI2_INCLUDE_DIR})
+    set(PROXY_BOOTSTRAP_LIBS     ${PMI2_LIBRARY})
+endif()
+
+if(GICC_GPU_API STREQUAL "hip")
+    # Tioga path: build the .cpp's as HIP so hipMalloc/hipHostMalloc resolve.
+    set_source_files_properties(test_proxy_libfabric_loopback.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+        PROPERTIES LANGUAGE HIP)
+    add_executable(test_proxy_libfabric_loopback
+        test_proxy_libfabric_loopback.cpp
+        ${PROXY_LIBFABRIC_SRC})
+    list(APPEND CMAKE_PREFIX_PATH "/opt/rocm")
+    find_package(hip REQUIRED)
+    target_link_libraries(test_proxy_libfabric_loopback PRIVATE
+        hip::device
+        ${PROXY_LIBFABRIC_LIBRARY}
+        ${PROXY_HWLOC_LIBRARY}
+        ${PROXY_BOOTSTRAP_LIBS}
+        pthread)
+elseif(GICC_GPU_API STREQUAL "cuda")
+    # Delta path: build as CXX (host-only) since proxy_libfabric.cpp is pure
+    # C++, but ofi_runtime.hpp still pulls hip/hip_runtime.h until Task 7.
+    # Expected to fail at preprocessing of the HIP header — documented.
+    add_executable(test_proxy_libfabric_loopback
+        test_proxy_libfabric_loopback.cpp
+        ${PROXY_LIBFABRIC_SRC})
+    find_package(CUDAToolkit REQUIRED)
+    target_link_libraries(test_proxy_libfabric_loopback PRIVATE
+        CUDA::cudart
+        ${PROXY_LIBFABRIC_LIBRARY}
+        ${PROXY_HWLOC_LIBRARY}
+        ${PROXY_BOOTSTRAP_LIBS}
+        pthread)
+endif()
+
+target_include_directories(test_proxy_libfabric_loopback PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/internal
+    ${PROXY_LIBFABRIC_INCLUDE_DIR}
+    ${PROXY_HWLOC_INCLUDE_DIR}
+    ${PROXY_BOOTSTRAP_INCLUDES})
+target_compile_definitions(test_proxy_libfabric_loopback PRIVATE
+    GICC_PLATFORM_OFI
+    ${PROXY_BOOTSTRAP_DEFINE})
