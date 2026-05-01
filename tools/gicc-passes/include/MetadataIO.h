@@ -76,6 +76,14 @@ struct KernelTemplate {
     std::string             simpleName;
     std::vector<ParamInfo>  params;
     std::vector<OpTemplate> ops;
+    // Set to true by GICCDispatchLowering when at least one of this
+    // kernel's call sites was lowered to CPU_PROXY_ENQUEUE. The
+    // device-side lowering pass (Task 8) reads this bit to decide
+    // whether to preserve the device-side put_no_db body so the proxy
+    // ring enqueue stays in the kernel. Defaults to false so kernel
+    // JSON files written before Task 2 round-trip with the original
+    // "host trace owns everything" semantics.
+    bool                    proxy_aware = false;
 };
 
 // Serialize `t` as JSON to ${metaDir}/<mangledName>.json. Creates the
