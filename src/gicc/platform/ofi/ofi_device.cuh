@@ -88,8 +88,15 @@ __device__ inline
 void flush(DeviceCtx* ctx) {
     if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0
         && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-        *ctx->trigger_addr_ = ctx->trigger_val_;
-        __threadfence_system();
+        // trigger_addr_ is null when the Runtime was constructed with
+        // GICC_SKIP_DWQ_INIT (proxy-only mode on platforms whose CUDA
+        // runtime cannot map the CXI MMIO BAR, e.g. GH200). Skip the
+        // store rather than dereference null and crash; the proxy path
+        // does not need a trigger.
+        if (ctx->trigger_addr_ != nullptr) {
+            *ctx->trigger_addr_ = ctx->trigger_val_;
+            __threadfence_system();
+        }
     }
 }
 
