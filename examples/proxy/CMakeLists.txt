@@ -165,3 +165,41 @@ elseif(GICC_GPU_API STREQUAL "hip")
         pthread)
 endif()
 _proxy_example_setup(put_two_rank_intranode)
+
+# ---------------------------------------------------------------------------
+# put_mixed_dispatch (L4) - 2 MPI ranks, two put_no_db sites in one kernel
+# routed to different dispatches via hint_mixed.json. Exercises the Task 8
+# hint-aware device-lowering pass; see file header for the build / run flow.
+# ---------------------------------------------------------------------------
+if(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(put_mixed_dispatch.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(put_mixed_dispatch
+        put_mixed_dispatch.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(put_mixed_dispatch PRIVATE
+        CUDA::cudart
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+elseif(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(put_mixed_dispatch.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE HIP)
+    add_executable(put_mixed_dispatch
+        put_mixed_dispatch.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(put_mixed_dispatch PRIVATE
+        hip::device
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+endif()
+_proxy_example_setup(put_mixed_dispatch)

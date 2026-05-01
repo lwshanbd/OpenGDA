@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "schema_version": "gicc-hint-v1",
+  "default_dispatch": "IPC_OR_DWQ",
+  "_comment": "Replace the <site_id_*> placeholders below with the ids that GICC_MODE=feature-extract emits in features.json for this kernel. Site 0 is the FIRST gicc::put_no_db call in mixed_kernel; site 1 is the second. Site_id format: '<TU_basename>:<line>:<kernel_simple_name>::<call_index>'.",
+  "sites": {
+    "<site_id_for_mixed_kernel_op_0>": { "dispatch": "DWQ_TRIGGER" },
+    "<site_id_for_mixed_kernel_op_1>": { "dispatch": "CPU_PROXY_ENQUEUE" }
+  }
+}
