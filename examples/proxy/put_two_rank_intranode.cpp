@@ -11,6 +11,20 @@
  * via the target-side counter). After a barrier, rank 1 host-copies its
  * buffer back and asserts byte i == (i & 0xFF).
  *
+ * NOTE: This example uses the raw kernel-launch syntax (gpuLaunchKernel)
+ * intentionally, NOT gicc::launch<...>. The CPU proxy path is fully
+ * self-contained on the device side at this point in the implementation:
+ * device-side put_no_db pushes a TransferCmd into the proxy ring, the
+ * proxy thread submits via libfabric, and rt.reset() drains. Going
+ * through gicc::launch<...> would also exercise the LTO host-trace
+ * pipeline (feature-extraction, dispatch-lowering, host-trace synthesis),
+ * which only becomes relevant for the proxy path when Task 9 lands the
+ * device-lowering hint-aware preserve so put_no_db calls survive to the
+ * GPU instead of being erased.
+ *
+ * For the launched-via-LTO pattern (DWQ path), see
+ * examples/ofi/test_gicc.cpp.
+ *
  * Run (intranode, two ranks):
  *   GICC_PROXY_ENABLED=1 srun -n 2 ./examples/proxy/put_two_rank_intranode
  */
