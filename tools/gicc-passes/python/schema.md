@@ -28,6 +28,7 @@ A JSON array of per-(launch site × op) records.
     "site_id":            "<TU>:<line>:<kernel>::<idx>",
     "kernel":             "halo_kernel",
     "op_kind":            "put_no_db",       // | get_no_db | flush | quiet
+    "hk_capable":         true,              // false → MUST route to CPU_PROXY_ENQUEUE
     "size_kind":          "const",           // | param | binop | cast | derived
     "size_log2":          12,                // null when size is non-const
     "peer_kind":          "param",           // | const | binop | cast | derived
@@ -46,6 +47,16 @@ placeholder call and is the join key between features and hint.
 
 `peer_locality` is reserved for v2 — the rule-based decider in v1
 infers it lazily from `peer_kind` + runtime context.
+
+`hk_capable` is computed by `GICCHKAnalysis`. It is `true` when every
+non-ctx argument of this call site is host-knowable per HK Analysis (a
+constant, a kernel formal, or a pure composition over those). When
+`false`, at least one argument depends on per-thread state
+(`threadIdx`, device load, non-canonical PHI, ...) and the call cannot
+be hoisted into a host trace function. Such sites MUST be routed to
+`CPU_PROXY_ENQUEUE` by the decider; routing them to `IPC_PUSH`,
+`DWQ_TRIGGER`, `IPC_OR_DWQ`, or `DWQ_BATCHED` is a compile-time error
+(enforced by `GICCDispatchLowering`).
 
 
 ## hint.json
