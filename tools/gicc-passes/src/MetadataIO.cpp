@@ -203,10 +203,15 @@ json::Value templateToJSON(const KernelTemplate &t) {
     json::Array ops;
     for (const auto &op : t.ops) {
         json::Object o;
-        o["site_id"] = op.siteId;
-        o["kind"]    = op.kind;
-        o["guard"]   = guardToJSON(op.guard);
+        o["site_id"]    = op.siteId;
+        o["kind"]       = op.kind;
+        o["guard"]      = guardToJSON(op.guard);
         if (op.loop.inLoop) o["loop"] = loopToJSON(op.loop);
+        // HK Analysis capability bit. Always serialize the bool so
+        // downstream readers can rely on its presence; only emit a
+        // reason string when the site failed.
+        o["hk_capable"] = op.hk_capable;
+        if (!op.hk_capable) o["hk_fail_reason"] = op.hk_fail_reason;
 
         json::Object args;
         for (const auto &kv : op.args) {
@@ -254,6 +259,12 @@ bool templateFromJSON(const json::Value &v, KernelTemplate &out) {
             if (const auto *l = oo->get("loop")) {
                 if (!loopFromJSON(*l, op.loop)) return false;
             }
+            // Default to true so JSON files written before HK softening
+            // (no field present) keep their original "all-HK" semantics.
+            if (auto h = oo->getBoolean("hk_capable")) op.hk_capable = *h;
+            else                                      op.hk_capable = true;
+            if (auto r = oo->getString("hk_fail_reason"))
+                op.hk_fail_reason = r->str();
             if (const auto *a = oo->getObject("args")) {
                 for (const auto &kv : *a) {
                     ArgRef ref;

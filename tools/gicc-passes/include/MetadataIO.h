@@ -56,6 +56,14 @@ struct OpTemplate {
     // ArgRef expression. Order is not significant; readers should look
     // up by name.
     std::map<std::string, ArgRef> args;
+    // HK Analysis capability bit, mirrored from GICCCallSite. True when
+    // every non-ctx argument of this op is host-knowable. Defaults to
+    // true so older JSON files (without the field) round-trip with the
+    // pre-soft behavior.
+    bool                         hk_capable = true;
+    // Diagnostic explaining why hk_capable is false (e.g. "arg 6 not
+    // host-knowable: depends on threadIdx.x"). Empty when hk_capable.
+    std::string                  hk_fail_reason;
 };
 
 struct ParamInfo {

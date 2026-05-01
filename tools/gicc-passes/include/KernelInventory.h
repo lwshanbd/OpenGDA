@@ -17,6 +17,15 @@ struct GICCCallSite {
     GICCOpKind      kind;
     std::string     siteId;             // <TU_basename>:<line>:<kernel>::<idx>
     unsigned        callIndexInKernel = 0;
+    // Capability bit computed by HK Analysis. True when every non-ctx
+    // argument of this site is host-knowable; false when any arg
+    // depends on per-thread state (threadIdx, device load, ...) and
+    // therefore must be routed to CPU_PROXY_ENQUEUE rather than
+    // IPC_PUSH / DWQ_TRIGGER / IPC_OR_DWQ / DWQ_BATCHED.
+    bool            hk_capable = true;
+    // Empty when hk_capable=true; populated for diagnostics with the
+    // first failing-argument reason ("arg N not host-knowable: ...").
+    std::string     hk_fail_reason;
 };
 
 struct GICCKernelInfo {
