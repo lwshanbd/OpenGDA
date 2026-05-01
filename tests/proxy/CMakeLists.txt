@@ -121,9 +121,13 @@ if(GICC_GPU_API STREQUAL "hip")
         ${PROXY_BOOTSTRAP_LIBS}
         pthread)
 elseif(GICC_GPU_API STREQUAL "cuda")
-    # Delta path: build as CXX (host-only) since proxy_libfabric.cpp is pure
-    # C++, but ofi_runtime.hpp still pulls hip/hip_runtime.h until Task 7.
-    # Expected to fail at preprocessing of the HIP header — documented.
+    # Delta path: ofi_runtime.hpp transitively pulls device-side bits
+    # (e.g. fabric.hpp's gpuLaunchKernel(gda_trigger_kernel,...) and
+    # ofi_device.cuh's threadIdx/blockIdx in flush()). Those require nvcc
+    # parsing, so compile the test sources as CUDA.
+    set_source_files_properties(test_proxy_libfabric_loopback.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+        PROPERTIES LANGUAGE CUDA)
     add_executable(test_proxy_libfabric_loopback
         test_proxy_libfabric_loopback.cpp
         ${PROXY_LIBFABRIC_SRC})
@@ -171,6 +175,10 @@ if(GICC_GPU_API STREQUAL "hip")
         ${PROXY_BOOTSTRAP_LIBS}
         pthread)
 elseif(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(test_proxy_thread.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
     add_executable(test_proxy_thread
         test_proxy_thread.cpp
         ${PROXY_LIBFABRIC_SRC}

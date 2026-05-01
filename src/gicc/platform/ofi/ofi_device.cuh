@@ -43,7 +43,7 @@
  */
 #pragma once
 
-#include <hip/hip_runtime.h>
+#include "internal/gpu_device_context.hpp"
 #include <cstdint>
 
 namespace gicc {
