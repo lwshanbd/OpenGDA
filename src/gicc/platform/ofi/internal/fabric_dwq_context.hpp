@@ -97,7 +97,21 @@ public:
                     "Runtime; CPU-proxy path is unaffected)\n");
         }
         get_local_address();
-        start_cq_progress_thread();
+        // The background CQ progress thread is required for DWQ-triggered
+        // ops (kernel writes the trigger counter, then host-side completion
+        // counters tick only as the CQ is drained). For pure CPU-proxy mode
+        // it is not just unnecessary — it actively HURTS, because the
+        // domain hint requests FI_THREAD_SAFE (init_fabric below), and the
+        // bg thread's tight fi_cq_read loop holds the per-domain mutex
+        // contended against the proxy thread's fi_write calls. Skip it
+        // when GICC_SKIP_DWQ_INIT is set.
+        if (std::getenv("GICC_SKIP_DWQ_INIT") == nullptr) {
+            start_cq_progress_thread();
+        } else if (rank == 0) {
+            fprintf(stderr,
+                    "[gicc] GICC_SKIP_DWQ_INIT=1: skipping background CQ "
+                    "progress thread (CPU-proxy thread does its own polling)\n");
+        }
     }
 
     ~FabricDwqContext() {
