@@ -13,7 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include <hip/hip_runtime.h>
+#include "gicc/platform/ofi/internal/gpu_device_context.hpp"
 
 namespace gicc { class Runtime; }
 
@@ -22,10 +22,10 @@ extern "C" {
 // IPC dispatch helpers (used by the IPC_PUSH lowering).
 void* gicc_runtime_peer_ipc_base(gicc::Runtime *rt, int peer, int buf_idx);
 void* gicc_runtime_local_buf_base(gicc::Runtime *rt, int buf_idx);
-hipStream_t gicc_runtime_ipc_stream(gicc::Runtime *rt);
+GpuStream_t gicc_runtime_ipc_stream(gicc::Runtime *rt);
 
 // Returns ipc_streams_[idx], or ipc_streams_[0] if idx is out of range.
-hipStream_t gicc_runtime_ipc_stream_indexed(gicc::Runtime *rt, int idx);
+GpuStream_t gicc_runtime_ipc_stream_indexed(gicc::Runtime *rt, int idx);
 
 // DWQ dispatch helper (used by the DWQ_TRIGGER lowering). Mirrors the
 // Runtime::put_no_db DWQ host-stage path: queues an RMA WRITE descriptor
