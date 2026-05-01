@@ -203,3 +203,44 @@ elseif(GICC_GPU_API STREQUAL "hip")
         pthread)
 endif()
 _proxy_example_setup(put_mixed_dispatch)
+
+# ---------------------------------------------------------------------------
+# quiet_pingpong (L5) - 2 MPI ranks. Each rank's kernel does
+# put_no_db(peer) -> quiet(); the device-side quiet() body (Task 9) pushes
+# a QUIET cmd and spins until the proxy's handle_quiet acks past the
+# slot. An MPI barrier between gpuDeviceSynchronize() and the readback
+# provides the cross-rank ordering each rank's quiet() cannot guarantee
+# on its own. See file header for scope-honesty caveats.
+# ---------------------------------------------------------------------------
+if(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(quiet_pingpong.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(quiet_pingpong
+        quiet_pingpong.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(quiet_pingpong PRIVATE
+        CUDA::cudart
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+elseif(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(quiet_pingpong.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE HIP)
+    add_executable(quiet_pingpong
+        quiet_pingpong.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(quiet_pingpong PRIVATE
+        hip::device
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+endif()
+_proxy_example_setup(quiet_pingpong)
