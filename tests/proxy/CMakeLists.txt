@@ -145,3 +145,50 @@ target_include_directories(test_proxy_libfabric_loopback PRIVATE
 target_compile_definitions(test_proxy_libfabric_loopback PRIVATE
     GICC_PLATFORM_OFI
     ${PROXY_BOOTSTRAP_DEFINE})
+
+# ---------------------------------------------------------------------------
+# test_proxy_thread (Task 6) - exercises the ProxyThread worker end to end.
+#
+# Reuses the same libfabric / hwloc / MPI / hip discovery from above. Like
+# the loopback test, this transitively pulls ofi_runtime.hpp and is HIP-only
+# until Task 7 splits the GPU API out of Runtime.
+# ---------------------------------------------------------------------------
+set(PROXY_THREAD_SRC
+    ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/proxy/proxy_thread.cpp)
+
+if(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(test_proxy_thread.cpp
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE HIP)
+    add_executable(test_proxy_thread
+        test_proxy_thread.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(test_proxy_thread PRIVATE
+        hip::device
+        ${PROXY_LIBFABRIC_LIBRARY}
+        ${PROXY_HWLOC_LIBRARY}
+        ${PROXY_BOOTSTRAP_LIBS}
+        pthread)
+elseif(GICC_GPU_API STREQUAL "cuda")
+    add_executable(test_proxy_thread
+        test_proxy_thread.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(test_proxy_thread PRIVATE
+        CUDA::cudart
+        ${PROXY_LIBFABRIC_LIBRARY}
+        ${PROXY_HWLOC_LIBRARY}
+        ${PROXY_BOOTSTRAP_LIBS}
+        pthread)
+endif()
+
+target_include_directories(test_proxy_thread PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/internal
+    ${PROXY_LIBFABRIC_INCLUDE_DIR}
+    ${PROXY_HWLOC_INCLUDE_DIR}
+    ${PROXY_BOOTSTRAP_INCLUDES})
+target_compile_definitions(test_proxy_thread PRIVATE
+    GICC_PLATFORM_OFI
+    ${PROXY_BOOTSTRAP_DEFINE})
