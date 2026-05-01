@@ -106,8 +106,28 @@ PreservedAnalyses GICCHKAnalysisPass::run(Module &M, ModuleAnalysisManager &) {
         // Propagate the per-site capability bits into the on-disk
         // kernel template (written by GICCDeviceDiscovery) so the
         // host-side passes can read hk_capable directly. Match by
-        // siteId — the only stable join key between in-memory
+        // siteId -- the only stable join key between in-memory
         // GICCCallSite and on-disk OpTemplate.
+        //
+        // CROSS-TU / PARALLEL-BUILD HAZARD:
+        // This is a read-modify-write on a shared JSON file. If the
+        // same kernel is compiled in another translation unit (or
+        // re-discovered under `make -j`), GICCDeviceDiscovery in that
+        // other TU may overwrite this file *after* HK has set
+        // hk_capable=false here, silently restoring the default
+        // hk_capable=true. There is no file lock and no merge step.
+        //
+        // CURRENT SCOPE (safe):
+        // Examples and minimod each compile any given kernel in
+        // exactly one TU, so Discovery writes the JSON exactly once
+        // per kernel and HK's later RMW is the last writer. The bug
+        // only manifests when the same kernel symbol is emitted by
+        // multiple TUs in one build.
+        //
+        // FUTURE FIX:
+        // Fold HK's capability-bit write into Discovery's
+        // writeKernelTemplate so there is a single writer per kernel
+        // JSON, and drop this RMW block entirely.
         if ((cfg.mode == Mode::FeatureExtract || cfg.mode == Mode::Lower)
             && !cfg.metaDir.empty()) {
             KernelTemplate t;
