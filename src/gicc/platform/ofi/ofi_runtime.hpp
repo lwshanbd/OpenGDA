@@ -680,6 +680,43 @@ public:
 
     Fabric& fabric() { return *comm_; }
 
+    //--------------------------------------------------------------------------
+    // CPU Proxy accessors (Task 5).
+    //
+    // ProxyLibfabric needs to dereference local-buffer descriptors and remote
+    // (rma_addr, rma_key, base_addr) tuples that already live on Runtime.
+    // These thin wrappers expose that state without leaking the OfiBuffer /
+    // RemoteInfo / Fabric internals to proxy code.
+    //--------------------------------------------------------------------------
+    struct LocalBufView { void* ptr; void* desc; };
+
+    LocalBufView local_buf_view(int idx) const {
+        if (idx < 0 || (size_t)idx >= local_bufs_.size()) {
+            fprintf(stderr,
+                "Runtime::local_buf_view: idx %d out of range (%zu)\n",
+                idx, local_bufs_.size());
+            std::abort();
+        }
+        const auto& ob = local_bufs_[idx];
+        return LocalBufView{ ob.ptr, ob.desc_ };
+    }
+
+    const RemoteInfo& remote_info(int rank, int buf_idx) const {
+        if (rank < 0 || buf_idx < 0 ||
+            (size_t)((size_t)rank * (size_t)n_bufs_ + (size_t)buf_idx)
+                >= remote_info_cache_.size()) {
+            fprintf(stderr,
+                "Runtime::remote_info: oob rank=%d buf=%d (n_bufs=%d)\n",
+                rank, buf_idx, n_bufs_);
+            std::abort();
+        }
+        return remote_info_cache_[(size_t)rank * (size_t)n_bufs_
+                                  + (size_t)buf_idx];
+    }
+
+    bool      is_virt_addr_mode() const { return comm_->is_virt_addr_mode(); }
+    fi_addr_t av_addr(int rank)   const { return comm_->av_addrs.at(rank); }
+
 private:
     // Internal buffer metadata (replaces gda::Buffer).
     struct OfiBuffer {
