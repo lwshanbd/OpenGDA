@@ -65,7 +65,7 @@ be hoisted into a host trace function. Such sites MUST be routed to
 {
   "version": 1,
   "schema_version": "gicc-hint-v1",
-  "default_dispatch": "IPC_OR_DWQ",           // | IPC_PUSH | DWQ_TRIGGER | DWQ_BATCHED
+  "default_dispatch": "IPC_OR_DWQ",           // | IPC_PUSH | DWQ_TRIGGER | DWQ_BATCHED | CPU_PROXY_ENQUEUE
   "sites": {
     "<site_id>": {
       "dispatch":     "IPC_PUSH",            // required
@@ -84,6 +84,49 @@ be hoisted into a host trace function. Such sites MUST be routed to
 referencing a kind the lowering pass doesn't yet know about (e.g.
 `DWQ_BATCHED` in v1) silently fall back to the default — no build
 failure.
+
+### Dispatch values
+
+| Value | Semantics |
+|---|---|
+| `IPC_PUSH` | Force IPC `hipMemcpyAsync` on the IPC stream. Caller asserts the peer is mapped. |
+| `DWQ_TRIGGER` | Force `gicc_runtime_dwq_enqueue` (libfabric Deferred Work Queue). |
+| `DWQ_BATCHED` | Collapse N consecutive same-BB sites into a single `gicc_runtime_dwq_enqueue_batched`. |
+| `IPC_OR_DWQ` | Hybrid runtime branch: IPC if peer base is mapped, DWQ otherwise. Default. |
+| `CPU_PROXY_ENQUEUE` | Device-side enqueue to the CPU proxy ring; the host trace function emits **nothing** for the site. The actual RDMA work is performed by a CPU proxy thread that drains the ring (see Task 8 for the device-side body that is preserved when this dispatch is selected). Required for sites with `hk_capable=false`. The pass `report_fatal_error`s if `CPU_PROXY_ENQUEUE` is requested without the `GICC_PROXY_ENABLED` env var set. |
+
+### HK / dispatch cross-check
+
+`GICCDispatchLowering` enforces two hard errors:
+
+1. A site with `hk_capable=false` (per the per-kernel JSON) MUST be routed to `CPU_PROXY_ENQUEUE`. Routing it to `IPC_PUSH`, `DWQ_TRIGGER`, `IPC_OR_DWQ`, or `DWQ_BATCHED` is a build error.
+2. `CPU_PROXY_ENQUEUE` MUST be paired with `GICC_PROXY_ENABLED=1` at compile time. Otherwise the build fails (the runtime helpers it would require are not linked in).
+
+
+## kernel JSON (per-kernel template)
+
+Written by `GICCDeviceDiscovery` to `${GICC_META_DIR}/<mangled>.json`.
+Read by every host-side pass and by `GICCDispatchLowering` (which
+read-modify-writes `proxy_aware` after lowering). Schema (relevant
+top-level fields):
+
+```json
+{
+  "version": 1,
+  "kernel_mangled": "_Z11halo_kernel...",
+  "kernel_simple":  "halo_kernel",
+  "proxy_aware":    false,            // see below
+  "params": [ ... ],
+  "ops":    [ { "site_id": "...", "hk_capable": true, ... } ]
+}
+```
+
+`proxy_aware` is set to `true` by `GICCDispatchLowering` when at least
+one of the kernel's call sites was lowered to `CPU_PROXY_ENQUEUE`. The
+device-side lowering pass (Task 8) reads this bit to decide whether to
+preserve the device-side `put_no_db` body so the proxy ring enqueue
+stays in the kernel. Defaults to `false`; absent in JSON files written
+before Task 2.
 
 
 ## Decider invocation
