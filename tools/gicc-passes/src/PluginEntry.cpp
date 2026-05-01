@@ -56,11 +56,22 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                 [](ModulePassManager &MPM, OptimizationLevel) {
                     MPM.addPass(GICCDeviceDiscoveryPass());
                     MPM.addPass(GICCHKAnalysisPass());
-                    MPM.addPass(GICCDeviceLoweringPass());
+                    // CRITICAL: order matters — DeviceLowering reads
+                    // proxy_aware (set by DispatchLowering) from the
+                    // kernel JSON. Within an LTO invocation that
+                    // processes both device and host modules together,
+                    // the host passes must run first so the JSON is
+                    // up-to-date when DeviceLowering consumes it.
+                    // (For separate-compilation flows where device and
+                    // host are different LLVM modules / clang
+                    // invocations, the JSON is only consistent on a
+                    // SECOND rebuild — document this limitation in the
+                    // build instructions.)
                     MPM.addPass(GICCHostDiscoveryPass());
                     MPM.addPass(GICCFeatureExtractionPass());
                     MPM.addPass(GICCTraceSynthesisPass());
                     MPM.addPass(GICCDispatchLoweringPass());
+                    MPM.addPass(GICCDeviceLoweringPass());
                 });
             // Sentinel stays at OptimizerLast — it's just a debug probe
             // and we want to see the post-optimization module triple.
