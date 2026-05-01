@@ -53,10 +53,6 @@ PreservedAnalyses GICCHKAnalysisPass::run(Module &M, ModuleAnalysisManager &) {
     const auto &cfg = getConfig();
     if (cfg.mode == Mode::Passthrough) return PreservedAnalyses::all();
 
-    // Reset capability bit. Kept on the pass instance for backwards
-    // compatibility with code that read it; in the soft-failure regime
-    // it is informational only — the pass never returns an error.
-    sawError = false;
     StringRef tuName = M.getName();
 
     for (Function &F : M) {
@@ -109,9 +105,6 @@ PreservedAnalyses GICCHKAnalysisPass::run(Module &M, ModuleAnalysisManager &) {
 
             site.hk_capable     = siteHK;
             site.hk_fail_reason = failReason;
-            if (!siteHK) sawError = true;
-            (void)failArg;
-            (void)failHK;
         }
 
         // Propagate the per-site capability bits into the on-disk
