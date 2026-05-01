@@ -20,7 +20,7 @@
  */
 #pragma once
 
-#include <hip/hip_runtime.h>
+#include "internal/gpu_device_context.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -63,8 +63,8 @@ class Runtime {
     // simpler than exposing each accessor.
     friend void *           (::gicc_runtime_peer_ipc_base) (Runtime *, int, int);
     friend void *           (::gicc_runtime_local_buf_base)(Runtime *, int);
-    friend ::hipStream_t    (::gicc_runtime_ipc_stream)        (Runtime *);
-    friend ::hipStream_t    (::gicc_runtime_ipc_stream_indexed)(Runtime *, int);
+    friend ::GpuStream_t    (::gicc_runtime_ipc_stream)        (Runtime *);
+    friend ::GpuStream_t    (::gicc_runtime_ipc_stream_indexed)(Runtime *, int);
     friend void             (::gicc_runtime_dwq_enqueue)   (Runtime *, int, int,
                                                             std::size_t, int,
                                                             std::size_t,
@@ -126,21 +126,21 @@ public:
         // ONE shared GPU buffer holds POOL_SIZE × uint64_t atomic_result
         // slots, registered with ONE MemoryRegion.
         const size_t POOL_BYTES = POOL_SIZE * sizeof(uint64_t);
-        if (hipMalloc(&d_slot_pool_, POOL_BYTES) != hipSuccess) {
-            fprintf(stderr, "hipMalloc(slot pool) failed\n"); exit(1);
+        if (gpuMalloc(&d_slot_pool_, POOL_BYTES) != GPU_SUCCESS) {
+            fprintf(stderr, "gpuMalloc(slot pool) failed\n"); exit(1);
         }
-        (void)hipMemset(d_slot_pool_, 0, POOL_BYTES);
+        (void)gpuMemset(d_slot_pool_, 0, POOL_BYTES);
         mr_slot_pool_ = new MemoryRegion(
             comm_->fabric->domain, comm_->fabric->ep, comm_->fabric->cxi_info,
             d_slot_pool_, POOL_BYTES, true, comm_->gpu_id(), comm_->rank());
 
         // Single shared atomic operand (value 1) and its MR.
-        if (hipMalloc(&d_operand_pool_, sizeof(uint64_t)) != hipSuccess) {
-            fprintf(stderr, "hipMalloc(operand) failed\n"); exit(1);
+        if (gpuMalloc(&d_operand_pool_, sizeof(uint64_t)) != GPU_SUCCESS) {
+            fprintf(stderr, "gpuMalloc(operand) failed\n"); exit(1);
         }
         const uint64_t one = 1;
-        (void)hipMemcpy(d_operand_pool_, &one, sizeof(uint64_t),
-                        hipMemcpyHostToDevice);
+        (void)gpuMemcpy(d_operand_pool_, &one, sizeof(uint64_t),
+                        gpuMemcpyHostToDevice);
         mr_operand_pool_ = new MemoryRegion(
             comm_->fabric->domain, comm_->fabric->ep, comm_->fabric->cxi_info,
             d_operand_pool_, sizeof(uint64_t), true, comm_->gpu_id(), comm_->rank());
@@ -156,10 +156,10 @@ public:
                                 &slots_[i].atomic_completion_cntr, NULL);
             if (ret) { fprintf(stderr, "fi_cntr_open(%d a) failed\n", i); exit(1); }
         }
-        (void)hipDeviceSynchronize();
+        (void)gpuDeviceSynchronize();
 
-        (void)hipHostMalloc(&h_dev_ctx_, sizeof(DeviceCtx), hipHostMallocMapped);
-        (void)hipHostGetDevicePointer((void**)&d_dev_ctx_, h_dev_ctx_, 0);
+        (void)gpuHostMalloc(&h_dev_ctx_, sizeof(DeviceCtx), gpuHostMallocMapped);
+        (void)gpuHostGetDevicePointer((void**)&d_dev_ctx_, h_dev_ctx_, 0);
         h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
         h_dev_ctx_->trigger_val_  = 0;
     }
@@ -175,14 +175,14 @@ public:
         }
         delete mr_slot_pool_;
         delete mr_operand_pool_;
-        if (d_slot_pool_)    (void)hipFree(d_slot_pool_);
-        if (d_operand_pool_) (void)hipFree(d_operand_pool_);
-        if (h_dev_ctx_)      (void)hipHostFree(h_dev_ctx_);
+        if (d_slot_pool_)    (void)gpuFree(d_slot_pool_);
+        if (d_operand_pool_) (void)gpuFree(d_operand_pool_);
+        if (h_dev_ctx_)      (void)gpuHostFree(h_dev_ctx_);
 
         // Close IPC mapped pointers (one per local peer × buffer).
         for (auto& per_rank : peer_mapped_ptrs_) {
             for (void* p : per_rank) {
-                if (p) (void)hipIpcCloseMemHandle(p);
+                if (p) (void)gpuIpcCloseMemHandle(p);
             }
         }
         peer_mapped_ptrs_.clear();
@@ -192,7 +192,7 @@ public:
         for (auto* op : dwq_pool_) delete op;
         dwq_pool_.clear();
         for (auto s : ipc_streams_) {
-            if (s) (void)hipStreamDestroy(s);
+            if (s) (void)gpuStreamDestroy(s);
         }
         ipc_streams_.clear();
 
@@ -216,10 +216,10 @@ public:
         ob.addr_ = h.rma_addr;
 
         // Capture an IPC handle for device buffers so same-node peers can
-        // open them in exchange(). hipMalloc'd pointers are always valid
+        // open them in exchange(). GPU-allocated pointers are always valid
         // here; for non-device buffers IPC isn't meaningful.
         if (is_device) {
-            if (hipIpcGetMemHandle(&ob.ipc_handle, buf) == hipSuccess) {
+            if (gpuIpcGetMemHandle(&ob.ipc_handle, buf) == GPU_SUCCESS) {
                 ob.has_ipc_handle = true;
             }
         }
@@ -248,7 +248,7 @@ public:
             uint64_t           addr;
             uint64_t           key;
             uint8_t            has_ipc;
-            hipIpcMemHandle_t  ipc_handle;
+            GpuIpcMemHandle_t  ipc_handle;
         };
         std::vector<BufMeta> my_metas(nbuf);
         for (int i = 0; i < nbuf; i++) {
@@ -287,10 +287,10 @@ public:
                     && peer_metas[i].has_ipc)
                 {
                     void* mapped = nullptr;
-                    hipError_t err = hipIpcOpenMemHandle(
+                    GpuError err = gpuIpcOpenMemHandle(
                         &mapped, peer_metas[i].ipc_handle,
-                        hipIpcMemLazyEnablePeerAccess);
-                    if (err == hipSuccess) {
+                        gpuIpcMemLazyEnablePeerAccess);
+                    if (err == GPU_SUCCESS) {
                         peer_mapped_ptrs_[r][i] = mapped;
                     }
                 }
@@ -385,9 +385,9 @@ public:
         // n_streams_max_ (read from GICC_STREAMS_MAX or default 8).
         ipc_streams_.resize(n_streams_max_);
         for (int i = 0; i < n_streams_max_; i++) {
-            if (hipStreamCreateWithFlags(&ipc_streams_[i], hipStreamNonBlocking)
-                != hipSuccess) {
-                fprintf(stderr, "GICC: hipStreamCreate(ipc_streams_[%d]) failed\n", i);
+            if (gpuStreamCreateWithFlags(&ipc_streams_[i], gpuStreamNonBlocking)
+                != GPU_SUCCESS) {
+                fprintf(stderr, "GICC: gpuStreamCreate(ipc_streams_[%d]) failed\n", i);
                 std::abort();
             }
         }
@@ -638,7 +638,7 @@ public:
             // launch, so draining all streams guarantees all peer
             // writes are committed before the upcoming MPI_Barrier.
             for (auto s : ipc_streams_) {
-                if (s) (void)hipStreamSynchronize(s);
+                if (s) (void)gpuStreamSynchronize(s);
             }
             return;
         }
@@ -725,7 +725,7 @@ private:
         uint64_t          key_;
         uint64_t          addr_;
         bool              has_ipc_handle = false;
-        hipIpcMemHandle_t ipc_handle{};
+        GpuIpcMemHandle_t ipc_handle{};
     };
 
     struct Slot {
@@ -787,7 +787,7 @@ private:
     // trace queues hipMemcpyAsync's on these streams BEFORE the kernel
     // launch (Y' / GDA-style); rt.reset() drains all of them.
     // Pool size is controlled by GICC_STREAMS_MAX (default 8, range [1,32]).
-    std::vector<hipStream_t>           ipc_streams_;
+    std::vector<GpuStream_t>           ipc_streams_;
     int                                n_streams_max_  = 8;
 
     // Flat cache of RemoteInfo (av_addr / rma_addr / rma_key / base_addr)
