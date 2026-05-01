@@ -1,5 +1,7 @@
 #include "GICCDispatchLowering.h"
+#include "GICCHostDiscovery.h"
 #include "GICCPassConfig.h"
+#include "MetadataIO.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/BasicBlock.h"
@@ -9,10 +11,13 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <cstdlib>
+#include <set>
 #include <string>
 #include <unordered_map>
 
@@ -29,19 +34,36 @@ namespace {
 // matches the AST plugin's runtime behavior and avoids DWQ's per-op
 // libfabric overhead on same-node halos.
 enum class DispatchKind {
-    IpcPush,    // force IPC path (assumes peer is mapped)
-    DwqTrigger, // force DWQ path
-    DwqBatched, // currently lowered same as DwqTrigger
-    IpcOrDwq,   // runtime branch: IPC if mapped else DWQ
+    IpcPush,         // force IPC path (assumes peer is mapped)
+    DwqTrigger,      // force DWQ path
+    DwqBatched,      // currently lowered same as DwqTrigger
+    IpcOrDwq,        // runtime branch: IPC if mapped else DWQ
+    CpuProxyEnqueue, // device-side enqueue to CPU proxy ring; host trace
+                     // emits nothing for the site (the actual work is
+                     // performed device-side and serviced by the CPU
+                     // proxy thread). Required for HK-incapable sites.
     Unknown,
 };
 
 DispatchKind parseDispatch(StringRef s) {
-    if (s == "IPC_PUSH")    return DispatchKind::IpcPush;
-    if (s == "DWQ_TRIGGER") return DispatchKind::DwqTrigger;
-    if (s == "DWQ_BATCHED") return DispatchKind::DwqBatched;
-    if (s == "IPC_OR_DWQ")  return DispatchKind::IpcOrDwq;
+    if (s == "IPC_PUSH")          return DispatchKind::IpcPush;
+    if (s == "DWQ_TRIGGER")       return DispatchKind::DwqTrigger;
+    if (s == "DWQ_BATCHED")       return DispatchKind::DwqBatched;
+    if (s == "IPC_OR_DWQ")        return DispatchKind::IpcOrDwq;
+    if (s == "CPU_PROXY_ENQUEUE") return DispatchKind::CpuProxyEnqueue;
     return DispatchKind::Unknown;
+}
+
+const char *dispatchName(DispatchKind d) {
+    switch (d) {
+        case DispatchKind::IpcPush:         return "IPC_PUSH";
+        case DispatchKind::DwqTrigger:      return "DWQ_TRIGGER";
+        case DispatchKind::DwqBatched:      return "DWQ_BATCHED";
+        case DispatchKind::IpcOrDwq:        return "IPC_OR_DWQ";
+        case DispatchKind::CpuProxyEnqueue: return "CPU_PROXY_ENQUEUE";
+        case DispatchKind::Unknown:         return "UNKNOWN";
+    }
+    return "UNKNOWN";
 }
 
 struct SiteHint {
@@ -369,6 +391,35 @@ void lowerDwqBatched(ArrayRef<CallInst *> group) {
 
 }  // namespace
 
+// Per-site HK info loaded from per-kernel JSON files via
+// collectLaunchInventory. Used by the dispatch driver to enforce the
+// HK / hint cross-check (Task 2).
+struct SiteHKInfo {
+    bool        hk_capable = true;   // default: assume HK if no JSON found
+    std::string hk_fail_reason;
+    std::string kernelMangled;       // for proxy_aware write-back
+};
+
+// Walk every launch site's kernel template once and index by site_id.
+// Returns an empty map if no launches were found in M (e.g. unit-test
+// IR with placeholders but no @llvm.global.annotations launch wrapper).
+std::unordered_map<std::string, SiteHKInfo>
+buildSiteHKMap(Module &M, const std::string &metaDir) {
+    std::unordered_map<std::string, SiteHKInfo> out;
+    auto inv = collectLaunchInventory(M, metaDir);
+    for (const auto &site : inv.sites) {
+        if (!site.haveTemplate) continue;
+        for (const auto &op : site.kernelTemplate.ops) {
+            SiteHKInfo info;
+            info.hk_capable     = op.hk_capable;
+            info.hk_fail_reason = op.hk_fail_reason;
+            info.kernelMangled  = site.kernelMangled;
+            out[op.siteId] = std::move(info);
+        }
+    }
+    return out;
+}
+
 PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
                                                  ModuleAnalysisManager &) {
     const auto &cfg = getConfig();
@@ -400,6 +451,20 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
     }
     if (placeholders.empty()) return PreservedAnalyses::all();
 
+    // Per-site HK capability map (from kernel JSON) for cross-check.
+    auto hkMap = buildSiteHKMap(M, cfg.metaDir);
+
+    // CPU_PROXY_ENQUEUE requires runtime support. Read the env var
+    // exactly once so we get a consistent answer across all sites.
+    static const bool proxyEnabled =
+        std::getenv("GICC_PROXY_ENABLED") != nullptr;
+
+    // Set of kernels that had at least one site lowered to
+    // CPU_PROXY_ENQUEUE. Persisted back to per-kernel JSON at end of
+    // pass so device-lowering (Task 8) knows to preserve the device-side
+    // body for proxy sites.
+    std::set<std::string> proxyAwareKernels;
+
     // Group consecutive same-BB placeholders that all want DwqBatched
     // into a single batched call. Walk in IR order so groups are
     // contiguous; flush a group whenever we hit a placeholder with a
@@ -416,6 +481,34 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
         StringRef siteId  = siteIdOf(PH);
         SiteHint  sh      = hintFor(hints, siteId);
         DispatchKind d    = sh.dispatch;
+
+        // Cross-check 1: HK-incapable sites can only go to CPU_PROXY.
+        // Look up by site_id; if no kernel JSON entry was found we
+        // conservatively treat the site as HK-capable (default true)
+        // — matches pre-Task 2 behavior so unit-test IR without launch
+        // metadata still runs.
+        auto hkIt = hkMap.find(siteId.str());
+        const SiteHKInfo *hkInfo = (hkIt != hkMap.end()) ? &hkIt->second
+                                                         : nullptr;
+        if (hkInfo && !hkInfo->hk_capable &&
+            d != DispatchKind::CpuProxyEnqueue) {
+            report_fatal_error(
+                Twine("gicc: site ") + siteId +
+                " has hk_capable=false but hint requests " +
+                dispatchName(d) +
+                "; only CPU_PROXY_ENQUEUE accepts non-HK args. Reason: " +
+                hkInfo->hk_fail_reason);
+        }
+
+        // Cross-check 2: CPU_PROXY hint requires runtime support.
+        if (d == DispatchKind::CpuProxyEnqueue && !proxyEnabled) {
+            report_fatal_error(
+                Twine("gicc: hint requests CPU_PROXY_ENQUEUE for site ") +
+                siteId +
+                " but GICC_PROXY_ENABLED is not set. Either rebuild with "
+                "-DGICC_ENABLE_CPU_PROXY=ON and set the env, or change "
+                "the hint.");
+        }
 
         if (d == DispatchKind::DwqBatched) {
             // Same BB as the running group? Add. Otherwise flush + start fresh.
@@ -439,6 +532,19 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
             case DispatchKind::Unknown:
                 lowerDwqTrigger(PH);
                 break;
+            case DispatchKind::CpuProxyEnqueue: {
+                // Lower the placeholder by ERASING it from the host
+                // trace. The actual runtime work is done device-side
+                // (see Task 8 for device-lowering changes that
+                // preserve the device-side put_no_db body for proxy
+                // sites). The host trace function does not stage
+                // anything for this site.
+                if (hkInfo && !hkInfo->kernelMangled.empty()) {
+                    proxyAwareKernels.insert(hkInfo->kernelMangled);
+                }
+                PH->eraseFromParent();
+                break;
+            }
             case DispatchKind::DwqBatched:
                 // Unreachable — handled above.
                 break;
@@ -452,6 +558,22 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
                         "gicc.runtime.get_no_db.placeholder"}) {
         if (Function *F = M.getFunction(n))
             if (F->use_empty()) F->eraseFromParent();
+    }
+
+    // Write the proxy_aware bit back to per-kernel JSON for any kernel
+    // that had a CPU_PROXY_ENQUEUE site. Read-modify-write: load,
+    // toggle the bit if necessary, write back. Skips the I/O when the
+    // bit is already set.
+    for (const auto &kname : proxyAwareKernels) {
+        KernelTemplate t;
+        if (!readKernelTemplate(cfg.metaDir, kname, t)) continue;
+        if (t.proxy_aware) continue;
+        t.proxy_aware = true;
+        if (!writeKernelTemplate(cfg.metaDir, t)) {
+            errs() << "[dispatch-lowering] WARN: could not write "
+                   << "proxy_aware=true to " << cfg.metaDir << "/"
+                   << kname << ".json\n";
+        }
     }
 
     return PreservedAnalyses::none();
