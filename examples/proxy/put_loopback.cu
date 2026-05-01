@@ -21,6 +21,7 @@
 #include <cstring>
 #include <cuda_runtime.h>
 
+#include "gicc/platform/ofi/internal/gpu_device_context.hpp"
 #include "gicc/platform/ofi/ofi_runtime.hpp"
 #include "gicc/platform/ofi/ofi_device.cuh"
 
@@ -65,8 +66,9 @@ int main() {
     // can hand it to the kernel directly.
     gicc::DeviceCtx* d_ctx = rt.prepare();
 
-    put_kernel<<<1, 1, 0, 0>>>(d_ctx, rt.rank(), bh.index, HALF);
-    if (cudaDeviceSynchronize() != cudaSuccess) {
+    gpuLaunchKernel(put_kernel, dim3(1), dim3(1), 0, 0,
+                    d_ctx, rt.rank(), bh.index, HALF);
+    if (gpuDeviceSynchronize() != GPU_SUCCESS) {
         fprintf(stderr, "put_loopback: kernel sync failed\n");
         return 2;
     }

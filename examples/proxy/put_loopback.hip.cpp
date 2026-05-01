@@ -15,6 +15,7 @@
 #include <cstring>
 #include <hip/hip_runtime.h>
 
+#include "gicc/platform/ofi/internal/gpu_device_context.hpp"
 #include "gicc/platform/ofi/ofi_runtime.hpp"
 #include "gicc/platform/ofi/ofi_device.cuh"
 
@@ -52,9 +53,9 @@ int main() {
     rt.exchange();
 
     gicc::DeviceCtx* d_ctx = rt.prepare();
-    hipLaunchKernelGGL(put_kernel, dim3(1), dim3(1), 0, 0,
-                       d_ctx, rt.rank(), bh.index, HALF);
-    if (hipDeviceSynchronize() != hipSuccess) {
+    gpuLaunchKernel(put_kernel, dim3(1), dim3(1), 0, 0,
+                    d_ctx, rt.rank(), bh.index, HALF);
+    if (gpuDeviceSynchronize() != GPU_SUCCESS) {
         fprintf(stderr, "put_loopback: kernel sync failed\n");
         return 2;
     }
