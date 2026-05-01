@@ -114,7 +114,7 @@ public:
             local_rank = boot.local_rank();
             if (local_rank < 0) {
                 int num_devices;
-                (void)hipGetDeviceCount(&num_devices);
+                (void)gpuGetDeviceCount(&num_devices);
                 local_rank = boot.rank() % num_devices;
             }
         }
@@ -151,8 +151,8 @@ public:
         delete mr_atomic_result;
         delete mr_atomic_operand;
         if (atomic_completion_cntr) fi_close(&atomic_completion_cntr->fid);
-        if (atomic_result) (void)hipFree(atomic_result);
-        if (atomic_operand) (void)hipFree(atomic_operand);
+        if (atomic_result) (void)gpuFree(atomic_result);
+        if (atomic_operand) (void)gpuFree(atomic_operand);
 
         // Cleanup components (reverse order)
         delete ofi_barrier;
@@ -415,7 +415,7 @@ public:
      */
     void reset_atomic_result() {
         uint64_t zero = 0;
-        (void)hipMemcpy(atomic_result, &zero, sizeof(uint64_t), hipMemcpyHostToDevice);
+        (void)gpuMemcpy(atomic_result, &zero, sizeof(uint64_t), gpuMemcpyHostToDevice);
     }
 
     /**
@@ -517,14 +517,14 @@ private:
 
     void init_atomic_signaling() {
         // Allocate GPU memory for atomic signaling
-        (void)hipMalloc(&atomic_result, sizeof(uint64_t));
-        (void)hipMalloc(&atomic_operand, sizeof(uint64_t));
+        (void)gpuMalloc(&atomic_result, sizeof(uint64_t));
+        (void)gpuMalloc(&atomic_operand, sizeof(uint64_t));
 
         // Initialize values
         uint64_t zero = 0;
         uint64_t one = 1;
-        (void)hipMemcpy(atomic_result, &zero, sizeof(uint64_t), hipMemcpyHostToDevice);
-        (void)hipMemcpy(atomic_operand, &one, sizeof(uint64_t), hipMemcpyHostToDevice);
+        (void)gpuMemcpy(atomic_result, &zero, sizeof(uint64_t), gpuMemcpyHostToDevice);
+        (void)gpuMemcpy(atomic_operand, &one, sizeof(uint64_t), gpuMemcpyHostToDevice);
 
         // Register as memory regions for RDMA
         mr_atomic_result = new MemoryRegion(fabric->domain, fabric->ep, fabric->cxi_info,

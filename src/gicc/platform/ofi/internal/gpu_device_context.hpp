@@ -23,6 +23,13 @@ using GpuDeviceProp = hipDeviceProp_t;
 #define gpuGetDeviceProperties   hipGetDeviceProperties
 #define gpuGetErrorString        hipGetErrorString
 
+// Memory management aliases (used by Fabric and friends).
+#define gpuMalloc                hipMalloc
+#define gpuFree                  hipFree
+#define gpuMemcpy                hipMemcpy
+#define gpuMemcpyHostToDevice    hipMemcpyHostToDevice
+#define gpuMemset                hipMemset
+
 // CRITICAL: Call this BEFORE any HIP/PMI2 initialization
 // Must be called at the very start of main()
 inline void unset_rocr_visible_devices() { unsetenv("ROCR_VISIBLE_DEVICES"); }
@@ -36,6 +43,13 @@ using GpuDeviceProp = cudaDeviceProp;
 #define gpuSetDevice             cudaSetDevice
 #define gpuGetDeviceProperties   cudaGetDeviceProperties
 #define gpuGetErrorString        cudaGetErrorString
+
+// Memory management aliases (used by Fabric and friends).
+#define gpuMalloc                cudaMalloc
+#define gpuFree                  cudaFree
+#define gpuMemcpy                cudaMemcpy
+#define gpuMemcpyHostToDevice    cudaMemcpyHostToDevice
+#define gpuMemset                cudaMemset
 
 // CUDA path has no equivalent of ROCR_VISIBLE_DEVICES; keep the symbol
 // available so call sites can stay GPU-agnostic.
