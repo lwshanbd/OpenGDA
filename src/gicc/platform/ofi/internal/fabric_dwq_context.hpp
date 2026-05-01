@@ -3,7 +3,7 @@
  */
 #pragma once
 
-#include <hip/hip_runtime.h>
+#include "gpu_device_context.hpp"
 #include <rdma/fabric.h>
 #include <rdma/fi_cm.h>
 #include <rdma/fi_cxi_ext.h>
@@ -93,8 +93,8 @@ public:
         stop_cq_progress_thread();
 
         // Unregister MMIO from GPU first (ignore errors in cleanup)
-        if (trigger_mmio_addr) (void)hipHostUnregister(trigger_mmio_addr);
-        if (completion_mmio_addr) (void)hipHostUnregister(completion_mmio_addr);
+        if (trigger_mmio_addr) (void)gpuHostUnregister(trigger_mmio_addr);
+        if (completion_mmio_addr) (void)gpuHostUnregister(completion_mmio_addr);
 
         // Close libfabric objects in reverse order
         if (trigger_cntr) fi_close(&trigger_cntr->fid);
@@ -158,10 +158,10 @@ private:
         }
     }
 
-    void check_hip(hipError_t err, const char* msg) {
-        if (err != hipSuccess) {
+    void check_gpu(GpuError err, const char* msg) {
+        if (err != GPU_SUCCESS) {
             fprintf(stderr, "Rank %d: %s failed: %s (%d)\n",
-                    rank, msg, hipGetErrorString(err), err);
+                    rank, msg, gpuGetErrorString(err), err);
             exit(1);
         }
     }
@@ -277,20 +277,20 @@ private:
               "get_mmio_addr(completion)");
 
         // Map MMIO to GPU
-        check_hip(hipHostRegister(trigger_mmio_addr, trigger_mmio_len,
-                                  hipHostRegisterMapped),
-                  "hipHostRegister(trigger)");
-        check_hip(hipHostRegister(completion_mmio_addr, completion_mmio_len,
-                                  hipHostRegisterMapped),
-                  "hipHostRegister(completion)");
+        check_gpu(gpuHostRegister(trigger_mmio_addr, trigger_mmio_len,
+                                  gpuHostRegisterMapped),
+                  "gpuHostRegister(trigger)");
+        check_gpu(gpuHostRegister(completion_mmio_addr, completion_mmio_len,
+                                  gpuHostRegisterMapped),
+                  "gpuHostRegister(completion)");
 
         // Get device pointers
-        check_hip(hipHostGetDevicePointer((void**)&dev_trigger_cntr,
+        check_gpu(gpuHostGetDevicePointer((void**)&dev_trigger_cntr,
                                           trigger_mmio_addr, 0),
-                  "hipHostGetDevicePointer(trigger)");
-        check_hip(hipHostGetDevicePointer((void**)&dev_completion_cntr,
+                  "gpuHostGetDevicePointer(trigger)");
+        check_gpu(gpuHostGetDevicePointer((void**)&dev_completion_cntr,
                                           completion_mmio_addr, 0),
-                  "hipHostGetDevicePointer(completion)");
+                  "gpuHostGetDevicePointer(completion)");
     }
 
     void get_local_address() {
@@ -347,19 +347,19 @@ public:
               "get_mmio_addr(trigger)");
 
         // Map to GPU
-        check_hip(hipHostRegister(cp.trigger_mmio_addr, cp.trigger_mmio_len,
-                                  hipHostRegisterMapped),
-                  "hipHostRegister(trigger)");
-        check_hip(hipHostGetDevicePointer((void**)&cp.dev_trigger_cntr,
+        check_gpu(gpuHostRegister(cp.trigger_mmio_addr, cp.trigger_mmio_len,
+                                  gpuHostRegisterMapped),
+                  "gpuHostRegister(trigger)");
+        check_gpu(gpuHostGetDevicePointer((void**)&cp.dev_trigger_cntr,
                                           cp.trigger_mmio_addr, 0),
-                  "hipHostGetDevicePointer(trigger)");
+                  "gpuHostGetDevicePointer(trigger)");
 
         return cp;
     }
 
     // Cleanup counter pair (ignore errors in cleanup)
     void destroy_counter_pair(CounterPair& cp) {
-        if (cp.trigger_mmio_addr) (void)hipHostUnregister(cp.trigger_mmio_addr);
+        if (cp.trigger_mmio_addr) (void)gpuHostUnregister(cp.trigger_mmio_addr);
         if (cp.trigger_cntr) fi_close(&cp.trigger_cntr->fid);
         if (cp.completion_cntr) fi_close(&cp.completion_cntr->fid);
         if (cp.atomic_completion_cntr) fi_close(&cp.atomic_completion_cntr->fid);
