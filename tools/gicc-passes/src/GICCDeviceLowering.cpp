@@ -1,6 +1,7 @@
 #include "GICCDeviceLowering.h"
 #include "GICCPassConfig.h"
 #include "KernelInventory.h"
+#include "MetadataIO.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/BasicBlock.h"
@@ -121,36 +122,74 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
     bool isNVPTX  = T.isNVPTX();
     if (!isAMDGCN && !isNVPTX) return PreservedAnalyses::all();
 
-    SmallVector<CallInst *, 16> putGetCalls;
+    // Per-kernel buckets so we can decide put/get/quiet preservation
+    // based on the kernel's `proxy_aware` bit. Flush is unconditional —
+    // it always lowers to the lead-thread MMIO write regardless.
     SmallVector<CallInst *, 16> flushCalls;
+    // List of (call, preserve-on-device) pairs for the put/get/quiet
+    // bodies. preserve=true means a CPU_PROXY_ENQUEUE site exists in
+    // this kernel — keep the device-side call so the put_no_db body in
+    // ofi_device.cuh runs and pushes a TransferCmd into the proxy ring.
+    SmallVector<std::pair<CallInst *, bool>, 16> putGetCalls;
+    const auto &cfgRef = cfg;  // capture for the inner switch.
 
     for (Function &F : M) {
         if (F.isDeclaration() || !isGPUKernel(F)) continue;
 
         GICCKernelInfo info;
         collectGICCSites(F, info);
+        if (info.sites.empty()) continue;
+
+        // Per-kernel proxy_aware lookup. Read the kernel's JSON written
+        // by GICCDispatchLowering (Task 2) — true when at least one of
+        // the kernel's call sites was routed to CPU_PROXY_ENQUEUE.
+        //
+        // CROSS-PASS / CROSS-TU NOTE:
+        // Mirrors the read-modify-write hazard documented at length in
+        // GICCHKAnalysis.cpp. The host-side dispatch-lowering pass
+        // writes proxy_aware; this device-side pass reads it. Within a
+        // single compilation invocation, host passes run before device
+        // passes on the same module, and each kernel symbol is emitted
+        // by exactly one TU in the supported build flows
+        // (examples + minimod), so the read here always sees the
+        // correct value. Multi-TU emission of the same kernel is the
+        // same hazard as in HK and would need a single-writer fix.
+        bool proxyAware = false;
+        if (!cfgRef.metaDir.empty()) {
+            KernelTemplate kt;
+            if (readKernelTemplate(cfgRef.metaDir, info.mangledName, kt))
+                proxyAware = kt.proxy_aware;
+        }
+
         for (const auto &s : info.sites) {
             switch (s.kind) {
                 case GICCOpKind::PutNoDb:
                 case GICCOpKind::GetNoDb:
-                    putGetCalls.push_back(s.CI);
+                    // Preserve on device when this kernel routes some
+                    // site to the CPU proxy; the device-side body
+                    // pushes the TransferCmd into the proxy ring.
+                    // Otherwise erase — host trace owns the work.
+                    putGetCalls.emplace_back(s.CI, proxyAware);
                     break;
                 case GICCOpKind::Flush:
                     flushCalls.push_back(s.CI);
                     break;
                 case GICCOpKind::Quiet:
                     // Quiet has no host-side IPC counterpart; v1 erases
-                    // it like put_no_db. NVPTX path lowers it to a
-                    // membar in Phase 4.
-                    putGetCalls.push_back(s.CI);
+                    // it like put_no_db. Preserved on the device when
+                    // proxy is in play so the device body (future:
+                    // MMIO drain or membar) keeps running. NVPTX path
+                    // lowers it to a membar in Phase 4.
+                    putGetCalls.emplace_back(s.CI, proxyAware);
                     break;
             }
         }
     }
 
     bool changed = false;
-    for (CallInst *CI : putGetCalls) {
-        CI->eraseFromParent();
+    for (auto &pr : putGetCalls) {
+        if (pr.second) continue;        // proxy-aware kernel: keep the body.
+        pr.first->eraseFromParent();
         changed = true;
     }
     for (CallInst *CI : flushCalls) {
