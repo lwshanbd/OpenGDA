@@ -69,6 +69,11 @@ json::Value toRecord(const std::string &siteId,
     r["site_id"]        = siteId;
     r["kernel"]         = simpleKernel;
     r["op_kind"]        = op.kind;
+    // HK Analysis capability bit. Sites with hk_capable=false MUST be
+    // routed to CPU_PROXY_ENQUEUE by the decider — routing them to
+    // IPC_PUSH / DWQ_TRIGGER / IPC_OR_DWQ / DWQ_BATCHED is a build error
+    // (enforced by GICCDispatchLowering in Task 2).
+    r["hk_capable"]     = op.hk_capable;
 
     if (auto it = op.args.find("size"); it != op.args.end()) {
         r["size_kind"] = argKindTag(it->second.kind);
