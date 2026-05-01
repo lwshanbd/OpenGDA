@@ -1,27 +1,62 @@
 /*
- * put_mixed_dispatch.cpp - L4 mixed-dispatch CPU-proxy example.
+ * put_mixed_dispatch.cpp — L4 mixed-dispatch SMOKE TEST.
+ *
+ * SCOPE LIMITATION (read this before claiming this validates anything):
+ * This example currently uses raw gpuLaunchKernel, NOT gicc::launch<>.
+ * That bypasses the host-side LTO pipeline (host-discovery,
+ * feature-extraction, trace-synthesis, dispatch-lowering), so the
+ * proxy_aware bit is NEVER written to the kernel JSON for this kernel.
+ * Device-lowering therefore sees proxy_aware=false and either:
+ *   (a) erases the put_no_db body (non-LTO + LTO with default ordering)
+ *       → only DWQ leg fires (via the prepared host trace) and the
+ *       proxy leg silently no-ops.
+ *   (b) preserves the put_no_db body if hint.json explicitly forces
+ *       CPU_PROXY_ENQUEUE for this site_id AND the dispatch-lowering
+ *       pass runs before device-lowering (post-Task-8 reorder).
+ *
+ * The byte-pattern verification at the end CANNOT distinguish "both
+ * legs fired via their intended dispatch" from "both legs fired via
+ * the proxy path" — the destination bytes look identical either way.
+ * To prove the routing decision is honored, instrument the proxy ring
+ * (count pushes) or intercept gicc_runtime_dwq_enqueue.
+ *
+ * This example is therefore a DEVICE-SIDE BODY SMOKE TEST plus a
+ * non-overlap byte verifier, not an end-to-end dispatch validator.
+ * Promoting it to a real end-to-end validator requires:
+ *   1. Switching to gicc::launch<>(rt, ...) so the LTO host trace
+ *      runs.
+ *   2. Adding instrumentation to count per-leg invocations.
+ *   3. Asserting the per-leg counts match the expected dispatch.
+ *
+ * Tracked as a follow-up after Task 9 (which lands the device-side
+ * quiet() body needed for the L5 ping-pong example).
+ *
+ * ----------------------------------------------------------------
+ * What the example DOES set up (kept from the original header for
+ * reference):
  *
  * Two MPI ranks. Rank 0's kernel issues TWO gicc::put_no_db calls into
  * non-overlapping regions of rank 1's buffer:
  *
- *   site 0  → DWQ_TRIGGER       (host trace pre-stages; device call
- *                                erased by GICCDeviceLowering)
- *   site 1  → CPU_PROXY_ENQUEUE (device pushes a TransferCmd into the
- *                                proxy ring; host trace emits nothing
- *                                for this site)
+ *   site 0  → intended DWQ_TRIGGER       (host trace pre-stages; device
+ *                                         call erased by
+ *                                         GICCDeviceLowering when
+ *                                         proxy_aware=false)
+ *   site 1  → intended CPU_PROXY_ENQUEUE (device pushes a TransferCmd
+ *                                         into the proxy ring; host
+ *                                         trace emits nothing for this
+ *                                         site)
  *
- * The whole point of this example is to exercise Task 8's hint-aware
- * device-lowering: it must PRESERVE the device-side put_no_db body for
- * the kernel (so the proxy site runs) while still erasing the DWQ site
- * via the host trace. Because both sites live in the same kernel
- * function, the preservation decision is per-kernel (proxy_aware bit
- * read from per-kernel JSON), not per-site — the DWQ-routed call is
- * simply a no-op in the device body once GICC_CPU_PROXY is defined,
- * since DeviceCtx::proxy_ring belongs to a single ring shared by both
- * sites and the DWQ leg is fully owned by the host trace.
+ * Because both sites live in the same kernel function, the preservation
+ * decision is per-kernel (proxy_aware bit read from per-kernel JSON),
+ * not per-site — the DWQ-routed call is simply a no-op in the device
+ * body once GICC_CPU_PROXY is defined, since DeviceCtx::proxy_ring
+ * belongs to a single ring shared by both sites and the DWQ leg is
+ * fully owned by the host trace.
  *
  * After rt.reset() and a barrier, rank 1 verifies:
- *   bytes [0,    OFF_DWQ + LEN) match rank 0's source pattern (DWQ leg)
+ *   bytes [0,    OFF_DWQ + LEN) match rank 0's source pattern (DWQ leg
+ *                                or proxy leg — see SCOPE LIMITATION)
  *   bytes [OFF_PROXY, OFF_PROXY + LEN) match rank 0's source pattern
  *                                       (PROXY leg)
  * The gap [LEN, OFF_PROXY) stays zero — confirms the two transfers
@@ -30,8 +65,10 @@
  * Build / run flow (Delta or Tioga):
  *   1. Configure the runtime build with -DGICC_ENABLE_CPU_PROXY=ON.
  *   2. Make sure the LTO pass plugin (libgicc-passes.so) is built.
- *   3. To exercise the hint-aware path end-to-end, the kernel must be
- *      compiled with -fpass-plugin=libgicc-passes.so plus
+ *   3. To force the device body to be preserved (so the proxy site can
+ *      fire), provide a hint.json that pins site 1 to
+ *      CPU_PROXY_ENQUEUE and rebuild with
+ *      -fpass-plugin=libgicc-passes.so plus
  *      GICC_MODE=lower / GICC_HINT_IN=hint_mixed.json /
  *      GICC_META_DIR=<dir>. The hint file is provided alongside this
  *      source as `hint_mixed.json.template`; replace the site_id
@@ -47,9 +84,7 @@
  * Without the LTO pass plugin both put_no_db calls fall through the
  * non-LTO path. Under GICC_CPU_PROXY that path pushes both into the
  * proxy ring, so the example still PASSes (no DWQ leg actually fires,
- * but bytes still arrive on rank 1 via the proxy). Treat that as a
- * partial smoke run; only the LTO build actually validates the
- * hint-aware preservation.
+ * but bytes still arrive on rank 1 via the proxy).
  */
 
 #include <cstdint>
