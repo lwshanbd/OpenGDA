@@ -66,8 +66,6 @@ PreservedAnalyses GICCHKAnalysisPass::run(Module &M, ModuleAnalysisManager &) {
             CallInst *CI = site.CI;
             bool        siteHK   = true;
             std::string failReason;
-            unsigned    failArg  = 0;
-            HKResult    failHK;
 
             // Skip the Runtime context pointer (arg 0). HK analysis only
             // matters for the data-shape arguments that the host-side
@@ -82,8 +80,6 @@ PreservedAnalyses GICCHKAnalysisPass::run(Module &M, ModuleAnalysisManager &) {
                 // can see the full diagnostic surface.
                 if (siteHK) {
                     siteHK     = false;
-                    failArg    = ai;
-                    failHK     = r;
                     failReason = "argument '" + std::string(argName(site.kind, ai))
                                  + "' is not host-knowable: " + r.failReason;
                 }
