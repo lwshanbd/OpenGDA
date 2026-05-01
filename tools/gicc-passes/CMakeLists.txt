@@ -6,14 +6,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Plugin must be built with the same Clang/LLVM that loads it (matching ABI).
 set(_GICC_EXPECTED_CXX "/opt/rocm-6.4.0/lib/llvm/bin/clang++")
-if(NOT CMAKE_CXX_COMPILER STREQUAL "${_GICC_EXPECTED_CXX}")
+if(NOT CMAKE_CXX_COMPILER STREQUAL "${_GICC_EXPECTED_CXX}"
+   AND NOT DEFINED LLVM_DIR)
     message(FATAL_ERROR
         "gicc-passes must be built with the ROCm Clang to match LLVM's ABI.\n"
         "  -DCMAKE_CXX_COMPILER=${_GICC_EXPECTED_CXX}\n"
         "Current: ${CMAKE_CXX_COMPILER}")
 endif()
 
-set(LLVM_DIR "/opt/rocm-6.4.0/lib/llvm/lib/cmake/llvm" CACHE PATH "LLVM cmake dir")
+if(NOT DEFINED LLVM_DIR)
+    set(LLVM_DIR "/opt/rocm-6.4.0/lib/llvm/lib/cmake/llvm" CACHE PATH "LLVM cmake dir")
+endif()
 find_package(LLVM REQUIRED CONFIG)
 message(STATUS "gicc-passes: using LLVM ${LLVM_VERSION_MAJOR} from ${LLVM_DIR}")
 
