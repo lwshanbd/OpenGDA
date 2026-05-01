@@ -60,4 +60,12 @@ void gicc_runtime_dwq_enqueue_batched(gicc::Runtime    *rt,
 volatile std::uint64_t *gicc_runtime_trigger_addr(gicc::Runtime *rt);
 std::uint64_t           gicc_runtime_trigger_val (gicc::Runtime *rt);
 
+#ifdef GICC_CPU_PROXY
+// Returns the device-mapped pointer to the lazily-started proxy ring.
+// Reserved for future LTO-pass plumbing; the MVP path writes the value
+// directly into DeviceCtx::proxy_ring inside Runtime::prepare(), so this
+// helper is currently uncalled.
+void* gicc_runtime_proxy_ring_device_ptr(gicc::Runtime *rt);
+#endif
+
 }  // extern "C"

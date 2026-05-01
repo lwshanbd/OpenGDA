@@ -119,4 +119,10 @@ std::uint64_t gicc_runtime_trigger_val(gicc::Runtime *rt) {
     return rt ? rt->mono_total_ops_ : 0;
 }
 
+#ifdef GICC_CPU_PROXY
+void* gicc_runtime_proxy_ring_device_ptr(gicc::Runtime *rt) {
+    return rt ? rt->ensure_proxy_ring() : nullptr;
+}
+#endif
+
 }  // extern "C"
