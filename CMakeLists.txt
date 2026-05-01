@@ -37,6 +37,17 @@ option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(BUILD_EXAMPLES    "Build GICC examples"    ON)
 
 # ============================================================================
+# CPU Proxy path (Task 4+) — header-only ring + tests live under
+# src/gicc/platform/ofi/proxy/ and tests/proxy/. The full proxy thread,
+# libfabric integration, and runtime wiring land in later tasks.
+# ============================================================================
+option(GICC_ENABLE_CPU_PROXY "Build CPU Proxy path under platform/ofi/" OFF)
+
+if(GICC_ENABLE_CPU_PROXY)
+    add_compile_definitions(GICC_CPU_PROXY=1)
+endif()
+
+# ============================================================================
 # Subdirectories
 # ============================================================================
 if(GICC_BACKEND STREQUAL "mlx5")
@@ -48,6 +59,10 @@ elseif(GICC_BACKEND STREQUAL "ofi")
     if(BUILD_EXAMPLES)
         add_subdirectory(examples/ofi)
     endif()
+endif()
+
+if(GICC_ENABLE_CPU_PROXY)
+    add_subdirectory(tests/proxy)
 endif()
 
 # ============================================================================
