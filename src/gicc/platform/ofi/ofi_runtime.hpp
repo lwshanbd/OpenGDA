@@ -657,7 +657,30 @@ public:
     }
 
     //--------------------------------------------------------------------------
-    // reset — drain the current batch and recycle the slots.
+    // reset — drain all in-flight communication for this batch.
+    //
+    // CALLER CONTRACT: any kernel that issued put_no_db / quiet via this
+    // Runtime MUST be device-synchronized (cudaDeviceSynchronize() /
+    // hipDeviceSynchronize()) BEFORE calling reset(). The proxy-ring drain
+    // snapshots the producer head ONCE at entry; if device work is still
+    // publishing pushes after that snapshot, those pushes complete
+    // asynchronously past reset() and may race with subsequent operations
+    // (e.g. MPI_Barrier).
+    //
+    // Typical call sequence:
+    //     gicc::launch<kernel>(rt, ..., args...);
+    //     hipDeviceSynchronize();        // or cudaDeviceSynchronize();
+    //     rt.reset();
+    //     MPI_Barrier(MPI_COMM_WORLD);
+    //
+    // What reset() actually does:
+    //   - Polls the shared completion counter against mono_total_ops_
+    //     (host-wait fast path) or every per-slot counter (legacy path)
+    //     until libfabric reports every queued op complete.
+    //   - Drains the CPU proxy ring (snapshot head, spin until tail
+    //     catches up) when GICC_CPU_PROXY is enabled.
+    //   - Synchronizes any IPC streams used by the host trace.
+    //   - Recycles slots / DwqWorkBuilders for the next batch.
     //--------------------------------------------------------------------------
     void reset() {
         if (host_wait_mode_) {

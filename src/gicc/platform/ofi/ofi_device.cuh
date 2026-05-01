@@ -115,6 +115,11 @@ void quiet(DeviceCtx* /*ctx*/) {}
 //
 // Empty bodies so non-LTO builds still link; the GICCDeviceLowering
 // pass erases every call site at LTO time.
+//
+// Under GICC_CPU_PROXY the device-side body publishes a TransferCmd
+// into the proxy ring instead. Caller MUST device-sync before
+// rt.reset() to ensure all such pushes are published before the host
+// drain snapshots the producer head.
 //==============================================================================
 __device__ inline
 void put_no_db(DeviceCtx* ctx,
