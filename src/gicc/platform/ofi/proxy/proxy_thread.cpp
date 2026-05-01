@@ -77,22 +77,48 @@ void ProxyThread::stop() {
 
 void ProxyThread::main_loop() {
     while (running_.load(std::memory_order_acquire)) {
+        bool stop_submitting = false;
+
+        // 0. Reissue any retry stashed by a prior -FI_EAGAIN. Must clear
+        //    before any new pop(), otherwise the failed (cmd, slot) is lost
+        //    (pop() already advanced proxy_read_cursor when it was first
+        //    popped). At most one PendingRetry exists at a time because the
+        //    proxy is single-threaded.
+        if (pending_retry_) {
+            int ret = lf_.submit_write(pending_retry_->cmd,
+                                       pending_retry_->slot);
+            if (ret == -FI_EAGAIN) {
+                stop_submitting = true;   // still no room; just poll CQ.
+            } else {
+                in_flight_.insert(pending_retry_->slot);
+                pending_retry_.reset();
+            }
+        }
+
         // 1. Drain ring (bounded for fairness).
-        for (int i = 0; i < kSubmitBatch; ++i) {
+        for (int i = 0; !stop_submitting && i < kSubmitBatch; ++i) {
             TransferCmd c;
             uint64_t    slot;
             if (!ring_host_->pop(c, &slot)) break;
             // Defensive: pop() advances proxy_read_cursor, so the same slot
-            // shouldn't be returned twice. If it ever is, bail this batch.
-            if (in_flight_.count(slot)) break;
+            // shouldn't be returned twice. If it ever is, log + skip (don't
+            // bail the whole batch — that would starve the next slots).
+            if (in_flight_.count(slot)) {
+                fprintf(stderr,
+                        "ProxyThread: pop returned in-flight slot %lu (invariant violation)\n",
+                        (unsigned long)slot);
+                continue;
+            }
 
             switch (c.cmd_type) {
                 case CmdType::WRITE: {
                     int ret = lf_.submit_write(c, slot);
                     if (ret == -FI_EAGAIN) {
-                        // The slot stays "popped but not in-flight"; we will
-                        // not retry it this iteration. Re-issue path will be
-                        // added with proper backpressure in a later task.
+                        // Stash for retry next iteration; do not advance
+                        // further down the ring (back-pressure: don't pop
+                        // commands we can't submit).
+                        pending_retry_ = PendingRetry{c, slot};
+                        stop_submitting = true;
                         break;
                     }
                     in_flight_.insert(slot);
