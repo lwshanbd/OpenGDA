@@ -22,11 +22,10 @@
  */
 #pragma once
 
-#include <hip/hip_runtime.h>
 #include <vector>
 #include <unordered_map>
 
-#include "hip_device_context.hpp"
+#include "gpu_device_context.hpp"
 #include "gicc/bootstrap/bootstrap.hpp"
 #include "device_affinity.hpp"
 #include "fabric_dwq_context.hpp"
