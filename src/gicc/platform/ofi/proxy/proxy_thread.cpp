@@ -117,6 +117,15 @@ void ProxyThread::main_loop() {
         }
 
         // 1. Drain ring (bounded for fairness).
+        //
+        // Reverted from a batched flush_batch / FI_MORE refactor (the
+        // ProxyLibfabric::submit_writes_batch API is still there for any
+        // future provider that benefits from FI_MORE) — on the cxi
+        // provider Slingshot uses, the per-op fi_writemsg overhead
+        // wiped out the doorbell-amortization win, and the
+        // mixed-with-QUIET path introduced a regression in the L4/L5
+        // ack ordering. Per-cmd submit_write is simpler and equivalent
+        // perf-wise on the systems we measure today.
         for (int i = 0; !stop_submitting && i < kSubmitBatch; ++i) {
             TransferCmd c;
             uint64_t    slot;
@@ -136,9 +145,6 @@ void ProxyThread::main_loop() {
                 case CmdType::WRITE: {
                     int ret = lf_.submit_write(c, slot);
                     if (ret == -FI_EAGAIN) {
-                        // Stash for retry next iteration; do not advance
-                        // further down the ring (back-pressure: don't pop
-                        // commands we can't submit).
                         pending_retry_ = PendingRetry{c, slot};
                         stop_submitting = true;
                         break;

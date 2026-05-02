@@ -98,6 +98,7 @@ int ProxyLibfabric::submit_write(const TransferCmd& c, uint64_t slot)
     return 0;
 }
 
+
 int ProxyLibfabric::poll(Completion* out, int max)
 {
     // 256 fi_cq_entry slots = 4 KiB on stack. UCCL-EP polls 2048 per call;
