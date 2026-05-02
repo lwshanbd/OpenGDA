@@ -1,0 +1,14 @@
+fi_domain: Function not implemented
+== probe_libfabric report ==
+provider:           shm
+ep type:            FI_EP_RDM
+caps:               0x108800000013f06
+  FI_RMA:           yes
+  FI_MSG:           yes
+  FI_HMEM:          NO
+  FI_ATOMIC:        NO
+mr_mode:            0x410
+tx_attr.size:       1024
+rx_attr.size:       1024
+tx_attr.inject_size:0
+max_msg_size:       18446744073709551615

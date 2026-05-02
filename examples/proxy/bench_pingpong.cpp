@@ -109,6 +109,23 @@ __global__ void proxy_send_kernel(gicc::DeviceCtx* ctx, int peer,
     if (!per_msg_quiet) gicc::quiet(ctx);
 }
 
+// Multi-lane kernel — one thread per block, each block hashes blockIdx.x
+// to a proxy ring index. With NUM_PROXY_THREADS>1 this lets the bench
+// measure aggregate throughput across the proxy fleet (the single-block
+// kernel above only ever uses ring 0). Each lane does n puts then ONE
+// quiet against its own ring.
+__global__ void proxy_send_kernel_multi(gicc::DeviceCtx* ctx, int peer,
+                                        int buf_idx, size_t bytes, int n) {
+    if (threadIdx.x != 0) return;
+    int ring_idx = blockIdx.x;  // one ring per block (mod num_proxy_rings)
+    for (int i = 0; i < n; ++i) {
+        gicc::put_no_db_idx(ctx, ring_idx, peer,
+                            buf_idx, /*dst_off=*/0,
+                            buf_idx, /*src_off=*/0, bytes);
+    }
+    gicc::quiet_idx(ctx, ring_idx);
+}
+
 static double median(std::vector<double>& v) {
     std::sort(v.begin(), v.end());
     size_t n = v.size();
@@ -123,9 +140,14 @@ int main(int argc, char** argv) {
     // --mode=mpi or --mode=proxy ; --quick = 3 sizes / 3 outer / 5 batch
     // --per-msg-quiet : (proxy mode) put + quiet per msg = pure latency
     //                   default: N puts + 1 quiet per outer = throughput
+    // --lanes=K       : (proxy mode) launch K parallel kernel blocks, each
+    //                   hashed to a proxy ring (block_idx % num_proxy_rings).
+    //                   Use with GICC_NUM_PROXY_THREADS=N to measure how
+    //                   parallel proxy threads scale aggregate throughput.
     std::string mode = "proxy";
     bool quick = false;
     bool per_msg_quiet = false;
+    int  lanes = 1;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a.rfind("--mode=", 0) == 0) {
@@ -134,6 +156,9 @@ int main(int argc, char** argv) {
             quick = true;
         } else if (a == "--per-msg-quiet") {
             per_msg_quiet = true;
+        } else if (a.rfind("--lanes=", 0) == 0) {
+            lanes = std::atoi(a.substr(8).c_str());
+            if (lanes < 1) lanes = 1;
         }
     }
     if (mode != "mpi" && mode != "proxy") {
@@ -178,14 +203,18 @@ int main(int argc, char** argv) {
     if (rank == 0) {
         const char* gpu_aware = std::getenv("MPICH_GPU_SUPPORT_ENABLED");
         printf("\n=== bench_pingpong (mode=%s) ===\n", mode.c_str());
-        printf("ranks=%d  outer_iters=%d  batch_per_outer=%d  warmup=%d\n",
+        printf("ranks=%d  outer_iters=%d  batch_per_outer=%d  warmup=%d  lanes=%d\n",
                nranks,
                quick ? 3 : NUM_OUTER,
                quick ? 5 : BATCH_PER_OUTER,
-               quick ? 2 : NUM_WARMUP);
+               quick ? 2 : NUM_WARMUP,
+               lanes);
         if (mode == "mpi") {
             printf("MPICH_GPU_SUPPORT_ENABLED=%s\n",
                    gpu_aware ? gpu_aware : "(unset)");
+        } else {
+            const char* npt = std::getenv("GICC_NUM_PROXY_THREADS");
+            printf("GICC_NUM_PROXY_THREADS=%s\n", npt ? npt : "1 (default)");
         }
         printf("\n%-10s %12s %14s %14s\n",
                "size", "iters_total", "mean_us/msg", "median_us/msg");
@@ -253,9 +282,20 @@ int main(int argc, char** argv) {
             } else {
                 if (rank == 0) {
                     gicc::DeviceCtx* d_ctx = rt.prepare();
-                    gpuLaunchKernel(proxy_send_kernel, dim3(1), dim3(1), 0, 0,
-                                    d_ctx, peer, bh.index, bytes,
-                                    batch_per_outer, per_msg_quiet);
+                    if (lanes > 1) {
+                        // Multi-lane mode: K blocks each push to its own
+                        // ring (mod num_proxy_rings) then quiet that ring.
+                        // Aggregate work = lanes * batch_per_outer puts.
+                        gpuLaunchKernel(proxy_send_kernel_multi,
+                                        dim3(lanes), dim3(1), 0, 0,
+                                        d_ctx, peer, bh.index, bytes,
+                                        batch_per_outer);
+                    } else {
+                        gpuLaunchKernel(proxy_send_kernel,
+                                        dim3(1), dim3(1), 0, 0,
+                                        d_ctx, peer, bh.index, bytes,
+                                        batch_per_outer, per_msg_quiet);
+                    }
                     (void)gpuDeviceSynchronize();
                     rt.reset();
                 }
@@ -264,8 +304,11 @@ int main(int argc, char** argv) {
 
             double t1 = MPI_Wtime();
             if (rank == 0) {
+                // Total messages this outer iter = batch_per_outer * lanes
+                // (lanes lanes each issued batch_per_outer puts).
+                int msgs_this_outer = batch_per_outer * lanes;
                 samples.push_back((t1 - t0) * 1e6 /
-                                  static_cast<double>(BATCH_PER_OUTER));
+                                  static_cast<double>(msgs_this_outer));
             }
         }
 

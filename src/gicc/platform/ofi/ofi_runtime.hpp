@@ -172,9 +172,16 @@ public:
 
     ~Runtime() {
 #ifdef GICC_CPU_PROXY
-        // Stop the proxy worker before tearing down any libfabric state it
-        // may still be polling. ProxyThread::stop() joins the worker thread.
-        if (proxy_thread_) proxy_thread_->stop();
+        // Stop all proxy workers before tearing down any libfabric state
+        // they may still be polling. ProxyThread::stop() joins the worker.
+        for (auto& pt : proxy_threads_) {
+            if (pt) pt->stop();
+        }
+        if (proxy_rings_arr_host_) {
+            (void)gpuHostFree(proxy_rings_arr_host_);
+            proxy_rings_arr_host_ = nullptr;
+            proxy_rings_arr_dev_  = nullptr;
+        }
 #endif
         for (auto* op : my_pending_) delete op;
         my_pending_.clear();
@@ -431,16 +438,24 @@ private:
     // No-op when the proxy thread was never started (no kernel has called
     // ensure_proxy_ring() yet).
     void drain_proxy_ring_() {
-        if (!proxy_thread_) return;
-        auto* ring = proxy_thread_->ring_host();
-        if (!ring) return;
-        const uint64_t snap = ring->head_volatile();
-        while (ring->tail_volatile() < snap) {
+        if (proxy_threads_.empty()) return;
+        // Snapshot all rings' heads first, then spin per ring until tail
+        // catches up. Snapshot-then-wait gives "all puts that were issued
+        // before reset() returned will have been ack'd by libfabric".
+        std::vector<uint64_t> snaps;
+        snaps.reserve(proxy_threads_.size());
+        for (auto& pt : proxy_threads_) {
+            snaps.push_back(pt->ring_host()->head_volatile());
+        }
+        for (size_t i = 0; i < proxy_threads_.size(); ++i) {
+            auto* ring = proxy_threads_[i]->ring_host();
+            while (ring->tail_volatile() < snaps[i]) {
 #if defined(__x86_64__)
-            __asm__ __volatile__("pause" ::: "memory");
+                __asm__ __volatile__("pause" ::: "memory");
 #else
-            __asm__ __volatile__("" ::: "memory");
+                __asm__ __volatile__("" ::: "memory");
 #endif
+            }
         }
     }
 #endif
@@ -623,9 +638,14 @@ public:
         h_dev_ctx_->trigger_val_  = host_wait_mode_ ? mono_total_ops_
                                                     : my_n_remote_ops_;
 #ifdef GICC_CPU_PROXY
-        // Lazy-start the CPU proxy worker on first prepare() and stash the
-        // device-mapped ring pointer so kernel-side put_no_db can push.
-        h_dev_ctx_->proxy_ring = ensure_proxy_ring();
+        // Lazy-start the CPU proxy fleet on first prepare(). Stash both
+        // the single ring 0 (DeviceCtx::proxy_ring, for back-compat with
+        // single-ring kernels) and the full N-element array of device
+        // ring pointers (DeviceCtx::proxy_rings_arr, for kernels that
+        // shard across rings — pick by warp_id / blockIdx etc.).
+        h_dev_ctx_->proxy_ring       = ensure_proxy_ring();
+        h_dev_ctx_->proxy_rings_arr  = ensure_proxy_rings();
+        h_dev_ctx_->num_proxy_rings  = num_proxy_rings();
 #endif
         return d_dev_ctx_;
     }
@@ -795,21 +815,88 @@ public:
 
 #ifdef GICC_CPU_PROXY
     //--------------------------------------------------------------------------
-    // ensure_proxy_ring — lazy-construct + start the CPU proxy worker, returning
-    // the device-mapped ProxyRing pointer to be stored in DeviceCtx::proxy_ring.
-    // Idempotent — second-and-subsequent calls return the cached ring pointer.
+    // ensure_proxy_rings — lazy-construct + start N CPU proxy workers (N read
+    // from GICC_NUM_PROXY_THREADS, default 1, clamped to [1,32]). Returns a
+    // device-mapped pointer to an array of N ring pointers. Idempotent.
     //--------------------------------------------------------------------------
-    gicc::proxy::ProxyRing* ensure_proxy_ring() {
-        // Two host threads racing into prepare() could both observe
-        // !proxy_thread_, both construct a ProxyThread, and one would leak
-        // (with its pinned ring + worker thread). Serialize the
-        // check-and-construct under proxy_init_mutex_ to close that TOCTOU.
+    void** ensure_proxy_rings() {
         std::lock_guard<std::mutex> g(proxy_init_mutex_);
-        if (!proxy_thread_) {
-            proxy_thread_ = std::make_unique<gicc::proxy::ProxyThread>(*this);
-            proxy_thread_->start();
+        if (!proxy_threads_.empty()) return proxy_rings_arr_dev_;
+
+        int n = 1;
+        if (const char* e = std::getenv("GICC_NUM_PROXY_THREADS")) {
+            int parsed = std::atoi(e);
+            if (parsed >= 1 && parsed <= 32) n = parsed;
+            else if (rank() == 0) {
+                fprintf(stderr,
+                    "[gicc] GICC_NUM_PROXY_THREADS=%s out of [1,32], using 1\n", e);
+            }
         }
-        return proxy_thread_->ring_device();
+        // CURRENT LIMITATION: all proxy threads share Fabric's single
+        // libfabric endpoint + CQ (cxi rejects binding a 2nd TX CQ to the
+        // same EP — verified at first run in ProxyLibfabric). With a shared
+        // CQ, multiple consumer threads steal each other's completions
+        // (fi_cq_read removes entries), so thread A may drain thread B's
+        // ack and never tell B about it → B's quiet/drain hangs forever.
+        //
+        // True UCCL-EP parity requires per-thread fi_endpoint + fi_cq
+        // (UCCL-EP's ProxyCtx-per-thread model with separate QPs). That is
+        // a substantial Fabric refactor (per-EP fi_getname + per-EP AV
+        // address exchange via Bootstrap). Until then, cap N to 1 — the
+        // multi-ring DeviceCtx fan-out, put_no_db_idx and quiet_idx are
+        // still wired so a future per-EP refactor only needs to extend
+        // ensure_proxy_rings.
+        if (n > 1) {
+            if (rank() == 0) {
+                fprintf(stderr,
+                    "[gicc] GICC_NUM_PROXY_THREADS=%d requested but the current "
+                    "implementation supports only N=1 (proxy threads share one "
+                    "libfabric EP+CQ; per-thread EP refactor not yet landed). "
+                    "Falling back to N=1.\n", n);
+            }
+            n = 1;
+        }
+        proxy_threads_.reserve(n);
+        for (int i = 0; i < n; ++i) {
+            proxy_threads_.push_back(
+                std::make_unique<gicc::proxy::ProxyThread>(*this));
+            proxy_threads_.back()->start();
+        }
+        // Allocate a host-pinned, GPU-mapped array of N device-ring pointers
+        // so the kernel can index proxy_rings_arr[ring_idx] without a host
+        // round-trip. Pinned makes the GPU-side load coherent on GH200.
+        size_t arr_bytes = sizeof(void*) * n;
+        if (gpuHostMalloc(&proxy_rings_arr_host_, arr_bytes,
+                          gpuHostMallocMapped) != GPU_SUCCESS) {
+            fprintf(stderr,
+                "[gicc] gpuHostMalloc(proxy_rings_arr) failed for N=%d\n", n);
+            std::abort();
+        }
+        for (int i = 0; i < n; ++i) {
+            proxy_rings_arr_host_[i] = proxy_threads_[i]->ring_device();
+        }
+        if (gpuHostGetDevicePointer(reinterpret_cast<void**>(&proxy_rings_arr_dev_),
+                                    proxy_rings_arr_host_, 0) != GPU_SUCCESS) {
+            fprintf(stderr,
+                "[gicc] gpuHostGetDevicePointer(proxy_rings_arr) failed\n");
+            std::abort();
+        }
+        if (rank() == 0) {
+            fprintf(stderr,
+                "[gicc] CPU proxy: %d worker thread(s) per rank\n", n);
+        }
+        return proxy_rings_arr_dev_;
+    }
+
+    int num_proxy_rings() const {
+        return static_cast<int>(proxy_threads_.size());
+    }
+
+    // Backward-compat single-ring helper. Returns ring 0; existing examples
+    // (L1/L2/L4/L5) that use a single ring keep working unchanged.
+    gicc::proxy::ProxyRing* ensure_proxy_ring() {
+        ensure_proxy_rings();
+        return proxy_threads_[0]->ring_device();
     }
 #endif
 
@@ -894,15 +981,21 @@ private:
     int                                n_bufs_         = 0;
 
 #ifdef GICC_CPU_PROXY
-    // Lazy-initialized CPU proxy worker. ensure_proxy_ring() constructs it
-    // on demand and start()s the worker thread; ~Runtime() stops it before
-    // tearing down libfabric state so the worker doesn't dereference a
-    // freed Fabric.
-    std::unique_ptr<gicc::proxy::ProxyThread> proxy_thread_;
-    // Serializes lazy construction of proxy_thread_ in ensure_proxy_ring().
-    // Without it, two host threads racing into prepare() could each see
-    // !proxy_thread_, each construct a ProxyThread, and leak one of them.
-    std::mutex                                proxy_init_mutex_;
+    // Lazy-initialized fleet of CPU proxy workers. ensure_proxy_rings()
+    // constructs them on demand. Count comes from GICC_NUM_PROXY_THREADS
+    // (default 1 — UCCL-EP uses 4 by default; we leave the default at 1
+    // so single-ring callers don't pay for unused workers, and let the
+    // bench / advanced callers opt in via the env var).
+    std::vector<std::unique_ptr<gicc::proxy::ProxyThread>> proxy_threads_;
+    // Device-mapped pointer to an array of N ring pointers. Allocated
+    // (host-pinned, GPU-mapped) lazily alongside the threads. Stored once
+    // in DeviceCtx::proxy_rings_arr by prepare().
+    void**                                                 proxy_rings_arr_host_ = nullptr;
+    void**                                                 proxy_rings_arr_dev_  = nullptr;
+    // Serializes lazy construction. Without it, two host threads racing
+    // into prepare() could each see empty proxy_threads_, each construct
+    // the fleet, and leak one of them.
+    std::mutex                                             proxy_init_mutex_;
 #endif
 };
 

@@ -63,12 +63,16 @@ struct DeviceCtx {
     volatile uint64_t* trigger_addr_;       // MMIO trigger counter
     uint64_t           trigger_val_;        // value to write to trigger_addr_
 #ifdef GICC_CPU_PROXY
-    // Device-mapped pointer to the host-pinned ProxyRing. Set by
-    // Runtime::prepare() to the result of ensure_proxy_ring(). put_no_db
-    // (proxy variant below) atomic_pushes a TransferCmd into this ring;
-    // the CPU proxy worker drains it and submits via libfabric. nullptr
-    // if the proxy thread hasn't been started yet.
+    // Single-ring back-compat pointer (== proxy_rings_arr[0]). Used by the
+    // single-ring put_no_db / quiet device functions below.
     void*              proxy_ring;          // gicc::proxy::ProxyRing*
+    // Multi-ring fan-out: device-mapped array of N ring pointers, plus N.
+    // Kernels can pick proxy_rings_arr[idx % num_proxy_rings] to dispatch
+    // independent submissions through different proxy threads (UCCL-EP
+    // model: kNumProxyThs separate workers, each owning its own ring,
+    // with the GPU side hashing on warp/expert id).
+    void**             proxy_rings_arr;
+    int                num_proxy_rings;
 #endif
 };
 
@@ -153,6 +157,81 @@ void quiet(DeviceCtx* ctx) {
 // rt.reset() to ensure all such pushes are published before the host
 // drain snapshots the producer head.
 //==============================================================================
+// Multi-ring variant: pushes the WRITE cmd into proxy_rings_arr[ring_idx %
+// num_proxy_rings]. Use this when sharding parallel kernel work across
+// multiple proxy threads (UCCL-EP pattern). Falls back to ring 0 if no
+// fan-out array is set up. Defined ABOVE single-ring put_no_db so the
+// latter can delegate.
+__device__ inline
+void put_no_db_idx(DeviceCtx* ctx, int ring_idx,
+                   int target_rank,
+                   int dst_buf, size_t dst_offset,
+                   int src_buf, size_t src_offset,
+                   size_t size) {
+#ifdef GICC_CPU_PROXY
+    if (!ctx) return;
+    void* ring_ptr = nullptr;
+    if (ctx->proxy_rings_arr && ctx->num_proxy_rings > 0) {
+        int n = ctx->num_proxy_rings;
+        int idx = ring_idx;
+        if (idx < 0) idx = 0;
+        idx = idx % n;
+        ring_ptr = ctx->proxy_rings_arr[idx];
+    } else {
+        ring_ptr = ctx->proxy_ring;
+    }
+    if (!ring_ptr) return;
+    auto* ring = reinterpret_cast<gicc::proxy::ProxyRing*>(ring_ptr);
+    gicc::proxy::TransferCmd c;
+    c.cmd_type   = gicc::proxy::CmdType::WRITE;
+    c.dst_rank   = static_cast<uint8_t>(target_rank);
+    c.src_buf    = static_cast<uint8_t>(src_buf);
+    c.dst_buf    = static_cast<uint8_t>(dst_buf);
+    c.bytes      = static_cast<uint32_t>(size);
+    c.src_offset = src_offset;
+    c.dst_offset = dst_offset;
+    ring->atomic_push(c);
+#else
+    (void)ctx; (void)ring_idx; (void)target_rank;
+    (void)dst_buf; (void)dst_offset; (void)src_buf; (void)src_offset; (void)size;
+#endif
+}
+
+// quiet variant for ring `ring_idx`. Pushes QUIET into that specific ring
+// and spins on its tail. Use after a series of put_no_db_idx() with the
+// same ring_idx to wait for completion of just that lane.
+__device__ inline
+void quiet_idx(DeviceCtx* ctx, int ring_idx) {
+#ifdef GICC_CPU_PROXY
+    if (!ctx) return;
+    void* ring_ptr = nullptr;
+    if (ctx->proxy_rings_arr && ctx->num_proxy_rings > 0) {
+        int n = ctx->num_proxy_rings;
+        int idx = ring_idx;
+        if (idx < 0) idx = 0;
+        idx = idx % n;
+        ring_ptr = ctx->proxy_rings_arr[idx];
+    } else {
+        ring_ptr = ctx->proxy_ring;
+    }
+    if (!ring_ptr) return;
+    auto* ring = reinterpret_cast<gicc::proxy::ProxyRing*>(ring_ptr);
+    gicc::proxy::TransferCmd c{};
+    c.cmd_type = gicc::proxy::CmdType::QUIET;
+    uint64_t my_slot = ring->atomic_push(c);
+    while (ring->device_tail_volatile() <= my_slot) {
+#if defined(__CUDA_ARCH__)
+        __nanosleep(64);
+#elif defined(__HIP_DEVICE_COMPILE__)
+        __builtin_amdgcn_s_sleep(1);
+#endif
+    }
+    __threadfence_system();
+#else
+    (void)ctx; (void)ring_idx;
+#endif
+}
+
 __device__ inline
 void put_no_db(DeviceCtx* ctx,
                int target_rank,
