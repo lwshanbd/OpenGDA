@@ -51,7 +51,7 @@ int main() {
     auto h_local = rt.register_buffer(dev_buf, SZ, /*is_device=*/true);
     rt.exchange();   // single rank: collective is just a self allgather
 
-    ProxyThread pt(rt);
+    ProxyThread pt(rt, /*ep_idx=*/0);
     pt.start();
 
     constexpr int N = 100;

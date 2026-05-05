@@ -26,8 +26,8 @@ namespace proxy {
 
 namespace {
 constexpr int kSubmitBatch = 32;
-// CQ poll batch — bumped up from 32 (UCCL-EP polls up to 2048). 256 drains
-// a typical burst in one syscall and amortizes the per-fi_cq_read overhead.
+// CQ poll batch — bumped up from 32. 256 drains a typical burst in one
+// syscall and amortizes the per-fi_cq_read overhead.
 constexpr int kCqBatch     = 256;
 
 // Bounded drain timeouts. Without these, a dropped completion (peer dead,
@@ -47,12 +47,12 @@ inline void cpu_relax() {
 }
 } // namespace
 
-ProxyThread::ProxyThread(::gicc::Runtime& rt)
+ProxyThread::ProxyThread(::gicc::Runtime& rt, int ep_idx)
     : rt_(rt)
     , ring_host_(nullptr)
     , ring_device_(nullptr)
     , running_(false)
-    , lf_(rt.fabric(), rt)
+    , lf_(rt.fabric(), rt, ep_idx)
 {
     ring_host_ = allocate_d2h_ring_host<kProxyRingCapacity>(&ring_device_);
 }
@@ -144,6 +144,17 @@ void ProxyThread::main_loop() {
             switch (c.cmd_type) {
                 case CmdType::WRITE: {
                     int ret = lf_.submit_write(c, slot);
+                    if (ret == -FI_EAGAIN) {
+                        pending_retry_ = PendingRetry{c, slot};
+                        stop_submitting = true;
+                        break;
+                    }
+                    in_flight_.set(bit);
+                    ++in_flight_count_;
+                    break;
+                }
+                case CmdType::ATOMIC: {
+                    int ret = lf_.submit_atomic_add(c, slot);
                     if (ret == -FI_EAGAIN) {
                         pending_retry_ = PendingRetry{c, slot};
                         stop_submitting = true;

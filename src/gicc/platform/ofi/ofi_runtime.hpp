@@ -121,6 +121,36 @@ public:
         unset_rocr_visible_devices();
         comm_ = new Fabric(boot_);
 
+#ifdef GICC_CPU_PROXY
+        // Open the per-thread proxy endpoints + CQs BEFORE any MR is
+        // registered, so that subsequent register_buffer() calls (and the
+        // slot_pool / operand_pool MRs below — even though those are
+        // DWQ-internal we keep registration uniform) can fi_mr_bind to every
+        // proxy EP. After fi_mr_enable, more EPs cannot be bound to the MR.
+        //
+        // Defaulting N to 1 matches the previous CPU-proxy default; users
+        // override via GICC_NUM_PROXY_THREADS to fan out the fleet. The
+        // env range is [1,32] — prepare() unconditionally calls
+        // ensure_proxy_rings() under -DGICC_CPU_PROXY, so a fleet of zero
+        // is not currently representable; build without GICC_CPU_PROXY to
+        // disable the proxy path entirely.
+        {
+            int n_proxy = 1;
+            if (const char* e = std::getenv("GICC_NUM_PROXY_THREADS")) {
+                int parsed = std::atoi(e);
+                if (parsed >= 1 && parsed <= 32) {
+                    n_proxy = parsed;
+                } else if (boot_.rank() == 0) {
+                    fprintf(stderr,
+                        "[gicc] GICC_NUM_PROXY_THREADS=%s out of [1,32], "
+                        "using default %d\n", e, n_proxy);
+                }
+            }
+            n_proxy_threads_ = n_proxy;
+            comm_->create_proxy_endpoints(n_proxy);
+        }
+#endif
+
         // Locality map from Bootstrap: [rank] = true iff rank shares our node.
         // put_no_db() routes same-node writes through HIP IPC entirely
         // device-side: the kernel reads peer_mapped_ptrs_ exposed via
@@ -815,51 +845,29 @@ public:
 
 #ifdef GICC_CPU_PROXY
     //--------------------------------------------------------------------------
-    // ensure_proxy_rings — lazy-construct + start N CPU proxy workers (N read
-    // from GICC_NUM_PROXY_THREADS, default 1, clamped to [1,32]). Returns a
+    // ensure_proxy_rings — lazy-construct + start N CPU proxy workers, where
+    // N was decided at Runtime construction time (GICC_NUM_PROXY_THREADS,
+    // default 1, range [0,32]). Each worker submits/polls on its own
+    // (fi_endpoint, fi_cq) opened by Fabric::create_proxy_endpoints in the
+    // Runtime ctor, so completions never cross threads. Returns a
     // device-mapped pointer to an array of N ring pointers. Idempotent.
     //--------------------------------------------------------------------------
     void** ensure_proxy_rings() {
         std::lock_guard<std::mutex> g(proxy_init_mutex_);
         if (!proxy_threads_.empty()) return proxy_rings_arr_dev_;
 
-        int n = 1;
-        if (const char* e = std::getenv("GICC_NUM_PROXY_THREADS")) {
-            int parsed = std::atoi(e);
-            if (parsed >= 1 && parsed <= 32) n = parsed;
-            else if (rank() == 0) {
-                fprintf(stderr,
-                    "[gicc] GICC_NUM_PROXY_THREADS=%s out of [1,32], using 1\n", e);
-            }
-        }
-        // CURRENT LIMITATION: all proxy threads share Fabric's single
-        // libfabric endpoint + CQ (cxi rejects binding a 2nd TX CQ to the
-        // same EP — verified at first run in ProxyLibfabric). With a shared
-        // CQ, multiple consumer threads steal each other's completions
-        // (fi_cq_read removes entries), so thread A may drain thread B's
-        // ack and never tell B about it → B's quiet/drain hangs forever.
-        //
-        // True UCCL-EP parity requires per-thread fi_endpoint + fi_cq
-        // (UCCL-EP's ProxyCtx-per-thread model with separate QPs). That is
-        // a substantial Fabric refactor (per-EP fi_getname + per-EP AV
-        // address exchange via Bootstrap). Until then, cap N to 1 — the
-        // multi-ring DeviceCtx fan-out, put_no_db_idx and quiet_idx are
-        // still wired so a future per-EP refactor only needs to extend
-        // ensure_proxy_rings.
-        if (n > 1) {
-            if (rank() == 0) {
-                fprintf(stderr,
-                    "[gicc] GICC_NUM_PROXY_THREADS=%d requested but the current "
-                    "implementation supports only N=1 (proxy threads share one "
-                    "libfabric EP+CQ; per-thread EP refactor not yet landed). "
-                    "Falling back to N=1.\n", n);
-            }
-            n = 1;
+        int n = n_proxy_threads_;
+        if (n != comm_->num_proxy_eps()) {
+            // Should be unreachable: ctor sized the EP fleet to match.
+            fprintf(stderr,
+                "[gicc] proxy fleet/EP count mismatch (threads=%d eps=%d)\n",
+                n, comm_->num_proxy_eps());
+            std::abort();
         }
         proxy_threads_.reserve(n);
         for (int i = 0; i < n; ++i) {
             proxy_threads_.push_back(
-                std::make_unique<gicc::proxy::ProxyThread>(*this));
+                std::make_unique<gicc::proxy::ProxyThread>(*this, /*ep_idx=*/i));
             proxy_threads_.back()->start();
         }
         // Allocate a host-pinned, GPU-mapped array of N device-ring pointers
@@ -981,11 +989,15 @@ private:
     int                                n_bufs_         = 0;
 
 #ifdef GICC_CPU_PROXY
+    // Number of proxy threads in the fleet. Decided at Runtime construction
+    // (GICC_NUM_PROXY_THREADS env var, default 1, clamped to [0,32]); the
+    // matching number of fi_endpoints + fi_cqs is opened in Fabric at the
+    // same time so MR registration can fi_mr_bind to all of them.
+    int                                                    n_proxy_threads_ = 1;
     // Lazy-initialized fleet of CPU proxy workers. ensure_proxy_rings()
-    // constructs them on demand. Count comes from GICC_NUM_PROXY_THREADS
-    // (default 1 — UCCL-EP uses 4 by default; we leave the default at 1
-    // so single-ring callers don't pay for unused workers, and let the
-    // bench / advanced callers opt in via the env var).
+    // constructs them on demand. Count is n_proxy_threads_ (default 1 —
+    // single-ring callers don't pay for unused workers, advanced callers
+    // opt into a wider fleet via GICC_NUM_PROXY_THREADS).
     std::vector<std::unique_ptr<gicc::proxy::ProxyThread>> proxy_threads_;
     // Device-mapped pointer to an array of N ring pointers. Allocated
     // (host-pinned, GPU-mapped) lazily alongside the threads. Stored once

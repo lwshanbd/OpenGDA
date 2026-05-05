@@ -1,5 +1,10 @@
 /*
  * memory_region.hpp - Libfabric memory region wrapper with RAII
+ *
+ * One MR is bound to one endpoint. CXI rejects fi_mr_bind to a second EP
+ * with -EINVAL, so the proxy fleet uses N+1 MR registrations per buffer
+ * (one per main/proxy EP) — see Fabric::register_buffer for the policy and
+ * Fabric::proxy_buf_desc for how the per-EP local descriptor is consumed.
  */
 #pragma once
 

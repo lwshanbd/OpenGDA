@@ -68,9 +68,9 @@ struct DeviceCtx {
     void*              proxy_ring;          // gicc::proxy::ProxyRing*
     // Multi-ring fan-out: device-mapped array of N ring pointers, plus N.
     // Kernels can pick proxy_rings_arr[idx % num_proxy_rings] to dispatch
-    // independent submissions through different proxy threads (UCCL-EP
-    // model: kNumProxyThs separate workers, each owning its own ring,
-    // with the GPU side hashing on warp/expert id).
+    // independent submissions through different proxy threads — N separate
+    // workers, each owning its own ring, with the GPU side hashing on
+    // warp / lane / per-message id to spread load across the fleet.
     void**             proxy_rings_arr;
     int                num_proxy_rings;
 #endif
@@ -159,9 +159,8 @@ void quiet(DeviceCtx* ctx) {
 //==============================================================================
 // Multi-ring variant: pushes the WRITE cmd into proxy_rings_arr[ring_idx %
 // num_proxy_rings]. Use this when sharding parallel kernel work across
-// multiple proxy threads (UCCL-EP pattern). Falls back to ring 0 if no
-// fan-out array is set up. Defined ABOVE single-ring put_no_db so the
-// latter can delegate.
+// multiple proxy threads. Falls back to ring 0 if no fan-out array is set
+// up. Defined ABOVE single-ring put_no_db so the latter can delegate.
 __device__ inline
 void put_no_db_idx(DeviceCtx* ctx, int ring_idx,
                    int target_rank,
@@ -194,6 +193,46 @@ void put_no_db_idx(DeviceCtx* ctx, int ring_idx,
 #else
     (void)ctx; (void)ring_idx; (void)target_rank;
     (void)dst_buf; (void)dst_offset; (void)src_buf; (void)src_offset; (void)size;
+#endif
+}
+
+// Multi-ring atomic-add variant: pushes a non-fetching FI_SUM/FI_UINT32
+// atomic add into proxy_rings_arr[ring_idx % num_proxy_rings]. The local
+// 4-byte source value lives at (src_buf, src_offset); the proxy issues
+// fi_atomic to add that value into peer's (dst_buf, dst_offset) counter
+// slot. Use to publish a per-lane completion fence after a sequence of
+// put_no_db_idx() calls so the receiver can wait on a single counter.
+__device__ inline
+void atomic_add_u32_idx(DeviceCtx* ctx, int ring_idx,
+                        int target_rank,
+                        int dst_buf, size_t dst_offset,
+                        int src_buf, size_t src_offset) {
+#ifdef GICC_CPU_PROXY
+    if (!ctx) return;
+    void* ring_ptr = nullptr;
+    if (ctx->proxy_rings_arr && ctx->num_proxy_rings > 0) {
+        int n = ctx->num_proxy_rings;
+        int idx = ring_idx;
+        if (idx < 0) idx = 0;
+        idx = idx % n;
+        ring_ptr = ctx->proxy_rings_arr[idx];
+    } else {
+        ring_ptr = ctx->proxy_ring;
+    }
+    if (!ring_ptr) return;
+    auto* ring = reinterpret_cast<gicc::proxy::ProxyRing*>(ring_ptr);
+    gicc::proxy::TransferCmd c;
+    c.cmd_type   = gicc::proxy::CmdType::ATOMIC;
+    c.dst_rank   = static_cast<uint8_t>(target_rank);
+    c.src_buf    = static_cast<uint8_t>(src_buf);
+    c.dst_buf    = static_cast<uint8_t>(dst_buf);
+    c.bytes      = 4;  // implicit; proxy ignores
+    c.src_offset = src_offset;
+    c.dst_offset = dst_offset;
+    ring->atomic_push(c);
+#else
+    (void)ctx; (void)ring_idx; (void)target_rank;
+    (void)dst_buf; (void)dst_offset; (void)src_buf; (void)src_offset;
 #endif
 }
 

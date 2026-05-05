@@ -33,7 +33,13 @@ namespace proxy {
 
 class ProxyThread {
 public:
-    explicit ProxyThread(::gicc::Runtime& rt);
+    // ep_idx selects the (fi_endpoint, fi_cq) this thread submits/polls on.
+    // Runtime opens N proxy endpoints in Fabric (Fabric::create_proxy_endpoints)
+    // before spawning the fleet, then constructs ProxyThread instances with
+    // ep_idx 0..N-1. With one EP per thread, completions never cross threads
+    // — fixing the prior shared-CQ bug where fi_cq_read on thread A could
+    // consume a completion that thread B was still waiting for.
+    ProxyThread(::gicc::Runtime& rt, int ep_idx);
     ~ProxyThread();
 
     ProxyThread(const ProxyThread&)            = delete;

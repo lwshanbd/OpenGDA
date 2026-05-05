@@ -80,6 +80,27 @@ public:
     // Registered memory regions (for cleanup)
     std::vector<MemoryRegion*> registered_mrs;
 
+    // CPU proxy fleet: per-thread fi_endpoint + fi_cq, sharing the main AV.
+    // create_proxy_endpoints(N) populates these; ProxyLibfabric instances
+    // pick proxy_eps_[i] / proxy_cqs_[i] by ep_idx. Empty when N=0 (only
+    // the DWQ-triggered path is in use).
+    //
+    // The AV is shared with the main EP: peer addresses are inserted once
+    // (in exchange_addresses()) and the resulting fi_addr_t is valid as a
+    // destination from any local EP bound to the AV — including these
+    // proxy EPs. So the proxy fleet does NOT need its own per-EP AV nor a
+    // separate address allgather. Peers only ever target our main EP via
+    // the address they learned from exchange(); our proxy EPs are TX-only.
+    std::vector<fid_ep*> proxy_eps_;
+    std::vector<fid_cq*> proxy_cqs_;
+
+    // Per-(buf_idx, ep_idx) MR pointers for the proxy fleet's local
+    // descriptors. Each proxy EP needs its own MR registration of every
+    // user buffer because CXI rejects fi_mr_bind to a second EP. The MR
+    // objects themselves are owned by registered_mrs; this vector just
+    // provides the [buf][ep] indexing that proxy_buf_desc() uses.
+    std::vector<std::vector<MemoryRegion*>> proxy_mrs_by_buf_;
+
     // DWQ work builders (one per pending operation)
     std::vector<DwqWorkBuilder*> pending_ops;
 
@@ -143,7 +164,8 @@ public:
         for (auto* wb : pending_wb_ops) delete wb;
         pending_wb_ops.clear();
 
-        // Cleanup registered memory regions
+        // Cleanup registered memory regions before tearing down EPs (MRs
+        // hold bind references to those EPs).
         for (auto* mr : registered_mrs) delete mr;
         registered_mrs.clear();
 
@@ -153,6 +175,18 @@ public:
         if (atomic_completion_cntr) fi_close(&atomic_completion_cntr->fid);
         if (atomic_result) (void)gpuFree(atomic_result);
         if (atomic_operand) (void)gpuFree(atomic_operand);
+
+        // Close proxy EPs + CQs before the FabricDwqContext (which owns the
+        // shared AV/domain). Order: EP first, then CQ — fi_close on EP can
+        // touch its bound CQ otherwise.
+        for (auto* ep : proxy_eps_) {
+            if (ep) fi_close(&ep->fid);
+        }
+        proxy_eps_.clear();
+        for (auto* cq : proxy_cqs_) {
+            if (cq) fi_close(&cq->fid);
+        }
+        proxy_cqs_.clear();
 
         // Cleanup components (reverse order)
         delete ofi_barrier;
@@ -166,17 +200,145 @@ public:
     Fabric& operator=(const Fabric&) = delete;
 
     /**
+     * Open N additional fi_endpoints (each with its own fi_cq) on the same
+     * domain, sharing the main AV. Idempotent: calling with the same N is
+     * a no-op; calling with a different N after the first call aborts —
+     * proxy_eps_ are bound by subsequent register_buffer() calls and
+     * cannot be added/removed after MRs are enabled.
+     *
+     * Must be called BEFORE the first register_buffer() so that MRs can
+     * fi_mr_bind to every proxy EP. Runtime ctor takes care of this when
+     * GICC_NUM_PROXY_THREADS > 0.
+     */
+    void create_proxy_endpoints(int n) {
+        if (n <= 0) return;
+        if (!proxy_eps_.empty()) {
+            if ((int)proxy_eps_.size() != n) {
+                fprintf(stderr,
+                    "Rank %d: create_proxy_endpoints called twice with "
+                    "different N (%zu vs %d) — proxy EPs cannot be resized "
+                    "after the first MR is registered against them.\n",
+                    boot.rank(), proxy_eps_.size(), n);
+                exit(1);
+            }
+            return;
+        }
+
+        proxy_eps_.reserve(n);
+        proxy_cqs_.reserve(n);
+
+        // Match the main EP's CQ size policy (GICC_CQ_SIZE), default 128.
+        struct fi_cq_attr cq_attr = {};
+        cq_attr.size   = 128;
+        if (const char* env = std::getenv("GICC_CQ_SIZE")) {
+            int sz = std::atoi(env);
+            if (sz >= 16 && sz <= 16384) cq_attr.size = sz;
+        }
+        cq_attr.format = FI_CQ_FORMAT_CONTEXT;
+
+        for (int i = 0; i < n; ++i) {
+            fid_cq* cq = nullptr;
+            int ret = fi_cq_open(fabric->domain, &cq_attr, &cq, NULL);
+            if (ret) {
+                fprintf(stderr,
+                    "Rank %d: fi_cq_open(proxy_cq[%d]) failed: %s (%d)\n",
+                    boot.rank(), i, fi_strerror(-ret), ret);
+                exit(1);
+            }
+
+            fid_ep* ep = nullptr;
+            ret = fi_endpoint(fabric->domain, fabric->cxi_info, &ep, NULL);
+            if (ret) {
+                fi_close(&cq->fid);
+                fprintf(stderr,
+                    "Rank %d: fi_endpoint(proxy_ep[%d]) failed: %s (%d)\n",
+                    boot.rank(), i, fi_strerror(-ret), ret);
+                exit(1);
+            }
+            // Share the main AV so peer fi_addr_t entries inserted by
+            // exchange_addresses() are usable from this EP too.
+            ret = fi_ep_bind(ep, &fabric->av->fid, 0);
+            if (ret) {
+                fi_close(&ep->fid);
+                fi_close(&cq->fid);
+                fprintf(stderr,
+                    "Rank %d: fi_ep_bind(proxy_ep[%d], av) failed: %s (%d)\n",
+                    boot.rank(), i, fi_strerror(-ret), ret);
+                exit(1);
+            }
+            // Bind the same CQ for both TX and RX. The proxy never posts
+            // recvs (peers only target the main EP — see exchange_addresses
+            // — so no traffic arrives at proxy EPs), but the CXI provider
+            // refuses fi_enable on an EP that has no RX CQ bound (it
+            // returns FI_ENOCQ). Sharing the TX CQ for RX is harmless: an
+            // empty RX path produces no completions to drain.
+            ret = fi_ep_bind(ep, &cq->fid, FI_TRANSMIT | FI_RECV);
+            if (ret) {
+                fi_close(&ep->fid);
+                fi_close(&cq->fid);
+                fprintf(stderr,
+                    "Rank %d: fi_ep_bind(proxy_ep[%d], cq, "
+                    "FI_TRANSMIT|FI_RECV) failed: %s (%d)\n",
+                    boot.rank(), i, fi_strerror(-ret), ret);
+                exit(1);
+            }
+            ret = fi_enable(ep);
+            if (ret) {
+                fi_close(&ep->fid);
+                fi_close(&cq->fid);
+                fprintf(stderr,
+                    "Rank %d: fi_enable(proxy_ep[%d]) failed: %s (%d)\n",
+                    boot.rank(), i, fi_strerror(-ret), ret);
+                exit(1);
+            }
+            proxy_eps_.push_back(ep);
+            proxy_cqs_.push_back(cq);
+        }
+    }
+
+    int      num_proxy_eps() const { return (int)proxy_eps_.size(); }
+    fid_ep*  proxy_ep(int i)       { return proxy_eps_.at(i); }
+    fid_cq*  proxy_cq(int i)       { return proxy_cqs_.at(i); }
+
+    /**
      * Register a buffer for RDMA operations
      * @param buf Buffer pointer
      * @param size Buffer size in bytes
      * @param is_device True if buffer is on GPU
      * @return Handle for use in put/get operations
+     *
+     * Always creates ONE MR bound to the main EP (its rkey is what peers
+     * learn via exchange()). Additionally, when the proxy fleet is open
+     * (N = num_proxy_eps() > 0), creates N more MRs — one per proxy EP —
+     * to provide the per-EP local descriptor each proxy thread needs for
+     * fi_write. Those extra MRs are LOCAL-ONLY: their rkeys are never
+     * advertised to peers. Peers always target our main EP using the main
+     * MR's rkey, regardless of which local proxy EP submits the write.
+     *
+     * Indexing: per-buffer descs[ep_idx] is exposed via proxy_buf_desc().
+     * Buffer index is the order register_buffer() is called.
      */
     Handle register_buffer(void* buf, size_t size, bool is_device) {
         auto* mr = new MemoryRegion(
             fabric->domain, fabric->ep, fabric->cxi_info,
             buf, size, is_device, hip->gpu_id, boot.rank());
         registered_mrs.push_back(mr);
+
+        // Per-proxy-EP MRs. Each is a separate fi_mr_regattr call binding
+        // the SAME local buffer to one proxy EP (CXI rejects multi-bind
+        // with -EINVAL, so a single MR can't span multiple EPs). Each MR's
+        // desc is what proxy_ep[i] needs as the source descriptor for
+        // fi_write; the rkey is unused (peers don't address these MRs).
+        std::vector<MemoryRegion*> per_ep;
+        per_ep.reserve(proxy_eps_.size());
+        for (size_t i = 0; i < proxy_eps_.size(); ++i) {
+            auto* pmr = new MemoryRegion(
+                fabric->domain, proxy_eps_[i], fabric->cxi_info,
+                buf, size, is_device, hip->gpu_id, boot.rank());
+            registered_mrs.push_back(pmr);   // for cleanup ownership
+            per_ep.push_back(pmr);
+        }
+        proxy_mrs_by_buf_.push_back(std::move(per_ep));
 
         Handle handle;
         handle.buf = buf;
@@ -186,6 +348,28 @@ public:
         handle.rma_addr = (uint64_t)buf;
         handle.rma_key = mr->key;
         return handle;
+    }
+
+    /**
+     * Per-(buf_idx, ep_idx) local descriptor for fi_write on proxy_ep[ep_idx].
+     * buf_idx is the order register_buffer() was called (matches
+     * Runtime::local_bufs_ index). Aborts if either index is out of range.
+     */
+    void* proxy_buf_desc(int buf_idx, int ep_idx) const {
+        if (buf_idx < 0 || (size_t)buf_idx >= proxy_mrs_by_buf_.size()) {
+            fprintf(stderr,
+                "Fabric::proxy_buf_desc: buf_idx %d out of range (n_bufs=%zu)\n",
+                buf_idx, proxy_mrs_by_buf_.size());
+            std::abort();
+        }
+        const auto& per_ep = proxy_mrs_by_buf_[(size_t)buf_idx];
+        if (ep_idx < 0 || (size_t)ep_idx >= per_ep.size()) {
+            fprintf(stderr,
+                "Fabric::proxy_buf_desc: ep_idx %d out of range (n_eps=%zu)\n",
+                ep_idx, per_ep.size());
+            std::abort();
+        }
+        return per_ep[(size_t)ep_idx]->desc;
     }
 
     /**

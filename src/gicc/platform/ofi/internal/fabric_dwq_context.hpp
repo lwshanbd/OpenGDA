@@ -195,7 +195,7 @@ private:
     void init_fabric() {
         // Setup hints
         struct fi_info* hints = fi_allocinfo();
-        hints->caps = FI_RMA | FI_MSG | FI_HMEM;
+        hints->caps = FI_RMA | FI_MSG | FI_HMEM | FI_ATOMIC;
         hints->mode = FI_CONTEXT2;  // DWQ requires FI_CONTEXT2
         hints->ep_attr->type = FI_EP_RDM;
         hints->domain_attr->mr_mode = FI_MR_VIRT_ADDR | FI_MR_ALLOCATED |

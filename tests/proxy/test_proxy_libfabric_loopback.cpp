@@ -34,7 +34,8 @@ int main() {
     auto h_local = rt.register_buffer(dev_buf, SZ, /*is_device=*/true);
     rt.exchange();   // single rank: collective is just a self allgather
 
-    ProxyLibfabric pl(rt.fabric(), rt);
+    // Use proxy EP 0 — Runtime opens the fleet eagerly in its ctor.
+    ProxyLibfabric pl(rt.fabric(), rt, /*ep_idx=*/0);
 
     TransferCmd c{};
     c.cmd_type   = CmdType::WRITE;
