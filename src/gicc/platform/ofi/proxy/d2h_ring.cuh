@@ -82,8 +82,8 @@ struct alignas(128) D2HRing {
     // CRITICAL ordering: the CAS that bumps `head` makes the new head visible
     // to the host BEFORE the slot data is written. If the consumer trusted
     // head alone, it would race and read stale/empty buf[idx]. So the
-    // consumer instead waits for cmd_type != EMPTY (mirrors UCCL-EP's
-    // ring_buffer.cuh atomic_set_and_commit pattern).
+    // consumer instead waits for cmd_type != EMPTY — cmd_type doubles as
+    // the per-slot ready flag, written last, after the payload.
     __device__ uint64_t atomic_push(const TransferCmd& c) {
         unsigned long long h, prev;
         do {
@@ -122,7 +122,7 @@ struct alignas(128) D2HRing {
         // fully-written slot. The earlier threadfence_system already
         // ordered the field stores; the cmd_type store + the consumer's
         // acquire-load form the release/acquire pair, so a second fence
-        // here is redundant (UCCL-EP atomic_set_and_commit also uses one).
+        // here is redundant.
         buf[idx].cmd_type = c.cmd_type;
 
         return h;
