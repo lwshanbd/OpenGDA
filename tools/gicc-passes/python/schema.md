@@ -24,7 +24,7 @@ A JSON array of per-(launch site × op) records.
 ```json
 [
   {
-    "schema_version": 1,
+    "schema_version": 2,
     "site_id":            "<TU>:<line>:<kernel>::<idx>",
     "kernel":             "halo_kernel",
     "op_kind":            "put_no_db",       // | get_no_db | flush | quiet
@@ -33,14 +33,31 @@ A JSON array of per-(launch site × op) records.
     "size_log2":          12,                // null when size is non-const
     "peer_kind":          "param",           // | const | binop | cast | derived
     "peer_locality":      null,              // | same_node | cross_node
-    "in_loop":            false,
+    "in_loop":            true,              // real value from device-side LoopInfo
+    "loop": {                                // present iff in_loop=true
+      "iv_start":         0,
+      "iv_step":          1,
+      "bound_known":      true,
+      "bound_param_idx":  3,
+      "degraded":         false              // omitted unless true
+    },
     "guard_density":      0.5,               // 1.0 if Always else 0.5
     "fan_out":            2,                 // distinct param-keyed peers
-    "compute_before_flops": 0,
-    "iter_estimate":      null
+    "compute_before_flops": 17,              // arith ops in BBs dominating the call;
+                                             //   null if not measured
+    "iter_estimate":      null               // numeric when const-bound (none today)
   }
 ]
 ```
+
+Schema v1 → v2 changes:
+- `in_loop` now reflects the real LoopInfo result (was hardcoded false).
+- `compute_before_flops` is the DominatorTree-derived count; was hardcoded 0.
+  `null` means the device pass ran without DT available.
+- New optional `loop` sub-object present iff `in_loop=true`, exposing the
+  canonical loop descriptor (`iv_start`, `iv_step`, `bound_param_idx`).
+- `peer_locality` still null — requires a runtime topology side-band that
+  is not yet wired up (filled by a future v2.x decider hook).
 
 `site_id` matches the `gicc.site_id` metadata operand on every
 placeholder call and is the join key between features and hint.

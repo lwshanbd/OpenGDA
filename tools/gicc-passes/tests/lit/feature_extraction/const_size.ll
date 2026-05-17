@@ -38,8 +38,17 @@ define void @main(ptr %rt) {
 
 ; STDERR: [feature-extract] wrote {{.*}}features.json
 
+; JSON-DAG: "schema_version": 2
 ; JSON-DAG: "kernel": "k_const_sz"
 ; JSON-DAG: "op_kind": "put_no_db"
 ; JSON-DAG: "size_kind": "const"
 ; JSON-DAG: "size_log2": 12
 ; JSON-DAG: "peer_kind": "const"
+; The meta JSON fixture has no `loop` entry → in_loop must serialize as false.
+; JSON-DAG: "in_loop": false
+; The fixture also omits `compute_before` → emit null (not measured), not 0.
+; JSON-DAG: "compute_before_flops": null
+; iter_estimate stays null in v2 (requires runtime bound values).
+; JSON-DAG: "iter_estimate": null
+; peer_locality is still null until the runtime topology side-band lands.
+; JSON-DAG: "peer_locality": null

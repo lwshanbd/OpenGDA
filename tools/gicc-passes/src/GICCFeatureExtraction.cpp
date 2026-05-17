@@ -60,12 +60,42 @@ int kernelFanOut(const KernelTemplate &t) {
     return static_cast<int>(peers.size());
 }
 
+// Compile-time estimate of the loop's trip count, when both bound and
+// start/step are integer constants. Today only the constant-step part
+// is recorded — bounds are typically kernel formals, so this returns
+// null and the decider has to fall back to runtime values. The hook
+// stays here so the schema is forward-compatible once analyzeLoop
+// learns to recognize const-bound loops.
+std::optional<int64_t> iterEstimate(const OpLoopInfo &L) {
+    if (!L.inLoop || !L.ivBoundKnown || L.degraded) return std::nullopt;
+    // bound is a kernel formal in v1 — no compile-time numeric estimate.
+    return std::nullopt;
+}
+
+// Structured loop descriptor for the ML decider. Only emitted when the
+// site is actually inside a loop. The decider can combine this with
+// runtime-side param values to reconstruct a trip-count estimate.
+json::Value loopDescriptor(const OpLoopInfo &L) {
+    json::Object o;
+    o["iv_start"]    = L.ivStart;
+    o["iv_step"]     = L.ivStep;
+    o["bound_known"] = L.ivBoundKnown;
+    if (L.ivBoundKnown)
+        o["bound_param_idx"] = static_cast<int64_t>(L.ivParamIdx);
+    if (L.degraded) o["degraded"] = true;
+    return json::Value(std::move(o));
+}
+
 json::Value toRecord(const std::string &siteId,
                      const std::string &simpleKernel,
                      const OpTemplate  &op,
                      int                fanOut) {
     json::Object r;
-    r["schema_version"] = 1;
+    // Bumped from 1 → 2 with this change: in_loop now reflects reality,
+    // compute_before_flops is populated when the device pass had DT
+    // available, and a structured `loop` sub-object accompanies in_loop
+    // when the site is inside a canonical loop.
+    r["schema_version"] = 2;
     r["site_id"]        = siteId;
     r["kernel"]         = simpleKernel;
     r["op_kind"]        = op.kind;
@@ -91,15 +121,31 @@ json::Value toRecord(const std::string &siteId,
     } else {
         r["peer_kind"] = nullptr;
     }
-    // peer_locality is filled by the decider / runtime introspection in
-    // v2; v1 always reports null.
+    // peer_locality still requires a runtime topology side-band (which
+    // peer ranks live on the same node as self). Filled in v2.x by the
+    // decider after Runtime::exchange() dumps the mapping; until then
+    // we report null and the runtime branch in IPC_OR_DWQ handles it.
     r["peer_locality"] = nullptr;
 
-    r["in_loop"]              = false;
-    r["guard_density"]        = guardDensity(op.guard);
-    r["fan_out"]              = fanOut;
-    r["compute_before_flops"] = 0;
-    r["iter_estimate"]        = nullptr;
+    r["in_loop"]       = op.loop.inLoop;
+    if (op.loop.inLoop) r["loop"] = loopDescriptor(op.loop);
+
+    r["guard_density"] = guardDensity(op.guard);
+    r["fan_out"]       = fanOut;
+
+    // compute_before_flops: static count of arithmetic / FP ops in BBs
+    // dominating the call site. -1 sentinel from the JSON means the
+    // device pass didn't have DT available — emit null in that case so
+    // the decider can tell "0 compute" apart from "not measured".
+    if (op.compute_before >= 0)
+        r["compute_before_flops"] = static_cast<int64_t>(op.compute_before);
+    else
+        r["compute_before_flops"] = nullptr;
+
+    if (auto est = iterEstimate(op.loop))
+        r["iter_estimate"] = *est;
+    else
+        r["iter_estimate"] = nullptr;
     return json::Value(std::move(r));
 }
 
