@@ -1,3 +1,4 @@
+; REQUIRES: gicc_lowering
 ; CPU_PROXY_ENQUEUE requires runtime support: when GICC_PROXY_ENABLED
 ; is not set in the environment, GICCDispatchLowering must emit a
 ; report_fatal_error mentioning the env var (and exit non-zero) instead

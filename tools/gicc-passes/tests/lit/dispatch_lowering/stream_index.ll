@@ -1,3 +1,4 @@
+; REQUIRES: gicc_lowering
 ; IPC_PUSH with non-default stream_index=3: verify that the decider-supplied
 ; stream_index flows through to gicc_runtime_ipc_stream_indexed as a literal
 ; i32 3, not the default i32 0.

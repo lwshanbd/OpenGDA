@@ -1,3 +1,4 @@
+; REQUIRES: gicc_lowering
 ; DWQ_TRIGGER lowering: replace placeholder with a single
 ; gicc_runtime_dwq_enqueue call.
 ;

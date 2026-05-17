@@ -1,3 +1,4 @@
+; REQUIRES: gicc_lowering
 ; IPC_PUSH lowering: replace placeholder with peer_ipc_base + GEP +
 ; local_buf_base + GEP + ipc_stream + hipMemcpyAsync.
 ;

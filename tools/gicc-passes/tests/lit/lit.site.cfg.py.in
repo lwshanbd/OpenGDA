@@ -2,6 +2,10 @@ import lit.llvm
 
 config.gicc_passes_so = "@CMAKE_CURRENT_BINARY_DIR@/libgicc-passes.so"
 config.llvm_bin_dir   = "@LLVM_TOOLS_BINARY_DIR@"
+# 1/0 flag from CMake — true when DeviceLowering + DispatchLowering
+# passes are linked into the plugin. ANALYZE_ONLY builds set this to 0
+# so the matching lit tests can REQUIRE it.
+config.gicc_have_lowering = bool(int("@GICC_PASSES_HAVE_LOWERING@"))
 
 lit.llvm.initialize(lit_config, config)
 lit_config.load_config(config, "@CMAKE_CURRENT_SOURCE_DIR@/tests/lit/lit.cfg.py")

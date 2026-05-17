@@ -1,3 +1,4 @@
+; REQUIRES: gicc_lowering
 ; Without GICC_HINT_IN set, DispatchLowering applies the new default
 ; IPC_OR_DWQ hybrid lowering: a runtime branch on the peer's IPC base
 ; pointer chooses between hipMemcpyAsync (same-node IPC) and

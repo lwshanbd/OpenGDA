@@ -1,3 +1,4 @@
+; REQUIRES: gicc_lowering
 ; CPU_PROXY_ENQUEUE lowering: the host-side placeholder call is erased
 ; (the actual RDMA work runs device-side and is serviced by the CPU
 ; proxy thread), and the kernel's per-kernel JSON is updated with

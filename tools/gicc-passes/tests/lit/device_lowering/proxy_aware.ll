@@ -1,3 +1,4 @@
+; REQUIRES: gicc_lowering
 ; GICCDeviceLowering: hint-aware put_no_db preservation. The pass reads
 ; `proxy_aware: bool` from the per-kernel JSON written by Task 2's
 ; dispatch-lowering. When the kernel has any CPU_PROXY_ENQUEUE site

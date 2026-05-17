@@ -1,3 +1,4 @@
+; REQUIRES: gicc_lowering
 ; GICCDeviceLowering: put_no_db calls become no-ops in device IR
 ; (the host trace function takes over). The kernel must still terminate
 ; with `ret void` and contain no remaining gicc::put_no_db symbol.

@@ -1,3 +1,4 @@
+; REQUIRES: gicc_lowering
 ; IPC_OR_DWQ lowering: replace placeholder with a runtime branch on
 ; %peer_base != null. Same-node peers (mapped IPC base) take the
 ; hipMemcpyAsync path; off-node peers fall through to the DWQ path.

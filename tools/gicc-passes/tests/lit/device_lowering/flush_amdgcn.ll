@@ -1,3 +1,4 @@
+; REQUIRES: gicc_lowering
 ; GICCDeviceLowering: gicc::flush is replaced by a lead-thread MMIO
 ; trigger store + agent-system release fence on AMDGCN.
 ;

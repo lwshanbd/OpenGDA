@@ -1,3 +1,4 @@
+; REQUIRES: gicc_lowering
 ; HK / dispatch cross-check: a site whose kernel JSON says
 ; hk_capable=false MUST be routed to CPU_PROXY_ENQUEUE. Routing it to
 ; any other dispatch (here: DWQ_TRIGGER via hint.json) is a hard build

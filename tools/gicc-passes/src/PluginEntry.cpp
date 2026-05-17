@@ -1,29 +1,48 @@
 #include "GICCDeviceDiscovery.h"
-#include "GICCDeviceLowering.h"
-#include "GICCDispatchLowering.h"
 #include "GICCFeatureExtraction.h"
 #include "GICCHKAnalysis.h"
 #include "GICCHostDiscovery.h"
 #include "GICCPassConfig.h"
 #include "GICCTraceSynthesis.h"
+#ifndef GICC_PASSES_ANALYZE_ONLY
+#  include "GICCDeviceLowering.h"
+#  include "GICCDispatchLowering.h"
+#endif
 
+#include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 
 using namespace llvm;
 using namespace gicc::pass;
+
+// PassBuilder EP-callback signature changed in LLVM 20: a third
+// `ThinOrFullLTOPhase` parameter was added. Provide a single macro for
+// the lambda prologue so both the early-simplification and
+// optimizer-last callbacks stay one-line-per-callsite on both versions.
+#if LLVM_VERSION_MAJOR >= 20
+#  define GICC_EP_LAMBDA_HEAD(MPM_NAME) \
+       [](ModulePassManager &MPM_NAME, OptimizationLevel, ThinOrFullLTOPhase)
+#else
+#  define GICC_EP_LAMBDA_HEAD(MPM_NAME) \
+       [](ModulePassManager &MPM_NAME, OptimizationLevel)
+#endif
 
 namespace {
 
 struct GICCSentinelPass : PassInfoMixin<GICCSentinelPass> {
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
         const auto &cfg = getConfig();
+        // Module::getTargetTriple() returns std::string in LLVM ≤19 and
+        // Triple in LLVM ≥20. Wrap-then-.str() builds on both: in ≤19
+        // it uses Triple's Twine ctor, in ≥20 it uses the copy ctor.
         errs() << "[gicc-pass] mode=" << modeName(cfg.mode)
                << " target=" << targetName(cfg.target)
-               << " triple=" << M.getTargetTriple()
+               << " triple=" << Triple(M.getTargetTriple()).str()
                << " meta-dir=" << cfg.metaDir
                << " module=" << M.getName()
                << "\n";
@@ -53,7 +72,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
             // PipelineStart is too early (mem2reg hasn't run yet);
             // OptimizerLast is too late (inliner has consumed the calls).
             PB.registerPipelineEarlySimplificationEPCallback(
-                [](ModulePassManager &MPM, OptimizationLevel) {
+                GICC_EP_LAMBDA_HEAD(MPM) {
                     MPM.addPass(GICCDeviceDiscoveryPass());
                     MPM.addPass(GICCHKAnalysisPass());
                     // CRITICAL: order matters — DeviceLowering reads
@@ -70,13 +89,15 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     MPM.addPass(GICCHostDiscoveryPass());
                     MPM.addPass(GICCFeatureExtractionPass());
                     MPM.addPass(GICCTraceSynthesisPass());
+#ifndef GICC_PASSES_ANALYZE_ONLY
                     MPM.addPass(GICCDispatchLoweringPass());
                     MPM.addPass(GICCDeviceLoweringPass());
+#endif
                 });
             // Sentinel stays at OptimizerLast — it's just a debug probe
             // and we want to see the post-optimization module triple.
             PB.registerOptimizerLastEPCallback(
-                [](ModulePassManager &MPM, OptimizationLevel) {
+                GICC_EP_LAMBDA_HEAD(MPM) {
                     MPM.addPass(GICCSentinelPass());
                 });
             // Named-pass registration so tests can drive the plugin via
@@ -96,10 +117,6 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                         MPM.addPass(GICCHKAnalysisPass());
                         return true;
                     }
-                    if (Name == "gicc-device-lowering") {
-                        MPM.addPass(GICCDeviceLoweringPass());
-                        return true;
-                    }
                     if (Name == "gicc-host-discovery") {
                         MPM.addPass(GICCHostDiscoveryPass());
                         return true;
@@ -112,10 +129,16 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                         MPM.addPass(GICCTraceSynthesisPass());
                         return true;
                     }
+#ifndef GICC_PASSES_ANALYZE_ONLY
+                    if (Name == "gicc-device-lowering") {
+                        MPM.addPass(GICCDeviceLoweringPass());
+                        return true;
+                    }
                     if (Name == "gicc-dispatch-lowering") {
                         MPM.addPass(GICCDispatchLoweringPass());
                         return true;
                     }
+#endif
                     return false;
                 });
         }};

@@ -1,3 +1,4 @@
+; REQUIRES: gicc_lowering
 ; DWQ_BATCHED dispatch: two consecutive same-BB placeholders collapse
 ; into a single gicc_runtime_dwq_enqueue_batched call. Six stack arrays
 ; (peers / dst_bufs / dst_offs / src_bufs / src_offs / sizes) are
