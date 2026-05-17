@@ -43,9 +43,12 @@ PreservedAnalyses GICCDeviceDiscoveryPass::run(Module &M, ModuleAnalysisManager 
         if (cfg.mode == Mode::FeatureExtract || cfg.mode == Mode::Lower) {
             // LoopAnalysis lets buildKernelTemplate detect call sites
             // wrapped by a canonical for-loop and lower iv-dependent
-            // arguments to ArgRef::LoopIv.
-            LoopInfo &LI = FAM.getResult<LoopAnalysis>(F);
-            KernelTemplate t = buildKernelTemplate(info, &LI);
+            // arguments to ArgRef::LoopIv. DominatorTree lets it count
+            // arithmetic instructions in BBs dominating each call site
+            // (the compute_before feature).
+            LoopInfo      &LI = FAM.getResult<LoopAnalysis>(F);
+            DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
+            KernelTemplate t = buildKernelTemplate(info, &LI, &DT);
             if (!writeKernelTemplate(cfg.metaDir, t)) {
                 errs() << "[discovery] WARN: failed to write template for "
                        << info.mangledName << " under " << cfg.metaDir << "\n";

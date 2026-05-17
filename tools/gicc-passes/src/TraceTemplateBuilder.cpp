@@ -4,9 +4,11 @@
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Type.h"
 
 #include <array>
@@ -333,10 +335,71 @@ LoopShape analyzeLoop(const Loop *L, const Function *K) {
     return S;
 }
 
+// Count instructions in `BB` that look like arithmetic / FP compute.
+// Int+FP binops, the typical math intrinsics, and fmuladd/fma. We
+// intentionally ignore memory ops, casts, GEPs, and per-thread
+// intrinsics — those are address arithmetic / dispatch glue, not the
+// "FLOPs" the ML decider cares about. `stopAt`, if non-null, makes the
+// scan stop just before that instruction (used for the call's own BB).
+int countArithInBB(const BasicBlock &BB, const Instruction *stopAt) {
+    int n = 0;
+    for (const Instruction &I : BB) {
+        if (stopAt && &I == stopAt) break;
+        if (isa<BinaryOperator>(&I)) {
+            ++n;
+            continue;
+        }
+        if (const auto *II = dyn_cast<IntrinsicInst>(&I)) {
+            switch (II->getIntrinsicID()) {
+                case Intrinsic::fmuladd:
+                case Intrinsic::fma:
+                case Intrinsic::sqrt:
+                case Intrinsic::sin:
+                case Intrinsic::cos:
+                case Intrinsic::pow:
+                case Intrinsic::exp:
+                case Intrinsic::exp2:
+                case Intrinsic::log:
+                case Intrinsic::log2:
+                case Intrinsic::log10:
+                case Intrinsic::fabs:
+                case Intrinsic::minnum:
+                case Intrinsic::maxnum:
+                    ++n;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+    return n;
+}
+
+// Sum of arithmetic ops in every BB that dominates the call's parent
+// BB (proper dominators), plus the prefix of the call's own BB up to
+// (but excluding) the call instruction. Coarse static "compute before
+// comm" estimate.
+int computeBeforeFor(const CallInst *CI, const Function *K,
+                     const DominatorTree *DT) {
+    if (!CI || !K || !DT) return -1;
+    const BasicBlock *parent = CI->getParent();
+    if (!parent) return -1;
+
+    int total = 0;
+    for (const BasicBlock &BB : *K) {
+        if (&BB == parent) continue;
+        if (DT->dominates(&BB, parent))
+            total += countArithInBB(BB, /*stopAt=*/nullptr);
+    }
+    total += countArithInBB(*parent, /*stopAt=*/CI);
+    return total;
+}
+
 }  // namespace
 
 KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
-                                   LoopInfo *LI) {
+                                   LoopInfo *LI,
+                                   DominatorTree *DT) {
     KernelTemplate t;
     t.mangledName = info.mangledName;
     t.simpleName  = info.simpleName;
@@ -355,6 +418,7 @@ KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
         op.siteId = site.siteId;
         op.kind   = opKindName(site.kind);
         op.guard  = deriveGuard(site.CI, info.kernel);
+        op.compute_before = computeBeforeFor(site.CI, info.kernel, DT);
 
         // If a LoopInfo is available, see whether this call is inside a
         // loop. We accept only the innermost loop and require canonical

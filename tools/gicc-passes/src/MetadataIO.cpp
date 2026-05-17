@@ -215,6 +215,11 @@ json::Value templateToJSON(const KernelTemplate &t) {
         // reason string when the site failed.
         o["hk_capable"] = op.hk_capable;
         if (!op.hk_capable) o["hk_fail_reason"] = op.hk_fail_reason;
+        // Static "compute before this comm op" count. Only emit when
+        // we actually computed it (DT was available) to keep older
+        // fixtures byte-stable.
+        if (op.compute_before >= 0)
+            o["compute_before"] = static_cast<int64_t>(op.compute_before);
 
         json::Object args;
         for (const auto &kv : op.args) {
@@ -272,6 +277,12 @@ bool templateFromJSON(const json::Value &v, KernelTemplate &out) {
             else                                      op.hk_capable = true;
             if (auto r = oo->getString("hk_fail_reason"))
                 op.hk_fail_reason = r->str();
+            // -1 sentinel = field absent (older fixtures or DT-less
+            // build). Clamp to >=0 when present.
+            if (auto c = oo->getInteger("compute_before"))
+                op.compute_before = static_cast<int>(*c);
+            else
+                op.compute_before = -1;
             if (const auto *a = oo->getObject("args")) {
                 for (const auto &kv : *a) {
                     ArgRef ref;

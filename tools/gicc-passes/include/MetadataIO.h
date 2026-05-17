@@ -64,6 +64,13 @@ struct OpTemplate {
     // Diagnostic explaining why hk_capable is false (e.g. "arg 6 not
     // host-knowable: depends on threadIdx.x"). Empty when hk_capable.
     std::string                  hk_fail_reason;
+    // Static count of arithmetic / FP instructions in basic blocks
+    // that dominate this call site (including the call's own BB,
+    // counting only instructions ordered before the call within it).
+    // Used as a coarse "how much compute precedes this comm op" feature
+    // for the ML decider. Computed at device-discovery time via the
+    // DominatorTree; -1 means "not computed" (older JSON / DT absent).
+    int                          compute_before = -1;
 };
 
 struct ParamInfo {
