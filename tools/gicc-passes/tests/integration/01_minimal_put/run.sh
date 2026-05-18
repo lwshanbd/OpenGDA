@@ -24,7 +24,7 @@ trap 'rm -rf "${META_DIR}" "${OBJ_DIR}"' EXIT
 HIPCC=/opt/rocm-6.4.0/lib/llvm/bin/clang++
 
 CFLAGS=(
-    -DGICC_BOOTSTRAP_MPI=1 -DGICC_PLATFORM_OFI -DUSE_PROF_API=1
+    -DGICC_BOOTSTRAP_MPI=1 -DGICC_PLATFORM_OFI -DGICC_GPU_HIP=1 -DUSE_PROF_API=1
     -D__HIP_PLATFORM_AMD__=1 -D__HIP_ROCclr__=1
     -I"${GICC_ROOT}/src"
     -I"${GICC_ROOT}/src/gicc/platform/ofi/internal"

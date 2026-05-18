@@ -15,7 +15,7 @@ trap 'rm -rf "${META_DIR}"' EXIT
 # the device pipeline pass.
 GICC_MODE=feature-extract GICC_META_DIR="${META_DIR}" \
 /opt/rocm-6.4.0/lib/llvm/bin/clang++ \
-    -DGICC_PLATFORM_OFI -D__HIP_PLATFORM_AMD__=1 \
+    -DGICC_PLATFORM_OFI -DGICC_GPU_HIP=1 -D__HIP_PLATFORM_AMD__=1 \
     -DGICC_BOOTSTRAP_MPI=1 \
     -I"${GICC_ROOT}/src" \
     -I"${GICC_ROOT}/src/gicc/platform/ofi/internal" \
