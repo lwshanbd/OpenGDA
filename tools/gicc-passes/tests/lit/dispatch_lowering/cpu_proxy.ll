@@ -1,9 +1,10 @@
 ; REQUIRES: gicc_lowering
 ; CPU_PROXY_ENQUEUE lowering: the host-side placeholder call is erased
 ; (the actual RDMA work runs device-side and is serviced by the CPU
-; proxy thread), and the kernel's per-kernel JSON is updated with
-; `"proxy_aware": true` so device-lowering (Task 8) knows to preserve
-; the device-side body for this kernel.
+; proxy thread). Direction-3 update: kernel JSON is no longer touched
+; for proxy_aware; device-lowering reads hint.json directly. The hint-
+; driven device side is covered separately by
+; device_lowering/hint_proxy_aware.ll.
 ;
 ; RUN: rm -rf %t.metadir && mkdir -p %t.metadir
 ; RUN: cp %S/../Inputs/k_one_put_meta.json \
@@ -14,8 +15,6 @@
 ; RUN:     %opt -load-pass-plugin=%gicc_passes_so \
 ; RUN:          -passes='gicc-dispatch-lowering' \
 ; RUN:          -S %s | %FileCheck %s --check-prefix=IR
-; RUN: cat %t.metadir/_Z9k_one_putPN4gicc9DeviceCtxEim.json \
-; RUN:     | %FileCheck %s --check-prefix=JSON
 
 target triple = "x86_64-unknown-linux-gnu"
 
@@ -64,6 +63,10 @@ define void @main(ptr %rt, i32 %peer, i64 %size) {
 ; IR-NOT:   call void @gicc_runtime_dwq_enqueue
 ; IR-NOT:   call i32 @hipMemcpyAsync
 
-; The kernel JSON must record proxy_aware=true so device-lowering
-; (Task 8) knows to preserve the device-side put_no_db body.
-; JSON: "proxy_aware": true
+; Per direction-3 refactor (DispatchDecision.h), proxy_aware is no
+; longer round-tripped through the kernel JSON — the device-side
+; lowering pass computes it locally from hint.json via
+; kernelHasProxySite(). Dispatch lowering therefore writes NOTHING
+; back to kernel JSON for proxy_aware. The hint-driven path is
+; covered by device_lowering/hint_proxy_aware.ll; this test just
+; verifies the IR transform side of CPU_PROXY_ENQUEUE.

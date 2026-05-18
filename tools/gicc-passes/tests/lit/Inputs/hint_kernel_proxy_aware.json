@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "schema_version": "gicc-hint-v1",
+  "_comment": "default DWQ_TRIGGER for kernel_dwq_only's site; explicit CPU_PROXY_ENQUEUE for kernel_proxy_aware's site. Site ids use the '?:?' prefix because the test IR has no debug info.",
+  "default_dispatch": "DWQ_TRIGGER",
+  "sites": {
+    "?:?:kernel_proxy_aware::0": { "dispatch": "CPU_PROXY_ENQUEUE" }
+  }
+}

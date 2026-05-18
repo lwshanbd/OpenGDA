@@ -80,6 +80,7 @@ set(_GICC_PASS_SOURCES
 )
 if(NOT GICC_PASSES_ANALYZE_ONLY)
     list(APPEND _GICC_PASS_SOURCES
+        src/DispatchDecision.cpp
         src/GICCDeviceLowering.cpp
         src/GICCDispatchLowering.cpp
     )

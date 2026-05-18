@@ -1,6 +1,7 @@
 #include "GICCDispatchLowering.h"
 #include "GICCHostDiscovery.h"
 #include "GICCPassConfig.h"
+#include "DispatchDecision.h"
 #include "MetadataIO.h"
 
 #include "llvm/ADT/SmallVector.h"
@@ -17,7 +18,6 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <cstdlib>
-#include <set>
 #include <string>
 #include <unordered_map>
 
@@ -27,97 +27,9 @@ namespace gicc::pass {
 
 namespace {
 
-// IpcOrDwq: hybrid runtime branch. If the peer's IPC base ptr is non-null
-// (peer is on the same node and the buffer is mapped), do an IPC
-// hipMemcpyAsync on the IPC stream. Otherwise fall through to a DWQ
-// enqueue. This is the new default when no hint.json is provided —
-// matches the AST plugin's runtime behavior and avoids DWQ's per-op
-// libfabric overhead on same-node halos.
-enum class DispatchKind {
-    IpcPush,         // force IPC path (assumes peer is mapped)
-    DwqTrigger,      // force DWQ path
-    DwqBatched,      // currently lowered same as DwqTrigger
-    IpcOrDwq,        // runtime branch: IPC if mapped else DWQ
-    CpuProxyEnqueue, // device-side enqueue to CPU proxy ring; host trace
-                     // emits nothing for the site (the actual work is
-                     // performed device-side and serviced by the CPU
-                     // proxy thread). Required for HK-incapable sites.
-    Unknown,
-};
-
-DispatchKind parseDispatch(StringRef s) {
-    if (s == "IPC_PUSH")          return DispatchKind::IpcPush;
-    if (s == "DWQ_TRIGGER")       return DispatchKind::DwqTrigger;
-    if (s == "DWQ_BATCHED")       return DispatchKind::DwqBatched;
-    if (s == "IPC_OR_DWQ")        return DispatchKind::IpcOrDwq;
-    if (s == "CPU_PROXY_ENQUEUE") return DispatchKind::CpuProxyEnqueue;
-    return DispatchKind::Unknown;
-}
-
-const char *dispatchName(DispatchKind d) {
-    switch (d) {
-        case DispatchKind::IpcPush:         return "IPC_PUSH";
-        case DispatchKind::DwqTrigger:      return "DWQ_TRIGGER";
-        case DispatchKind::DwqBatched:      return "DWQ_BATCHED";
-        case DispatchKind::IpcOrDwq:        return "IPC_OR_DWQ";
-        case DispatchKind::CpuProxyEnqueue: return "CPU_PROXY_ENQUEUE";
-        case DispatchKind::Unknown:         return "UNKNOWN";
-    }
-    return "UNKNOWN";
-}
-
-struct SiteHint {
-    DispatchKind dispatch     = DispatchKind::Unknown;
-    int          streamIndex  = 0;  // 0 default; set by decider for IPC_PUSH dispatch
-};
-
-struct HintFile {
-    // When no hint.json is supplied we default to the hybrid runtime
-    // branch. Same-node peers go through IPC (low latency / high BW
-    // SDMA) and off-node peers fall back to DWQ. Lit tests that
-    // expect a hard DWQ default explicitly set GICC_HINT_IN to a
-    // hint.json with default_dispatch="DWQ_TRIGGER".
-    DispatchKind                          defaultDispatch = DispatchKind::IpcOrDwq;
-    std::unordered_map<std::string,
-                       SiteHint>          sites;
-};
-
-bool readHintFile(const std::string &path, HintFile &out) {
-    auto bufOr = MemoryBuffer::getFile(path);
-    if (!bufOr) return false;
-    auto parsed = json::parse((*bufOr)->getBuffer());
-    if (!parsed) {
-        consumeError(parsed.takeError());
-        return false;
-    }
-    const auto *root = parsed->getAsObject();
-    if (!root) return false;
-    if (auto def = root->getString("default_dispatch"))
-        out.defaultDispatch = parseDispatch(*def);
-    if (const auto *sites = root->getObject("sites")) {
-        for (const auto &kv : *sites) {
-            const auto *entry = kv.second.getAsObject();
-            if (!entry) continue;
-            auto disp = entry->getString("dispatch");
-            if (!disp) continue;
-            SiteHint sh;
-            sh.dispatch = parseDispatch(*disp);
-            if (auto v = entry->getInteger("stream_index"))
-                sh.streamIndex = static_cast<int>(*v);
-            out.sites[kv.first.str()] = sh;
-        }
-    }
-    return true;
-}
-
-SiteHint hintFor(const HintFile &h, StringRef siteId) {
-    auto it = h.sites.find(siteId.str());
-    if (it != h.sites.end()) return it->second;
-    SiteHint sh;
-    sh.dispatch    = h.defaultDispatch;
-    sh.streamIndex = 0;
-    return sh;
-}
+// DispatchKind, SiteHint, HintFile, readHintFile, hintFor were moved to
+// DispatchDecision.h so the device-side lowering pass can share them and
+// compute proxy_aware locally without an inter-pass JSON round-trip.
 
 // Recover the site_id metadata string attached to a placeholder call.
 StringRef siteIdOf(CallInst *CI) {
@@ -459,12 +371,6 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
     static const bool proxyEnabled =
         std::getenv("GICC_PROXY_ENABLED") != nullptr;
 
-    // Set of kernels that had at least one site lowered to
-    // CPU_PROXY_ENQUEUE. Persisted back to per-kernel JSON at end of
-    // pass so device-lowering (Task 8) knows to preserve the device-side
-    // body for proxy sites.
-    std::set<std::string> proxyAwareKernels;
-
     // Group consecutive same-BB placeholders that all want DwqBatched
     // into a single batched call. Walk in IR order so groups are
     // contiguous; flush a group whenever we hit a placeholder with a
@@ -535,13 +441,9 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
             case DispatchKind::CpuProxyEnqueue: {
                 // Lower the placeholder by ERASING it from the host
                 // trace. The actual runtime work is done device-side
-                // (see Task 8 for device-lowering changes that
-                // preserve the device-side put_no_db body for proxy
-                // sites). The host trace function does not stage
-                // anything for this site.
-                if (hkInfo && !hkInfo->kernelMangled.empty()) {
-                    proxyAwareKernels.insert(hkInfo->kernelMangled);
-                }
+                // by the preserved put_no_db body; GICCDeviceLowering
+                // independently decides preservation by reading the
+                // same hint.json via kernelHasProxySite (direction 3).
                 PH->eraseFromParent();
                 break;
             }
@@ -560,21 +462,10 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
             if (F->use_empty()) F->eraseFromParent();
     }
 
-    // Write the proxy_aware bit back to per-kernel JSON for any kernel
-    // that had a CPU_PROXY_ENQUEUE site. Read-modify-write: load,
-    // toggle the bit if necessary, write back. Skips the I/O when the
-    // bit is already set.
-    for (const auto &kname : proxyAwareKernels) {
-        KernelTemplate t;
-        if (!readKernelTemplate(cfg.metaDir, kname, t)) continue;
-        if (t.proxy_aware) continue;
-        t.proxy_aware = true;
-        if (!writeKernelTemplate(cfg.metaDir, t)) {
-            errs() << "[dispatch-lowering] WARN: could not write "
-                   << "proxy_aware=true to " << cfg.metaDir << "/"
-                   << kname << ".json\n";
-        }
-    }
+    // Direction 3: proxy_aware is no longer round-tripped through the
+    // kernel JSON. The device-side lowering pass computes it locally
+    // from the same hint.json via DispatchDecision::kernelHasProxySite,
+    // so there's nothing to persist here.
 
     return PreservedAnalyses::none();
 }

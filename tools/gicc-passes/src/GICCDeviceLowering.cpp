@@ -2,6 +2,7 @@
 #include "GICCPassConfig.h"
 #include "KernelInventory.h"
 #include "MetadataIO.h"
+#include "DispatchDecision.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/BasicBlock.h"
@@ -140,22 +141,43 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
         collectGICCSites(F, info);
         if (info.sites.empty()) continue;
 
-        // Per-kernel proxy_aware lookup. Read the kernel's JSON written
-        // by GICCDispatchLowering (Task 2) — true when at least one of
-        // the kernel's call sites was routed to CPU_PROXY_ENQUEUE.
+        // Direction 3: compute proxy_aware locally from hint.json. The
+        // dispatch decision is a pure function of (site_id, hint), so
+        // both passes (this device-side lowering and the host-side
+        // dispatch lowering) can independently reach the same answer
+        // without a JSON-mediated handshake.
         //
-        // CROSS-PASS / CROSS-TU NOTE:
-        // Mirrors the read-modify-write hazard documented at length in
-        // GICCHKAnalysis.cpp. The host-side dispatch-lowering pass
-        // writes proxy_aware; this device-side pass reads it. Within a
-        // single compilation invocation, host passes run before device
-        // passes on the same module, and each kernel symbol is emitted
-        // by exactly one TU in the supported build flows
-        // (examples + minimod), so the read here always sees the
-        // correct value. Multi-TU emission of the same kernel is the
-        // same hazard as in HK and would need a single-writer fix.
+        // This removes the cross-pass ordering hazard that previously
+        // required either (a) the host pass to run before this one in
+        // the same invocation, or (b) a two-pass compile to populate
+        // the JSON bit.
+        //
+        // Multi-TU caveat: hint.json must be identical across every TU
+        // that emits the same kernel symbol, otherwise the .o files
+        // disagree on whether the device-side put_no_db body is
+        // preserved and the linker will silently pick one.
+        //
+        // Fallback: if no hint.json is supplied we keep the legacy JSON
+        // read so existing build flows (where a prior compile or
+        // external decider wrote proxy_aware) continue to work.
         bool proxyAware = false;
-        if (!cfgRef.metaDir.empty()) {
+        if (!cfgRef.hintIn.empty()) {
+            HintFile hint;
+            if (readHintFile(cfgRef.hintIn, hint)) {
+                proxyAware = kernelHasProxySite(info.sites, hint);
+            } else {
+                // Loud failure: silently falling back to JSON would
+                // mask a typo'd GICC_HINT_IN path and produce a
+                // mysteriously-wrong device body. Warn so the user
+                // sees the misconfiguration.
+                errs() << "[device-lowering] WARN: GICC_HINT_IN="
+                       << cfgRef.hintIn << " could not be read; "
+                       << "falling back to per-kernel JSON for "
+                       << "proxy_aware. Fix the path or remove the "
+                       << "env var to silence.\n";
+            }
+        }
+        if (!proxyAware && !cfgRef.metaDir.empty()) {
             KernelTemplate kt;
             if (readKernelTemplate(cfgRef.metaDir, info.mangledName, kt))
                 proxyAware = kt.proxy_aware;
