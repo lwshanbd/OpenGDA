@@ -89,6 +89,13 @@ function(_proxy_example_setup tgt)
     target_compile_definitions(${tgt} PRIVATE
         GICC_PLATFORM_OFI
         ${PROXY_EX_BOOTSTRAP_DEFINE})
+    target_compile_features(${tgt} PRIVATE cxx_std_17)
+    set_target_properties(${tgt} PROPERTIES HIP_STANDARD 17)
+    # Use -flto so the comparison vs bench_pingpong_lto isolates the
+    # LTO pass's trace-synthesis effect from the cross-TU inlining
+    # effect that the LTO bench gets for free via -flto.
+    target_compile_options(${tgt} PRIVATE -O3 -flto)
+    target_link_options(${tgt} PRIVATE -flto)
 endfunction()
 
 # ---------------------------------------------------------------------------
@@ -275,11 +282,13 @@ elseif(GICC_GPU_API STREQUAL "hip")
     set_source_files_properties(bench_pingpong.cpp
                                 ${PROXY_LIBFABRIC_SRC}
                                 ${PROXY_THREAD_SRC}
+                                ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp
         PROPERTIES LANGUAGE HIP)
     add_executable(bench_pingpong
         bench_pingpong.cpp
         ${PROXY_LIBFABRIC_SRC}
-        ${PROXY_THREAD_SRC})
+        ${PROXY_THREAD_SRC}
+        ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp)
     target_link_libraries(bench_pingpong PRIVATE
         hip::device
         ${PROXY_EX_LIBFABRIC_LIBRARY}

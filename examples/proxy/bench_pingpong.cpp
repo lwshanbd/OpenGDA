@@ -33,6 +33,8 @@
  */
 
 #include <mpi.h>
+#include <sched.h>
+#include <dirent.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -42,15 +44,41 @@
 #include <string>
 #include <vector>
 
+// Print the CPUs that this process (and therefore its proxy worker threads)
+// is allowed to run on. Critical for multi-threaded proxy benchmarks: on a
+// default --cpus-per-task=1 Slurm config the whole proxy fleet would be
+// time-sliced on one core and look like a regression instead of speedup.
+static void print_cpu_affinity(const char* tag) {
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    if (sched_getaffinity(0, sizeof(mask), &mask) != 0) {
+        printf("[cpu-aff] %s: sched_getaffinity failed\n", tag);
+        return;
+    }
+    int n = CPU_COUNT(&mask);
+    int first = -1, last = -1;
+    for (int c = 0; c < CPU_SETSIZE; ++c) {
+        if (CPU_ISSET(c, &mask)) {
+            if (first < 0) first = c;
+            last = c;
+        }
+    }
+    printf("[cpu-aff] %s: %d CPUs allowed (range %d..%d)\n",
+           tag, n, first, last);
+    fflush(stdout);
+}
+
 #include "gicc/platform/ofi/internal/gpu_device_context.hpp"
 #include "gicc/platform/ofi/ofi_device.cuh"
 #include "gicc/platform/ofi/ofi_runtime.hpp"
+#include "gicc/platform/ofi/runtime_helpers.h"  // gicc_runtime_trigger_val
 
 #define MPI_TAG 100
 
 // Sizes in bytes. Sweep covers latency-bound (small) through bandwidth-bound
 // (large). Keep the largest below the buffer cap below.
 static const size_t kSizes[] = {
+    1, 2, 4,                       // tiny: pure latency / NIC min-packet
     8,
     64,
     256,
@@ -59,7 +87,9 @@ static const size_t kSizes[] = {
     16 * 1024,
     64 * 1024,
     256 * 1024,
+    512 * 1024,                    // bridge 256K→1M
     1024 * 1024,
+    2 * 1024 * 1024,               // bridge 1M→4M
     4 * 1024 * 1024,
     16 * 1024 * 1024,
 };
@@ -109,6 +139,14 @@ __global__ void proxy_send_kernel(gicc::DeviceCtx* ctx, int peer,
     if (!per_msg_quiet) gicc::quiet(ctx);
 }
 
+// DWQ mode trigger kernel — pre-staged host enqueues fire when the
+// device thread does flush() (lead-thread MMIO write) then quiet()
+// (poll completion counter).
+__global__ void dwq_flush_quiet_kernel(gicc::DeviceCtx* ctx) {
+    gicc::flush(ctx);
+    gicc::quiet(ctx);
+}
+
 // Multi-lane kernel — one thread per block, each block hashes blockIdx.x
 // to a proxy ring index. With NUM_PROXY_THREADS>1 this lets the bench
 // measure aggregate throughput across the proxy fleet (the single-block
@@ -148,6 +186,7 @@ int main(int argc, char** argv) {
     bool quick = false;
     bool per_msg_quiet = false;
     int  lanes = 1;
+    int  batch_override = 0;  // 0 = use default BATCH_PER_OUTER
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a.rfind("--mode=", 0) == 0) {
@@ -159,16 +198,24 @@ int main(int argc, char** argv) {
         } else if (a.rfind("--lanes=", 0) == 0) {
             lanes = std::atoi(a.substr(8).c_str());
             if (lanes < 1) lanes = 1;
+        } else if (a.rfind("--batch=", 0) == 0) {
+            batch_override = std::atoi(a.substr(8).c_str());
+            if (batch_override < 1) batch_override = 1;
         }
     }
-    if (mode != "mpi" && mode != "proxy") {
-        fprintf(stderr, "bench_pingpong: --mode must be 'mpi' or 'proxy'\n");
+    if (mode != "mpi" && mode != "proxy" && mode != "dwq" && mode != "dwq-tonly") {
+        fprintf(stderr,
+            "bench_pingpong: --mode must be 'mpi', 'proxy', 'dwq', or "
+            "'dwq-tonly' (DWQ with host enqueue OUTSIDE the timing window)\n");
         return 2;
     }
 
     // gicc::Runtime initializes Bootstrap (MPI) internally; we just use
     // its rank/size and MPI_COMM_WORLD afterwards.
     gicc::Runtime rt;
+    // DWQ mode uses the GDA-style host-wait fast path (shared completion
+    // counter, mono_total_ops_ accounting). Proxy mode doesn't care.
+    if (mode == "dwq" || mode == "dwq-tonly") rt.enable_host_wait_mode();
     int rank = rt.rank();
     int nranks = rt.size();
     if (nranks != 2) {
@@ -192,15 +239,93 @@ int main(int argc, char** argv) {
     auto bh = rt.register_buffer(d_buf, kBufBytes, /*is_device=*/true);
     rt.exchange();
 
-    // Force the proxy thread to spawn now (lazy init would otherwise
-    // happen during the first prepare() inside the timed loop, polluting
-    // the first sample).
-    if (mode == "proxy") {
+    // Force lazy init (proxy thread spawn / DWQ ctx) before timing.
+    if (mode == "proxy" || mode == "dwq" || mode == "dwq-tonly") {
         (void)rt.prepare();
+        rt.reset();
     }
     rt.barrier();
 
+    // Run a small burn-in so each proxy worker actually executes once
+    // before we probe its placement — last_cpu read from /proc/self/task
+    // is the LAST scheduling slot, so threads that have not yet run all
+    // report cpu=0 from their constructor.
+    if ((mode == "proxy" || mode == "dwq" || mode == "dwq-tonly") && rank == 0) {
+        const int burn_n = 64;
+        gicc::DeviceCtx* d_ctx = rt.prepare();
+        if (mode == "proxy") {
+            if (lanes > 1) {
+                gpuLaunchKernel(proxy_send_kernel_multi,
+                                dim3(lanes), dim3(1), 0, 0,
+                                d_ctx, peer, bh.index, /*bytes=*/8, burn_n);
+            } else {
+                gpuLaunchKernel(proxy_send_kernel,
+                                dim3(1), dim3(1), 0, 0,
+                                d_ctx, peer, bh.index, /*bytes=*/8, burn_n,
+                                /*per_msg_quiet=*/false);
+            }
+        } else {
+            for (int i = 0; i < burn_n; ++i)
+                rt.put_no_db(bh, peer, bh.index, 8, 0, 0);
+            d_ctx = rt.prepare();
+            gpuLaunchKernel(dwq_flush_quiet_kernel, dim3(1), dim3(1), 0, 0, d_ctx);
+        }
+        (void)gpuDeviceSynchronize();
+        rt.reset();
+    }
+    rt.barrier();
+
+    // After lazy init AND a burn-in, dump the per-thread "last CPU used"
+    // from /proc/self/task/<tid>/stat field 39 (processor). Lets us see
+    // whether the N proxy threads actually landed on distinct cores.
+    if (rank == 0 && mode == "proxy") {
+        DIR* d = opendir("/proc/self/task");
+        if (d) {
+            printf("[cpu-aff] rank0 thread placement (tid → last CPU):\n");
+            struct dirent* ent;
+            int shown = 0;
+            while ((ent = readdir(d)) != nullptr && shown < 32) {
+                if (ent->d_name[0] == '.') continue;
+                char path[256], comm[64] = "?", stat_buf[1024];
+                snprintf(path, sizeof(path), "/proc/self/task/%s/comm", ent->d_name);
+                FILE* fc = fopen(path, "r");
+                if (fc) { if (fgets(comm, sizeof(comm), fc)) { /* strip \n */
+                    size_t L = strlen(comm); if (L && comm[L-1]=='\n') comm[L-1]=0; }
+                    fclose(fc); }
+                snprintf(path, sizeof(path), "/proc/self/task/%s/stat", ent->d_name);
+                FILE* fs = fopen(path, "r");
+                int last_cpu = -1;
+                if (fs) {
+                    if (fgets(stat_buf, sizeof(stat_buf), fs)) {
+                        // stat fields are space-separated; processor is field 39
+                        // (1-indexed). Skip past ") " for the comm field which
+                        // may contain spaces.
+                        char* rp = strrchr(stat_buf, ')');
+                        if (rp) {
+                            int field = 1;  // ')' ends field 2
+                            char* tok = rp + 1;
+                            while (*tok && field < 39) {
+                                if (*tok == ' ') field++;
+                                tok++;
+                            }
+                            last_cpu = atoi(tok);
+                        }
+                    }
+                    fclose(fs);
+                }
+                printf("    tid=%-7s comm=%-16s last_cpu=%d\n",
+                       ent->d_name, comm, last_cpu);
+                shown++;
+            }
+            closedir(d);
+            fflush(stdout);
+        }
+    }
+
     if (rank == 0) {
+        char tag[64];
+        snprintf(tag, sizeof(tag), "rank0 (mode=%s)", mode.c_str());
+        print_cpu_affinity(tag);
         const char* gpu_aware = std::getenv("MPICH_GPU_SUPPORT_ENABLED");
         printf("\n=== bench_pingpong (mode=%s) ===\n", mode.c_str());
         printf("ranks=%d  outer_iters=%d  batch_per_outer=%d  warmup=%d  lanes=%d\n",
@@ -226,6 +351,12 @@ int main(int argc, char** argv) {
     int num_outer = quick ? 3 : NUM_OUTER;
     int batch_per_outer = quick ? 5 : BATCH_PER_OUTER;
     int num_warmup = quick ? 2 : NUM_WARMUP;
+    if (batch_override > 0) {
+        batch_per_outer = batch_override;
+        if (rank == 0) {
+            printf("(batch override: batch_per_outer=%d)\n", batch_per_outer);
+        }
+    }
     if (rank == 0 && quick) {
         printf("(quick mode: %d sizes, %d outer, %d batch, %d warmup)\n",
                num_sizes, num_outer, batch_per_outer, num_warmup);
@@ -238,6 +369,18 @@ int main(int argc, char** argv) {
             printf("  starting size=%s ...\n", sb);
         }
 
+        // --- correctness setup: stamp src on rank 0, wipe dst on rank 1.
+        //     Verified after this size's timing completes (sentinel +
+        //     pattern compare on first/last byte of dst).
+        const uint8_t pat_byte = (uint8_t)((s * 17 + 0xA1) & 0xFF);
+        if (rank == 0) {
+            (void)hipMemset(d_buf, pat_byte, std::max<size_t>(bytes, 64));
+        } else {
+            (void)hipMemset(d_buf, 0x00, std::max<size_t>(bytes, 64));
+        }
+        (void)hipDeviceSynchronize();
+        rt.barrier();
+
         // --- warmup ---
         if (mode == "mpi") {
             for (int w = 0; w < num_warmup; ++w) {
@@ -247,6 +390,20 @@ int main(int argc, char** argv) {
                 else
                     MPI_Recv(d_buf, bytes, MPI_BYTE, peer, MPI_TAG,
                              MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            }
+        } else if (mode == "dwq" || mode == "dwq-tonly") {
+            if (rank == 0) {
+                for (int w = 0; w < num_warmup; ++w) {
+                    for (int i = 0; i < batch_per_outer; ++i) {
+                        rt.put_no_db(bh, peer, bh.index, bytes,
+                                     /*src_off=*/0, /*dst_off=*/0);
+                    }
+                    gicc::DeviceCtx* d_ctx = rt.prepare();
+                    gpuLaunchKernel(dwq_flush_quiet_kernel,
+                                    dim3(1), dim3(1), 0, 0, d_ctx);
+                    (void)gpuDeviceSynchronize();
+                    rt.reset();
+                }
             }
         } else {
             // Proxy warmup: rank 0 fires num_warmup small put+quiet ops.
@@ -267,6 +424,23 @@ int main(int argc, char** argv) {
 
         for (int o = 0; o < num_outer; ++o) {
             rt.barrier();
+
+            // dwq-tonly: pre-stage host enqueue BEFORE t0 so the timing
+            // window contains only the trigger+complete+reset legs. Lets
+            // us answer "is host enqueue the reason DWQ loses at small
+            // sizes?" without changing the rest of the harness.
+            //
+            // Also measure host enqueue cost separately if requested.
+            double t_enq_us = 0.0;
+            if (mode == "dwq-tonly" && rank == 0) {
+                double te0 = MPI_Wtime();
+                for (int i = 0; i < batch_per_outer; ++i) {
+                    rt.put_no_db(bh, peer, bh.index, bytes,
+                                 /*src_off=*/0, /*dst_off=*/0);
+                }
+                t_enq_us = (MPI_Wtime() - te0) * 1e6 / batch_per_outer;
+            }
+
             double t0 = MPI_Wtime();
 
             if (mode == "mpi") {
@@ -278,6 +452,24 @@ int main(int argc, char** argv) {
                     for (int i = 0; i < batch_per_outer; ++i)
                         MPI_Recv(d_buf, bytes, MPI_BYTE, peer, MPI_TAG,
                                  MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                }
+            } else if (mode == "dwq" || mode == "dwq-tonly") {
+                if (rank == 0) {
+                    // dwq: host pre-stages batch_per_outer puts INSIDE
+                    // the timing window. dwq-tonly: those same puts were
+                    // pre-staged BEFORE t0 above, so this branch only
+                    // measures the device-side trigger + completion + reset.
+                    if (mode == "dwq") {
+                        for (int i = 0; i < batch_per_outer; ++i) {
+                            rt.put_no_db(bh, peer, bh.index, bytes,
+                                         /*src_off=*/0, /*dst_off=*/0);
+                        }
+                    }
+                    gicc::DeviceCtx* d_ctx = rt.prepare();
+                    gpuLaunchKernel(dwq_flush_quiet_kernel,
+                                    dim3(1), dim3(1), 0, 0, d_ctx);
+                    (void)gpuDeviceSynchronize();
+                    rt.reset();
                 }
             } else {
                 if (rank == 0) {
@@ -309,6 +501,15 @@ int main(int argc, char** argv) {
                 int msgs_this_outer = batch_per_outer * lanes;
                 samples.push_back((t1 - t0) * 1e6 /
                                   static_cast<double>(msgs_this_outer));
+                if (mode == "dwq-tonly" && o == num_outer / 2) {
+                    // Mid-sample: dump host-enqueue cost (per put_no_db) so
+                    // we can see exactly how much fi_control(FI_QUEUE_WORK)
+                    // is costing us, separately from trigger+complete.
+                    fprintf(stderr, "[dwq-tonly] size=%zu  enq=%.2f us/put  "
+                            "tonly=%.2f us/msg\n",
+                            bytes, t_enq_us,
+                            (t1 - t0) * 1e6 / msgs_this_outer);
+                }
             }
         }
 
@@ -324,10 +525,99 @@ int main(int argc, char** argv) {
             fflush(stdout);
         }
         rt.barrier();
+
+        // --- correctness verify: rank 1 confirms first & last byte of
+        //     dst now equal the pattern rank 0 stamped. If any timed
+        //     mode silently skipped the actual fi_write (compiler
+        //     pass / dispatch routing bug, src/dst alias confusion,
+        //     etc.) this catches it. Done outside timing.
+        if (rank == 1) {
+            uint8_t first_dst = 0xFF, last_dst = 0xFF;
+            size_t check_len = std::max<size_t>(bytes, 1);
+            (void)hipMemcpy(&first_dst, d_buf, 1, hipMemcpyDeviceToHost);
+            (void)hipMemcpy(&last_dst,
+                            (char*)d_buf + (check_len - 1), 1,
+                            hipMemcpyDeviceToHost);
+            if (first_dst != pat_byte || last_dst != pat_byte) {
+                char sb[32]; fmt_size(bytes, sb);
+                fprintf(stderr,
+                    "[VERIFY-FAIL mode=%s] size=%s first=0x%02x last=0x%02x "
+                    "expected=0x%02x\n",
+                    mode.c_str(), sb, first_dst, last_dst, pat_byte);
+                fflush(stderr);
+            }
+        }
+        rt.barrier();
     }
 
     if (rank == 0) {
         printf("---------------------------------------------------\n");
+    }
+
+    // Cumulative enqueue audit. mono_total_ops_ increments inside
+    // rt.put_no_db (host_wait_mode path) and gicc_runtime_dwq_enqueue,
+    // so for the dwq / dwq-tonly modes the expected total is
+    // (NUM_WARMUP + NUM_OUTER) * batch_per_outer * num_sizes. Proxy
+    // mode bypasses this counter (puts go through the ring not the
+    // host enqueue path), so for proxy the actual value will be near
+    // zero — that's expected and not a bug.
+    if (rank == 0) {
+        uint64_t actual = gicc_runtime_trigger_val(&rt);
+        uint64_t expected_per_size =
+            (uint64_t)(num_warmup + num_outer) * (uint64_t)batch_per_outer;
+        uint64_t expected = expected_per_size * (uint64_t)num_sizes;
+        printf("[enqueue-audit mode=%s] mono_total_ops=%lu  "
+               "dwq_expected=%lu  match=%s\n",
+               mode.c_str(), (unsigned long)actual, (unsigned long)expected,
+               (mode == "dwq" || mode == "dwq-tonly")
+                   ? ((actual == expected) ? "YES" :
+                      (actual > expected ? "MORE" : "LESS"))
+                   : "(proxy mode uses ring, expect 0)");
+    }
+
+    // Final placement snapshot — by now proxy threads have been hot for
+    // seconds, so last_cpu reflects steady-state scheduling. A healthy
+    // multi-thread run should show distinct CPU numbers across worker
+    // tids (not all clustered on cpu=0).
+    if (rank == 0 && mode == "proxy") {
+        DIR* d = opendir("/proc/self/task");
+        if (d) {
+            printf("[cpu-aff] rank0 thread placement AFTER bench:\n");
+            struct dirent* ent;
+            int shown = 0;
+            while ((ent = readdir(d)) != nullptr && shown < 32) {
+                if (ent->d_name[0] == '.') continue;
+                char path[256], stat_buf[1024], comm[64] = "?";
+                snprintf(path, sizeof(path), "/proc/self/task/%s/comm", ent->d_name);
+                FILE* fc = fopen(path, "r");
+                if (fc) { if (fgets(comm, sizeof(comm), fc)) {
+                    size_t L = strlen(comm); if (L && comm[L-1]=='\n') comm[L-1]=0; }
+                    fclose(fc); }
+                snprintf(path, sizeof(path), "/proc/self/task/%s/stat", ent->d_name);
+                FILE* fs = fopen(path, "r");
+                int last_cpu = -1;
+                if (fs) {
+                    if (fgets(stat_buf, sizeof(stat_buf), fs)) {
+                        char* rp = strrchr(stat_buf, ')');
+                        if (rp) {
+                            int field = 1;
+                            char* tok = rp + 1;
+                            while (*tok && field < 39) {
+                                if (*tok == ' ') field++;
+                                tok++;
+                            }
+                            last_cpu = atoi(tok);
+                        }
+                    }
+                    fclose(fs);
+                }
+                printf("    tid=%-7s comm=%-16s last_cpu=%d\n",
+                       ent->d_name, comm, last_cpu);
+                shown++;
+            }
+            closedir(d);
+            fflush(stdout);
+        }
     }
 
     rt.barrier();
