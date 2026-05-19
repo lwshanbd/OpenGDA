@@ -68,5 +68,15 @@ namespace gicc {
 
 //==============================================================================
 // gicc::launch — backend-agnostic kernel launch wrapper
+//
+// NOTE (Maple bring-up, 2026-05-19): platform/mlx5/launch.hpp is stale —
+// its body calls rt.prepare() with no args, but Runtime::prepare on this
+// backend is prepare(int peer, int remote_buf_index). No examples under
+// examples/gicc/ use gicc::launch (they call rt.prepare(peer,idx) +
+// kernel<<<>>>(ctx, ...) directly), so we gate the include to OFI to
+// unblock the MLX5 build. The MLX5 launch wrapper needs a signature
+// refresh before this gate can be removed.
 //==============================================================================
+#if defined(GICC_PLATFORM_OFI)
 #include "launch.hpp"
+#endif
