@@ -843,6 +843,22 @@ public:
     bool      is_virt_addr_mode() const { return comm_->is_virt_addr_mode(); }
     fi_addr_t av_addr(int rank)   const { return comm_->av_addrs.at(rank); }
 
+    // Same-node IPC accessors.  Exposes the local_peer / peer_mapped
+    // tables built by exchange() so an upper-layer collective can emit
+    // in-kernel direct GPU stores to peer-IPC-mapped pointers (NVSHMEM-
+    // style) instead of routing same-node traffic through the proxy +
+    // libfabric path.  Both must NOT be queried before exchange().
+    // Returns nullptr for off-node peers or unmapped slots.
+    bool is_local_peer(int rank) const {
+        return rank >= 0 && (size_t)rank < local_peer_.size() && local_peer_[rank];
+    }
+    void* peer_mapped(int rank, int buf_idx) const {
+        if (rank < 0 || (size_t)rank >= peer_mapped_ptrs_.size()) return nullptr;
+        const auto& pm = peer_mapped_ptrs_[rank];
+        if (buf_idx < 0 || (size_t)buf_idx >= pm.size()) return nullptr;
+        return pm[buf_idx];
+    }
+
 #ifdef GICC_CPU_PROXY
     //--------------------------------------------------------------------------
     // ensure_proxy_rings — lazy-construct + start N CPU proxy workers, where
