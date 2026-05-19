@@ -656,6 +656,86 @@ __device__ __forceinline__ bool gda_rdma_write_batched(
 }
 
 //==============================================================================
+// RDMA READ — mirrors the WRITE path. Same WQE layout (ctrl | raddr | data),
+// only the opcode and the direction of bytes change: the NIC reads from
+// (remote_addr, remote_rkey) and writes into (local_addr, local_lkey).
+//==============================================================================
+
+__device__ __forceinline__ void gda_build_rdma_read_wqe_opt(
+    DeviceStateOpt* state,
+    uint64_t local_addr,
+    uint32_t local_lkey,
+    uint64_t remote_addr,
+    uint32_t remote_rkey,
+    uint32_t size,
+    uint16_t wqe_idx,
+    bool signaled)
+{
+    volatile uint32_t* wqe = (volatile uint32_t*)gda_get_wqe_ptr(state, wqe_idx);
+
+    // Control Segment
+    gda_store_relaxed_u32(&wqe[0], gda_opt_htobe32((wqe_idx << 8) | MLX5_OPCODE_RDMA_READ));
+    gda_store_relaxed_u32(&wqe[1], gda_opt_htobe32((state->qpn << 8) | 3));
+    uint32_t flags = signaled ? MLX5_WQE_CTRL_CQ_UPDATE : 0;
+    gda_store_relaxed_u32(&wqe[2], flags << 24);
+    gda_store_relaxed_u32(&wqe[3], 0);
+
+    // Remote Address Segment — peer side that we are reading FROM.
+    uint64_t raddr_be = gda_opt_htobe64(remote_addr);
+    gda_store_relaxed_u32(&wqe[4], (uint32_t)raddr_be);
+    gda_store_relaxed_u32(&wqe[5], (uint32_t)(raddr_be >> 32));
+    gda_store_relaxed_u32(&wqe[6], gda_opt_htobe32(remote_rkey));
+    gda_store_relaxed_u32(&wqe[7], 0);
+
+    // Data Segment — local destination of the read.
+    gda_store_relaxed_u32(&wqe[8], gda_opt_htobe32(size));
+    gda_store_relaxed_u32(&wqe[9], gda_opt_htobe32(local_lkey));
+    uint64_t laddr_be = gda_opt_htobe64(local_addr);
+    gda_store_relaxed_u32(&wqe[10], (uint32_t)laddr_be);
+    gda_store_relaxed_u32(&wqe[11], (uint32_t)(laddr_be >> 32));
+}
+
+__device__ __forceinline__ void gda_rdma_read_no_db(
+    DeviceStateOpt* state,
+    uint64_t local_addr,
+    uint32_t local_lkey,
+    uint64_t remote_addr,
+    uint32_t remote_rkey,
+    uint32_t size,
+    bool signaled)
+{
+    uint64_t prod = gda_load_relaxed_u64(state->prod_idx);
+    uint16_t wqe_idx = (uint16_t)(prod & 0xFFFF);
+    uint16_t new_prod = (uint16_t)((prod + 1) & 0xFFFF);
+
+    gda_build_rdma_read_wqe_opt(state, local_addr, local_lkey,
+                                 remote_addr, remote_rkey, size,
+                                 wqe_idx, signaled);
+
+    gda_store_relaxed_u64(state->prod_idx, new_prod);
+}
+
+__device__ __forceinline__ void gda_rdma_read_opt(
+    DeviceStateOpt* state,
+    uint64_t local_addr,
+    uint32_t local_lkey,
+    uint64_t remote_addr,
+    uint32_t remote_rkey,
+    uint32_t size,
+    bool signaled)
+{
+    uint64_t prod = gda_load_relaxed_u64(state->prod_idx);
+    uint16_t wqe_idx = (uint16_t)(prod & 0xFFFF);
+    uint16_t new_prod = (uint16_t)((prod + 1) & 0xFFFF);
+
+    gda_build_rdma_read_wqe_opt(state, local_addr, local_lkey,
+                                 remote_addr, remote_rkey, size,
+                                 wqe_idx, signaled);
+
+    gda_ring_doorbell_bf(state, new_prod);
+}
+
+//==============================================================================
 // OPTIMIZED KERNELS
 // Guard with GICC_DEVICE_OPT_SUPPRESS_KERNELS to avoid multiple-definition
 // errors when this header is included from multiple translation units.

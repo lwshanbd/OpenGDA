@@ -79,6 +79,54 @@ void flush(DeviceCtx* ctx)
 }
 
 //==============================================================================
+// RDMA GET — counterpart of put. The NIC reads from
+// (remote_addr, remote_rkey) and writes into (local_addr, local_lkey).
+// Completion is observed by quiet() the same way put does.
+//==============================================================================
+
+/**
+ * RDMA GET with explicit local and remote addresses. Doorbell included.
+ */
+__device__ __forceinline__
+void get(DeviceCtx* ctx,
+         uint64_t local_addr, uint32_t local_lkey,
+         uint64_t remote_addr, uint32_t remote_rkey,
+         uint32_t size, bool signaled = false)
+{
+    gicc::mlx5::gda_rdma_read_opt(
+        ctx, local_addr, local_lkey,
+        remote_addr, remote_rkey, size, signaled);
+}
+
+/**
+ * RDMA GET using default remote address set by Runtime::prepare().
+ */
+__device__ __forceinline__
+void get(DeviceCtx* ctx,
+         uint64_t local_addr, uint32_t local_lkey,
+         uint32_t size, bool signaled = false)
+{
+    gicc::mlx5::gda_rdma_read_opt(
+        ctx, local_addr, local_lkey,
+        ctx->remote_addr, ctx->remote_rkey, size, signaled);
+}
+
+/**
+ * RDMA GET without ringing doorbell. Build WQE and advance prod_idx only.
+ * Call flush() after posting all WQEs for a QP to ring doorbell once.
+ */
+__device__ __forceinline__
+void get_no_db(DeviceCtx* ctx,
+         uint64_t local_addr, uint32_t local_lkey,
+         uint64_t remote_addr, uint32_t remote_rkey,
+         uint32_t size, bool signaled = false)
+{
+    gicc::mlx5::gda_rdma_read_no_db(
+        ctx, local_addr, local_lkey,
+        remote_addr, remote_rkey, size, signaled);
+}
+
+//==============================================================================
 // Completion
 //==============================================================================
 

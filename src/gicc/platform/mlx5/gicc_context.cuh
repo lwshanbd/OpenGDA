@@ -146,4 +146,93 @@ void quiet(GiccContext* ctx, int peer)
     gicc::mlx5::gda_quiet(ctx->peer_ctxs[peer]);
 }
 
+//==============================================================================
+// Common-form RDMA — buffer-index + offset addressing.
+//
+// Mirrors the unified device API documented in
+// src/gicc/platform/ofi/ofi_device.cuh:
+//
+//   put_no_db(ctx, target_rank,
+//             dst_buf, dst_offset,
+//             src_buf, src_offset,
+//             size, signaled=false)
+//
+//   get_no_db(ctx, source_rank,
+//             src_buf, src_offset,
+//             dst_buf, dst_offset,
+//             size, signaled=false)
+//
+// (target_rank, dst_buf, dst_offset) names a slice of the peer's
+// registered buffer; (src_buf, src_offset) names a slice of the caller's
+// local buffer. Backend resolves lkey/rkey/addresses from the registries
+// populated by Runtime::build_context().
+//==============================================================================
+
+__device__ __forceinline__
+void put_no_db(GiccContext* ctx,
+               int target_rank,
+               int dst_buf, size_t dst_offset,
+               int src_buf, size_t src_offset,
+               size_t size, bool signaled = false)
+{
+    uint64_t  src_addr = ctx->local_bufs[src_buf].addr + src_offset;
+    uint32_t  lkey     = ctx->local_bufs[src_buf].lkey;
+    uint64_t  dst_addr = ctx->remote_bufs[target_rank][dst_buf].addr + dst_offset;
+    uint32_t  rkey     = ctx->remote_bufs[target_rank][dst_buf].rkey;
+    RawDeviceCtx* qp   = ctx->peer_ctxs[target_rank];
+
+    gicc::mlx5::gda_rdma_write_no_db(
+        qp, src_addr, lkey, dst_addr, rkey,
+        static_cast<uint32_t>(size), signaled);
+}
+
+__device__ __forceinline__
+void get_no_db(GiccContext* ctx,
+               int source_rank,
+               int src_buf, size_t src_offset,
+               int dst_buf, size_t dst_offset,
+               size_t size, bool signaled = false)
+{
+    uint64_t  dst_addr = ctx->local_bufs[dst_buf].addr + dst_offset;
+    uint32_t  lkey     = ctx->local_bufs[dst_buf].lkey;
+    uint64_t  src_addr = ctx->remote_bufs[source_rank][src_buf].addr + src_offset;
+    uint32_t  rkey     = ctx->remote_bufs[source_rank][src_buf].rkey;
+    RawDeviceCtx* qp   = ctx->peer_ctxs[source_rank];
+
+    gicc::mlx5::gda_rdma_read_no_db(
+        qp, dst_addr, lkey, src_addr, rkey,
+        static_cast<uint32_t>(size), signaled);
+}
+
+//==============================================================================
+// flush / quiet over the common-form context.
+//
+// MLX5's WQE submission is per-QP. The OFI backend's flush() is a
+// single MMIO trigger that releases every queued op across all peers;
+// here we fan out one BlueFlame doorbell per peer that still has WQEs
+// queued. The kernel pays N peer-iterations of doorbell + fence; this
+// is fundamental to the per-QP submission model and matches what
+// hand-written MLX5 kernels already do.
+//==============================================================================
+
+__device__ __forceinline__
+void flush(GiccContext* ctx)
+{
+    for (int peer = 0; peer < ctx->num_peers; ++peer) {
+        if (peer == ctx->my_rank) continue;
+        RawDeviceCtx* qp = ctx->peer_ctxs[peer];
+        if (qp) gicc::mlx5::gda_flush_doorbell(qp);
+    }
+}
+
+__device__ __forceinline__
+void quiet(GiccContext* ctx)
+{
+    for (int peer = 0; peer < ctx->num_peers; ++peer) {
+        if (peer == ctx->my_rank) continue;
+        RawDeviceCtx* qp = ctx->peer_ctxs[peer];
+        if (qp) gicc::mlx5::gda_quiet(qp);
+    }
+}
+
 } // namespace gicc

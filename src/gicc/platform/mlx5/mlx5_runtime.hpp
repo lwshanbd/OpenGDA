@@ -242,6 +242,22 @@ public:
     Bootstrap& boot() noexcept { return boot_; }
     const Bootstrap& boot() const noexcept { return boot_; }
 
+    //--------------------------------------------------------------------------
+    // Cross-backend accessor parity with the OFI runtime.
+    //
+    // These exist on the OFI side and are sometimes referenced by
+    // portable user code. On MLX5 they have trivial answers because the
+    // backend always uses RDMA (no same-node IPC fast path) and always
+    // operates in virtual-address mode (no FI_MR_BASIC zero-based MR).
+    // enable_host_wait_mode is an OFI-specific shared-counter
+    // optimization that has no analog on MLX5; we accept the call to
+    // keep portable bring-up paths compiling and treat it as a no-op.
+    //--------------------------------------------------------------------------
+    void  enable_host_wait_mode() noexcept {}
+    bool  is_local_peer(int /*rank*/) const noexcept { return false; }
+    void* peer_mapped (int /*rank*/, int /*buf_idx*/) const noexcept { return nullptr; }
+    bool  is_virt_addr_mode() const noexcept { return true; }
+
 private:
     gicc::Bootstrap boot_;
     struct ibv_context* ib_ctx_ = nullptr;

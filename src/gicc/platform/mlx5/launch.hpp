@@ -1,18 +1,25 @@
 /**
  * launch.hpp - gicc::launch wrapper for MLX5 backend.
  *
- * Owns the prepare() + kernel-launch sequence. The user calls
+ * Owns the build_context() + kernel-launch sequence. The user calls
  *   gicc::launch<kernel>(rt, grid, block, args...)
- * instead of writing rt.prepare() + kernel<<<>>>(ctx, args...) by hand.
+ * instead of writing rt.build_context() + kernel<<<>>>(gctx, args...) by
+ * hand. The kernel receives a GiccContext* and uses the common-form
+ * device API (gicc::put_no_db(ctx, rank, dst_buf, dst_off, ...)),
+ * matching the cross-backend semantics documented in
+ * src/gicc/platform/ofi/ofi_device.cuh.
  *
  * The kernel is passed as a NON-TYPE TEMPLATE PARAMETER (constant
- * expression) so the OFI backend can key its kernel_trace<> specialization
- * on it. This file mirrors that signature for source-level portability
- * across both backends.
+ * expression) so the OFI backend can key its kernel_trace<>
+ * specialization on it. We mirror that signature for source-level
+ * portability across both backends.
  *
- * v1.5: peer + dst_buf are per-CALL on gicc::put_no_db inside the kernel
- * (the MLX5 device-side put_no_db consumes them to build the WQE for the
- * right QP). launch itself no longer carries them.
+ * NOTE: the underlying GiccContext is heap-allocated by build_context()
+ * and held by the launch site. Repeatedly calling launch() will leak
+ * GiccContexts; the production refresh of this wrapper should cache
+ * the per-Runtime GiccContext (one allocation per Runtime, reused on
+ * every launch). That refactor is intentionally not part of this
+ * cross-backend parity patch.
  */
 #pragma once
 
@@ -29,8 +36,8 @@ inline void launch(Runtime& rt,
                    dim3 grid, dim3 block,
                    Args... args)
 {
-    DeviceCtx* ctx = rt.prepare();
-    Kernel<<<grid, block>>>(ctx, args...);
+    GiccContext* gctx = rt.build_context();
+    Kernel<<<grid, block>>>(gctx, args...);
 }
 
 template <auto Kernel, typename... Args>
@@ -40,8 +47,8 @@ inline void launch(Runtime& rt,
                    size_t shmem_bytes, cudaStream_t stream,
                    Args... args)
 {
-    DeviceCtx* ctx = rt.prepare();
-    Kernel<<<grid, block, shmem_bytes, stream>>>(ctx, args...);
+    GiccContext* gctx = rt.build_context();
+    Kernel<<<grid, block, shmem_bytes, stream>>>(gctx, args...);
 }
 
 } // namespace gicc
