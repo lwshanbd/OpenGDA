@@ -140,6 +140,23 @@ public:
             }
         }
 
+        // Clamp the GPU id to the count of GPUs visible to this process.
+        // When Slurm is launched with --gpus-per-task=1, each rank sees
+        // only its own assigned GPU as device 0, regardless of the rank's
+        // local_rank.  Calling gpuSetDevice(local_rank) for rank>=1 then
+        // fails with "invalid device ordinal".  With this clamp:
+        //   - 4 ranks/node + all GPUs visible: clamp is a no-op, ranks
+        //     0..3 pick distinct devices as before
+        //   - 4 ranks/node + Slurm-filtered visibility: clamp pins
+        //     every rank to device 0 (which IS that rank's GPU)
+        {
+            int num_visible = 0;
+            if (gpuGetDeviceCount(&num_visible) == GPU_SUCCESS && num_visible > 0
+                && local_rank >= num_visible) {
+                local_rank = local_rank % num_visible;
+            }
+        }
+
         // Initialize components
         affinity = new DeviceAffinityDetector(local_rank);
         hip = new HipDeviceContext(affinity->selected_gpu_id);
