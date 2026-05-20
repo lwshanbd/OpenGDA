@@ -134,55 +134,18 @@ __device__ __forceinline__ uint64_t gda_globaltimer() {
 
 //==============================================================================
 // OPTIMIZED DEVICE STATE - includes BlueFlame and batching support
+//
+// Struct layout extracted to device_state_opt.hpp so the runtime header
+// (and host-only TUs that route through it, e.g. the CPU proxy) can
+// describe the type without pulling in every __device__ intrinsic body.
+// (device_state_opt.hpp opens its own `namespace gicc::mlx5 {}` block, so
+//  we re-open ours after the include to keep the rest of this file in the
+//  same namespace context as before the refactor.)
 //==============================================================================
 
-struct Cqe64Opt {
-    uint8_t  rsvd0[46];
-    uint16_t wqe_counter;
-    uint8_t  signature;
-    uint8_t  op_own;
-} __attribute__((packed));
-
-// Extended device state with optimization support
-struct DeviceStateOpt {
-    // QP info
-    uint32_t qpn;
-    uint16_t nwqes;
-    uint16_t nwqes_mask;
-
-    // WQE buffer (GPU-accessible)
-    void* wqe_buf;
-    uint32_t wqe_lkey;
-
-    // Doorbell record (GPU-writable)
-    volatile uint32_t* dbrec;
-
-    // BlueFlame register (GPU-writable, 64-bit)
-    volatile uint64_t* bf_reg;
-
-    // Producer indices (nvshmem-style separated indices)
-    volatile uint64_t* resv_head;    // Reserved slots (atomically incremented)
-    volatile uint64_t* ready_head;   // Ready to post (after WQE written)
-    volatile uint64_t* prod_idx;     // Posted to hardware
-
-    // CQ for completion
-    volatile Cqe64Opt* cqe;
-    uint32_t ncqes;
-    uint32_t ncqes_mask;
-    volatile uint64_t* cq_cons_idx;
-    volatile uint32_t* cq_dbrec;
-
-    // Remote peer info
-    uint64_t remote_addr;
-    uint32_t remote_rkey;
-
-    // Completion tracking
-    volatile uint64_t* num_completions;
-
-    // Batching configuration
-    uint32_t batch_size;          // Number of WQEs per doorbell
-    uint32_t batch_mask;          // batch_size - 1 for fast modulo
-};
+} // namespace gicc::mlx5  -- close before include
+#include "gicc/platform/mlx5/device_state_opt.hpp"
+namespace gicc::mlx5 {
 
 //==============================================================================
 // OPTIMIZED WQE BUILDING - Per-32bit writes with L1 bypass

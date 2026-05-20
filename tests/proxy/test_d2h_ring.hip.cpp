@@ -4,7 +4,7 @@
  * Microtest for the SPSC D2HRing<Capacity> template under HIP. Byte-identical
  * to test_d2h_ring.cu apart from the runtime sync call and the printf tag.
  */
-#include "gicc/platform/ofi/proxy/d2h_ring.cuh"
+#include "gicc/proxy/common/d2h_ring.cuh"
 #include <cstdio>
 #include <cassert>
 

@@ -13,8 +13,8 @@
  * exercises the proxy worker today.
  */
 #include "gicc/platform/ofi/proxy/proxy_thread.hpp"
-#include "gicc/platform/ofi/proxy/d2h_ring.cuh"
-#include "gicc/platform/ofi/proxy/transfer_cmd.hpp"
+#include "gicc/proxy/common/d2h_ring.cuh"
+#include "gicc/proxy/common/transfer_cmd.hpp"
 #include "gicc/platform/ofi/ofi_runtime.hpp"
 #include "gicc/platform/ofi/internal/gpu_device_context.hpp"
 

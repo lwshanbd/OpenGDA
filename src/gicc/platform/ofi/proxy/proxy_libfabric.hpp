@@ -19,7 +19,7 @@
  */
 #pragma once
 
-#include "transfer_cmd.hpp"
+#include "gicc/proxy/common/transfer_cmd.hpp"
 
 #include <rdma/fabric.h>      // for fid_ep, fid_cq, fi_addr_t
 #include <cstdint>

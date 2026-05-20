@@ -3,7 +3,7 @@
  *
  * Microtest for the SPSC D2HRing<Capacity> template under CUDA.
  */
-#include "gicc/platform/ofi/proxy/d2h_ring.cuh"
+#include "gicc/proxy/common/d2h_ring.cuh"
 #include <cstdio>
 #include <cassert>
 

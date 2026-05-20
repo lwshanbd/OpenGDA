@@ -47,8 +47,8 @@
 #include <cstdint>
 
 #ifdef GICC_CPU_PROXY
-#include "proxy/proxy_ring_defs.hpp"
-#include "proxy/transfer_cmd.hpp"
+#include "gicc/proxy/common/proxy_ring_defs.hpp"
+#include "gicc/proxy/common/transfer_cmd.hpp"
 #endif
 
 namespace gicc {

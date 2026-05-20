@@ -84,7 +84,15 @@ struct alignas(128) D2HRing {
     // head alone, it would race and read stale/empty buf[idx]. So the
     // consumer instead waits for cmd_type != EMPTY — cmd_type doubles as
     // the per-slot ready flag, written last, after the payload.
+    //
+    // Body gated on the device-compile pass: nvcc/hipcc lower it to real
+    // atomicAdd / atomicCAS / __threadfence_system; a host-only TU that
+    // transitively includes this header (e.g. ProxyThread implementation
+    // built by g++) parses an empty stub because those intrinsics aren't
+    // declared at namespace scope under -x c++. The function is __device__
+    // and never called from host code, so the stub is unreachable.
     __device__ uint64_t atomic_push(const TransferCmd& c) {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
         unsigned long long h, prev;
         do {
             h = atomicAdd(reinterpret_cast<unsigned long long*>(&head), 0ULL);
@@ -126,21 +134,27 @@ struct alignas(128) D2HRing {
         buf[idx].cmd_type = c.cmd_type;
 
         return h;
+#else
+        (void)c;
+        return 0;
+#endif
     }
 
     // Volatile read of the host-published tail (so the GPU sees space free up).
     __device__ uint64_t device_tail_volatile() const {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
         unsigned long long t;
 #if defined(__CUDA_ARCH__)
         asm volatile("ld.volatile.global.u64 %0, [%1];"
                      : "=l"(t) : "l"(&tail) : "memory");
-#elif defined(__HIP_DEVICE_COMPILE__)
+#else
         t = __builtin_nontemporal_load(
                 reinterpret_cast<const unsigned long long*>(&tail));
-#else
-        t = *reinterpret_cast<volatile const unsigned long long*>(&tail);
 #endif
         return static_cast<uint64_t>(t);
+#else
+        return 0;
+#endif
     }
 
     // ---------- Host side ----------

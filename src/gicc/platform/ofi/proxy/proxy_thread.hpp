@@ -15,10 +15,10 @@
  */
 #pragma once
 
-#include "d2h_ring.cuh"
+#include "gicc/proxy/common/d2h_ring.cuh"
+#include "gicc/proxy/common/proxy_ring_defs.hpp"
+#include "gicc/proxy/common/transfer_cmd.hpp"
 #include "proxy_libfabric.hpp"
-#include "proxy_ring_defs.hpp"
-#include "transfer_cmd.hpp"
 
 #include <atomic>
 #include <bitset>

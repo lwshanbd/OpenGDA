@@ -15,50 +15,17 @@
 
 #include <stdint.h>
 
+// Struct layout (BufEntry, PeerBufEntry, GiccContext, GICC_MAX_*) lives in
+// gicc_context_types.hpp; we extend it here with the __device__ helpers
+// whose bodies use CUDA atomics / PTX intrinsics and therefore can only
+// be parsed by nvcc.
+#include "gicc/platform/mlx5/gicc_context_types.hpp"
+
 #if defined(GICC_PLATFORM_MLX5)
 #include "gicc/platform/mlx5/device_opt.cuh"
-namespace gicc { using RawDeviceCtx = gicc::mlx5::DeviceStateOpt; }
 #endif
 
 namespace gicc {
-
-/// Maximum number of registered buffers (per rank) and peers.
-/// These are compile-time limits for the GPU-side fixed-size arrays.
-enum {
-    GICC_MAX_BUFS  = 16,
-    GICC_MAX_PEERS = 64,
-};
-
-/// Memory region entry: maps an address range to its IB lkey/rkey.
-struct BufEntry {
-    uint64_t addr;   ///< Base GPU virtual address
-    uint64_t size;   ///< Size in bytes
-    uint32_t lkey;   ///< Local key (for RDMA source)
-    uint32_t rkey;   ///< Remote key (for RDMA target when this buf is remote)
-};
-
-/// Per-peer remote buffer info.
-struct PeerBufEntry {
-    uint64_t addr;   ///< Remote GPU virtual address
-    uint32_t rkey;   ///< Remote key
-};
-
-/// GPU-accessible context for simplified GICC operations.
-/// Created by Runtime::build_context(), passed to GPU kernels.
-struct GiccContext {
-    int my_rank;
-    int num_peers;
-
-    /// Per-peer QP state (index = MPI rank, NULL for self)
-    RawDeviceCtx* peer_ctxs[GICC_MAX_PEERS];
-
-    /// Local buffer registry
-    BufEntry local_bufs[GICC_MAX_BUFS];
-    int num_local_bufs;
-
-    /// Remote buffer registry: remote_bufs[peer][buf_idx]
-    PeerBufEntry remote_bufs[GICC_MAX_PEERS][GICC_MAX_BUFS];
-};
 
 //==============================================================================
 // Internal: look up lkey for a local pointer
