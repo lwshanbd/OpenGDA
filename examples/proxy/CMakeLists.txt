@@ -253,6 +253,166 @@ endif()
 _proxy_example_setup(quiet_pingpong)
 
 # ---------------------------------------------------------------------------
+# get_pingpong - 2 MPI ranks. Each rank's kernel does
+# get_no_db(peer) -> quiet(); the device-side quiet() body acts as the
+# read-ordering fence (proxy advances ring tail only after the libfabric
+# CQE, kernel __threadfence_system() invalidates GPU L2 for the landing
+# range). Smoke-tests the CPU-Proxy GET path end-to-end (device push +
+# fi_read + ack + L2 invalidate). See file header for caveats.
+# ---------------------------------------------------------------------------
+if(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(get_pingpong.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(get_pingpong
+        get_pingpong.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(get_pingpong PRIVATE
+        CUDA::cudart
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+elseif(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(get_pingpong.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE HIP)
+    add_executable(get_pingpong
+        get_pingpong.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(get_pingpong PRIVATE
+        hip::device
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+endif()
+_proxy_example_setup(get_pingpong)
+
+# ---------------------------------------------------------------------------
+# get_stress - 2 MPI ranks. Back-to-back large GETs into a shared landing
+# region, checks the tail bytes immediately after each quiet(). Designed
+# to expose the PCIe-ordering race window between fi_read CQE and the
+# NIC's posted writes actually landing in GPU HBM.
+# ---------------------------------------------------------------------------
+if(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(get_stress.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(get_stress
+        get_stress.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(get_stress PRIVATE
+        CUDA::cudart
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+elseif(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(get_stress.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE HIP)
+    add_executable(get_stress
+        get_stress.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(get_stress PRIVATE
+        hip::device
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+endif()
+_proxy_example_setup(get_stress)
+
+# ---------------------------------------------------------------------------
+# get_pingpong_dwq - 2 MPI ranks. DWQ path GET smoke test.
+# Uses rt.get_no_db() to queue a deferred fi_read + chained atomic_signal;
+# kernel issues a single flush() that fires the trigger MMIO; host waits
+# on libfabric counters via rt.wait/rt.reset. Verifies via SM-driven copy
+# (avoids the hipMemcpy-D2H stale-L2 pathology on small buffers).
+# ---------------------------------------------------------------------------
+if(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(get_pingpong_dwq.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(get_pingpong_dwq
+        get_pingpong_dwq.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(get_pingpong_dwq PRIVATE
+        CUDA::cudart
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+elseif(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(get_pingpong_dwq.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+                                ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp
+        PROPERTIES LANGUAGE HIP)
+    add_executable(get_pingpong_dwq
+        get_pingpong_dwq.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC}
+        ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp)
+    target_link_libraries(get_pingpong_dwq PRIVATE
+        hip::device
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+endif()
+_proxy_example_setup(get_pingpong_dwq)
+
+# ---------------------------------------------------------------------------
+# get_stress_dwq - back-to-back DWQ GETs, full window verification.
+# ---------------------------------------------------------------------------
+if(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(get_stress_dwq.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(get_stress_dwq
+        get_stress_dwq.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(get_stress_dwq PRIVATE
+        CUDA::cudart
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+elseif(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(get_stress_dwq.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+                                ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp
+        PROPERTIES LANGUAGE HIP)
+    add_executable(get_stress_dwq
+        get_stress_dwq.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC}
+        ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp)
+    target_link_libraries(get_stress_dwq PRIVATE
+        hip::device
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+endif()
+_proxy_example_setup(get_stress_dwq)
+
+# ---------------------------------------------------------------------------
 # bench_pingpong - latency benchmark comparing CPU Proxy and Cray MPI for
 # unidirectional GPU-buffer-to-GPU-buffer transfers across a size sweep.
 # Selects mode at runtime via --mode={mpi,proxy}.

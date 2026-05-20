@@ -139,6 +139,24 @@ __global__ void proxy_send_kernel(gicc::DeviceCtx* ctx, int peer,
     if (!per_msg_quiet) gicc::quiet(ctx);
 }
 
+// GET counterpart of proxy_send_kernel. Pulls from peer's buffer at
+// offset 0 into our buffer at offset 0. Same pipelining vs per-msg-quiet
+// tradeoff as the PUT kernel.
+__global__ void proxy_get_kernel(gicc::DeviceCtx* ctx, int peer,
+                                 int buf_idx, size_t bytes, int n,
+                                 bool per_msg_quiet) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    for (int i = 0; i < n; ++i) {
+        // get_no_db: (source_rank, src_buf=peer_buf, src_off=0,
+        //             dst_buf=our_buf, dst_off=0, bytes)
+        gicc::get_no_db(ctx, peer,
+                        buf_idx, /*src_off=*/0,
+                        buf_idx, /*dst_off=*/0, bytes);
+        if (per_msg_quiet) gicc::quiet(ctx);
+    }
+    if (!per_msg_quiet) gicc::quiet(ctx);
+}
+
 // DWQ mode trigger kernel — pre-staged host enqueues fire when the
 // device thread does flush() (lead-thread MMIO write) then quiet()
 // (poll completion counter).
@@ -183,6 +201,7 @@ int main(int argc, char** argv) {
     //                   Use with GICC_NUM_PROXY_THREADS=N to measure how
     //                   parallel proxy threads scale aggregate throughput.
     std::string mode = "proxy";
+    std::string op   = "put";   // "put" | "get"
     bool quick = false;
     bool per_msg_quiet = false;
     int  lanes = 1;
@@ -191,6 +210,8 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         if (a.rfind("--mode=", 0) == 0) {
             mode = a.substr(7);
+        } else if (a.rfind("--op=", 0) == 0) {
+            op = a.substr(5);
         } else if (a == "--quick") {
             quick = true;
         } else if (a == "--per-msg-quiet") {
@@ -202,6 +223,25 @@ int main(int argc, char** argv) {
             batch_override = std::atoi(a.substr(8).c_str());
             if (batch_override < 1) batch_override = 1;
         }
+    }
+    if (op != "put" && op != "get") {
+        fprintf(stderr, "bench_pingpong: --op must be 'put' or 'get'\n");
+        return 2;
+    }
+    // GET is one-sided like PUT but pulls FROM the peer. For mode=mpi
+    // there is no direct GET analog (MPI_Get is RMA, not point-to-point).
+    if (op == "get" && mode == "mpi") {
+        fprintf(stderr,
+            "bench_pingpong: --op=get is only valid for proxy/dwq modes\n");
+        return 2;
+    }
+    // GET via proxy needs lanes=1 for now (the multi-lane GET kernel is
+    // a separate symbol we have not added). Single-block lane=1 still
+    // gives the per-msg-quiet/throughput pipelined timings.
+    if (op == "get" && lanes != 1) {
+        fprintf(stderr,
+            "bench_pingpong: --op=get currently requires --lanes=1\n");
+        return 2;
     }
     if (mode != "mpi" && mode != "proxy" && mode != "dwq" && mode != "dwq-tonly") {
         fprintf(stderr,
@@ -258,15 +298,25 @@ int main(int argc, char** argv) {
                 gpuLaunchKernel(proxy_send_kernel_multi,
                                 dim3(lanes), dim3(1), 0, 0,
                                 d_ctx, peer, bh.index, /*bytes=*/8, burn_n);
-            } else {
+            } else if (op == "put") {
                 gpuLaunchKernel(proxy_send_kernel,
+                                dim3(1), dim3(1), 0, 0,
+                                d_ctx, peer, bh.index, /*bytes=*/8, burn_n,
+                                /*per_msg_quiet=*/false);
+            } else {
+                gpuLaunchKernel(proxy_get_kernel,
                                 dim3(1), dim3(1), 0, 0,
                                 d_ctx, peer, bh.index, /*bytes=*/8, burn_n,
                                 /*per_msg_quiet=*/false);
             }
         } else {
-            for (int i = 0; i < burn_n; ++i)
-                rt.put_no_db(bh, peer, bh.index, 8, 0, 0);
+            for (int i = 0; i < burn_n; ++i) {
+                if (op == "put") {
+                    rt.put_no_db(bh, peer, bh.index, 8, 0, 0);
+                } else {
+                    rt.get_no_db(bh, peer, bh.index, 8, 0, 0);
+                }
+            }
             d_ctx = rt.prepare();
             gpuLaunchKernel(dwq_flush_quiet_kernel, dim3(1), dim3(1), 0, 0, d_ctx);
         }
@@ -327,7 +377,8 @@ int main(int argc, char** argv) {
         snprintf(tag, sizeof(tag), "rank0 (mode=%s)", mode.c_str());
         print_cpu_affinity(tag);
         const char* gpu_aware = std::getenv("MPICH_GPU_SUPPORT_ENABLED");
-        printf("\n=== bench_pingpong (mode=%s) ===\n", mode.c_str());
+        printf("\n=== bench_pingpong (mode=%s op=%s) ===\n",
+               mode.c_str(), op.c_str());
         printf("ranks=%d  outer_iters=%d  batch_per_outer=%d  warmup=%d  lanes=%d\n",
                nranks,
                quick ? 3 : NUM_OUTER,
@@ -369,11 +420,14 @@ int main(int argc, char** argv) {
             printf("  starting size=%s ...\n", sb);
         }
 
-        // --- correctness setup: stamp src on rank 0, wipe dst on rank 1.
-        //     Verified after this size's timing completes (sentinel +
-        //     pattern compare on first/last byte of dst).
+        // --- correctness setup:
+        //   op=put: stamp src on rank 0, wipe dst on rank 1. After PUT,
+        //           rank 1 verifies.
+        //   op=get: stamp src on rank 1 (data we'll pull), wipe dst on
+        //           rank 0. After GET, rank 0 verifies.
         const uint8_t pat_byte = (uint8_t)((s * 17 + 0xA1) & 0xFF);
-        if (rank == 0) {
+        const int src_rank_for_check = (op == "put") ? 0 : 1;
+        if (rank == src_rank_for_check) {
             (void)hipMemset(d_buf, pat_byte, std::max<size_t>(bytes, 64));
         } else {
             (void)hipMemset(d_buf, 0x00, std::max<size_t>(bytes, 64));
@@ -395,8 +449,16 @@ int main(int argc, char** argv) {
             if (rank == 0) {
                 for (int w = 0; w < num_warmup; ++w) {
                     for (int i = 0; i < batch_per_outer; ++i) {
-                        rt.put_no_db(bh, peer, bh.index, bytes,
-                                     /*src_off=*/0, /*dst_off=*/0);
+                        if (op == "put") {
+                            rt.put_no_db(bh, peer, bh.index, bytes,
+                                         /*src_off=*/0, /*dst_off=*/0);
+                        } else {
+                            // GET: pull peer's data into our buffer.
+                            // local_dst=bh, src_rank=peer, src_buf=peer's idx,
+                            // local_off=0, remote_off=0.
+                            rt.get_no_db(bh, peer, bh.index, bytes,
+                                         /*local_off=*/0, /*remote_off=*/0);
+                        }
                     }
                     gicc::DeviceCtx* d_ctx = rt.prepare();
                     gpuLaunchKernel(dwq_flush_quiet_kernel,
@@ -409,9 +471,15 @@ int main(int argc, char** argv) {
             // Proxy warmup: rank 0 fires num_warmup small put+quiet ops.
             if (rank == 0) {
                 gicc::DeviceCtx* d_ctx = rt.prepare();
-                gpuLaunchKernel(proxy_send_kernel, dim3(1), dim3(1), 0, 0,
-                                d_ctx, peer, bh.index, bytes, num_warmup,
-                                per_msg_quiet);
+                if (op == "put") {
+                    gpuLaunchKernel(proxy_send_kernel, dim3(1), dim3(1), 0, 0,
+                                    d_ctx, peer, bh.index, bytes, num_warmup,
+                                    per_msg_quiet);
+                } else {
+                    gpuLaunchKernel(proxy_get_kernel, dim3(1), dim3(1), 0, 0,
+                                    d_ctx, peer, bh.index, bytes, num_warmup,
+                                    per_msg_quiet);
+                }
                 (void)gpuDeviceSynchronize();
                 rt.reset();
             }
@@ -435,8 +503,13 @@ int main(int argc, char** argv) {
             if (mode == "dwq-tonly" && rank == 0) {
                 double te0 = MPI_Wtime();
                 for (int i = 0; i < batch_per_outer; ++i) {
-                    rt.put_no_db(bh, peer, bh.index, bytes,
-                                 /*src_off=*/0, /*dst_off=*/0);
+                    if (op == "put") {
+                        rt.put_no_db(bh, peer, bh.index, bytes,
+                                     /*src_off=*/0, /*dst_off=*/0);
+                    } else {
+                        rt.get_no_db(bh, peer, bh.index, bytes,
+                                     /*local_off=*/0, /*remote_off=*/0);
+                    }
                 }
                 t_enq_us = (MPI_Wtime() - te0) * 1e6 / batch_per_outer;
             }
@@ -461,8 +534,13 @@ int main(int argc, char** argv) {
                     // measures the device-side trigger + completion + reset.
                     if (mode == "dwq") {
                         for (int i = 0; i < batch_per_outer; ++i) {
-                            rt.put_no_db(bh, peer, bh.index, bytes,
-                                         /*src_off=*/0, /*dst_off=*/0);
+                            if (op == "put") {
+                                rt.put_no_db(bh, peer, bh.index, bytes,
+                                             /*src_off=*/0, /*dst_off=*/0);
+                            } else {
+                                rt.get_no_db(bh, peer, bh.index, bytes,
+                                             /*local_off=*/0, /*remote_off=*/0);
+                            }
                         }
                     }
                     gicc::DeviceCtx* d_ctx = rt.prepare();
@@ -478,12 +556,18 @@ int main(int argc, char** argv) {
                         // Multi-lane mode: K blocks each push to its own
                         // ring (mod num_proxy_rings) then quiet that ring.
                         // Aggregate work = lanes * batch_per_outer puts.
+                        // (PUT-only; GET requires --lanes=1.)
                         gpuLaunchKernel(proxy_send_kernel_multi,
                                         dim3(lanes), dim3(1), 0, 0,
                                         d_ctx, peer, bh.index, bytes,
                                         batch_per_outer);
-                    } else {
+                    } else if (op == "put") {
                         gpuLaunchKernel(proxy_send_kernel,
+                                        dim3(1), dim3(1), 0, 0,
+                                        d_ctx, peer, bh.index, bytes,
+                                        batch_per_outer, per_msg_quiet);
+                    } else {
+                        gpuLaunchKernel(proxy_get_kernel,
                                         dim3(1), dim3(1), 0, 0,
                                         d_ctx, peer, bh.index, bytes,
                                         batch_per_outer, per_msg_quiet);
@@ -526,12 +610,10 @@ int main(int argc, char** argv) {
         }
         rt.barrier();
 
-        // --- correctness verify: rank 1 confirms first & last byte of
-        //     dst now equal the pattern rank 0 stamped. If any timed
-        //     mode silently skipped the actual fi_write (compiler
-        //     pass / dispatch routing bug, src/dst alias confusion,
-        //     etc.) this catches it. Done outside timing.
-        if (rank == 1) {
+        // --- correctness verify: the "dst" rank confirms first & last
+        //     byte. For PUT that's rank 1; for GET that's rank 0.
+        const int dst_rank_for_check = (op == "put") ? 1 : 0;
+        if (rank == dst_rank_for_check) {
             uint8_t first_dst = 0xFF, last_dst = 0xFF;
             size_t check_len = std::max<size_t>(bytes, 1);
             (void)hipMemcpy(&first_dst, d_buf, 1, hipMemcpyDeviceToHost);
@@ -541,9 +623,9 @@ int main(int argc, char** argv) {
             if (first_dst != pat_byte || last_dst != pat_byte) {
                 char sb[32]; fmt_size(bytes, sb);
                 fprintf(stderr,
-                    "[VERIFY-FAIL mode=%s] size=%s first=0x%02x last=0x%02x "
+                    "[VERIFY-FAIL mode=%s op=%s] size=%s first=0x%02x last=0x%02x "
                     "expected=0x%02x\n",
-                    mode.c_str(), sb, first_dst, last_dst, pat_byte);
+                    mode.c_str(), op.c_str(), sb, first_dst, last_dst, pat_byte);
                 fflush(stderr);
             }
         }
