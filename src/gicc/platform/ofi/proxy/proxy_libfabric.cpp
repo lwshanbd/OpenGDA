@@ -169,6 +169,39 @@ int ProxyLibfabric::submit_write(const TransferCmd& c, uint64_t slot)
 }
 
 
+int ProxyLibfabric::submit_read(const TransferCmd& c, uint64_t slot)
+{
+    // Cmd-struct convention: src_* = LOCAL (where to land the data),
+    // dst_* = REMOTE (where to read from on dst_rank). This mirrors
+    // submit_write's accessors so the host code stays symmetric.
+    auto        lb   = rt_.local_buf_view(c.src_buf);
+    const auto& ri   = rt_.remote_info(c.dst_rank, c.dst_buf);
+    fi_addr_t   peer = rt_.av_addr(c.dst_rank);
+
+    char*    local_dst = static_cast<char*>(lb.ptr) + c.src_offset;
+    void*    desc      = fab_.proxy_buf_desc(c.src_buf, ep_idx_);
+    uint64_t raddr     = rt_.is_virt_addr_mode()
+                            ? (ri.rma_addr + c.dst_offset)
+                            : (ri.rma_addr - ri.base_addr) + c.dst_offset;
+    uint64_t rkey      = ri.rma_key;
+
+    int ret = fi_read(ep_,
+                      local_dst, c.bytes, desc,
+                      peer, raddr, rkey,
+                      reinterpret_cast<void*>(slot));
+    if (ret == -FI_EAGAIN) {
+        return -FI_EAGAIN;
+    }
+    if (ret != 0) {
+        fprintf(stderr,
+            "ProxyLibfabric[%d]::submit_read: fi_read failed: %s\n",
+            ep_idx_, fi_strerror(-ret));
+        std::abort();
+    }
+    return 0;
+}
+
+
 int ProxyLibfabric::submit_atomic_add(const TransferCmd& c, uint64_t slot)
 {
     auto        lb   = rt_.local_buf_view(c.src_buf);

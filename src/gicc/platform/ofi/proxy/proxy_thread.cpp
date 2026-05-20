@@ -104,8 +104,26 @@ void ProxyThread::main_loop() {
         //    popped). At most one PendingRetry exists at a time because the
         //    proxy is single-threaded.
         if (pending_retry_) {
-            int ret = lf_.submit_write(pending_retry_->cmd,
-                                       pending_retry_->slot);
+            int ret;
+            switch (pending_retry_->cmd.cmd_type) {
+                case CmdType::WRITE:
+                    ret = lf_.submit_write(pending_retry_->cmd,
+                                           pending_retry_->slot);
+                    break;
+                case CmdType::READ:
+                    ret = lf_.submit_read(pending_retry_->cmd,
+                                          pending_retry_->slot);
+                    break;
+                case CmdType::ATOMIC:
+                    ret = lf_.submit_atomic_add(pending_retry_->cmd,
+                                                pending_retry_->slot);
+                    break;
+                default:
+                    fprintf(stderr,
+                        "ProxyThread: pending retry has unexpected cmd_type %u\n",
+                        (unsigned)pending_retry_->cmd.cmd_type);
+                    std::abort();
+            }
             if (ret == -FI_EAGAIN) {
                 stop_submitting = true;   // still no room; just poll CQ.
             } else {
@@ -144,6 +162,17 @@ void ProxyThread::main_loop() {
             switch (c.cmd_type) {
                 case CmdType::WRITE: {
                     int ret = lf_.submit_write(c, slot);
+                    if (ret == -FI_EAGAIN) {
+                        pending_retry_ = PendingRetry{c, slot};
+                        stop_submitting = true;
+                        break;
+                    }
+                    in_flight_.set(bit);
+                    ++in_flight_count_;
+                    break;
+                }
+                case CmdType::READ: {
+                    int ret = lf_.submit_read(c, slot);
                     if (ret == -FI_EAGAIN) {
                         pending_retry_ = PendingRetry{c, slot};
                         stop_submitting = true;

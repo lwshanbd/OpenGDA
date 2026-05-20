@@ -297,11 +297,71 @@ void put_no_db(DeviceCtx* ctx,
 #endif
 }
 
+// Multi-ring GET variant: pushes a READ cmd into proxy_rings_arr[ring_idx %
+// num_proxy_rings]. The NIC pulls bytes from peer (source_rank)'s
+// (src_buf, src_offset) into our local (dst_buf, dst_offset).
+//
+// Read-ordering guarantee: the proxy only ack's this slot after the CQ
+// completion fires, which under both libfabric (cxi/verbs) and IB verbs
+// means the bytes have already landed in local memory. The kernel MUST
+// call quiet() / quiet_idx() before reading the landed data — the spin
+// on device_tail_volatile() + __threadfence_system() inside quiet()
+// invalidates the GPU's L2 for the destination range and pairs with the
+// proxy's release-store of tail.
 __device__ inline
-void get_no_db(DeviceCtx* /*ctx*/,
-               int /*source_rank*/,
-               int /*src_buf*/, size_t /*src_offset*/,
-               int /*dst_buf*/, size_t /*dst_offset*/,
-               size_t /*size*/, bool /*signaled*/ = false) {}
+void get_no_db_idx(DeviceCtx* ctx, int ring_idx,
+                   int source_rank,
+                   int src_buf, size_t src_offset,
+                   int dst_buf, size_t dst_offset,
+                   size_t size) {
+#ifdef GICC_CPU_PROXY
+    if (!ctx) return;
+    void* ring_ptr = nullptr;
+    if (ctx->proxy_rings_arr && ctx->num_proxy_rings > 0) {
+        int n = ctx->num_proxy_rings;
+        int idx = ring_idx;
+        if (idx < 0) idx = 0;
+        idx = idx % n;
+        ring_ptr = ctx->proxy_rings_arr[idx];
+    } else {
+        ring_ptr = ctx->proxy_ring;
+    }
+    if (!ring_ptr) return;
+    auto* ring = reinterpret_cast<gicc::proxy::ProxyRing*>(ring_ptr);
+    // Remap API direction (src=remote, dst=local) onto the cmd-struct
+    // convention (src_*=local, dst_*=remote on dst_rank). This lets the
+    // host-side accessors stay uniform across WRITE and READ.
+    gicc::proxy::TransferCmd c;
+    c.cmd_type   = gicc::proxy::CmdType::READ;
+    c.dst_rank   = static_cast<uint8_t>(source_rank);
+    c.src_buf    = static_cast<uint8_t>(dst_buf);     // LOCAL landing
+    c.dst_buf    = static_cast<uint8_t>(src_buf);     // REMOTE source
+    c.bytes      = static_cast<uint32_t>(size);
+    c.src_offset = dst_offset;                        // LOCAL landing offset
+    c.dst_offset = src_offset;                        // REMOTE source offset
+    ring->atomic_push(c);
+#else
+    (void)ctx; (void)ring_idx; (void)source_rank;
+    (void)src_buf; (void)src_offset; (void)dst_buf; (void)dst_offset; (void)size;
+#endif
+}
+
+__device__ inline
+void get_no_db(DeviceCtx* ctx,
+               int source_rank,
+               int src_buf, size_t src_offset,
+               int dst_buf, size_t dst_offset,
+               size_t size, bool /*signaled*/ = false) {
+#ifdef GICC_CPU_PROXY
+    get_no_db_idx(ctx, /*ring_idx=*/0,
+                  source_rank, src_buf, src_offset,
+                  dst_buf, dst_offset, size);
+#else
+    (void)ctx; (void)source_rank;
+    (void)src_buf; (void)src_offset;
+    (void)dst_buf; (void)dst_offset;
+    (void)size;
+#endif
+}
 
 } // namespace gicc

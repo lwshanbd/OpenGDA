@@ -75,6 +75,13 @@ public:
                            const uint64_t*   slots,
                            size_t            n);
 
+    // Issues an RDMA READ: the NIC pulls `c.bytes` from the peer's
+    // (c.dst_rank, c.dst_buf, c.dst_offset) into the local landing slice
+    // (c.src_buf, c.src_offset). The completion only fires once the
+    // bytes have landed in local memory, so the same QUIET / slot-ack
+    // mechanism that drives WRITE acks also fences the read.
+    int submit_read(const TransferCmd& c, uint64_t slot);
+
     // Issues a non-fetching remote atomic add (FI_SUM, FI_UINT32) on the
     // peer's counter slot identified by (c.dst_rank, c.dst_buf, c.dst_offset)
     // using the local 4-byte source value at (c.src_buf, c.src_offset).
