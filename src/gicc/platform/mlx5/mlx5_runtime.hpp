@@ -26,13 +26,25 @@
 #include "gicc/util/memory_region.hpp"
 #include "gicc/bootstrap/bootstrap.hpp"
 
-// Include gda_device_opt.cuh for DeviceStateOpt struct definition.
+#ifdef GICC_CPU_PROXY
+#include "gicc/platform/mlx5/proxy/proxy_thread.hpp"
+#include <memory>
+#include <mutex>
+#endif
+
+// DeviceStateOpt POD layout — the slim type-only header so this runtime
+// header can be included from pure host C++ TUs (CPU proxy worker)
+// without parsing the heavy __device__ helpers in device_opt.cuh.
 // Must come AFTER mlx5dv.h (included by mlx5_devx_qp.hpp) to avoid
 // macro conflicts with MLX5 enum constants.
-#include "gicc/platform/mlx5/device_opt.cuh"
+#include "gicc/platform/mlx5/device_state_opt.hpp"
 
-// Simplified GPU context (NVSHMEM-style API)
-#include "gicc/platform/mlx5/gicc_context.cuh"
+// Simplified GPU context — type-only slice, so this runtime header stays
+// includable from pure host TUs (CPU proxy worker). The __device__ helper
+// flavour (put / get / flush / quiet on GiccContext) lives in
+// gicc_context.cuh and is pulled in by gicc/gicc_device.cuh for user
+// kernels compiled by nvcc.
+#include "gicc/platform/mlx5/gicc_context_types.hpp"
 
 namespace gicc {
 
@@ -81,10 +93,43 @@ public:
         }
 
         connect_peers();
+
+#ifdef GICC_CPU_PROXY
+        // Decide proxy fleet width up front (workers are started lazily
+        // by ensure_proxy_rings()). Mirrors the OFI side: default 1,
+        // override via GICC_NUM_PROXY_THREADS, clamp to [1,32].
+        n_proxy_threads_ = 1;
+        if (const char* e = std::getenv("GICC_NUM_PROXY_THREADS")) {
+            int parsed = std::atoi(e);
+            if (parsed >= 1 && parsed <= 32) {
+                n_proxy_threads_ = parsed;
+            } else if (boot_.rank() == 0) {
+                fprintf(stderr,
+                    "[gicc] GICC_NUM_PROXY_THREADS=%s out of [1,32], "
+                    "using default 1\n", e);
+            }
+        }
+#endif
     }
 
     ~Runtime() {
         reset();
+
+#ifdef GICC_CPU_PROXY
+        // Stop + join workers (and release their per-thread CQ/QP fleets)
+        // BEFORE we tear down MRs and the PD — the proxy QPs were created
+        // against the same pd_ and may still hold references to it.
+        proxy_threads_.clear();
+        for (auto* mr : proxy_aux_mrs_) {
+            if (mr) ibv_dereg_mr(mr);
+        }
+        proxy_aux_mrs_.clear();
+        if (proxy_rings_arr_host_) {
+            cudaFreeHost(proxy_rings_arr_host_);
+            proxy_rings_arr_host_ = nullptr;
+            proxy_rings_arr_dev_  = nullptr;
+        }
+#endif
 
         for (auto* mr : local_bufs_) delete mr;
         local_bufs_.clear();
@@ -258,6 +303,95 @@ public:
     void* peer_mapped (int /*rank*/, int /*buf_idx*/) const noexcept { return nullptr; }
     bool  is_virt_addr_mode() const noexcept { return true; }
 
+#ifdef GICC_CPU_PROXY
+    //--------------------------------------------------------------------------
+    // CPU-proxy accessors consumed by mlx5::proxy::{ProxyThread, ProxyVerbs,
+    // ProxyQpFleet}. We expose the shared ib_context + PD so the proxy QP
+    // fleet can ibv_create_qp / ibv_modify_qp on it without re-opening the
+    // device, and thin views over local/remote buffer registries so
+    // ProxyVerbs can build SGEs from TransferCmd (rank, buf_idx, offset).
+    //--------------------------------------------------------------------------
+    struct ProxyLocalBuf  { uint64_t addr; uint32_t lkey; };
+    struct ProxyRemoteBuf { uint64_t addr; uint32_t rkey; };
+
+    ibv_context* proxy_ib_context() noexcept { return ib_ctx_; }
+    ibv_pd*      proxy_pd()         noexcept { return pd_; }
+
+    ProxyLocalBuf proxy_local_buf(int idx) const {
+        const auto& mr = *local_bufs_.at(idx);
+        return ProxyLocalBuf{ reinterpret_cast<uint64_t>(mr.buf), mr.lkey };
+    }
+
+    ProxyRemoteBuf proxy_remote_buf(int rank, int buf_idx) const {
+        const auto& rb = remote_bufs_.at(rank).at(buf_idx);
+        return ProxyRemoteBuf{ rb.addr, rb.rkey };
+    }
+
+    // Register a host buffer in the shared PD (used by ProxyVerbs for the
+    // IBV_WR_ATOMIC_FETCH_AND_ADD scratch landing). Tracked here so it gets
+    // ibv_dereg_mr()'d in the dtor before pd_ goes away.
+    ibv_mr* proxy_register_host(void* ptr, size_t bytes) {
+        ibv_mr* mr = ibv_reg_mr(
+            pd_, ptr, bytes,
+            IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+        if (mr) proxy_aux_mrs_.push_back(mr);
+        return mr;
+    }
+
+    //--------------------------------------------------------------------------
+    // Lazy-start the proxy fleet. The first call constructs n_proxy_threads_
+    // ProxyThreads (each owning its own ring + CQ + per-peer QPs), spawns
+    // their worker threads, and publishes a host-pinned device-mapped array
+    // of the N ring pointers for kernels to fan out across. Idempotent.
+    //--------------------------------------------------------------------------
+    void** ensure_proxy_rings() {
+        std::lock_guard<std::mutex> g(proxy_init_mutex_);
+        if (!proxy_threads_.empty()) return proxy_rings_arr_dev_;
+
+        const int n = n_proxy_threads_;
+        proxy_threads_.reserve(n);
+        for (int i = 0; i < n; ++i) {
+            proxy_threads_.push_back(
+                std::make_unique<gicc::mlx5::proxy::ProxyThread>(*this, i));
+            proxy_threads_.back()->start();
+        }
+
+        const size_t arr_bytes = sizeof(void*) * n;
+        if (cudaHostAlloc(reinterpret_cast<void**>(&proxy_rings_arr_host_),
+                          arr_bytes, cudaHostAllocMapped) != cudaSuccess) {
+            fprintf(stderr,
+                "[gicc] cudaHostAlloc(proxy_rings_arr) failed for N=%d\n", n);
+            std::abort();
+        }
+        for (int i = 0; i < n; ++i) {
+            proxy_rings_arr_host_[i] = proxy_threads_[i]->ring_device();
+        }
+        if (cudaHostGetDevicePointer(
+                reinterpret_cast<void**>(&proxy_rings_arr_dev_),
+                proxy_rings_arr_host_, 0) != cudaSuccess) {
+            fprintf(stderr,
+                "[gicc] cudaHostGetDevicePointer(proxy_rings_arr) failed\n");
+            std::abort();
+        }
+
+        if (rank() == 0) {
+            fprintf(stderr,
+                "[gicc] mlx5 CPU proxy: %d worker thread(s) per rank\n", n);
+        }
+        return proxy_rings_arr_dev_;
+    }
+
+    // Single-ring back-compat helper. Returns ring 0's device pointer.
+    void* ensure_proxy_ring() {
+        ensure_proxy_rings();
+        return proxy_threads_[0]->ring_device();
+    }
+
+    int num_proxy_rings() const {
+        return static_cast<int>(proxy_threads_.size());
+    }
+#endif  // GICC_CPU_PROXY
+
 private:
     gicc::Bootstrap boot_;
     struct ibv_context* ib_ctx_ = nullptr;
@@ -272,6 +406,18 @@ private:
     int gpu_id_ = 0;
     double clock_rate_khz_ = 0;
     cudaDeviceProp gpu_props_;
+
+#ifdef GICC_CPU_PROXY
+    int                                                          n_proxy_threads_ = 1;
+    std::vector<std::unique_ptr<gicc::mlx5::proxy::ProxyThread>> proxy_threads_;
+    void**                                                       proxy_rings_arr_host_ = nullptr;
+    void**                                                       proxy_rings_arr_dev_  = nullptr;
+    std::mutex                                                   proxy_init_mutex_;
+    // Auxiliary MRs registered by proxy_register_host() (e.g. atomic
+    // fetch-and-add scratch landings). Owned by us; released before pd_
+    // in the dtor.
+    std::vector<ibv_mr*>                                         proxy_aux_mrs_;
+#endif
 
     void open_ib_device() {
         int num_devices = 0;

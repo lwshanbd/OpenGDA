@@ -38,6 +38,18 @@ add_library(gicc SHARED
     gicc_lib.cu
 )
 
+# CPU proxy worker (MLX5/verbs flavour). Pure host C++ — added to the same
+# libgicc.so so kernels that pull in proxy_device.cuh link cleanly. Mirrors
+# the OFI proxy/ source set; activated by the top-level GICC_ENABLE_CPU_PROXY
+# option (which also defines GICC_CPU_PROXY=1 globally).
+if(GICC_ENABLE_CPU_PROXY)
+    target_sources(gicc PRIVATE
+        gicc/platform/mlx5/proxy/proxy_qp_fleet.cpp
+        gicc/platform/mlx5/proxy/proxy_verbs.cpp
+        gicc/platform/mlx5/proxy/proxy_thread.cpp
+    )
+endif()
+
 # Include directories: src/ is the root so includes work as <gicc/...>
 target_include_directories(gicc
     PUBLIC

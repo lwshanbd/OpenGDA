@@ -66,9 +66,16 @@ elseif(GICC_BACKEND STREQUAL "ofi")
 endif()
 
 if(GICC_ENABLE_CPU_PROXY)
-    add_subdirectory(tests/proxy)
-    if(BUILD_EXAMPLES)
-        add_subdirectory(examples/proxy)
+    # tests/proxy and examples/proxy currently target the OFI/HIP proxy path
+    # (Tioga). Skip them under the MLX5/CUDA backend so the MLX5 CPU-proxy
+    # build doesn't try to drag in HIP. A future refactor should split the
+    # truly backend-agnostic tests (e.g. the D2H ring microtest) out from
+    # the OFI-specific ones.
+    if(GICC_BACKEND STREQUAL "ofi")
+        add_subdirectory(tests/proxy)
+        if(BUILD_EXAMPLES)
+            add_subdirectory(examples/proxy)
+        endif()
     endif()
 endif()
 
