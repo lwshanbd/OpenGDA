@@ -51,6 +51,20 @@ __global__ void put_kernel(gicc::DeviceCtx* ctx,
     }
 }
 
+// Kernel-driven verification copy. Bypasses the well-known Tioga ROCm
+// pathology where hipMemcpy(D2H) on small (<16 KiB) buffers can satisfy
+// reads from a stale GPU L2, missing NIC-deposited data — the data is
+// actually in HBM, the SM-issued read sees it, but the host-issued copy
+// hits stale cache. See get_pingpong_dwq.cpp and legacy/ofi/test_ofi_get.cpp.
+__global__ void verify_copy_kernel(const uint8_t* __restrict__ src,
+                                   uint8_t* __restrict__ dst, int n) {
+    for (int i = threadIdx.x + blockIdx.x * blockDim.x;
+         i < n;
+         i += blockDim.x * gridDim.x) {
+        dst[i] = src[i];
+    }
+}
+
 int main(int /*argc*/, char** /*argv*/) {
     gicc::Runtime rt;
     const int rank   = rt.rank();
@@ -115,22 +129,31 @@ int main(int /*argc*/, char** /*argv*/) {
 
     int rc = 0;
     if (rank == 1) {
-        auto* h_check = static_cast<uint8_t*>(std::malloc(BUF_BYTES));
-        (void)gpuMemcpy(h_check, d_buf, BUF_BYTES, gpuMemcpyDeviceToHost);
+        // SM-driven copy → pinned host memory (bypasses Tioga ROCm's
+        // <16KiB hipMemcpy(D2H) stale-L2 quirk).
+        uint8_t* h_pinned = nullptr;
+        (void)gpuHostMalloc(&h_pinned, BUF_BYTES, gpuHostMallocMapped);
+        uint8_t* d_pinned = nullptr;
+        (void)gpuHostGetDevicePointer((void**)&d_pinned, h_pinned, 0);
+        gpuLaunchKernel(verify_copy_kernel,
+                        dim3(16), dim3(256), 0, 0,
+                        (const uint8_t*)d_buf, d_pinned, (int)BUF_BYTES);
+        (void)gpuDeviceSynchronize();
+
         int errors = 0;
         for (size_t i = 0; i < BUF_BYTES; ++i) {
-            if (h_check[i] != (uint8_t)(i & 0xFF)) {
+            if (h_pinned[i] != (uint8_t)(i & 0xFF)) {
                 if (errors < 4) {
                     fprintf(stderr,
                         "  rank 1: mismatch @%zu got=0x%02x want=0x%02x\n",
-                        i, h_check[i], (unsigned)(i & 0xFF));
+                        i, h_pinned[i], (unsigned)(i & 0xFF));
                 }
                 ++errors;
             }
         }
         printf("put_two_rank_intranode: %s (%d errors over %zu bytes)\n",
                errors == 0 ? "PASS" : "FAIL", errors, BUF_BYTES);
-        std::free(h_check);
+        (void)gpuHostFree(h_pinned);
         rc = (errors == 0) ? 0 : 4;
     }
 
