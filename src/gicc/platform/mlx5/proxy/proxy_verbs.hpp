@@ -41,6 +41,15 @@ public:
     // as Completion::context after poll().
     int submit_write(const ::gicc::proxy::TransferCmd& c, uint64_t slot);
 
+    // Issues an RDMA READ via IBV_WR_RDMA_READ. The NIC pulls `c.bytes`
+    // from the peer's (c.dst_rank, c.dst_buf, c.dst_offset) into the
+    // local landing slice (c.src_buf, c.src_offset). Verbs ordering: an
+    // RDMA_READ on the same QP is fenced after prior outbound WRITEs to
+    // the same peer per the IB spec, so a put_no_db()→get_no_db() pair
+    // pulled through one QP sees its own prior writes. Returns -ENOMEM
+    // if SQ full; aborts on hard error.
+    int submit_read(const ::gicc::proxy::TransferCmd& c, uint64_t slot);
+
     // Verbs has no non-fetching FI_SUM-style atomic add: IBV_WR_ATOMIC_FETCH_AND_ADD
     // exists but returns the pre-add value via a local buffer. For now we
     // map ATOMIC to fetch-and-add into a per-Verbs scratch buffer, which

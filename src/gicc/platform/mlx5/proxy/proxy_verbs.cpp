@@ -78,6 +78,49 @@ int ProxyVerbs::submit_write(const ::gicc::proxy::TransferCmd& c, uint64_t slot)
     return 0;
 }
 
+int ProxyVerbs::submit_read(const ::gicc::proxy::TransferCmd& c, uint64_t slot)
+{
+    ibv_qp* qp = fleet_.qp(c.dst_rank);
+    if (!qp) {
+        fprintf(stderr,
+            "ProxyVerbs::submit_read: no QP for dst_rank=%u (self or out-of-range)\n",
+            (unsigned)c.dst_rank);
+        std::abort();
+    }
+
+    // Cmd-struct convention: src_* = LOCAL landing, dst_* = REMOTE source
+    // on dst_rank. Same accessors as submit_write but the data flow is
+    // reversed (NIC -> local).
+    const auto& lb = rt_.proxy_local_buf(c.src_buf);
+    const auto& rb = rt_.proxy_remote_buf(c.dst_rank, c.dst_buf);
+
+    ibv_sge sge{};
+    sge.addr   = lb.addr + c.src_offset;
+    sge.length = c.bytes;
+    sge.lkey   = lb.lkey;
+
+    ibv_send_wr wr{};
+    wr.wr_id      = slot;
+    wr.next       = nullptr;
+    wr.sg_list    = &sge;
+    wr.num_sge    = 1;
+    wr.opcode     = IBV_WR_RDMA_READ;
+    wr.send_flags = IBV_SEND_SIGNALED;            // one CQE per submit; ack drives tail.
+    wr.wr.rdma.remote_addr = rb.addr + c.dst_offset;
+    wr.wr.rdma.rkey        = rb.rkey;
+
+    ibv_send_wr* bad = nullptr;
+    int ret = ibv_post_send(qp, &wr, &bad);
+    if (ret == ENOMEM) return -ENOMEM;
+    if (ret != 0) {
+        fprintf(stderr,
+            "ProxyVerbs::submit_read: ibv_post_send failed: %s (%d) bad=%p\n",
+            strerror(ret), ret, (void*)bad);
+        std::abort();
+    }
+    return 0;
+}
+
 int ProxyVerbs::submit_atomic_add(const ::gicc::proxy::TransferCmd& c, uint64_t slot)
 {
     // Lazy-allocate one 8-byte scratch landing per ProxyVerbs to absorb

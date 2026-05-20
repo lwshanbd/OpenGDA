@@ -105,8 +105,26 @@ void ProxyThread::main_loop() {
 
         // 0. Reissue any retry stashed by a prior -ENOMEM.
         if (pending_retry_) {
-            int ret = verbs_->submit_write(pending_retry_->cmd,
-                                           pending_retry_->slot);
+            int ret;
+            switch (pending_retry_->cmd.cmd_type) {
+                case CmdType::WRITE:
+                    ret = verbs_->submit_write(pending_retry_->cmd,
+                                               pending_retry_->slot);
+                    break;
+                case CmdType::READ:
+                    ret = verbs_->submit_read(pending_retry_->cmd,
+                                              pending_retry_->slot);
+                    break;
+                case CmdType::ATOMIC:
+                    ret = verbs_->submit_atomic_add(pending_retry_->cmd,
+                                                    pending_retry_->slot);
+                    break;
+                default:
+                    fprintf(stderr,
+                        "ProxyThread(mlx5): pending retry has unexpected "
+                        "cmd_type %u\n", (unsigned)pending_retry_->cmd.cmd_type);
+                    std::abort();
+            }
             if (ret == -ENOMEM) {
                 stop_submitting = true;
             } else {
@@ -134,6 +152,17 @@ void ProxyThread::main_loop() {
             switch (c.cmd_type) {
                 case CmdType::WRITE: {
                     int ret = verbs_->submit_write(c, slot);
+                    if (ret == -ENOMEM) {
+                        pending_retry_ = PendingRetry{c, slot};
+                        stop_submitting = true;
+                        break;
+                    }
+                    in_flight_.set(bit);
+                    ++in_flight_count_;
+                    break;
+                }
+                case CmdType::READ: {
+                    int ret = verbs_->submit_read(c, slot);
                     if (ret == -ENOMEM) {
                         pending_retry_ = PendingRetry{c, slot};
                         stop_submitting = true;
