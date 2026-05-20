@@ -254,6 +254,20 @@ public:
     // Buffer registration — delegates to Fabric, caches local metadata.
     //--------------------------------------------------------------------------
     Buffer register_buffer(void* buf, size_t size, bool is_device) {
+        // Sync any pending GPU work on `buf` before exposing it to peers
+        // for RDMA. Without this, an async gpuMemset or gpuMemcpy issued
+        // by the user prior to register_buffer can race with subsequent
+        // inbound NIC writes: if the user's GPU init completes AFTER an
+        // inbound RMA write has landed, the init overwrites that write
+        // with stale bytes (typically 0). The bug only manifests on the
+        // "silent receiver" side — a rank that registers + waits for
+        // inbound but never launches its own GPU kernel — because no
+        // later kernel launch implicitly forces the queued init to
+        // complete. Cheapest robust fix: pay one device sync per
+        // device-buffer registration.
+        if (is_device) {
+            (void)gpuDeviceSynchronize();
+        }
         Handle h = comm_->register_buffer(buf, size, is_device);
         int idx = (int)local_bufs_.size();
 
@@ -508,19 +522,31 @@ public:
             exit(1);
         }
 
-        // IPC fast path. host_wait_mode + Pattern C: don't do anything
-        // here — the device-side put_no_db will push a command to the
-        // GPU↔CPU ring AT THE put_no_db CALL SITE in the user kernel,
-        // and the monitor thread will dispatch hipMemcpyAsync onto
-        // one of ipc_streams_. This preserves "comm fires when you write
-        // put_no_db" semantics. Legacy (non-host-wait) mode: device
-        // put_no_db does in-kernel block-cooperative memcpy.
+        // IPC fast path. Same-node peer with an IPC-mapped buffer →
+        // issue a device-to-device gpuMemcpyAsync directly here (mirror
+        // of what GICCDispatchLowering::emitIpcBody emits in the LTO
+        // host trace). rt.reset() syncs ipc_streams_ so any outstanding
+        // copy completes before the next barrier.
+        //
+        // Pre-Pattern-C deletion this branch relied on a monitor thread
+        // + device-side ring to deliver the copy; that machinery was
+        // removed in 25e08e2. Without the inline gpuMemcpyAsync below,
+        // a non-LTO caller (bench_pingpong, put_two_rank_intranode) hits
+        // the IPC peer fast-path and silently transfers ZERO bytes.
         if (dest_rank != comm_->rank()
             && local_peer_[dest_rank]
             && (int)peer_mapped_ptrs_[dest_rank].size() > dest_buf_index
             && peer_mapped_ptrs_[dest_rank][dest_buf_index] != nullptr)
         {
-            (void)ob; (void)size; (void)src_offset; (void)dst_offset;
+            void* peer_base = peer_mapped_ptrs_[dest_rank][dest_buf_index];
+            void* dst       = static_cast<char*>(peer_base) + dst_offset;
+            void* src       = static_cast<char*>(ob.ptr)    + src_offset;
+            // ipc_streams_ may be empty if enable_host_wait_mode() was
+            // not called (legacy path constructs streams in that setter).
+            // Fall back to the default stream in that case.
+            GpuStream_t s = ipc_streams_.empty() ? nullptr : ipc_streams_[0];
+            (void)gpuMemcpyAsync(dst, src, size,
+                                 gpuMemcpyDeviceToDevice, s);
             return Token{ -1, /*is_local=*/true };
         }
 
@@ -593,13 +619,77 @@ public:
     }
 
     // get_no_db — queue an RMA READ. Same slot-pool accounting as put_no_db.
+    //
+    // FI_HMEM contract note: the local destination buffer was registered with
+    // iface = FI_HMEM_ROCR / FI_HMEM_CUDA, so libfabric's completion event
+    // for the queued fi_read implies the response payload has been committed
+    // to GPU HBM. Host wait via fi_cntr_read on slots_[].completion_cntr is
+    // therefore sufficient — subsequent SM reads see the new data.
+    //
+    // The chained queue_atomic_signal that publishes a GPU-visible "done"
+    // slot is currently disabled by default (GICC_GET_ENABLE_ATOMIC_SIGNAL
+    // opt-in). The atomic-signal path through the cxi provider, with both
+    // operand and target on FI_HMEM_ROCR memory and a loopback fi_addr_t,
+    // segfaults inside fi_control(FI_QUEUE_WORK) on the Tioga/Slingshot
+    // stack we ship on (libfabric 2.1 + cxi). Bypassing it costs us a
+    // kernel-side mid-flight quiet (the kernel cannot poll completion
+    // without leaving via host wait), but every host-driven flow (legacy
+    // wait/reset, future LTO-driven post-launch host wait) is unaffected.
     Token get_no_db(const Buffer& local_dst, int src_rank, int src_buf_index,
                     size_t size, size_t local_offset = 0, size_t remote_offset = 0)
     {
-        // NOTE: unlike put_no_db, no IPC fast-path here. v1 deliberately
-        // routes local get through DWQ — IPC short-circuit for reads is
-        // deferred (see unified-compiler-codegen design §12 "Out of Scope").
         const OfiBuffer& ob = local_bufs_.at(local_dst.index);
+
+        // IPC fast path. Mirrors put_no_db: same-node peer with IPC-mapped
+        // src buffer → pull via gpuMemcpyDeviceToDevice on an IPC stream.
+        // The peer's buffer at peer_mapped_ptrs_[src_rank][src_buf_index]
+        // is the GPU-address-space mapping of rank src_rank's d_buf.
+        if (src_rank != comm_->rank()
+            && (size_t)src_rank < local_peer_.size()
+            && local_peer_[src_rank]
+            && (int)peer_mapped_ptrs_[src_rank].size() > src_buf_index
+            && peer_mapped_ptrs_[src_rank][src_buf_index] != nullptr)
+        {
+            void* peer_base = peer_mapped_ptrs_[src_rank][src_buf_index];
+            void* src       = static_cast<char*>(peer_base) + remote_offset;
+            void* dst       = static_cast<char*>(ob.ptr)    + local_offset;
+            GpuStream_t s   = ipc_streams_.empty() ? nullptr : ipc_streams_[0];
+            (void)gpuMemcpyAsync(dst, src, size,
+                                 gpuMemcpyDeviceToDevice, s);
+            return Token{ -1, /*is_local=*/true };
+        }
+
+        // Host-wait-mode fast path: mirror put_no_db's host-wait branch
+        // (mono_total_ops_ accounting, shared_completion_cntr_, no
+        // atomic_signal, recycled DwqWorkBuilder from the pool). This
+        // matches the timing model that DWQ PUT uses in bench_pingpong
+        // and the LTO-generated host trace.
+        if (host_wait_mode_) {
+            RemoteInfo ri = comm_->get_remote_info(src_rank, src_buf_index);
+            if (ri.rma_key == 0 && ri.rma_addr == 0) {
+                fprintf(stderr, "gicc::Runtime: remote info not set for rank %d "
+                        "buf %d (call exchange() first)\n",
+                        src_rank, src_buf_index);
+                exit(1);
+            }
+            const uint64_t remote_addr = comm_->is_virt_addr_mode()
+                ? (ri.rma_addr + remote_offset)
+                : (ri.rma_addr - ri.base_addr) + remote_offset;
+
+            ++mono_total_ops_;
+            ++my_n_remote_ops_;
+            DwqWorkBuilder* dwq = dwq_get_();
+            dwq->queue_rma_read(
+                comm_->fabric->domain, comm_->fabric->ep,
+                (char*)ob.ptr + local_offset, ob.desc_, size,
+                comm_->av_addrs[src_rank], remote_addr, ri.rma_key,
+                comm_->fabric->trigger_cntr,
+                shared_completion_cntr_,
+                /*threshold=*/mono_total_ops_);
+            // NO atomic_signal queued — same saving as host-wait PUT.
+            my_pending_.push_back(dwq);
+            return Token{ (int)mono_total_ops_, /*is_local=*/false };
+        }
 
         if ((int)my_n_ops_ >= POOL_SIZE) {
             fprintf(stderr,
@@ -633,21 +723,29 @@ public:
             slots_[slot_idx].completion_cntr,
             trigger_threshold);
 
-        uint64_t* slot_addr = (uint64_t*)d_slot_pool_ + slot_idx;
-        const uint64_t result_addr = comm_->is_virt_addr_mode()
-            ? (uint64_t)slot_addr : ((uint64_t)slot_idx * sizeof(uint64_t));
-        dwq->queue_atomic_signal(
-            comm_->fabric->domain, comm_->fabric->ep,
-            d_operand_pool_, mr_operand_pool_->desc,
-            slot_addr, mr_slot_pool_->key,
-            result_addr,
-            comm_->fabric->local_addr_in_av,
-            slots_[slot_idx].completion_cntr,
-            slots_[slot_idx].atomic_completion_cntr,
-            1);
+        // GPU-visible completion signal via chained atomic. Currently
+        // gated behind opt-in env var because cxi 2.1 / Slingshot fails
+        // inside fi_control(FI_QUEUE_WORK) when the atomic targets
+        // FI_HMEM_ROCR memory with a loopback fi_addr_t. Host wait via
+        // slots_[slot_idx].completion_cntr is unaffected (the GET's own
+        // completion bumps it).
+        if (std::getenv("GICC_GET_ENABLE_ATOMIC_SIGNAL") != nullptr) {
+            uint64_t* slot_addr = (uint64_t*)d_slot_pool_ + slot_idx;
+            const uint64_t result_addr = comm_->is_virt_addr_mode()
+                ? (uint64_t)slot_addr : ((uint64_t)slot_idx * sizeof(uint64_t));
+            dwq->queue_atomic_signal(
+                comm_->fabric->domain, comm_->fabric->ep,
+                d_operand_pool_, mr_operand_pool_->desc,
+                slot_addr, mr_slot_pool_->key,
+                result_addr,
+                comm_->fabric->local_addr_in_av,
+                slots_[slot_idx].completion_cntr,
+                slots_[slot_idx].atomic_completion_cntr,
+                1);
+            atomic_signals_queued_ = true;
+        }
 
         my_pending_.push_back(dwq);
-        atomic_signals_queued_ = true;
 
         return Token{ slot_idx, /*is_local=*/false };
     }
@@ -696,13 +794,19 @@ public:
     // Host-side wait for a specific token.
     //--------------------------------------------------------------------------
     void wait(Token tok) {
-        // IPC-routed ops are executed INSIDE the user's kernel by the
-        // device-side gicc::put_no_db (block-cooperative GPU stores
-        // through ctx->ipc_map_). The caller is expected to have already
-        // synchronised the kernel (e.g. hipStreamSynchronize /
-        // hipDeviceSynchronize) before calling wait(), so the copy has
-        // landed and no host-side polling is required.
-        if (tok.is_local) return;
+        // IPC-routed ops are issued on ipc_streams_[0] inside put_no_db /
+        // get_no_db (an async gpuMemcpyAsync). Sync that stream so the
+        // local destination buffer is observable when wait() returns.
+        // A naked gpuDeviceSynchronize from the caller would also work,
+        // but waiting on the specific IPC stream lets wait() preserve
+        // its "only this op" semantics. The cross-node path polls the
+        // per-slot libfabric counter as before.
+        if (tok.is_local) {
+            if (!ipc_streams_.empty()) {
+                (void)gpuStreamSynchronize(ipc_streams_[0]);
+            }
+            return;
+        }
         while (fi_cntr_read(slots_[tok.slot_idx].completion_cntr) < 1) {}
     }
 

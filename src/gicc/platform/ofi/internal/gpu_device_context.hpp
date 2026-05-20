@@ -18,6 +18,7 @@
 using GpuError      = hipError_t;
 using GpuDeviceProp = hipDeviceProp_t;
 using GpuStream_t   = hipStream_t;
+using GpuEvent_t    = hipEvent_t;
 using GpuIpcMemHandle_t = hipIpcMemHandle_t;
 #define GPU_SUCCESS              hipSuccess
 #define gpuGetDeviceCount        hipGetDeviceCount
@@ -27,13 +28,18 @@ using GpuIpcMemHandle_t = hipIpcMemHandle_t;
 
 // Memory management aliases (used by Fabric and friends).
 #define gpuMalloc                hipMalloc
+#define gpuMallocManaged         hipMallocManaged
 #define gpuFree                  hipFree
 #define gpuMemcpy                hipMemcpy
 #define gpuMemcpyAsync           hipMemcpyAsync
 #define gpuMemcpyHostToDevice    hipMemcpyHostToDevice
 #define gpuMemcpyDeviceToHost    hipMemcpyDeviceToHost
+#define gpuMemcpyDeviceToDevice  hipMemcpyDeviceToDevice
+#define gpuMemcpyDefault         hipMemcpyDefault
 #define gpuMemset                hipMemset
 #define gpuDeviceSynchronize     hipDeviceSynchronize
+#define gpuDeviceCanAccessPeer   hipDeviceCanAccessPeer
+#define gpuDeviceEnablePeerAccess hipDeviceEnablePeerAccess
 
 // Host-pinned memory (mapped into the device address space).
 #define gpuHostMalloc            hipHostMalloc
@@ -47,9 +53,19 @@ using GpuIpcMemHandle_t = hipIpcMemHandle_t;
 
 // Streams.
 #define gpuStreamCreateWithFlags hipStreamCreateWithFlags
+#define gpuStreamCreate          hipStreamCreate
 #define gpuStreamDestroy         hipStreamDestroy
 #define gpuStreamSynchronize     hipStreamSynchronize
+#define gpuStreamWaitEvent       hipStreamWaitEvent
 #define gpuStreamNonBlocking     hipStreamNonBlocking
+
+// Events.
+#define gpuEventCreate           hipEventCreate
+#define gpuEventCreateWithFlags  hipEventCreateWithFlags
+#define gpuEventDestroy          hipEventDestroy
+#define gpuEventRecord           hipEventRecord
+#define gpuEventSynchronize      hipEventSynchronize
+#define gpuEventDisableTiming    hipEventDisableTiming
 
 // IPC handles (same-node peer mapping).
 #define gpuIpcGetMemHandle       hipIpcGetMemHandle
@@ -74,6 +90,7 @@ inline void unset_rocr_visible_devices() { unsetenv("ROCR_VISIBLE_DEVICES"); }
 using GpuError      = cudaError_t;
 using GpuDeviceProp = cudaDeviceProp;
 using GpuStream_t   = cudaStream_t;
+using GpuEvent_t    = cudaEvent_t;
 using GpuIpcMemHandle_t = cudaIpcMemHandle_t;
 #define GPU_SUCCESS              cudaSuccess
 #define gpuGetDeviceCount        cudaGetDeviceCount
@@ -83,13 +100,18 @@ using GpuIpcMemHandle_t = cudaIpcMemHandle_t;
 
 // Memory management aliases (used by Fabric and friends).
 #define gpuMalloc                cudaMalloc
+#define gpuMallocManaged         cudaMallocManaged
 #define gpuFree                  cudaFree
 #define gpuMemcpy                cudaMemcpy
 #define gpuMemcpyAsync           cudaMemcpyAsync
 #define gpuMemcpyHostToDevice    cudaMemcpyHostToDevice
 #define gpuMemcpyDeviceToHost    cudaMemcpyDeviceToHost
+#define gpuMemcpyDeviceToDevice  cudaMemcpyDeviceToDevice
+#define gpuMemcpyDefault         cudaMemcpyDefault
 #define gpuMemset                cudaMemset
 #define gpuDeviceSynchronize     cudaDeviceSynchronize
+#define gpuDeviceCanAccessPeer   cudaDeviceCanAccessPeer
+#define gpuDeviceEnablePeerAccess cudaDeviceEnablePeerAccess
 
 // Host-pinned memory (mapped into the device address space). CUDA's
 // equivalent of hipHostMalloc(p, n, hipHostMallocMapped) is
@@ -105,9 +127,19 @@ using GpuIpcMemHandle_t = cudaIpcMemHandle_t;
 
 // Streams.
 #define gpuStreamCreateWithFlags cudaStreamCreateWithFlags
+#define gpuStreamCreate          cudaStreamCreate
 #define gpuStreamDestroy         cudaStreamDestroy
 #define gpuStreamSynchronize     cudaStreamSynchronize
+#define gpuStreamWaitEvent       cudaStreamWaitEvent
 #define gpuStreamNonBlocking     cudaStreamNonBlocking
+
+// Events.
+#define gpuEventCreate           cudaEventCreate
+#define gpuEventCreateWithFlags  cudaEventCreateWithFlags
+#define gpuEventDestroy          cudaEventDestroy
+#define gpuEventRecord           cudaEventRecord
+#define gpuEventSynchronize      cudaEventSynchronize
+#define gpuEventDisableTiming    cudaEventDisableTiming
 
 // IPC handles (same-node peer mapping).
 #define gpuIpcGetMemHandle       cudaIpcGetMemHandle
