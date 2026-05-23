@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -37,6 +38,17 @@ constexpr int kCqBatch     = 256;
 // responsive.
 constexpr auto kShutdownDrainTimeout = std::chrono::seconds(5);
 constexpr auto kQuietDrainTimeout    = std::chrono::seconds(30);
+
+// Idle-backoff thresholds. Counted in consecutive empty-poll iterations.
+// Below kIdleYield: pure cpu_relax (sub-µs back-off, no wakeup latency).
+// Above kIdleYield but below kIdleSleep: std::this_thread::yield (gives up
+// the slice to ready siblings on the same core, prevents starving the
+// Python main thread doing host work like illum += ...).
+// Above kIdleSleep: sleep for a few µs. After ~20ms of pure idle (between
+// shots or in finalize) we drop to near-zero CPU, freeing memory bandwidth
+// for numpy / zlib on the host.
+constexpr int kIdleYield = 1000;     // ~200µs at ~200ns/iter
+constexpr int kIdleSleep = 100000;   // ~20ms
 
 inline void cpu_relax() {
 #if defined(__x86_64__) || defined(_M_X64)
@@ -95,8 +107,13 @@ constexpr size_t ring_idx(uint64_t slot) {
 } // namespace
 
 void ProxyThread::main_loop() {
+    // Idle-backoff counter. Reset to 0 whenever we did any real work
+    // (submitted, polled a completion, or popped a QUIET). Climbs while
+    // ring + CQ stay empty so we can stop hot-spinning between shots.
+    int idle_iters = 0;
     while (running_.load(std::memory_order_acquire)) {
         bool stop_submitting = false;
+        bool did_work = false;
 
         // 0. Reissue any retry stashed by a prior -FI_EAGAIN. Must clear
         //    before any new pop(), otherwise the failed (cmd, slot) is lost
@@ -131,6 +148,7 @@ void ProxyThread::main_loop() {
                 in_flight_.set(bit);
                 ++in_flight_count_;
                 pending_retry_.reset();
+                did_work = true;
             }
         }
 
@@ -148,6 +166,7 @@ void ProxyThread::main_loop() {
             TransferCmd c;
             uint64_t    slot;
             if (!ring_host_->pop(c, &slot)) break;
+            did_work = true;
             // Defensive: pop() advances proxy_read_cursor, so the same slot
             // shouldn't be returned twice. If it ever is, log + skip (don't
             // bail the whole batch — that would starve the next slots).
@@ -218,8 +237,19 @@ void ProxyThread::main_loop() {
         }
         if (n > 0) {
             ring_host_->advance_tail_from_mask();
+            did_work = true;
+        }
+        if (did_work) {
+            idle_iters = 0;
         } else {
-            cpu_relax();
+            ++idle_iters;
+            if (idle_iters < kIdleYield) {
+                cpu_relax();
+            } else if (idle_iters < kIdleSleep) {
+                std::this_thread::yield();
+            } else {
+                std::this_thread::sleep_for(std::chrono::microseconds(10));
+            }
         }
     }
 
