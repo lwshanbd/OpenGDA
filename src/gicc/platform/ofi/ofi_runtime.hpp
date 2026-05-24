@@ -94,6 +94,7 @@ public:
           my_n_ops_(0), my_n_remote_ops_(0),
           atomic_signals_queued_(false),
           host_wait_mode_(false),
+          proxy_dispatch_disabled_(false),
           shared_completion_cntr_(nullptr),
           mono_total_ops_(0),
           mono_last_triggered_(0)
@@ -455,6 +456,17 @@ public:
             }
         }
         host_wait_mode_ = true;
+        // Couple host-wait (DWQ) mode with disabling the CPU-proxy
+        // dispatch in DeviceCtx.  Without this, a kernel that calls
+        // gicc::put would BOTH push a TransferCmd into the proxy ring
+        // (CPU worker -> fi_write) AND let the lead-thread MMIO trigger
+        // fire the host-pre-staged DWQ descriptors -- the peer receives
+        // the same payload twice.  By writing nullptr to proxy_ring /
+        // proxy_rings_arr at the next prepare(), gicc::put / quiet
+        // short-circuit to no-op on the device side, letting a single
+        // unified source kernel correctly serve both proxy and DWQ
+        // paths (the mode is selected here, not inside the kernel).
+        proxy_dispatch_disabled_ = true;
     }
 
 
@@ -784,9 +796,20 @@ public:
         // single-ring kernels) and the full N-element array of device
         // ring pointers (DeviceCtx::proxy_rings_arr, for kernels that
         // shard across rings — pick by warp_id / blockIdx etc.).
-        h_dev_ctx_->proxy_ring       = ensure_proxy_ring();
-        h_dev_ctx_->proxy_rings_arr  = ensure_proxy_rings();
-        h_dev_ctx_->num_proxy_rings  = num_proxy_rings();
+        //
+        // Skip when proxy dispatch is disabled (see enable_host_wait_mode):
+        // a DWQ-mode kernel must not also push to the proxy ring, or the
+        // peer ends up receiving the payload twice.  Nulling the fields
+        // makes the inline gicc::put / quiet device bodies short-circuit.
+        if (proxy_dispatch_disabled_) {
+            h_dev_ctx_->proxy_ring       = nullptr;
+            h_dev_ctx_->proxy_rings_arr  = nullptr;
+            h_dev_ctx_->num_proxy_rings  = 0;
+        } else {
+            h_dev_ctx_->proxy_ring       = ensure_proxy_ring();
+            h_dev_ctx_->proxy_rings_arr  = ensure_proxy_rings();
+            h_dev_ctx_->num_proxy_rings  = num_proxy_rings();
+        }
 #endif
         return d_dev_ctx_;
     }
@@ -798,7 +821,9 @@ public:
         h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
         h_dev_ctx_->trigger_val_  = my_n_remote_ops_;
 #ifdef GICC_CPU_PROXY
-        h_dev_ctx_->proxy_ring = ensure_proxy_ring();
+        h_dev_ctx_->proxy_ring = proxy_dispatch_disabled_
+            ? nullptr
+            : ensure_proxy_ring();
 #endif
         return d_dev_ctx_;
     }
@@ -1098,6 +1123,12 @@ private:
     // call gicc::quiet (no GPU-side completion polling); host gates via
     // rt.reset() which becomes a fi_cntr_read busy-poll on the shared cntr.
     bool                               host_wait_mode_;
+    // Set by enable_host_wait_mode().  When true, prepare() writes nullptr
+    // to DeviceCtx::proxy_ring / proxy_rings_arr so device-side gicc::put
+    // and gicc::quiet bodies short-circuit -- prevents double-send when a
+    // unified kernel source serves both proxy + DWQ paths.  The CPU proxy
+    // fleet is not lazy-started either (ensure_proxy_rings is bypassed).
+    bool                               proxy_dispatch_disabled_;
     struct fid_cntr*                   shared_completion_cntr_;
     uint64_t                           mono_total_ops_;          // monotonic across batches
     uint64_t                           mono_last_triggered_;     // last value the kernel's MMIO write added (for delta calc)
