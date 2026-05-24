@@ -93,15 +93,10 @@ public:
         msg_rma.context = NULL;
         msg_rma.data = 0;
 
-        // Setup op_rma — request DELIVERY_COMPLETE semantic so the
-        // completion_cntr only ticks AFTER peer's NIC has DMA'd the
-        // data into peer's memory.  Without this, CXI default fires
-        // completion at transmit-complete, so rt.reset() returns
-        // before peer can read the value (one-iter lag bug observed
-        // in asf_pattern_bench at iter 3+).
+        // Setup op_rma
         op_rma.ep = ep;
         op_rma.msg = msg_rma;
-        op_rma.flags = FI_COMPLETION | FI_DELIVERY_COMPLETE;
+        op_rma.flags = FI_COMPLETION;  // No FI_CXI_CNTR_WB - we use atomic signal instead
 
         // Setup deferred work
         work.triggering_cntr = trigger_cntr;
