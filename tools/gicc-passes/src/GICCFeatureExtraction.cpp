@@ -24,12 +24,13 @@ namespace {
 // Translate ArgRef::Kind to the JSON tag the decider consumes.
 const char *argKindTag(ArgRef::Kind k) {
     switch (k) {
-        case ArgRef::Kind::Param:    return "param";
-        case ArgRef::Kind::ConstI64: return "const";
-        case ArgRef::Kind::BinOp:    return "binop";
-        case ArgRef::Kind::Cast:     return "cast";
-        case ArgRef::Kind::Derived:  return "derived";
-        case ArgRef::Kind::LoopIv:   return "loop_iv";
+        case ArgRef::Kind::Param:     return "param";
+        case ArgRef::Kind::ConstI64:  return "const";
+        case ArgRef::Kind::BinOp:     return "binop";
+        case ArgRef::Kind::Cast:      return "cast";
+        case ArgRef::Kind::Derived:   return "derived";
+        case ArgRef::Kind::LoopIv:    return "loop_iv";
+        case ArgRef::Kind::FieldLoad: return "field_load";
     }
     return "derived";
 }

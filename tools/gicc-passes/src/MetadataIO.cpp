@@ -15,23 +15,25 @@ namespace {
 
 const char *argRefKindStr(ArgRef::Kind k) {
     switch (k) {
-        case ArgRef::Kind::Param:    return "param";
-        case ArgRef::Kind::ConstI64: return "const_i64";
-        case ArgRef::Kind::BinOp:    return "binop";
-        case ArgRef::Kind::Cast:     return "cast";
-        case ArgRef::Kind::Derived:  return "derived";
-        case ArgRef::Kind::LoopIv:   return "loop_iv";
+        case ArgRef::Kind::Param:     return "param";
+        case ArgRef::Kind::ConstI64:  return "const_i64";
+        case ArgRef::Kind::BinOp:     return "binop";
+        case ArgRef::Kind::Cast:      return "cast";
+        case ArgRef::Kind::Derived:   return "derived";
+        case ArgRef::Kind::LoopIv:    return "loop_iv";
+        case ArgRef::Kind::FieldLoad: return "field_load";
     }
     return "derived";
 }
 
 bool parseArgRefKind(StringRef s, ArgRef::Kind &out) {
-    if (s == "param")     { out = ArgRef::Kind::Param;    return true; }
-    if (s == "const_i64") { out = ArgRef::Kind::ConstI64; return true; }
-    if (s == "binop")     { out = ArgRef::Kind::BinOp;    return true; }
-    if (s == "cast")      { out = ArgRef::Kind::Cast;     return true; }
-    if (s == "derived")   { out = ArgRef::Kind::Derived;  return true; }
-    if (s == "loop_iv")   { out = ArgRef::Kind::LoopIv;   return true; }
+    if (s == "param")      { out = ArgRef::Kind::Param;     return true; }
+    if (s == "const_i64")  { out = ArgRef::Kind::ConstI64;  return true; }
+    if (s == "binop")      { out = ArgRef::Kind::BinOp;     return true; }
+    if (s == "cast")       { out = ArgRef::Kind::Cast;      return true; }
+    if (s == "derived")    { out = ArgRef::Kind::Derived;   return true; }
+    if (s == "loop_iv")    { out = ArgRef::Kind::LoopIv;    return true; }
+    if (s == "field_load") { out = ArgRef::Kind::FieldLoad; return true; }
     return false;
 }
 
@@ -41,6 +43,7 @@ const char *guardKindStr(GuardSpec::Kind k) {
         case GuardSpec::Kind::ParamTruthy:   return "param_truthy";
         case GuardSpec::Kind::ParamEqConst:  return "param_eq_const";
         case GuardSpec::Kind::BinOp:         return "binop";
+        case GuardSpec::Kind::FieldNotNull:  return "field_not_null";
         case GuardSpec::Kind::Unknown:       return "unknown";
     }
     return "unknown";
@@ -51,6 +54,7 @@ bool parseGuardKind(StringRef s, GuardSpec::Kind &out) {
     if (s == "param_truthy")    { out = GuardSpec::Kind::ParamTruthy;  return true; }
     if (s == "param_eq_const")  { out = GuardSpec::Kind::ParamEqConst; return true; }
     if (s == "binop")           { out = GuardSpec::Kind::BinOp;        return true; }
+    if (s == "field_not_null")  { out = GuardSpec::Kind::FieldNotNull; return true; }
     if (s == "unknown")         { out = GuardSpec::Kind::Unknown;      return true; }
     return false;
 }
@@ -71,6 +75,19 @@ json::Value argRefToJSON(const ArgRef &a) {
             json::Array children;
             for (const auto &c : a.children) children.push_back(argRefToJSON(c));
             o["children"] = std::move(children);
+            break;
+        }
+        case ArgRef::Kind::FieldLoad: {
+            // host_mirror_of(formal[base_formal])[iv].field — see
+            // MetadataIO.h ArgRef doc.  iv lives in children[0] and is
+            // serialized as a nested ArgRef (typically LoopIv, but any
+            // HK expression is permitted).
+            o["base_formal"]  = static_cast<int64_t>(a.paramIdx);
+            o["struct_size"]  = a.structElemSize;
+            o["field_offset"] = a.fieldByteOffset;
+            o["field_type"]   = a.fieldTypeStr;
+            if (!a.children.empty())
+                o["iv"] = argRefToJSON(a.children[0]);
             break;
         }
         case ArgRef::Kind::Derived:
@@ -114,6 +131,23 @@ bool argRefFromJSON(const json::Value &v, ArgRef &out) {
             }
             break;
         }
+        case ArgRef::Kind::FieldLoad: {
+            auto base = o->getInteger("base_formal");
+            auto sz   = o->getInteger("struct_size");
+            auto off  = o->getInteger("field_offset");
+            auto ty   = o->getString("field_type");
+            if (!base || !sz || !off || !ty) return false;
+            out.paramIdx        = static_cast<unsigned>(*base);
+            out.structElemSize  = *sz;
+            out.fieldByteOffset = *off;
+            out.fieldTypeStr    = ty->str();
+            if (const auto *ivv = o->get("iv")) {
+                ArgRef ivRef;
+                if (!argRefFromJSON(*ivv, ivRef)) return false;
+                out.children.push_back(std::move(ivRef));
+            }
+            break;
+        }
         case ArgRef::Kind::Derived:
         case ArgRef::Kind::LoopIv:
             break;
@@ -130,6 +164,9 @@ json::Value guardToJSON(const GuardSpec &g) {
     }
     if (g.kind == GuardSpec::Kind::ParamEqConst) {
         o["value"] = g.constVal;
+    }
+    if (g.kind == GuardSpec::Kind::FieldNotNull && !g.fieldArg.empty()) {
+        o["field"] = argRefToJSON(g.fieldArg[0]);
     }
     return json::Value(std::move(o));
 }
@@ -150,6 +187,14 @@ bool guardFromJSON(const json::Value &v, GuardSpec &out) {
         auto v2 = o->getInteger("value");
         if (!v2) return false;
         out.constVal = *v2;
+    }
+    if (out.kind == GuardSpec::Kind::FieldNotNull) {
+        const auto *f = o->get("field");
+        if (!f) return false;
+        ArgRef fr;
+        if (!argRefFromJSON(*f, fr)) return false;
+        out.fieldArg.clear();
+        out.fieldArg.push_back(std::move(fr));
     }
     return true;
 }
@@ -199,6 +244,8 @@ json::Value templateToJSON(const KernelTemplate &t) {
         p["idx"]  = static_cast<int64_t>(i);
         p["name"] = t.params[i].name;
         p["type"] = t.params[i].typeStr;
+        // Only emit when set, so older fixtures stay byte-stable.
+        if (t.params[i].host_mirrored) p["host_mirrored"] = true;
         params.push_back(std::move(p));
     }
     root["params"] = std::move(params);
@@ -253,6 +300,9 @@ bool templateFromJSON(const json::Value &v, KernelTemplate &out) {
             ParamInfo info;
             if (auto n = po->getString("name")) info.name    = n->str();
             if (auto t = po->getString("type")) info.typeStr = t->str();
+            // Default false on absent field so older JSON round-trips.
+            if (auto m = po->getBoolean("host_mirrored"))
+                info.host_mirrored = *m;
             out.params.push_back(std::move(info));
         }
     }
