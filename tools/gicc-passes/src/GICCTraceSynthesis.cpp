@@ -141,6 +141,53 @@ Value *evalArgRef(IRBuilder<> &B, Function *traceFn, const ArgRef &a,
                                                  : Type::getInt64Ty(Ctx));
             return evalArgRef(B, traceFn, a.children[0], expected, currentIv);
         }
+        case ArgRef::Kind::FieldLoad: {
+            // host_mirror_of(formal[base_formal])[iv].field — resolve
+            // the device pointer at trace time then read the field
+            // from the host-side mirror.
+            if (a.paramIdx >= traceFn->arg_size())
+                return UndefValue::get(expected ? expected
+                                                 : Type::getInt64Ty(Ctx));
+            Value *devPtr = traceFn->getArg(a.paramIdx);
+            Value *rt     = traceFn->getArg(0);
+
+            Module *M = traceFn->getParent();
+            Type   *ptrTy = PointerType::getUnqual(Ctx);
+            FunctionCallee hostMirrorFn = M->getOrInsertFunction(
+                "gicc_runtime_host_mirror_of",
+                FunctionType::get(ptrTy, {ptrTy, ptrTy}, false));
+            Value *hostBase =
+                B.CreateCall(hostMirrorFn, {rt, devPtr}, "host_mirror");
+
+            Type *i64Ty = Type::getInt64Ty(Ctx);
+            Value *ivVal;
+            if (a.children.empty()) {
+                ivVal = ConstantInt::get(i64Ty, 0);
+            } else {
+                ivVal = evalArgRef(B, traceFn, a.children[0], i64Ty,
+                                   currentIv);
+            }
+            Value *off = B.CreateMul(
+                ivVal, ConstantInt::get(i64Ty, a.structElemSize), "elem_off");
+            off = B.CreateAdd(
+                off, ConstantInt::get(i64Ty, a.fieldByteOffset), "field_off");
+
+            Value *fieldPtr = B.CreateGEP(
+                B.getInt8Ty(), hostBase, off, "host_field_ptr");
+
+            Type  *fieldTy  = typeFromStr(Ctx, a.fieldTypeStr);
+            Value *fieldVal = B.CreateAlignedLoad(
+                fieldTy, fieldPtr, Align(1), /*isVolatile=*/false,
+                "host_field");
+
+            if (!expected) return fieldVal;
+            if (expected == fieldTy) return fieldVal;
+            if (expected->isPointerTy() || fieldTy->isPointerTy())
+                return fieldVal;
+            if (expected->isIntegerTy() && fieldTy->isIntegerTy())
+                return coerceInt(B, fieldVal, expected);
+            return fieldVal;
+        }
         case ArgRef::Kind::Derived:
         default:
             return UndefValue::get(expected ? expected
@@ -152,6 +199,11 @@ Value *evalArgRef(IRBuilder<> &B, Function *traceFn, const ArgRef &a,
 Value *evalGuard(IRBuilder<> &B, Function *traceFn, const GuardSpec &g) {
     LLVMContext &Ctx = B.getContext();
     if (g.kind == GuardSpec::Kind::Always) return B.getTrue();
+    // FieldNotNull: the per-iteration check requires the iv, so it
+    // can't be materialized at the outer (loop-invariant) guard layer.
+    // Return True here and let the loop emitter insert the icmp
+    // inside the loop body.
+    if (g.kind == GuardSpec::Kind::FieldNotNull) return B.getTrue();
     if (g.paramIdx >= traceFn->arg_size()) return B.getFalse();
     Value *p = traceFn->getArg(g.paramIdx);
 
@@ -257,12 +309,12 @@ void emitOpInLoop(Module &M, IRBuilder<> &B, Function *traceFn,
     boundRef.paramIdx = op.loop.ivParamIdx;
     Value *bound = evalArgRef(B, traceFn, boundRef, i64Ty, nullptr);
 
-    BasicBlock *headBB = BasicBlock::Create(Ctx, "loop.head." + op.siteId,
-                                            traceFn);
-    BasicBlock *bodyBB = BasicBlock::Create(Ctx, "loop.body." + op.siteId,
-                                            traceFn);
-    BasicBlock *exitBB = BasicBlock::Create(Ctx, "loop.exit." + op.siteId,
-                                            traceFn);
+    BasicBlock *headBB  = BasicBlock::Create(Ctx, "loop.head." + op.siteId,
+                                             traceFn);
+    BasicBlock *bodyBB  = BasicBlock::Create(Ctx, "loop.body." + op.siteId,
+                                             traceFn);
+    BasicBlock *exitBB  = BasicBlock::Create(Ctx, "loop.exit." + op.siteId,
+                                             traceFn);
 
     // Capture the predecessor (where we currently sit) so the head PHI
     // can reference it as the start incoming.
@@ -277,14 +329,44 @@ void emitOpInLoop(Module &M, IRBuilder<> &B, Function *traceFn,
     Value *cmp = B.CreateICmpSLT(iv, bound, "cmp");
     B.CreateCondBr(cmp, bodyBB, exitBB);
 
-    // loop.body: placeholder call + increment + back-edge
+    // loop.body: optional per-iteration FieldNotNull guard, then
+    // placeholder call, then fall through to a latch BB that increments
+    // the iv and branches back to head.
     B.SetInsertPoint(bodyBB);
-    emitPlaceholderCall(M, B, traceFn, op, kind, /*currentIv=*/iv);
+
+    bool perIterGuard =
+        (op.guard.kind == GuardSpec::Kind::FieldNotNull
+         && !op.guard.fieldArg.empty());
+
+    BasicBlock *latchBB;
+    if (perIterGuard) {
+        // Evaluate host_mirror[iv].field with iv as the live PHI value,
+        // compare against null, emit the placeholder only when the
+        // field IS null (the ASF IPC-skip semantic: peer_recv_addr
+        // == null means "cross-node — needs a DWQ descriptor").
+        Type *ptrTy = PointerType::getUnqual(Ctx);
+        Value *fv = evalArgRef(B, traceFn, op.guard.fieldArg[0], ptrTy, iv);
+        Value *isNull = B.CreateICmpEQ(
+            fv, ConstantPointerNull::get(cast<PointerType>(ptrTy)),
+            "is_null");
+        BasicBlock *doCallBB = BasicBlock::Create(
+            Ctx, "guard.do." + op.siteId, traceFn);
+        latchBB = BasicBlock::Create(Ctx, "loop.latch." + op.siteId, traceFn);
+        B.CreateCondBr(isNull, doCallBB, latchBB);
+        B.SetInsertPoint(doCallBB);
+        emitPlaceholderCall(M, B, traceFn, op, kind, /*currentIv=*/iv);
+        B.CreateBr(latchBB);
+        B.SetInsertPoint(latchBB);
+    } else {
+        emitPlaceholderCall(M, B, traceFn, op, kind, /*currentIv=*/iv);
+        latchBB = bodyBB;
+    }
+
     Value *next = B.CreateAdd(
         iv, ConstantInt::get(i64Ty, op.loop.ivStep, /*signed=*/true),
         "iv.next");
     B.CreateBr(headBB);
-    iv->addIncoming(next, bodyBB);
+    iv->addIncoming(next, latchBB);
 
     // Caller continues at exitBB.
     B.SetInsertPoint(exitBB);
