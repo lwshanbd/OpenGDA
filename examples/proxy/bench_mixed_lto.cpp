@@ -60,13 +60,13 @@ __global__ void mixed_kernel(gicc::DeviceCtx* ctx,
                ctx, ctx ? ctx->proxy_ring : nullptr,
                ctx ? (void*)ctx->trigger_addr_ : nullptr);
         // site 0 — intended DWQ_TRIGGER (constant offset 0)
-        gicc::put_no_db(ctx, dst_rank,
+        gicc::put(ctx, dst_rank,
                         dst_buf, /*dst_off=*/0,
                         src_buf, /*src_off=*/0,
                         bytes);
         printf("[kernel] after site 0 (DWQ-routed put)\n");
         // site 1 — intended CPU_PROXY_ENQUEUE (constant offset 16384)
-        gicc::put_no_db(ctx, dst_rank,
+        gicc::put(ctx, dst_rank,
                         dst_buf, /*dst_off=*/16384,
                         src_buf, /*src_off=*/16384,
                         bytes);

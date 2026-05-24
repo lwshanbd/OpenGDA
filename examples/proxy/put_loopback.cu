@@ -32,11 +32,11 @@ __global__ void put_kernel(gicc::DeviceCtx* ctx,
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         // src lives at offset 0; dst at offset half_bytes within the same
         // registered buffer. Self-loopback: dst_rank == self_rank.
-        gicc::put_no_db(ctx,
-                        self_rank,
-                        buf_idx, /*dst_offset=*/half_bytes,
-                        buf_idx, /*src_offset=*/0,
-                        half_bytes);
+        gicc::put(ctx,
+                  self_rank,
+                  buf_idx, /*dst_offset=*/half_bytes,
+                  buf_idx, /*src_offset=*/0,
+                  half_bytes);
     }
 }
 

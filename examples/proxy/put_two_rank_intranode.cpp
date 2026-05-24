@@ -43,11 +43,11 @@ __global__ void put_kernel(gicc::DeviceCtx* ctx,
                            size_t bytes)
 {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        gicc::put_no_db(ctx,
-                        dst_rank,
-                        dst_buf_idx, /*dst_offset=*/0,
-                        src_buf_idx, /*src_offset=*/0,
-                        bytes);
+        gicc::put(ctx,
+                  dst_rank,
+                  dst_buf_idx, /*dst_offset=*/0,
+                  src_buf_idx, /*src_offset=*/0,
+                  bytes);
     }
 }
 

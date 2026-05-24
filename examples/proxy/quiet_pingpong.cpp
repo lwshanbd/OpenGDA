@@ -68,11 +68,11 @@ __global__ void put_then_quiet(gicc::DeviceCtx* ctx,
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         // Write our local source half [0, bytes) into the peer's
         // [dst_offset, dst_offset + bytes) slot.
-        gicc::put_no_db(ctx,
-                        peer,
-                        dst_buf_idx, dst_offset,
-                        src_buf_idx, /*src_offset=*/0,
-                        bytes);
+        gicc::put(ctx,
+                  peer,
+                  dst_buf_idx, dst_offset,
+                  src_buf_idx, /*src_offset=*/0,
+                  bytes);
         // In-kernel completion fence: pushes QUIET cmd; spins until the
         // proxy thread's handle_quiet acks past our slot.
         gicc::quiet(ctx);

@@ -69,7 +69,7 @@ __global__ void get_stress_kernel(gicc::DeviceCtx* ctx,
 {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     for (int k = 0; k < N_ITERS; ++k) {
-        gicc::get_no_db(ctx, peer, peer_buf, (size_t)k * WIN_BYTES,
+        gicc::get(ctx, peer, peer_buf, (size_t)k * WIN_BYTES,
                         my_buf,  land_off,  (size_t)WIN_BYTES);
         gicc::quiet(ctx);
 

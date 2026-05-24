@@ -46,7 +46,7 @@ __global__ void get_then_quiet(gicc::DeviceCtx* ctx,
 {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         // Pull bytes from peer's [0, bytes) into our [landing_offset, ...).
-        gicc::get_no_db(ctx,
+        gicc::get(ctx,
                         peer,
                         peer_buf_idx, /*src_offset=*/0,
                         my_buf_idx,   landing_offset,

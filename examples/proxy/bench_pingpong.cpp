@@ -132,8 +132,8 @@ __global__ void proxy_send_kernel(gicc::DeviceCtx* ctx, int peer,
                                   bool per_msg_quiet) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     for (int i = 0; i < n; ++i) {
-        gicc::put_no_db(ctx, peer, buf_idx, /*dst_off=*/0,
-                        buf_idx, /*src_off=*/0, bytes);
+        gicc::put(ctx, peer, buf_idx, /*dst_off=*/0,
+                  buf_idx, /*src_off=*/0, bytes);
         if (per_msg_quiet) gicc::quiet(ctx);
     }
     if (!per_msg_quiet) gicc::quiet(ctx);
@@ -147,11 +147,11 @@ __global__ void proxy_get_kernel(gicc::DeviceCtx* ctx, int peer,
                                  bool per_msg_quiet) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     for (int i = 0; i < n; ++i) {
-        // get_no_db: (source_rank, src_buf=peer_buf, src_off=0,
-        //             dst_buf=our_buf, dst_off=0, bytes)
-        gicc::get_no_db(ctx, peer,
-                        buf_idx, /*src_off=*/0,
-                        buf_idx, /*dst_off=*/0, bytes);
+        // get: (source_rank, src_buf=peer_buf, src_off=0,
+        //       dst_buf=our_buf, dst_off=0, bytes)
+        gicc::get(ctx, peer,
+                  buf_idx, /*src_off=*/0,
+                  buf_idx, /*dst_off=*/0, bytes);
         if (per_msg_quiet) gicc::quiet(ctx);
     }
     if (!per_msg_quiet) gicc::quiet(ctx);
@@ -173,13 +173,13 @@ __global__ void dwq_flush_quiet_kernel(gicc::DeviceCtx* ctx) {
 __global__ void proxy_send_kernel_multi(gicc::DeviceCtx* ctx, int peer,
                                         int buf_idx, size_t bytes, int n) {
     if (threadIdx.x != 0) return;
-    int ring_idx = blockIdx.x;  // one ring per block (mod num_proxy_rings)
+    int lane = blockIdx.x;  // one lane per block (mod num_proxy_rings)
     for (int i = 0; i < n; ++i) {
-        gicc::put_no_db_idx(ctx, ring_idx, peer,
-                            buf_idx, /*dst_off=*/0,
-                            buf_idx, /*src_off=*/0, bytes);
+        gicc::put(ctx, peer,
+                  buf_idx, /*dst_off=*/0,
+                  buf_idx, /*src_off=*/0, bytes, /*lane=*/lane);
     }
-    gicc::quiet_idx(ctx, ring_idx);
+    gicc::quiet(ctx, /*lane=*/lane);
 }
 
 static double median(std::vector<double>& v) {

@@ -91,10 +91,10 @@ __global__ void jacobi_step_kernel(
     // Two halo puts to two different peers — multi-peer in one launch.
     // put_no_db must be called from all threads of block 0 (IPC route is
     // block-cooperative). Other blocks early-return inside put_no_db.
-    gicc::put_no_db(ctx, top_peer,    top_dst_buf,    dst_off_top,
-                    src_buf, src_off_top, halo_bytes);
-    gicc::put_no_db(ctx, bottom_peer, bottom_dst_buf, dst_off_bot,
-                    src_buf, src_off_bot, halo_bytes);
+    gicc::put(ctx, top_peer,    top_dst_buf,    dst_off_top,
+              src_buf, src_off_top, halo_bytes);
+    gicc::put(ctx, bottom_peer, bottom_dst_buf, dst_off_bot,
+              src_buf, src_off_bot, halo_bytes);
 
     int iy = blockIdx.y * blockDim.y + threadIdx.y + iy_start;
     int ix = blockIdx.x * blockDim.x + threadIdx.x + 1;

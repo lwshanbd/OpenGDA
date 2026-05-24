@@ -2,11 +2,16 @@
  * proxy_device.cuh - kernel-visible CPU-proxy device API for the MLX5 backend.
  *
  * Mirrors the GICC_CPU_PROXY block of src/gicc/platform/ofi/ofi_device.cuh:
- * the device-side put / quiet primitives push commands into a host-pinned,
- * device-mapped D2HRing<kProxyRingCapacity>; the CPU proxy worker
- * (mlx5::proxy::ProxyThread) consumes them and posts the real ibv_post_send.
+ * the device-side put / get / quiet primitives push commands into a
+ * host-pinned, device-mapped D2HRing<kProxyRingCapacity>; the CPU proxy
+ * worker (mlx5::proxy::ProxyThread) consumes them and posts the real
+ * ibv_post_send.
  *
  * Active only when GICC_CPU_PROXY is defined.
+ *
+ * The `lane` parameter selects which proxy ring (and thus which CPU
+ * worker / QP) the submission lands on. Same-lane ops are FIFO;
+ * different lanes are independent and can be quieted separately.
  */
 #pragma once
 
@@ -30,28 +35,39 @@ struct ProxyCtx {
     int    num_proxy_rings;
 };
 
-// Push a WRITE command into proxy_rings_arr[ring_idx % num_proxy_rings].
-// Falls back to ring 0 if no fan-out array is set up. No verbs work
-// happens device-side — the CPU worker resolves (rank, buf, off) →
-// (lkey, rkey, raddr) and issues ibv_post_send.
+namespace detail {
+
+// Resolve `lane` to a concrete ProxyRing*, with fallback to the legacy
+// single-ring pointer when no fan-out array has been set up.
 __device__ inline
-void put_no_db_idx(ProxyCtx* ctx, int ring_idx,
-                   int target_rank,
-                   int dst_buf, size_t dst_offset,
-                   int src_buf, size_t src_offset,
-                   size_t size)
-{
-    if (!ctx) return;
+gicc::proxy::ProxyRing* lane_to_ring(ProxyCtx* ctx, int lane) {
     void* ring_ptr = nullptr;
     if (ctx->proxy_rings_arr && ctx->num_proxy_rings > 0) {
         int n   = ctx->num_proxy_rings;
-        int idx = ring_idx < 0 ? 0 : (ring_idx % n);
+        int idx = lane < 0 ? 0 : (lane % n);
         ring_ptr = ctx->proxy_rings_arr[idx];
     } else {
         ring_ptr = ctx->proxy_ring;
     }
-    if (!ring_ptr) return;
-    auto* ring = reinterpret_cast<gicc::proxy::ProxyRing*>(ring_ptr);
+    return reinterpret_cast<gicc::proxy::ProxyRing*>(ring_ptr);
+}
+
+}  // namespace detail
+
+// Push a WRITE command into proxy_rings_arr[lane % num_proxy_rings]. No
+// verbs work happens device-side — the CPU worker resolves
+// (rank, buf, off) → (lkey, rkey, raddr) and issues ibv_post_send.
+__device__ inline
+void put(ProxyCtx* ctx,
+         int target_rank,
+         int dst_buf, size_t dst_offset,
+         int src_buf, size_t src_offset,
+         size_t size,
+         int lane = 0)
+{
+    if (!ctx) return;
+    auto* ring = detail::lane_to_ring(ctx, lane);
+    if (!ring) return;
 
     gicc::proxy::TransferCmd c{};
     c.cmd_type   = gicc::proxy::CmdType::WRITE;
@@ -64,44 +80,24 @@ void put_no_db_idx(ProxyCtx* ctx, int ring_idx,
     ring->atomic_push(c);
 }
 
-// Single-ring convenience (always pushes to proxy_ring).
+// Push a READ command into proxy_rings_arr[lane % num_proxy_rings].
+// The NIC pulls bytes from peer (source_rank)'s (src_buf, src_offset)
+// into our local (dst_buf, dst_offset). Read-ordering guarantee mirrors
+// the OFI side: the proxy ack's the slot only after the verbs CQE fires,
+// by which point the data has landed in local memory. The caller MUST
+// quiet(ctx, lane) before reading the landed data so the GPU's L2 is
+// invalidated.
 __device__ inline
-void put_no_db(ProxyCtx* ctx,
-               int target_rank,
-               int dst_buf, size_t dst_offset,
-               int src_buf, size_t src_offset,
-               size_t size)
-{
-    put_no_db_idx(ctx, /*ring_idx=*/0,
-                  target_rank, dst_buf, dst_offset,
-                  src_buf, src_offset, size);
-}
-
-// Push a READ command into proxy_rings_arr[ring_idx % num_proxy_rings].
-// Falls back to ring 0 if no fan-out array is set up. The NIC pulls
-// bytes from peer (source_rank)'s (src_buf, src_offset) into our local
-// (dst_buf, dst_offset). Read-ordering guarantee mirrors the OFI side:
-// the proxy ack's the slot only after the verbs CQE fires, by which
-// point the data has landed in local memory. The caller MUST quiet()
-// before reading the landed data so the GPU's L2 is invalidated.
-__device__ inline
-void get_no_db_idx(ProxyCtx* ctx, int ring_idx,
-                   int source_rank,
-                   int src_buf, size_t src_offset,
-                   int dst_buf, size_t dst_offset,
-                   size_t size)
+void get(ProxyCtx* ctx,
+         int source_rank,
+         int src_buf, size_t src_offset,
+         int dst_buf, size_t dst_offset,
+         size_t size,
+         int lane = 0)
 {
     if (!ctx) return;
-    void* ring_ptr = nullptr;
-    if (ctx->proxy_rings_arr && ctx->num_proxy_rings > 0) {
-        int n   = ctx->num_proxy_rings;
-        int idx = ring_idx < 0 ? 0 : (ring_idx % n);
-        ring_ptr = ctx->proxy_rings_arr[idx];
-    } else {
-        ring_ptr = ctx->proxy_ring;
-    }
-    if (!ring_ptr) return;
-    auto* ring = reinterpret_cast<gicc::proxy::ProxyRing*>(ring_ptr);
+    auto* ring = detail::lane_to_ring(ctx, lane);
+    if (!ring) return;
 
     // Remap API direction onto cmd-struct convention: src_* = LOCAL,
     // dst_* = REMOTE on dst_rank. Keeps host-side proxy_local_buf /
@@ -117,40 +113,20 @@ void get_no_db_idx(ProxyCtx* ctx, int ring_idx,
     ring->atomic_push(c);
 }
 
-// Single-ring convenience (always pushes to proxy_ring).
-__device__ inline
-void get_no_db(ProxyCtx* ctx,
-               int source_rank,
-               int src_buf, size_t src_offset,
-               int dst_buf, size_t dst_offset,
-               size_t size)
-{
-    get_no_db_idx(ctx, /*ring_idx=*/0,
-                  source_rank, src_buf, src_offset,
-                  dst_buf, dst_offset, size);
-}
-
 // Push a (non-fetching, FI_SUM-style) 4-byte atomic add command. The
 // CPU worker maps it to IBV_WR_ATOMIC_FETCH_AND_ADD into a scratch
 // buffer (the original value is discarded) so the remote-side effect
 // is identical to the OFI fi_atomic / FI_SUM / FI_UINT32 path.
 __device__ inline
-void atomic_add_u32_idx(ProxyCtx* ctx, int ring_idx,
-                        int target_rank,
-                        int dst_buf, size_t dst_offset,
-                        int src_buf, size_t src_offset)
+void atomic_add_u32(ProxyCtx* ctx,
+                    int target_rank,
+                    int dst_buf, size_t dst_offset,
+                    int src_buf, size_t src_offset,
+                    int lane = 0)
 {
     if (!ctx) return;
-    void* ring_ptr = nullptr;
-    if (ctx->proxy_rings_arr && ctx->num_proxy_rings > 0) {
-        int n   = ctx->num_proxy_rings;
-        int idx = ring_idx < 0 ? 0 : (ring_idx % n);
-        ring_ptr = ctx->proxy_rings_arr[idx];
-    } else {
-        ring_ptr = ctx->proxy_ring;
-    }
-    if (!ring_ptr) return;
-    auto* ring = reinterpret_cast<gicc::proxy::ProxyRing*>(ring_ptr);
+    auto* ring = detail::lane_to_ring(ctx, lane);
+    if (!ring) return;
 
     gicc::proxy::TransferCmd c{};
     c.cmd_type   = gicc::proxy::CmdType::ATOMIC;
@@ -163,25 +139,16 @@ void atomic_add_u32_idx(ProxyCtx* ctx, int ring_idx,
     ring->atomic_push(c);
 }
 
-// Per-ring quiet: push a QUIET cmd into ring `ring_idx` and spin on
-// that ring's tail until the proxy has drained every prior in-flight
-// op AND acknowledged this QUIET slot. Use after a sequence of
-// put_no_db_idx(..., ring_idx, ...) to wait for completion of just
-// that lane.
+// Push a QUIET cmd into ring `lane` and spin on that ring's tail until
+// the proxy has drained every prior in-flight op AND acknowledged this
+// QUIET slot. Use after a sequence of put(..., lane) / get(..., lane)
+// with the same `lane` to wait for completion of just that channel.
 __device__ inline
-void quiet_idx(ProxyCtx* ctx, int ring_idx)
+void quiet(ProxyCtx* ctx, int lane = 0)
 {
     if (!ctx) return;
-    void* ring_ptr = nullptr;
-    if (ctx->proxy_rings_arr && ctx->num_proxy_rings > 0) {
-        int n   = ctx->num_proxy_rings;
-        int idx = ring_idx < 0 ? 0 : (ring_idx % n);
-        ring_ptr = ctx->proxy_rings_arr[idx];
-    } else {
-        ring_ptr = ctx->proxy_ring;
-    }
-    if (!ring_ptr) return;
-    auto* ring = reinterpret_cast<gicc::proxy::ProxyRing*>(ring_ptr);
+    auto* ring = detail::lane_to_ring(ctx, lane);
+    if (!ring) return;
 
     gicc::proxy::TransferCmd c{};
     c.cmd_type = gicc::proxy::CmdType::QUIET;
@@ -190,12 +157,6 @@ void quiet_idx(ProxyCtx* ctx, int ring_idx)
         __nanosleep(64);
     }
     __threadfence_system();
-}
-
-__device__ inline
-void quiet(ProxyCtx* ctx)
-{
-    quiet_idx(ctx, 0);
 }
 
 } // namespace gicc::mlx5::proxy

@@ -55,7 +55,7 @@ __global__ void dwq_loop_kernel(gicc::DeviceCtx* ctx, int peer,
                                 int buf_idx, size_t bytes, int n) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         for (int i = 0; i < n; ++i) {
-            gicc::put_no_db(ctx, peer, buf_idx, /*dst_off=*/0,
+            gicc::put(ctx, peer, buf_idx, /*dst_off=*/0,
                                          buf_idx, /*src_off=*/0, bytes);
         }
         gicc::flush(ctx);

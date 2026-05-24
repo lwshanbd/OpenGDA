@@ -106,15 +106,15 @@ __global__ void mixed_kernel(gicc::DeviceCtx* ctx,
         // ofi_device.cuh; for proxy_aware kernels it's preserved but
         // the DWQ work is performed by the host trace ahead of the
         // kernel launch. Without LTO, see file header.
-        gicc::put_no_db(ctx,
-                        dst_rank,
+        gicc::put(ctx,
+                  dst_rank,
                         dst_buf_idx, /*dst_offset=*/off_dwq,
                         src_buf_idx, /*src_offset=*/off_dwq,
                         bytes);
         // site 1: routed to CPU_PROXY_ENQUEUE. Device push to the
         // proxy ring; CPU proxy worker submits via libfabric.
-        gicc::put_no_db(ctx,
-                        dst_rank,
+        gicc::put(ctx,
+                  dst_rank,
                         dst_buf_idx, /*dst_offset=*/off_proxy,
                         src_buf_idx, /*src_offset=*/off_proxy,
                         bytes);
