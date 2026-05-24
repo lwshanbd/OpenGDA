@@ -34,15 +34,35 @@ bool classifyGICCCall(const CallInst &CI, GICCOpKind &out) {
     auto *F = CI.getCalledFunction();
     if (!F) return false;
     StringRef n = F->getName();
-    // Itanium length-prefixes the unmangled identifier:
-    //   put_no_db / get_no_db are 9 chars  → "9put_no_db" / "9get_no_db"
-    //   flush / quiet      are 5 chars     → "5flushE"   / "5quietE"
-    // The trailing E for flush/quiet rules out accidental matches against
-    // longer identifiers that happen to start with "flush" / "quiet".
-    if (n.contains("9put_no_db")) { out = GICCOpKind::PutNoDb; return true; }
-    if (n.contains("9get_no_db")) { out = GICCOpKind::GetNoDb; return true; }
-    if (n.contains("5flushE"))    { out = GICCOpKind::Flush;   return true; }
-    if (n.contains("5quietE"))    { out = GICCOpKind::Quiet;   return true; }
+    // Itanium length-prefixes the unmangled identifier; the trailing E
+    // closes the nested-name encoding and rules out accidental matches
+    // against longer identifiers that share a prefix.
+    //
+    // Phase 2.1 of the put/get/quiet rename: recognize the new short
+    // names (put/get -> "3putE"/"3getE", quiet unchanged at "5quietE")
+    // alongside the legacy long names (9put_no_db / 9get_no_db). Both
+    // tokens map to the same OpKind enum so the rest of the pipeline
+    // (TraceTemplateBuilder, GICCDeviceLowering, GICCDispatchLowering)
+    // is name-agnostic. The legacy tokens stay during the transition
+    // so any old-API code in user trees keeps working through the LTO
+    // pipeline; they can be dropped once the migration is complete.
+    //
+    // Arg-count drift between old and new: the new put/get take an
+    // extra trailing `int lane` arg. TraceTemplateBuilder::fillArgs
+    // caps capture at `putGetArgNames().size()` (= 7, including ctx)
+    // so the lane arg is silently dropped, which is correct for v1:
+    // host-side DWQ uses a single shared completion counter and does
+    // not consume lane.
+    if (n.contains("9put_no_db") || n.contains("3putE")) {
+        out = GICCOpKind::PutNoDb;
+        return true;
+    }
+    if (n.contains("9get_no_db") || n.contains("3getE")) {
+        out = GICCOpKind::GetNoDb;
+        return true;
+    }
+    if (n.contains("5flushE")) { out = GICCOpKind::Flush; return true; }
+    if (n.contains("5quietE")) { out = GICCOpKind::Quiet; return true; }
     return false;
 }
 
