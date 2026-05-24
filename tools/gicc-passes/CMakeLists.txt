@@ -69,6 +69,7 @@ set(_GICC_PASS_SOURCES
     src/PluginEntry.cpp
     src/GICCPassConfig.cpp
     src/SiteId.cpp
+    src/HostMirrorAnnotation.cpp
     src/GICCDeviceDiscovery.cpp
     src/HKAnalysis.cpp
     src/GICCHKAnalysis.cpp

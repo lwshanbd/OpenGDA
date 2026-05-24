@@ -1,4 +1,5 @@
 #include "TraceTemplateBuilder.h"
+#include "HostMirrorAnnotation.h"
 
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/Argument.h"
@@ -405,10 +406,17 @@ KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
     t.simpleName  = info.simpleName;
 
     if (info.kernel) {
+        // Discover @llvm.global.annotations entries that flag this kernel's
+        // formals as host-mirrored. Name lookup is tried first; positional
+        // form is the fallback for builds that strip value names.
+        std::vector<bool> hostMirrored =
+            computeHostMirroredFormals(*info.kernel);
         for (const Argument &A : info.kernel->args()) {
             ParamInfo p;
             p.name    = A.getName().str();
             p.typeStr = typeStr(A.getType());
+            if (A.getArgNo() < hostMirrored.size())
+                p.host_mirrored = hostMirrored[A.getArgNo()];
             t.params.push_back(std::move(p));
         }
     }
