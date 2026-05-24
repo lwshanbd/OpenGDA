@@ -8,22 +8,53 @@
 namespace gicc::pass {
 
 struct ArgRef {
-    // LoopIv: refers to the host-side loop induction variable that the
-    // trace function materializes when emitting a loop op. Carries no
-    // payload — the trace builder substitutes the live %iv value in IR.
-    enum class Kind { Param, ConstI64, BinOp, Cast, Derived, LoopIv };
+    // Kinds:
+    //   Param      - kernel formal at index paramIdx
+    //   ConstI64   - literal int64
+    //   BinOp/Cast - arithmetic / type conversion on `children`
+    //   Derived    - placeholder; trace synth emits undef
+    //   LoopIv     - host-side loop induction variable (no payload; the
+    //                trace builder substitutes the live %iv value in IR)
+    //   FieldLoad  - `host_mirror_of(formal[paramIdx])[iv].field` where
+    //                paramIdx names a kernel formal annotated as
+    //                gicc_host_mirror.  baseFormalIdx is the formal,
+    //                structElemSize is sizeof(struct), fieldByteOffset
+    //                is offsetof(struct, field), fieldTypeStr is the
+    //                loaded type ("i32" / "i64" / "ptr" / ...).  iv lives
+    //                in children[0] as a nested ArgRef (typically LoopIv,
+    //                but any HK expression works).  Trace synth emits
+    //                a call to gicc_runtime_host_mirror_of(rt, formal)
+    //                followed by a byte-GEP + load.
+    enum class Kind { Param, ConstI64, BinOp, Cast, Derived, LoopIv, FieldLoad };
     Kind                 kind        = Kind::Derived;
-    unsigned             paramIdx    = 0;       // for Kind::Param
+    unsigned             paramIdx    = 0;       // for Kind::Param, Kind::FieldLoad
     int64_t              constVal    = 0;       // for Kind::ConstI64
     std::string          opStr;                 // for BinOp ("add", "shl", ...) / Cast
     std::vector<ArgRef>  children;
+    // FieldLoad-only:
+    int64_t              structElemSize  = 0;
+    int64_t              fieldByteOffset = 0;
+    std::string          fieldTypeStr;          // "i32" / "i64" / "ptr"
 };
 
 struct GuardSpec {
-    enum class Kind { Always, ParamTruthy, ParamEqConst, BinOp, Unknown };
-    Kind     kind    = Kind::Always;
+    // Kinds:
+    //   Always         - unconditional
+    //   ParamTruthy    - `if (kernel_formal[paramIdx]) op(...)`
+    //   ParamEqConst   - `if (kernel_formal == constVal)`
+    //   FieldNotNull   - `if (host_mirror[iv].field != nullptr)`; field
+    //                    locator carried in `fieldArg` (a FieldLoad ArgRef).
+    //                    Used by ASF's IPC-skip pattern
+    //                    `if (transfers[i].peer_recv_addr != nullptr) continue;`
+    //   Unknown        - guarded but pass can't model; degraded.
+    enum class Kind { Always, ParamTruthy, ParamEqConst, BinOp, FieldNotNull, Unknown };
+    Kind     kind     = Kind::Always;
     unsigned paramIdx = 0;
     int64_t  constVal = 0;
+    // FieldNotNull-only: the field-load expression we compare against null.
+    // Stored as a single-element vector to keep the type forward-declared
+    // (ArgRef is defined just above).
+    std::vector<ArgRef> fieldArg;
 };
 
 // Description of a loop containing a GICC call site. Populated by the
@@ -76,6 +107,14 @@ struct OpTemplate {
 struct ParamInfo {
     std::string name;        // formal name as it appears in IR (may be empty)
     std::string typeStr;     // "i32" / "i64" / "ptr" / ...
+    // True when this formal is annotated as carrying a host-side mirror
+    // (via __attribute__((annotate("gicc_kernel_host_mirror=<name>"))))
+    // on the kernel function).  Field loads of the form `formal[iv].field`
+    // become HK-capable when this bit is set: the trace synthesizer
+    // resolves the device pointer at trace time via
+    // gicc_runtime_host_mirror_of() then reads the field from the host
+    // mirror.  See ArgRef::Kind::FieldLoad.
+    bool        host_mirrored = false;
 };
 
 struct KernelTemplate {

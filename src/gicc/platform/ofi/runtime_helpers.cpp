@@ -125,4 +125,8 @@ void* gicc_runtime_proxy_ring_device_ptr(gicc::Runtime *rt) {
 }
 #endif
 
+const void* gicc_runtime_host_mirror_of(gicc::Runtime *rt, const void* dev_ptr) {
+    return rt ? rt->host_mirror_of(dev_ptr) : nullptr;
+}
+
 }  // extern "C"

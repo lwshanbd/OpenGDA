@@ -60,6 +60,14 @@ void gicc_runtime_dwq_enqueue_batched(gicc::Runtime    *rt,
 volatile std::uint64_t *gicc_runtime_trigger_addr(gicc::Runtime *rt);
 std::uint64_t           gicc_runtime_trigger_val (gicc::Runtime *rt);
 
+// Host-mirror lookup (used by the pass-synthesized DWQ trace function when
+// a kernel formal carries a "host-mirrored" annotation: at trace time the
+// pass needs to read the array's contents to pre-stage one DWQ descriptor
+// per element, and that data lives in a host-side mirror registered via
+// Runtime::register_host_mirror).  Returns nullptr if no mirror is known
+// for `dev_ptr` (= unregistered or invalid pointer).
+const void* gicc_runtime_host_mirror_of(gicc::Runtime *rt, const void* dev_ptr);
+
 #ifdef GICC_CPU_PROXY
 // Returns the device-mapped pointer to the lazily-started proxy ring.
 // Reserved for future LTO-pass plumbing; the MVP path writes the value

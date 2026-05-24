@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include "gicc/gicc_types.hpp"
@@ -433,6 +434,37 @@ public:
     // GPU-side completion signalling). Host-side rt.reset() is the wait.
     // Idempotent (safe to call multiple times).
     //--------------------------------------------------------------------------
+    //--------------------------------------------------------------------------
+    // register_host_mirror — tell GICC that the device array at `dev_ptr`
+    // has an authoritative host-side mirror at `host_ptr`, laid out as
+    // `count` elements of `elem_size` bytes each.  This lets the LTO pass
+    // synthesize a host-side trace function that reads e.g.
+    // `transfers[i].peer` at trace time -- the trace looks the host mirror
+    // up via gicc_runtime_host_mirror_of() and does the GEP+load on the
+    // host, avoiding a GPU memory dereference and unlocking DWQ_TRIGGER
+    // dispatch for kernels that today are stuck on CPU_PROXY_ENQUEUE
+    // because their args aren't host-knowable.
+    //
+    // Caller contract: the host mirror's contents must be valid + match
+    // the device array on every kernel launch the pass might fire trace
+    // for; if the host mirror drifts the synthesized DWQ pre-stage queues
+    // stale args.  ASF updates `h_transfers` in lockstep with `d_transfers`
+    // at Freeze time so this invariant holds.
+    //
+    // (elem_size, count) are recorded for future use (range-bounds checks,
+    // batched alloc); the lookup helper currently just returns the host
+    // pointer.
+    //--------------------------------------------------------------------------
+    void register_host_mirror(const void* dev_ptr, const void* host_ptr,
+                              size_t /*elem_size*/, size_t /*count*/) {
+        host_mirrors_[dev_ptr] = host_ptr;
+    }
+
+    const void* host_mirror_of(const void* dev_ptr) const {
+        auto it = host_mirrors_.find(dev_ptr);
+        return it == host_mirrors_.end() ? nullptr : it->second;
+    }
+
     void enable_host_wait_mode() {
         if (host_wait_mode_) return;
         struct fi_cntr_attr cntr_attr = {};
@@ -1134,6 +1166,15 @@ private:
     // unified kernel source serves both proxy + DWQ paths.  The CPU proxy
     // fleet is not lazy-started either (ensure_proxy_rings is bypassed).
     bool                               proxy_dispatch_disabled_;
+    // Host-side mirrors of device arrays whose contents the LTO pass needs
+    // to read at host trace synthesis time.  ASF's transfer descriptors,
+    // for example, live as gs->d_transfers (GPU) with a host-side mirror
+    // at gs->h_transfers; pass-synthesized DWQ trace calls
+    // gicc_runtime_host_mirror_of(rt, dev_ptr) to translate the device
+    // formal back to the host array so it can pre-stage one DWQ descriptor
+    // per element without depending on a kernel-formal-only HK arg path.
+    // See [[asf-rtm-pass-driven-dwq]] for the design rationale.
+    std::unordered_map<const void*, const void*> host_mirrors_;
     struct fid_cntr*                   shared_completion_cntr_;
     uint64_t                           mono_total_ops_;          // monotonic across batches
     uint64_t                           mono_last_triggered_;     // last value the kernel's MMIO write added (for delta calc)

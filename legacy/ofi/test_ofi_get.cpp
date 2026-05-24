@@ -30,7 +30,7 @@ int main() {
     rt.boot().barrier();
 
     if (rt.rank() == 0) {
-        rt.get_no_db(lb, peer, rb.index, 4096, 0, 0);
+        rt.get(lb, peer, rb.index, 4096, 0, 0);
         auto* ctx = rt.prepare(peer, rb.index);
         hipLaunchKernelGGL(get_kernel, dim3(1), dim3(1), 0, 0, ctx);
         hipDeviceSynchronize();
