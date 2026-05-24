@@ -267,6 +267,22 @@ matchHostMirroredFieldLoad(const LoadInst *LI, const Function *K,
         // Field walk starts at operand 2 (already the default).
     }
 
+    // Strip semantic-preserving casts that Clang/HIP often wrap around
+    // kernel pointer formals: AMDGCN puts kernel args in addrspace(1)
+    // and an `addrspacecast ... to ptr` shows up between the formal and
+    // its first GEP. BitCast is also possible from old opaque-pointer
+    // legacy. Strip both before checking for the Argument.
+    while (true) {
+        if (const auto *cast = dyn_cast<CastInst>(base)) {
+            if (cast->getOpcode() == Instruction::AddrSpaceCast ||
+                cast->getOpcode() == Instruction::BitCast) {
+                base = cast->getOperand(0);
+                continue;
+            }
+        }
+        break;
+    }
+
     const auto *arg = dyn_cast<Argument>(base);
     if (!arg || arg->getParent() != K) return out;
     unsigned formalIdx = arg->getArgNo();
