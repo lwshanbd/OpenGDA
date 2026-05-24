@@ -2,11 +2,17 @@
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/Constant.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/IntrinsicsAMDGPU.h"
 #include "llvm/IR/IntrinsicsNVPTX.h"
+#include "llvm/IR/Module.h"
+
+#include <string>
 
 using namespace llvm;
 
@@ -94,17 +100,32 @@ HKResult fail(const std::string &reason, Instruction *origin) {
     return HKResult{false, reason, origin};
 }
 
-HKResult check(Value *V, Function *K, SmallPtrSetImpl<Value *> &visited);
+std::string fieldTypeStrOf(Type *T) {
+    if (!T) return "i64";
+    if (T->isPointerTy())  return "ptr";
+    if (T->isIntegerTy())  return ("i" + std::to_string(T->getIntegerBitWidth()));
+    if (T->isFloatTy())    return "f32";
+    if (T->isDoubleTy())   return "f64";
+    return "i64";
+}
 
-HKResult checkAllOperands(User *U, Function *K, SmallPtrSetImpl<Value *> &visited) {
+HKResult check(Value *V, Function *K,
+               SmallPtrSetImpl<Value *> &visited,
+               const std::vector<bool> *hostMirrored);
+
+HKResult checkAllOperands(User *U, Function *K,
+                          SmallPtrSetImpl<Value *> &visited,
+                          const std::vector<bool> *hostMirrored) {
     for (Use &op : U->operands()) {
-        HKResult r = check(op.get(), K, visited);
+        HKResult r = check(op.get(), K, visited, hostMirrored);
         if (!r.ok) return r;
     }
     return {};
 }
 
-HKResult check(Value *V, Function *K, SmallPtrSetImpl<Value *> &visited) {
+HKResult check(Value *V, Function *K,
+               SmallPtrSetImpl<Value *> &visited,
+               const std::vector<bool> *hostMirrored) {
     if (!V) return fail("null value", nullptr);
     if (!visited.insert(V).second) return {};  // cycle (e.g. PHI back-edge)
 
@@ -120,7 +141,7 @@ HKResult check(Value *V, Function *K, SmallPtrSetImpl<Value *> &visited) {
     if (isa<GetElementPtrInst>(I) || isa<CastInst>(I) ||
         isa<BinaryOperator>(I)    || isa<SelectInst>(I) ||
         isa<ICmpInst>(I)          || isa<FCmpInst>(I))
-        return checkAllOperands(I, K, visited);
+        return checkAllOperands(I, K, visited, hostMirrored);
 
     if (auto *PHI = dyn_cast<PHINode>(I)) {
         // Only canonical induction-variable PHIs are HK in v1: exactly
@@ -161,7 +182,7 @@ HKResult check(Value *V, Function *K, SmallPtrSetImpl<Value *> &visited) {
                         "(no `phi + const_step` self-recurrence)", I);
 
         // Init value must be host-knowable.
-        HKResult r = check(initVal, K, visited);
+        HKResult r = check(initVal, K, visited, hostMirrored);
         if (!r.ok) return r;
         return {};
     }
@@ -173,7 +194,7 @@ HKResult check(Value *V, Function *K, SmallPtrSetImpl<Value *> &visited) {
                 if (isPerThreadIntrinsic(id))
                     return fail(intrinsicReason(id), I);
                 if (isHKPureIntrinsic(id))
-                    return checkAllOperands(CI, K, visited);
+                    return checkAllOperands(CI, K, visited, hostMirrored);
             }
             return fail(("calls non-HK function '" +
                          callee->getName().str() + "'"), I);
@@ -181,17 +202,112 @@ HKResult check(Value *V, Function *K, SmallPtrSetImpl<Value *> &visited) {
         return fail("indirect call", I);
     }
 
-    if (isa<LoadInst>(I))
+    if (auto *LI = dyn_cast<LoadInst>(I)) {
+        // Loads are non-HK in general (they read device memory). The
+        // sole exception is the host-mirrored pattern: when the load's
+        // pointer reduces to `host_mirror[iv].field` on a formal flagged
+        // host_mirrored, the trace function reads that field from the
+        // host mirror at trace time. The iv itself must still be HK.
+        if (hostMirrored) {
+            FieldLoadMatch m = matchHostMirroredFieldLoad(LI, K, *hostMirrored);
+            if (m.matched) {
+                if (!m.iv) return {};  // const-iv load: trivially HK
+                return check(m.iv, K, visited, hostMirrored);
+            }
+        }
         return fail("loads from device memory", I);
+    }
 
     return fail("unsupported instruction kind", I);
 }
 
 }  // namespace
 
-HKResult isHK(Value *V, Function *kernelF) {
+HKResult isHK(Value *V, Function *kernelF,
+              const std::vector<bool> *hostMirrored) {
     SmallPtrSet<Value *, 16> visited;
-    return check(V, kernelF, visited);
+    return check(V, kernelF, visited, hostMirrored);
+}
+
+FieldLoadMatch
+matchHostMirroredFieldLoad(const LoadInst *LI, const Function *K,
+                           const std::vector<bool> &hostMirrored) {
+    FieldLoadMatch out;
+    if (!LI || !K) return out;
+    const auto *gep = dyn_cast<GetElementPtrInst>(LI->getPointerOperand());
+    if (!gep) return out;
+
+    const Value *base       = gep->getPointerOperand();
+    Type        *containerTy = gep->getSourceElementType();
+    Value       *ivVal      = nullptr;
+    // GEP indices we should "consume" as struct-field offsets after the
+    // iv. `fieldStart` is the index into `gep`'s operands where the
+    // field walk begins (operand 0 is the pointer, operand 1 the first
+    // explicit index).
+    unsigned     fieldStart = 2;
+
+    // Pattern P2: outer GEP's first index is constant 0 and the base is
+    // another GEP. Collapse by taking the iv from the inner GEP and
+    // beginning the field walk at outer operand 2 (which we already had).
+    if (const auto *innerGep = dyn_cast<GetElementPtrInst>(base)) {
+        if (auto *outerFirst = dyn_cast<ConstantInt>(gep->getOperand(1));
+            outerFirst && outerFirst->isZero()) {
+            // Inner must have exactly one explicit index (the iv).
+            if (innerGep->getNumOperands() == 2 &&
+                innerGep->getSourceElementType() == containerTy) {
+                base  = innerGep->getPointerOperand();
+                ivVal = const_cast<Value *>(innerGep->getOperand(1));
+            }
+        }
+    }
+
+    // Pattern P1: iv lives in outer GEP's first explicit index.
+    if (!ivVal) {
+        ivVal      = const_cast<Value *>(gep->getOperand(1));
+        // Field walk starts at operand 2 (already the default).
+    }
+
+    const auto *arg = dyn_cast<Argument>(base);
+    if (!arg || arg->getParent() != K) return out;
+    unsigned formalIdx = arg->getArgNo();
+    if (formalIdx >= hostMirrored.size() || !hostMirrored[formalIdx])
+        return out;
+
+    const DataLayout &DL = K->getParent()->getDataLayout();
+    int64_t structSize   = DL.getTypeAllocSize(containerTy).getFixedValue();
+    int64_t fieldOff     = 0;
+
+    // Walk remaining indices through the container type (typically a
+    // struct), accumulating byte offsets. All field indices must be
+    // constants for the trace synthesizer to materialize the offset.
+    Type *curTy = containerTy;
+    for (unsigned i = fieldStart; i < gep->getNumOperands(); ++i) {
+        Value *idx = gep->getOperand(i);
+        auto  *ci  = dyn_cast<ConstantInt>(idx);
+        if (!ci) return out;
+        if (auto *st = dyn_cast<StructType>(curTy)) {
+            unsigned f = static_cast<unsigned>(ci->getZExtValue());
+            if (f >= st->getNumElements()) return out;
+            const StructLayout *SL = DL.getStructLayout(st);
+            fieldOff += static_cast<int64_t>(SL->getElementOffset(f));
+            curTy = st->getElementType(f);
+        } else if (auto *at = dyn_cast<ArrayType>(curTy)) {
+            uint64_t k = ci->getZExtValue();
+            fieldOff += static_cast<int64_t>(
+                k * DL.getTypeAllocSize(at->getElementType()).getFixedValue());
+            curTy = at->getElementType();
+        } else {
+            return out;
+        }
+    }
+
+    out.matched          = true;
+    out.formalIdx        = formalIdx;
+    out.structElemSize   = structSize;
+    out.fieldByteOffset  = fieldOff;
+    out.fieldTypeStr     = fieldTypeStrOf(LI->getType());
+    out.iv               = ivVal;
+    return out;
 }
 
 }  // namespace gicc::pass

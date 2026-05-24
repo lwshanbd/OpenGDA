@@ -1,6 +1,7 @@
 #include "GICCHKAnalysis.h"
 #include "GICCPassConfig.h"
 #include "HKAnalysis.h"
+#include "HostMirrorAnnotation.h"
 #include "KernelInventory.h"
 #include "MetadataIO.h"
 
@@ -13,6 +14,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <string>
+#include <vector>
 
 using namespace llvm;
 
@@ -62,6 +64,11 @@ PreservedAnalyses GICCHKAnalysisPass::run(Module &M, ModuleAnalysisManager &) {
         collectGICCSites(F, info);
         if (info.sites.empty()) continue;
 
+        // Per-kernel set of host-mirrored formals. Computed once per
+        // kernel; threaded through isHK so loads of host-mirrored fields
+        // are accepted instead of degrading to CPU_PROXY.
+        std::vector<bool> hostMirrored = computeHostMirroredFormals(F);
+
         for (auto &site : info.sites) {
             CallInst *CI = site.CI;
             bool        siteHK   = true;
@@ -72,7 +79,7 @@ PreservedAnalyses GICCHKAnalysisPass::run(Module &M, ModuleAnalysisManager &) {
             // trace function will consume.
             for (unsigned ai = 1; ai < CI->arg_size(); ++ai) {
                 Value *operand = CI->getArgOperand(ai);
-                HKResult r = isHK(operand, &F);
+                HKResult r = isHK(operand, &F, &hostMirrored);
                 if (r.ok) continue;
 
                 // Record the first failing argument as the canonical
