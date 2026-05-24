@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "kernel_mangled": "_Z6k_haloPN4gicc9DeviceCtxEP4Desci",
+  "kernel_simple":  "k_halo",
+  "params": [
+    { "idx": 0, "name": "ctx",           "type": "ptr" },
+    { "idx": 1, "name": "transfers",     "type": "ptr",
+      "host_mirrored": true },
+    { "idx": 2, "name": "num_transfers", "type": "i32" }
+  ],
+  "ops": [
+    {
+      "site_id": "k.cpp:5:k_halo::0",
+      "kind":    "put_no_db",
+      "guard":   {
+        "kind":  "field_not_null",
+        "field": {
+          "kind":         "field_load",
+          "base_formal":  1,
+          "struct_size":  24,
+          "field_offset": 16,
+          "field_type":   "ptr",
+          "iv":           { "kind": "loop_iv" }
+        }
+      },
+      "loop": {
+        "in_loop":  true,
+        "iv_param": 2,
+        "iv_start": 0,
+        "iv_step":  1
+      },
+      "args": {
+        "target_rank": {
+          "kind":         "field_load",
+          "base_formal":  1,
+          "struct_size":  24,
+          "field_offset": 0,
+          "field_type":   "i32",
+          "iv":           { "kind": "loop_iv" }
+        },
+        "dst_buf": {
+          "kind":         "field_load",
+          "base_formal":  1,
+          "struct_size":  24,
+          "field_offset": 4,
+          "field_type":   "i32",
+          "iv":           { "kind": "loop_iv" }
+        },
+        "dst_off": {
+          "kind":         "field_load",
+          "base_formal":  1,
+          "struct_size":  24,
+          "field_offset": 8,
+          "field_type":   "i64",
+          "iv":           { "kind": "loop_iv" }
+        },
+        "src_buf": { "kind": "const_i64", "value": 0 },
+        "src_off": { "kind": "const_i64", "value": 0 },
+        "size":    { "kind": "const_i64", "value": 64 }
+      }
+    }
+  ]
+}
