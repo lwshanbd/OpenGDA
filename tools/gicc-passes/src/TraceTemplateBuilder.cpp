@@ -1,4 +1,5 @@
 #include "TraceTemplateBuilder.h"
+#include "HKAnalysis.h"
 #include "HostMirrorAnnotation.h"
 
 #include "llvm/Analysis/LoopInfo.h"
@@ -91,7 +92,13 @@ const char *castName(unsigned op) {
 // an ArgRef::Kind::LoopIv leaf so the host trace synthesizer can
 // substitute the host-side loop counter instead of treating the PHI
 // as a kernel formal (which it is not).
-ArgRef toArgRef(Value *V, const Function *K, const Value *ivPhi = nullptr) {
+//
+// `hostMirrored` (optional): per-formal "is host-mirrored" bits. When
+// present and `V` is a LoadInst that reduces to host_mirror[iv].field
+// on a host-mirrored formal, we emit an ArgRef::Kind::FieldLoad so the
+// trace synthesizer can read the field at trace time.
+ArgRef toArgRef(Value *V, const Function *K, const Value *ivPhi = nullptr,
+                const std::vector<bool> *hostMirrored = nullptr) {
     ArgRef out;
     if (!V) {
         out.kind = ArgRef::Kind::Derived;
@@ -116,21 +123,38 @@ ArgRef toArgRef(Value *V, const Function *K, const Value *ivPhi = nullptr) {
     if (auto *BO = dyn_cast<BinaryOperator>(V)) {
         out.kind = ArgRef::Kind::BinOp;
         out.opStr = binopName(BO->getOpcode());
-        out.children.push_back(toArgRef(BO->getOperand(0), K, ivPhi));
-        out.children.push_back(toArgRef(BO->getOperand(1), K, ivPhi));
+        out.children.push_back(toArgRef(BO->getOperand(0), K, ivPhi, hostMirrored));
+        out.children.push_back(toArgRef(BO->getOperand(1), K, ivPhi, hostMirrored));
         return out;
     }
     if (auto *CI = dyn_cast<CastInst>(V)) {
         out.kind = ArgRef::Kind::Cast;
         out.opStr = castName(CI->getOpcode());
-        out.children.push_back(toArgRef(CI->getOperand(0), K, ivPhi));
+        out.children.push_back(toArgRef(CI->getOperand(0), K, ivPhi, hostMirrored));
+        return out;
+    }
+    if (auto *LI = dyn_cast<LoadInst>(V)) {
+        if (hostMirrored) {
+            FieldLoadMatch m = matchHostMirroredFieldLoad(LI, K, *hostMirrored);
+            if (m.matched) {
+                out.kind            = ArgRef::Kind::FieldLoad;
+                out.paramIdx        = m.formalIdx;
+                out.structElemSize  = m.structElemSize;
+                out.fieldByteOffset = m.fieldByteOffset;
+                out.fieldTypeStr    = m.fieldTypeStr;
+                out.children.push_back(
+                    toArgRef(m.iv, K, ivPhi, hostMirrored));
+                return out;
+            }
+        }
+        out.kind = ArgRef::Kind::Derived;
         return out;
     }
     if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
         out.kind = ArgRef::Kind::Cast;
         out.opStr = "gep";
         for (Value *op : GEP->operands()) {
-            out.children.push_back(toArgRef(op, K, ivPhi));
+            out.children.push_back(toArgRef(op, K, ivPhi, hostMirrored));
         }
         return out;
     }
@@ -138,7 +162,9 @@ ArgRef toArgRef(Value *V, const Function *K, const Value *ivPhi = nullptr) {
     return out;
 }
 
-GuardSpec deriveGuard(const CallInst *CI, const Function *K) {
+GuardSpec deriveGuard(const CallInst *CI, const Function *K,
+                      const Value *ivPhi = nullptr,
+                      const std::vector<bool> *hostMirrored = nullptr) {
     GuardSpec g;
     g.kind = GuardSpec::Kind::Always;
 
@@ -193,6 +219,47 @@ GuardSpec deriveGuard(const CallInst *CI, const Function *K) {
                 return g;
             }
         }
+
+        // icmp <eq/ne> ptr <field_load>, null — the ASF IPC-skip
+        // pattern. The trace should emit the call only for entries
+        // where the field IS null (cross-node peers in ASF's
+        // transfers[]).
+        if (hostMirrored) {
+            LoadInst *fieldLoad = nullptr;
+            if (auto *L = dyn_cast<LoadInst>(lhs);
+                L && isa<ConstantPointerNull>(rhs)) {
+                fieldLoad = L;
+            } else if (auto *L = dyn_cast<LoadInst>(rhs);
+                       L && isa<ConstantPointerNull>(lhs)) {
+                fieldLoad = L;
+            }
+            if (fieldLoad) {
+                FieldLoadMatch m =
+                    matchHostMirroredFieldLoad(fieldLoad, K, *hostMirrored);
+                if (m.matched) {
+                    // Does branching into `parent` mean "field IS null"?
+                    //   pred EQ ⇒ cond-true means field == null
+                    //   pred NE ⇒ cond-true means field != null
+                    bool trueMeansNull =
+                        (icmp->getPredicate() == ICmpInst::ICMP_EQ);
+                    bool enterMeansNull = (trueMeansNull == takeWhenCondTrue);
+                    if (enterMeansNull) {
+                        g.kind = GuardSpec::Kind::FieldNotNull;
+                        ArgRef fl;
+                        fl.kind            = ArgRef::Kind::FieldLoad;
+                        fl.paramIdx        = m.formalIdx;
+                        fl.structElemSize  = m.structElemSize;
+                        fl.fieldByteOffset = m.fieldByteOffset;
+                        fl.fieldTypeStr    = m.fieldTypeStr;
+                        fl.children.push_back(
+                            toArgRef(m.iv, K, ivPhi, hostMirrored));
+                        g.fieldArg.clear();
+                        g.fieldArg.push_back(std::move(fl));
+                        return g;
+                    }
+                }
+            }
+        }
     }
 
     g.kind = GuardSpec::Kind::Unknown;
@@ -200,7 +267,8 @@ GuardSpec deriveGuard(const CallInst *CI, const Function *K) {
 }
 
 void fillArgs(const CallInst *CI, GICCOpKind kind, OpTemplate &op,
-              const Function *K, const Value *ivPhi = nullptr) {
+              const Function *K, const Value *ivPhi = nullptr,
+              const std::vector<bool> *hostMirrored = nullptr) {
     const auto *names =
         (kind == GICCOpKind::PutNoDb || kind == GICCOpKind::GetNoDb)
             ? reinterpret_cast<const char *const *>(putGetArgNames().data())
@@ -212,7 +280,8 @@ void fillArgs(const CallInst *CI, GICCOpKind kind, OpTemplate &op,
 
     // Skip arg 0 (ctx) — not part of the trace template.
     for (unsigned i = 1; i < CI->arg_size() && i < maxArgs; ++i) {
-        op.args[names[i]] = toArgRef(CI->getArgOperand(i), K, ivPhi);
+        op.args[names[i]] =
+            toArgRef(CI->getArgOperand(i), K, ivPhi, hostMirrored);
     }
 }
 
@@ -405,12 +474,12 @@ KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
     t.mangledName = info.mangledName;
     t.simpleName  = info.simpleName;
 
+    // Discover @llvm.global.annotations entries that flag this kernel's
+    // formals as host-mirrored. Name lookup is tried first; positional
+    // form is the fallback for builds that strip value names.
+    std::vector<bool> hostMirrored;
     if (info.kernel) {
-        // Discover @llvm.global.annotations entries that flag this kernel's
-        // formals as host-mirrored. Name lookup is tried first; positional
-        // form is the fallback for builds that strip value names.
-        std::vector<bool> hostMirrored =
-            computeHostMirroredFormals(*info.kernel);
+        hostMirrored = computeHostMirroredFormals(*info.kernel);
         for (const Argument &A : info.kernel->args()) {
             ParamInfo p;
             p.name    = A.getName().str();
@@ -425,14 +494,11 @@ KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
         OpTemplate op;
         op.siteId = site.siteId;
         op.kind   = opKindName(site.kind);
-        op.guard  = deriveGuard(site.CI, info.kernel);
         op.compute_before = computeBeforeFor(site.CI, info.kernel, DT);
 
-        // If a LoopInfo is available, see whether this call is inside a
-        // loop. We accept only the innermost loop and require canonical
-        // shape (constant start/step + kernel-formal bound). Anything
-        // else marks the op `degraded` so the host trace synthesizer
-        // refuses to emit it (rather than silently emitting wrong code).
+        // Loop analysis runs first so we have the canonical iv PHI
+        // before deriving guard / arg ArgRefs (so iv references become
+        // LoopIv leaves rather than walked-back kernel formals).
         const Value *ivPhi = nullptr;
         if (LI) {
             BasicBlock *parent = site.CI->getParent();
@@ -452,7 +518,8 @@ KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
             }
         }
 
-        fillArgs(site.CI, site.kind, op, info.kernel, ivPhi);
+        op.guard = deriveGuard(site.CI, info.kernel, ivPhi, &hostMirrored);
+        fillArgs(site.CI, site.kind, op, info.kernel, ivPhi, &hostMirrored);
         t.ops.push_back(std::move(op));
     }
     return t;
