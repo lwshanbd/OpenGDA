@@ -69,8 +69,8 @@ __global__ void matmul_step_kernel(gicc::DeviceCtx* ctx,
     // route uses block-cooperative memcpy_block + __syncthreads). Other
     // blocks early-return inside put_no_db. Whole-buffer copy → both
     // dst_offset and src_offset are 0.
-    gicc::put_no_db(ctx, target, dst_buf, /*dst_off=*/(size_t)0,
-                    src_buf, /*src_off=*/(size_t)0, sz);
+    gicc::put(ctx, target, dst_buf, /*dst_off=*/(size_t)0,
+              src_buf, /*src_off=*/(size_t)0, sz);
 
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;

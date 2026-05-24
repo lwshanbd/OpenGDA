@@ -312,9 +312,9 @@ int main(int argc, char** argv) {
         } else {
             for (int i = 0; i < burn_n; ++i) {
                 if (op == "put") {
-                    rt.put_no_db(bh, peer, bh.index, 8, 0, 0);
+                    rt.put(bh, peer, bh.index, 8, 0, 0);
                 } else {
-                    rt.get_no_db(bh, peer, bh.index, 8, 0, 0);
+                    rt.get(bh, peer, bh.index, 8, 0, 0);
                 }
             }
             d_ctx = rt.prepare();
@@ -450,13 +450,13 @@ int main(int argc, char** argv) {
                 for (int w = 0; w < num_warmup; ++w) {
                     for (int i = 0; i < batch_per_outer; ++i) {
                         if (op == "put") {
-                            rt.put_no_db(bh, peer, bh.index, bytes,
+                            rt.put(bh, peer, bh.index, bytes,
                                          /*src_off=*/0, /*dst_off=*/0);
                         } else {
                             // GET: pull peer's data into our buffer.
                             // local_dst=bh, src_rank=peer, src_buf=peer's idx,
                             // local_off=0, remote_off=0.
-                            rt.get_no_db(bh, peer, bh.index, bytes,
+                            rt.get(bh, peer, bh.index, bytes,
                                          /*local_off=*/0, /*remote_off=*/0);
                         }
                     }
@@ -504,10 +504,10 @@ int main(int argc, char** argv) {
                 double te0 = MPI_Wtime();
                 for (int i = 0; i < batch_per_outer; ++i) {
                     if (op == "put") {
-                        rt.put_no_db(bh, peer, bh.index, bytes,
+                        rt.put(bh, peer, bh.index, bytes,
                                      /*src_off=*/0, /*dst_off=*/0);
                     } else {
-                        rt.get_no_db(bh, peer, bh.index, bytes,
+                        rt.get(bh, peer, bh.index, bytes,
                                      /*local_off=*/0, /*remote_off=*/0);
                     }
                 }
@@ -535,10 +535,10 @@ int main(int argc, char** argv) {
                     if (mode == "dwq") {
                         for (int i = 0; i < batch_per_outer; ++i) {
                             if (op == "put") {
-                                rt.put_no_db(bh, peer, bh.index, bytes,
+                                rt.put(bh, peer, bh.index, bytes,
                                              /*src_off=*/0, /*dst_off=*/0);
                             } else {
-                                rt.get_no_db(bh, peer, bh.index, bytes,
+                                rt.get(bh, peer, bh.index, bytes,
                                              /*local_off=*/0, /*remote_off=*/0);
                             }
                         }

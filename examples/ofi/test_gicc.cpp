@@ -24,11 +24,11 @@ __global__ void put_kernel(gicc::DeviceCtx* ctx,
                            int n, size_t bytes_per)
 {
     for (int i = 0; i < n; i++) {
-        gicc::put_no_db(ctx, target, dst_buf,
-                        (size_t)i * bytes_per,
-                        src_buf,
-                        (size_t)i * bytes_per,
-                        bytes_per);
+        gicc::put(ctx, target, dst_buf,
+                  (size_t)i * bytes_per,
+                  src_buf,
+                  (size_t)i * bytes_per,
+                  bytes_per);
     }
     if (threadIdx.x == 0) {
         gicc::flush(ctx);

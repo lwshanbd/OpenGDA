@@ -105,7 +105,7 @@ int main(int /*argc*/, char** /*argv*/) {
     int first_bad = -1, last_bad = -1;
 
     for (int k = 0; k < N_ITERS; ++k) {
-        auto tok = rt.get_no_db(bh,
+        auto tok = rt.get(bh,
                                 peer, bh.index,
                                 WIN_BYTES,
                                 /*local_offset=*/LAND_OFF,

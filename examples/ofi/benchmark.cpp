@@ -167,7 +167,7 @@ int main(int argc, char** argv) {
 
             if (rank == 0) {
                 for (int i = 0; i < N_STREAMS; i++) {
-                    rt.put_no_db(src_buf, peer, dst_buf.index, cur,
+                    rt.put(src_buf, peer, dst_buf.index, cur,
                                  /*src_off=*/(size_t)i * MAX_SIZE,
                                  /*dst_off=*/(size_t)i * MAX_SIZE);
                 }

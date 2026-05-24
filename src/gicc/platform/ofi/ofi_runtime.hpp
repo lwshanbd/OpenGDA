@@ -520,16 +520,21 @@ private:
 public:
 
     //--------------------------------------------------------------------------
-    // put_no_db — queue an RMA WRITE only. Consumes one slot from the pool.
+    // put — queue an RMA WRITE.  Non-blocking; consumes one slot from the
+    // pool.  Caller observes completion via rt.reset() (host_wait_mode) or
+    // rt.wait(tok).  Renamed from put_no_db: under the unified put/get/quiet
+    // API, every device + host put is non-blocking-initiated by construction;
+    // the "_no_db" suffix only made sense in the legacy device API where
+    // flush was the explicit doorbell.
     //--------------------------------------------------------------------------
-    Token put_no_db(const Buffer& src, int dest_rank, int dest_buf_index,
-                    size_t size, size_t src_offset = 0, size_t dst_offset = 0)
+    Token put(const Buffer& src, int dest_rank, int dest_buf_index,
+              size_t size, size_t src_offset = 0, size_t dst_offset = 0)
     {
         const OfiBuffer& ob = local_bufs_.at(src.index);
 
         if ((int)my_n_ops_ >= POOL_SIZE) {
             fprintf(stderr,
-                "gicc::Runtime::put_no_db: batch exceeds POOL_SIZE=%d. "
+                "gicc::Runtime::put: batch exceeds POOL_SIZE=%d. "
                 "Call rt.reset() between batches or raise POOL_SIZE.\n",
                 POOL_SIZE);
             exit(1);
@@ -595,7 +600,7 @@ public:
         // ---------- Legacy path (per-slot + atomic_signal for device quiet) ----------
         if ((int)my_n_ops_ >= POOL_SIZE) {
             fprintf(stderr,
-                "gicc::Runtime::put_no_db: batch exceeds POOL_SIZE=%d. "
+                "gicc::Runtime::put: batch exceeds POOL_SIZE=%d. "
                 "Call rt.reset() between batches or raise POOL_SIZE.\n",
                 POOL_SIZE);
             exit(1);
@@ -648,8 +653,8 @@ public:
     // kernel-side mid-flight quiet (the kernel cannot poll completion
     // without leaving via host wait), but every host-driven flow (legacy
     // wait/reset, future LTO-driven post-launch host wait) is unaffected.
-    Token get_no_db(const Buffer& local_dst, int src_rank, int src_buf_index,
-                    size_t size, size_t local_offset = 0, size_t remote_offset = 0)
+    Token get(const Buffer& local_dst, int src_rank, int src_buf_index,
+              size_t size, size_t local_offset = 0, size_t remote_offset = 0)
     {
         const OfiBuffer& ob = local_bufs_.at(local_dst.index);
 
@@ -706,7 +711,7 @@ public:
 
         if ((int)my_n_ops_ >= POOL_SIZE) {
             fprintf(stderr,
-                "gicc::Runtime::get_no_db: batch exceeds POOL_SIZE=%d. "
+                "gicc::Runtime::get: batch exceeds POOL_SIZE=%d. "
                 "Call rt.reset() between batches or raise POOL_SIZE.\n",
                 POOL_SIZE);
             exit(1);

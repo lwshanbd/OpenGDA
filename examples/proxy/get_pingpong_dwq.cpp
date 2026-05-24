@@ -96,7 +96,7 @@ int main(int /*argc*/, char** /*argv*/) {
 
     const int peer = 1 - rank;
 
-    auto tok = rt.get_no_db(bh,
+    auto tok = rt.get(bh,
                             peer, bh.index,
                             WIN,
                             /*local_offset=*/LAND_OFF,
