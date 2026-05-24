@@ -95,7 +95,8 @@ public:
           atomic_signals_queued_(false),
           host_wait_mode_(false),
           shared_completion_cntr_(nullptr),
-          mono_total_ops_(0)
+          mono_total_ops_(0),
+          mono_last_triggered_(0)
     {
         // Read W from env var; hint.json override is applied later when
         // the dispatch-lowering pass produces final hint.
@@ -762,9 +763,21 @@ public:
         // helper C ABI. The kernel only needs the trigger MMIO addr
         // and the threshold value so its lead thread can fire all
         // queued DWQ ops with one volatile store at flush() time.
+        //
+        // CRITICAL: CXI's trigger counter MMIO write is ADD-on-write,
+        // not SET-on-write — writing N increments the counter by N.
+        // For correct DWQ semantics we must write the DELTA between
+        // this iter's pending op count and the previous iter's
+        // already-written total, so the counter ends up at exactly
+        // mono_total_ops_ (the highest queued threshold).
         h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
-        h_dev_ctx_->trigger_val_  = host_wait_mode_ ? mono_total_ops_
-                                                    : my_n_remote_ops_;
+        if (host_wait_mode_) {
+            const uint64_t delta = mono_total_ops_ - mono_last_triggered_;
+            h_dev_ctx_->trigger_val_  = delta;
+            mono_last_triggered_ = mono_total_ops_;
+        } else {
+            h_dev_ctx_->trigger_val_ = my_n_remote_ops_;
+        }
 #ifdef GICC_CPU_PROXY
         // Lazy-start the CPU proxy fleet on first prepare(). Stash both
         // the single ring 0 (DeviceCtx::proxy_ring, for back-compat with
@@ -1087,6 +1100,7 @@ private:
     bool                               host_wait_mode_;
     struct fid_cntr*                   shared_completion_cntr_;
     uint64_t                           mono_total_ops_;          // monotonic across batches
+    uint64_t                           mono_last_triggered_;     // last value the kernel's MMIO write added (for delta calc)
     std::vector<DwqWorkBuilder*>       dwq_pool_;                // recycled builders
 
     // Sliding-window depth passed to Barrier construction. Default 8;
