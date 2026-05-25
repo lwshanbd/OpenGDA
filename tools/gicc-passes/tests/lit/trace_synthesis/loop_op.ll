@@ -49,20 +49,38 @@ define void @main(ptr %rt, i32 %peer, i32 %buf, i32 %n, i64 %bytes_per) {
 ; CHECK: call void @gicc_trace_k_loop(ptr %rt, i32 %peer, i32 %buf, i32 %n, i64 %bytes_per)
 ; CHECK-NEXT: call void @_ZN4gicc6launchI
 
-; The synthesized trace function wraps the placeholder in a host-side
-; loop. We expect: a loop.head BB with a phi i64 starting at 0; an
-; icmp slt comparing against the (sext i32→i64) bound; a placeholder
-; call inside loop.body using the iv as part of dst_off; and an
-; `add i64 ..., 1` step in the body.
+; The synthesized trace function stages per-iteration args into
+; stack-allocated arrays, then issues a single batched-placeholder
+; call after the loop exits — one call instead of N. We check that:
+;   (1) the trace fn alloca's per-arg arrays sized by the bound,
+;   (2) the loop body stores args[count] and bumps count,
+;   (3) the loop.exit issues exactly one batched placeholder call
+;       carrying the final count + array pointers.
 
 ; The block names contain `:` so LLVM round-trips them as quoted strings.
 ; CHECK-LABEL: define internal void @gicc_trace_k_loop(ptr %rt, i32 %peer, i32 %buf, i32 %n, i64 %bytes_per)
+; CHECK: %dwq.peers = alloca i32, i64 %{{.*}}
+; CHECK: %dwq.sizes = alloca i64, i64 %{{.*}}
+; CHECK: %dwq.count = alloca i32
+; CHECK: store i32 0, ptr %dwq.count
+;
 ; CHECK: "loop.head.k.cpp:5:k_loop::0":
-; CHECK: %iv = phi i64 [ 0, %{{.*}} ], [ %iv.next, %"loop.body.k.cpp:5:k_loop::0" ]
+; CHECK: %iv = phi i64 [ 0, %{{.*}} ], [ %iv.next, %"loop.latch.k.cpp:5:k_loop::0" ]
 ; CHECK: %cmp = icmp slt i64 %iv, %{{.*}}
 ; CHECK: br i1 %cmp, label %"loop.body.k.cpp:5:k_loop::0", label %"loop.exit.k.cpp:5:k_loop::0"
+;
 ; CHECK: "loop.body.k.cpp:5:k_loop::0":
-; CHECK: call void @gicc.runtime.put_no_db.placeholder(ptr %rt, i32 %peer, i32 %buf, i64 %{{.*}}, i32 %buf, i64 %{{.*}}, i64 %bytes_per){{.*}}!gicc.site_id
+; CHECK: %count = load i32, ptr %dwq.count
+; CHECK: getelementptr i32, ptr %dwq.peers
+; CHECK: store i32 %peer, ptr
+; CHECK: add i32 %count, 1
+; CHECK: store i32{{.*}} ptr %dwq.count
+; CHECK: br label %"loop.latch.k.cpp:5:k_loop::0"
+;
+; CHECK: "loop.exit.k.cpp:5:k_loop::0":
+; CHECK: %final_count = load i32, ptr %dwq.count
+; CHECK: call void @gicc.runtime.put_no_db.batched.placeholder(ptr %rt, i32 %final_count, ptr %dwq.peers, ptr %dwq.dst_bufs, ptr %dwq.dst_offs, ptr %dwq.src_bufs, ptr %dwq.src_offs, ptr %dwq.sizes){{.*}}!gicc.site_id
+;
+; CHECK: "loop.latch.k.cpp:5:k_loop::0":
 ; CHECK: %iv.next = add i64 %iv, 1
 ; CHECK: br label %"loop.head.k.cpp:5:k_loop::0"
-; CHECK: "loop.exit.k.cpp:5:k_loop::0":

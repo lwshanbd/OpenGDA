@@ -44,12 +44,17 @@ define void @main(ptr %rt, ptr %transfers, i32 %num_transfers) {
 ; CHECK-LABEL: define void @main
 ; CHECK: call void @gicc_trace_k_halo(ptr %rt, ptr %transfers, i32 %num_transfers)
 
-; The synthesized trace function: a host-side loop bounded by
-; num_transfers; the loop body looks up the host mirror, computes the
-; per-iter field address (iv * 24 + 16) for the FieldNotNull guard,
-; loads the peer_recv_addr field as i8/ptr, compares to null, and only
-; calls the placeholder for entries where the field is null.
+; The synthesized trace function: alloca per-arg arrays sized by
+; num_transfers, host-side loop bounded by num_transfers; the loop
+; body looks up the host mirror, computes the per-iter field address
+; (iv * 24 + 16) for the FieldNotNull guard, loads peer_recv_addr,
+; compares to null, and only STAGES into arrays[count++] for entries
+; where the field is null. After loop, ONE batched placeholder call
+; consumes the staged arrays.
 ; CHECK-LABEL: define internal void @gicc_trace_k_halo(ptr %rt, ptr %transfers, i32 %num_transfers)
+; CHECK: %dwq.peers = alloca i32, i64 %{{.*}}
+; CHECK: %dwq.count = alloca i32
+; BB output order: head, body, exit, guard.do, latch (creation order).
 ; CHECK: phi i64
 ; CHECK: call ptr @gicc_runtime_host_mirror_of(ptr %rt, ptr %transfers)
 ; CHECK: %elem_off = mul i64 %iv, 24
@@ -57,5 +62,12 @@ define void @main(ptr %rt, ptr %transfers, i32 %num_transfers) {
 ; CHECK: getelementptr i8, ptr %host_mirror, i64 %field_off
 ; CHECK: load ptr, ptr %host_field_ptr
 ; CHECK: icmp eq ptr %host_field, null
-; CHECK: br i1 %is_null, label %"guard.do.k.cpp:5:k_halo::0", label %"loop.latch.k.cpp:5:k_halo::0"
-; CHECK: call void @gicc.runtime.put_no_db.placeholder
+; CHECK: br i1 %is_null
+; The batched call lives in loop.exit, which comes BEFORE guard.do
+; in the dump because exit was created first.
+; CHECK: %final_count = load i32, ptr %dwq.count
+; CHECK: call void @gicc.runtime.put_no_db.batched.placeholder
+; The guard.do BB later stages args into %dwq.peers and bumps %dwq.count.
+; CHECK: load i32, ptr %dwq.count
+; CHECK: getelementptr i32, ptr %dwq.peers
+; CHECK: store i32{{.*}} ptr %dwq.count

@@ -242,6 +242,27 @@ FunctionCallee getPlaceholder(Module &M, GICCOpKind kind) {
     return {};
 }
 
+// Batched form: (ptr rt, i32 n_ops, ptr peers, ptr dst_bufs,
+//                ptr dst_offs, ptr src_bufs, ptr src_offs, ptr sizes).
+// Matches gicc_runtime_dwq_enqueue_batched 1:1 so the dispatch
+// lowering pass just renames the call.
+FunctionCallee getBatchedPlaceholder(Module &M, GICCOpKind kind) {
+    LLVMContext &Ctx = M.getContext();
+    Type *ptrTy = PointerType::getUnqual(Ctx);
+    Type *i32Ty = Type::getInt32Ty(Ctx);
+    if (kind == GICCOpKind::PutNoDb || kind == GICCOpKind::GetNoDb) {
+        StringRef name = (kind == GICCOpKind::PutNoDb)
+            ? "gicc.runtime.put_no_db.batched.placeholder"
+            : "gicc.runtime.get_no_db.batched.placeholder";
+        auto *FT = FunctionType::get(
+            Type::getVoidTy(Ctx),
+            {ptrTy, i32Ty, ptrTy, ptrTy, ptrTy, ptrTy, ptrTy, ptrTy},
+            /*isVarArg=*/false);
+        return M.getOrInsertFunction(name, FT);
+    }
+    return {};
+}
+
 GICCOpKind opKindFromStr(StringRef s) {
     if (s == "put_no_db") return GICCOpKind::PutNoDb;
     if (s == "get_no_db") return GICCOpKind::GetNoDb;
@@ -298,9 +319,46 @@ void emitPlaceholderCall(Module &M, IRBuilder<> &B, Function *traceFn,
 // On entry the IRBuilder is positioned at the bb where the bound expression
 // should be materialized. On return the builder is positioned at the
 // freshly-created loop.exit block; caller must terminate it.
+// Emit a host-side loop that STAGES per-iteration args into
+// stack-allocated arrays, then issues a single batched-placeholder
+// call after the loop exits. The batched placeholder maps 1:1 to
+// gicc_runtime_dwq_enqueue_batched, so dispatch lowering becomes a
+// rename instead of N separate enqueue calls.
+//
+//   preBB:
+//     %bound64    = …
+//     %peer_arr   = alloca i32, i64 %bound64
+//     %dst_buf_arr= alloca i32, i64 %bound64
+//     %dst_off_arr= alloca i64, i64 %bound64
+//     %src_buf_arr= alloca i32, i64 %bound64
+//     %src_off_arr= alloca i64, i64 %bound64
+//     %size_arr   = alloca i64, i64 %bound64
+//     %count_ptr  = alloca i32
+//     store i32 0, ptr %count_ptr
+//     br loop.head
+//   loop.head:
+//     %iv  = phi i64 [0, preBB], [iv.next, loop.latch]
+//     %cmp = icmp slt i64 %iv, %bound64
+//     br i1 %cmp, label loop.body, label loop.exit
+//   loop.body:           ; (optionally branches to guard.do via FieldNotNull)
+//   guard.do:            ; (only present when op has FieldNotNull guard)
+//     %c     = load i32, ptr %count_ptr
+//     ; eval each arg, store to arrays[c]
+//     %c_nxt = add i32 %c, 1
+//     store i32 %c_nxt, ptr %count_ptr
+//     br loop.latch
+//   loop.latch:
+//     %iv.next = add i64 %iv, step
+//     br loop.head
+//   loop.exit:
+//     %n = load i32, ptr %count_ptr
+//     call void @gicc.runtime.put_no_db.batched.placeholder(
+//         ptr %rt, i32 %n, ptr %peer_arr, ptr %dst_buf_arr,
+//         ptr %dst_off_arr, ptr %src_buf_arr, ptr %src_off_arr, ptr %size_arr)
 void emitOpInLoop(Module &M, IRBuilder<> &B, Function *traceFn,
                   const OpTemplate &op, GICCOpKind kind) {
     LLVMContext &Ctx = M.getContext();
+    Type *i32Ty = Type::getInt32Ty(Ctx);
     Type *i64Ty = Type::getInt64Ty(Ctx);
 
     // Materialize the bound (kernel formal `ivParamIdx`) as i64.
@@ -308,6 +366,18 @@ void emitOpInLoop(Module &M, IRBuilder<> &B, Function *traceFn,
     boundRef.kind     = ArgRef::Kind::Param;
     boundRef.paramIdx = op.loop.ivParamIdx;
     Value *bound = evalArgRef(B, traceFn, boundRef, i64Ty, nullptr);
+
+    // Stack-allocate the per-arg arrays in the SAME BB as `bound` was
+    // computed so they dominate the loop. Sizes are i64 to match
+    // alloca's preferred index type.
+    Value *peerArr   = B.CreateAlloca(i32Ty, bound, "dwq.peers");
+    Value *dstBufArr = B.CreateAlloca(i32Ty, bound, "dwq.dst_bufs");
+    Value *dstOffArr = B.CreateAlloca(i64Ty, bound, "dwq.dst_offs");
+    Value *srcBufArr = B.CreateAlloca(i32Ty, bound, "dwq.src_bufs");
+    Value *srcOffArr = B.CreateAlloca(i64Ty, bound, "dwq.src_offs");
+    Value *sizeArr   = B.CreateAlloca(i64Ty, bound, "dwq.sizes");
+    Value *countPtr  = B.CreateAlloca(i32Ty, nullptr, "dwq.count");
+    B.CreateStore(ConstantInt::get(i32Ty, 0), countPtr);
 
     BasicBlock *headBB  = BasicBlock::Create(Ctx, "loop.head." + op.siteId,
                                              traceFn);
@@ -330,46 +400,76 @@ void emitOpInLoop(Module &M, IRBuilder<> &B, Function *traceFn,
     B.CreateCondBr(cmp, bodyBB, exitBB);
 
     // loop.body: optional per-iteration FieldNotNull guard, then
-    // placeholder call, then fall through to a latch BB that increments
-    // the iv and branches back to head.
+    // stage args[count++], then fall through to a latch BB that
+    // increments the iv and branches back to head.
     B.SetInsertPoint(bodyBB);
 
     bool perIterGuard =
         (op.guard.kind == GuardSpec::Kind::FieldNotNull
          && !op.guard.fieldArg.empty());
 
+    BasicBlock *stageBB;
     BasicBlock *latchBB;
     if (perIterGuard) {
-        // Evaluate host_mirror[iv].field with iv as the live PHI value,
-        // compare against null, emit the placeholder only when the
-        // field IS null (the ASF IPC-skip semantic: peer_recv_addr
-        // == null means "cross-node — needs a DWQ descriptor").
         Type *ptrTy = PointerType::getUnqual(Ctx);
         Value *fv = evalArgRef(B, traceFn, op.guard.fieldArg[0], ptrTy, iv);
         Value *isNull = B.CreateICmpEQ(
             fv, ConstantPointerNull::get(cast<PointerType>(ptrTy)),
             "is_null");
-        BasicBlock *doCallBB = BasicBlock::Create(
-            Ctx, "guard.do." + op.siteId, traceFn);
+        stageBB = BasicBlock::Create(Ctx, "guard.do." + op.siteId, traceFn);
         latchBB = BasicBlock::Create(Ctx, "loop.latch." + op.siteId, traceFn);
-        B.CreateCondBr(isNull, doCallBB, latchBB);
-        B.SetInsertPoint(doCallBB);
-        emitPlaceholderCall(M, B, traceFn, op, kind, /*currentIv=*/iv);
-        B.CreateBr(latchBB);
-        B.SetInsertPoint(latchBB);
+        // Enter staging only when field IS null (cross-node entry).
+        B.CreateCondBr(isNull, stageBB, latchBB);
     } else {
-        emitPlaceholderCall(M, B, traceFn, op, kind, /*currentIv=*/iv);
-        latchBB = bodyBB;
+        stageBB = bodyBB;
+        latchBB = BasicBlock::Create(Ctx, "loop.latch." + op.siteId, traceFn);
     }
 
+    // Staging: evaluate each arg, store into arrays[count], bump count.
+    B.SetInsertPoint(stageBB);
+    Value *count   = B.CreateLoad(i32Ty, countPtr, "count");
+    Value *countI64 = B.CreateZExt(count, i64Ty);
+    auto storeAt = [&](Value *arr, Type *eltTy, Value *val) {
+        Value *addr = B.CreateGEP(eltTy, arr, countI64);
+        B.CreateStore(val, addr);
+    };
+    // Same arg-name keys as emitPlaceholderCall but writing to arrays.
+    auto evalNamed = [&](const char *name, Type *expected) -> Value * {
+        auto it = op.args.find(name);
+        if (it == op.args.end())
+            return ConstantInt::get(expected, 0);
+        return evalArgRef(B, traceFn, it->second, expected, iv);
+    };
+    storeAt(peerArr,   i32Ty, evalNamed("target_rank", i32Ty));
+    storeAt(dstBufArr, i32Ty, evalNamed("dst_buf",     i32Ty));
+    storeAt(dstOffArr, i64Ty, evalNamed("dst_off",     i64Ty));
+    storeAt(srcBufArr, i32Ty, evalNamed("src_buf",     i32Ty));
+    storeAt(srcOffArr, i64Ty, evalNamed("src_off",     i64Ty));
+    storeAt(sizeArr,   i64Ty, evalNamed("size",        i64Ty));
+    Value *countNext = B.CreateAdd(count, ConstantInt::get(i32Ty, 1));
+    B.CreateStore(countNext, countPtr);
+    B.CreateBr(latchBB);
+
+    // Latch: increment iv, jump back to header.
+    B.SetInsertPoint(latchBB);
     Value *next = B.CreateAdd(
         iv, ConstantInt::get(i64Ty, op.loop.ivStep, /*signed=*/true),
         "iv.next");
     B.CreateBr(headBB);
     iv->addIncoming(next, latchBB);
 
-    // Caller continues at exitBB.
+    // Exit: one batched-placeholder call carrying the final count + arrays.
     B.SetInsertPoint(exitBB);
+    Value *finalCount = B.CreateLoad(i32Ty, countPtr, "final_count");
+    auto callee = getBatchedPlaceholder(M, kind);
+    auto *batchedCI = B.CreateCall(callee,
+        {traceFn->getArg(0), finalCount,
+         peerArr, dstBufArr, dstOffArr,
+         srcBufArr, srcOffArr, sizeArr});
+    auto *md = MDNode::get(Ctx, MDString::get(Ctx, op.siteId));
+    batchedCI->setMetadata("gicc.site_id", md);
+
+    // Caller continues at exitBB.
 }
 
 void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,
