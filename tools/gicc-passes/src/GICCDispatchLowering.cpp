@@ -346,6 +346,7 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
     }
 
     SmallVector<CallInst *, 32> placeholders;
+    SmallVector<CallInst *, 32> batchedPlaceholders;
     for (Function &F : M) {
         for (BasicBlock &BB : F) {
             for (Instruction &I : BB) {
@@ -357,11 +358,15 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
                 if (n == "gicc.runtime.put_no_db.placeholder" ||
                     n == "gicc.runtime.get_no_db.placeholder") {
                     placeholders.push_back(CI);
+                } else if (n == "gicc.runtime.put_no_db.batched.placeholder" ||
+                           n == "gicc.runtime.get_no_db.batched.placeholder") {
+                    batchedPlaceholders.push_back(CI);
                 }
             }
         }
     }
-    if (placeholders.empty()) return PreservedAnalyses::all();
+    if (placeholders.empty() && batchedPlaceholders.empty())
+        return PreservedAnalyses::all();
 
     // Per-site HK capability map (from kernel JSON) for cross-check.
     auto hkMap = buildSiteHKMap(M, cfg.metaDir);
@@ -454,10 +459,81 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
     }
     flushBatch();
 
-    // Drop the now-unused placeholder declaration so the linker doesn't
-    // need a definition.
+    // ------------------------------------------------------------------
+    // Lower batched placeholders (trace-synth emits one per loop op).
+    // The signature already matches gicc_runtime_dwq_enqueue_batched
+    // 1:1, so for DWQ_TRIGGER / DWQ_BATCHED / Unknown the lowering is
+    // just a function-rename (callee swap). For CPU_PROXY_ENQUEUE, the
+    // device side does the work and the host trace is a no-op — erase
+    // the call so the unused alloca arrays + stores get cleaned up by
+    // later LLVM opt passes (SROA / DSE).
+    // ------------------------------------------------------------------
+    if (!batchedPlaceholders.empty()) {
+        LoweringHelpers H = makeHelpers(&M);
+        for (CallInst *PH : batchedPlaceholders) {
+            StringRef siteId = siteIdOf(PH);
+            SiteHint  sh     = hintFor(hints, siteId);
+            DispatchKind d   = sh.dispatch;
+
+            auto hkIt = hkMap.find(siteId.str());
+            const SiteHKInfo *hkInfo = (hkIt != hkMap.end()) ? &hkIt->second
+                                                             : nullptr;
+            if (hkInfo && !hkInfo->hk_capable &&
+                d != DispatchKind::CpuProxyEnqueue) {
+                report_fatal_error(
+                    Twine("gicc: batched site ") + siteId +
+                    " has hk_capable=false but hint requests " +
+                    dispatchName(d) + " (only CPU_PROXY_ENQUEUE accepts "
+                    "non-HK args). Reason: " + hkInfo->hk_fail_reason);
+            }
+            if (d == DispatchKind::CpuProxyEnqueue && !proxyEnabled) {
+                report_fatal_error(
+                    Twine("gicc: batched site ") + siteId +
+                    " requests CPU_PROXY_ENQUEUE but GICC_PROXY_ENABLED "
+                    "is unset");
+            }
+
+            switch (d) {
+                case DispatchKind::DwqTrigger:
+                case DispatchKind::DwqBatched:
+                case DispatchKind::Unknown: {
+                    // Swap the callee to gicc_runtime_dwq_enqueue_batched.
+                    // Signatures match: (rt, i32 n, ptr*6 arrays).
+                    PH->setCalledFunction(H.enqBatchedFn);
+                    break;
+                }
+                case DispatchKind::CpuProxyEnqueue: {
+                    // Host trace does nothing in proxy mode; the device
+                    // body pushes into the ring.  Erase the call (the
+                    // staged alloca arrays become dead and get cleaned
+                    // up by SROA/DSE later).
+                    PH->eraseFromParent();
+                    break;
+                }
+                case DispatchKind::IpcPush:
+                case DispatchKind::IpcOrDwq: {
+                    // The batched-loop pattern only makes sense for DWQ
+                    // because each iteration's args are computed from a
+                    // host-mirrored array. IPC dispatch wants per-call
+                    // peer_mapped() lookup which we can't batch with the
+                    // current helper. Reject loudly rather than silently
+                    // emit wrong code.
+                    report_fatal_error(
+                        Twine("gicc: batched site ") + siteId +
+                        " requests " + dispatchName(d) +
+                        " but the batched-loop trace shape only supports "
+                        "DWQ_TRIGGER / DWQ_BATCHED / CPU_PROXY_ENQUEUE.");
+                }
+            }
+        }
+    }
+
+    // Drop the now-unused placeholder declarations so the linker doesn't
+    // need definitions.
     for (StringRef n : {"gicc.runtime.put_no_db.placeholder",
-                        "gicc.runtime.get_no_db.placeholder"}) {
+                        "gicc.runtime.get_no_db.placeholder",
+                        "gicc.runtime.put_no_db.batched.placeholder",
+                        "gicc.runtime.get_no_db.batched.placeholder"}) {
         if (Function *F = M.getFunction(n))
             if (F->use_empty()) F->eraseFromParent();
     }
