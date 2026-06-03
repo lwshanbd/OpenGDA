@@ -12,6 +12,10 @@ GICC_ROOT="${GICC_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 HIPCC=/opt/rocm-6.4.0/lib/llvm/bin/clang++
 LIBFAB=/opt/cray/libfabric/2.1
 MPI=/opt/cray/pe/mpich/9.0.1/ofi/cray/20.0
+# Cray MPICH GPU Transport Layer (GTL) — required so the MPI baseline in
+# coll_bench can MPI_Allreduce/Alltoall directly on device pointers
+# (MPICH_GPU_SUPPORT_ENABLED=1).
+GTL=/opt/cray/pe/mpich/9.0.1/gtl/lib
 
 SCRATCH="${GICC_ROOT}/build_ofi/coll_scratch"
 mkdir -p "${SCRATCH}"
@@ -27,10 +31,11 @@ COMMON_CFLAGS=(
 )
 
 LINK_LIBS=(
-    -Wl,-rpath,"${LIBFAB}/lib64":"${MPI}/lib"
+    -Wl,-rpath,"${LIBFAB}/lib64":"${MPI}/lib":"${GTL}"
     "${LIBFAB}/lib64/libfabric.so" /usr/lib64/libhwloc.so
     -lpthread /opt/rocm-6.4.0/lib/libamdhip64.so.6.4.60400
     "${MPI}/lib/libmpi_cray.so"
+    "${GTL}/libmpi_gtl_hsa.so"
 )
 
 # build_one <example.cpp> <out-name> <proxy|dwq>
@@ -78,5 +83,7 @@ build_one allreduce_ring.cpp allreduce_ring_proxy proxy
 build_one allreduce_ring.cpp allreduce_ring_dwq   dwq
 build_one alltoall.cpp        alltoall_proxy        proxy
 build_one alltoall.cpp        alltoall_dwq          dwq
+build_one coll_bench.cpp      coll_bench_proxy      proxy
+build_one coll_bench.cpp      coll_bench_dwq        dwq
 
 echo "All collective binaries built into ${GICC_ROOT}/build_ofi/"
