@@ -34,6 +34,9 @@ int main(int argc, char** argv) {
 
 #ifndef GICC_CPU_PROXY
     rt.enable_host_wait_mode();
+    // Same-node via DWQ/NIC too (avoid IPC+DWQ SDMA deadlock; see
+    // Runtime::set_ipc_fastpath).
+    rt.set_ipc_fastpath(false);
 #endif
 
     // Chunk = floats/ints exchanged with one neighbour per ring step (and the

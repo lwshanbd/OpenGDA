@@ -45,7 +45,13 @@ int main(int argc, char** argv) {
     // kernel only fires the trigger. Proxy path must NOT enable this (it
     // would disable the device-side ring push).
     rt.enable_host_wait_mode();
+    // Route same-node peers through DWQ/NIC too: mixing same-node IPC copies
+    // with concurrent cross-node DWQ writes deadlocks the GPU SDMA engine on
+    // AMD+CXI (see Runtime::set_ipc_fastpath).
+    rt.set_ipc_fastpath(false);
 #endif
+
+    gicc_coll::start_watchdog(rank);   // no-op unless -DGICC_COLL_DEBUG
 
     // count must be divisible by N for equal chunks. Default 1024 elems/rank
     // chunk; override with argv[1] = elems-per-chunk.

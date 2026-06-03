@@ -40,6 +40,9 @@ int main(int argc, char** argv) {
 
 #ifndef GICC_CPU_PROXY
     rt.enable_host_wait_mode();
+    // Same-node via DWQ/NIC too (avoid IPC+DWQ SDMA deadlock; see
+    // Runtime::set_ipc_fastpath).
+    rt.set_ipc_fastpath(false);
     if (N - 1 > gicc::Runtime::POOL_SIZE) {
         if (rank == 0)
             fprintf(stderr, "alltoall DWQ: %d peers exceeds POOL_SIZE=%d\n",
