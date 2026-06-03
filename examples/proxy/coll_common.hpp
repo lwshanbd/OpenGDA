@@ -43,6 +43,25 @@ __global__ void proxy_put_kernel(gicc::DeviceCtx* ctx, int peer,
 }
 #endif
 
+#ifdef GICC_CPU_PROXY
+// Proxy mode all-to-all: one kernel issues every remote put then a single
+// quiet(). Each rank writes its send[j] into peer j's recv[rank].
+__global__ void alltoall_put_kernel(gicc::DeviceCtx* ctx, int N, int rank,
+                                    int recv_buf, int send_buf,
+                                    size_t chunk_bytes) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        for (int j = 0; j < N; ++j) {
+            if (j == rank) continue;
+            gicc::put(ctx, j,
+                      recv_buf, (size_t)rank * chunk_bytes,   // peer's recv[rank]
+                      send_buf, (size_t)j * chunk_bytes,      // my send[j]
+                      chunk_bytes);
+        }
+        gicc::quiet(ctx);
+    }
+}
+#endif
+
 // DWQ mode: lead thread writes the trigger MMIO once, firing every RMA
 // write the host pre-staged via rt.put() before the launch. Compiled in
 // both builds (gicc::flush exists in both); only launched on the DWQ path.
@@ -89,6 +108,180 @@ inline void put_one(gicc::Runtime& rt, int peer,
 #endif
     rt.barrier();
 }
+
+//----------------------------------------------------------------------------
+// ring_allreduce - sum-reduce `N*elems_per_chunk` floats in d_data in place.
+// d_recv / recv_buf is a one-chunk scratch buffer. Buffers must already be
+// registered + exchanged. Works identically under both transports.
+//----------------------------------------------------------------------------
+inline void ring_allreduce(gicc::Runtime& rt,
+                           const gicc::Buffer& data_buf, float* d_data,
+                           const gicc::Buffer& recv_buf, float* d_recv,
+                           int elems_per_chunk) {
+    const int    N           = rt.size();
+    const int    rank        = rt.rank();
+    const size_t chunk_bytes = (size_t)elems_per_chunk * sizeof(float);
+    const int    next        = (rank + 1) % N;
+    const int    threads     = 256;
+    const int    blocks      = (elems_per_chunk + threads - 1) / threads;
+    (void)d_recv;
+
+    for (int s = 0; s < N - 1; ++s) {
+        const int send_chunk = (rank - s + N) % N;
+        const int recv_chunk = (rank - 1 - s + N) % N;
+        put_one(rt, next, recv_buf, 0, data_buf,
+                (size_t)send_chunk * chunk_bytes, chunk_bytes);
+        hipLaunchKernelGGL(add_kernel, dim3(blocks), dim3(threads), 0, 0,
+                           d_data, d_recv,
+                           (size_t)recv_chunk * elems_per_chunk, elems_per_chunk);
+        (void)hipDeviceSynchronize();
+        rt.barrier();
+    }
+    for (int s = 0; s < N - 1; ++s) {
+        const int send_chunk = (rank + 1 - s + 2 * N) % N;
+        put_one(rt, next, data_buf, (size_t)send_chunk * chunk_bytes,
+                data_buf, (size_t)send_chunk * chunk_bytes, chunk_bytes);
+    }
+}
+
+//----------------------------------------------------------------------------
+// alltoall_run - exchange `elems_per_chunk` ints to every peer. send[j] ->
+// peer j's recv[rank]; local self-chunk copied directly. Single round.
+//----------------------------------------------------------------------------
+inline void alltoall_run(gicc::Runtime& rt,
+                         const gicc::Buffer& send_buf, int* d_send,
+                         const gicc::Buffer& recv_buf, int* d_recv,
+                         int elems_per_chunk) {
+    const int    N           = rt.size();
+    const int    rank        = rt.rank();
+    const size_t chunk_bytes = (size_t)elems_per_chunk * sizeof(int);
+
+    (void)hipMemcpy(d_recv + (size_t)rank * elems_per_chunk,
+                    d_send + (size_t)rank * elems_per_chunk,
+                    chunk_bytes, hipMemcpyDeviceToDevice);
+#ifdef GICC_CPU_PROXY
+    gicc::DeviceCtx* d = rt.prepare();
+    hipLaunchKernelGGL(alltoall_put_kernel, dim3(1), dim3(1), 0, 0,
+                       d, N, rank, recv_buf.index, send_buf.index, chunk_bytes);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+#else
+    for (int j = 0; j < N; ++j) {
+        if (j == rank) continue;
+        rt.put(send_buf, j, recv_buf.index, chunk_bytes,
+               (size_t)j * chunk_bytes, (size_t)rank * chunk_bytes);
+    }
+    gicc::DeviceCtx* d = rt.prepare();
+    hipLaunchKernelGGL(dwq_flush_kernel, dim3(1), dim3(1), 0, 0, d);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+#endif
+    rt.barrier();
+}
+
+#ifdef GICC_CPU_PROXY
+//============================================================================
+// FUSED proxy ring all-reduce. Each phase runs entirely inside ONE kernel:
+// the N-1 dependent steps are sequenced on-device (device put/quiet + a
+// neighbour-set flag), so there is NO per-step host sync / barrier — only a
+// single host barrier between the reduce-scatter and all-gather phases.
+//
+// Synchronisation: after the lead thread's put lands remotely (quiet = CQE),
+// it writes a flag into the SAME neighbour's flag buffer. The downstream rank
+// spins on its flag[s] (host-pinned, so the NIC write is PCIe-coherent for the
+// GPU) before consuming the chunk. Flags are zeroed + barriered before launch.
+//
+// Distinct recv slot + distinct flag index per step => no buffer reuse race,
+// so a one-directional forward signal is sufficient (no back-ACK needed).
+//============================================================================
+
+// Reduce-scatter: send chunk to next.recv[s], flag it, wait my flag[s], add.
+__global__ void rs_fused_kernel(gicc::DeviceCtx* ctx,
+                                int data_idx, int recv_idx, int flag_idx,
+                                int one_idx, int N, int rank, int chunk,
+                                float* data, const float* recv,
+                                volatile unsigned int* flag) {
+    const int    next = (rank + 1) % N;
+    const int    tid  = threadIdx.x, nt = blockDim.x;
+    const size_t cb   = (size_t)chunk * sizeof(float);
+    for (int s = 0; s < N - 1; ++s) {
+        const int sc = (rank - s + N) % N;
+        const int rc = (rank - 1 - s + N) % N;
+        if (tid == 0) {
+            gicc::put(ctx, next, recv_idx, (size_t)s * cb,
+                      data_idx, (size_t)sc * cb, cb);
+            gicc::quiet(ctx);
+            gicc::put(ctx, next, flag_idx, (size_t)s * sizeof(unsigned int),
+                      one_idx, 0, sizeof(unsigned int));
+            gicc::quiet(ctx);
+            while (flag[s] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            __threadfence_system();
+        }
+        __syncthreads();
+        for (int i = tid; i < chunk; i += nt)
+            data[(size_t)rc * chunk + i] += recv[(size_t)s * chunk + i];
+        __syncthreads();
+    }
+}
+
+// All-gather: write finalised chunk straight into next.data[sc], flag it,
+// wait my flag so the slot is filled before forwarding it next step.
+__global__ void ag_fused_kernel(gicc::DeviceCtx* ctx,
+                                int data_idx, int flag_idx, int one_idx,
+                                int N, int rank, int chunk,
+                                volatile unsigned int* flag) {
+    const int    next = (rank + 1) % N;
+    const size_t cb   = (size_t)chunk * sizeof(float);
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        for (int s = 0; s < N - 1; ++s) {
+            const int sc = (rank + 1 - s + 2 * N) % N;
+            gicc::put(ctx, next, data_idx, (size_t)sc * cb,
+                      data_idx, (size_t)sc * cb, cb);
+            gicc::quiet(ctx);
+            gicc::put(ctx, next, flag_idx,
+                      (size_t)(N - 1 + s) * sizeof(unsigned int),
+                      one_idx, 0, sizeof(unsigned int));
+            gicc::quiet(ctx);
+            while (flag[N - 1 + s] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            __threadfence_system();
+        }
+    }
+}
+
+// Host driver for the fused proxy all-reduce. flag buffer must be host-pinned
+// (registered) of >= 2*(N-1) uint; recv >= (N-1)*chunk floats; one_buf any
+// registered 4-byte nonzero source.
+inline void ring_allreduce_fused(gicc::Runtime& rt,
+                                 const gicc::Buffer& data_buf, float* d_data,
+                                 const gicc::Buffer& recv_buf, float* d_recv,
+                                 const gicc::Buffer& flag_buf, unsigned int* d_flag,
+                                 const gicc::Buffer& one_buf,
+                                 int chunk) {
+    const int N = rt.size();
+    const int rank = rt.rank();
+
+    (void)hipMemset(d_flag, 0, (size_t)2 * (N - 1) * sizeof(unsigned int));
+    (void)hipDeviceSynchronize();
+    rt.barrier();   // flags zeroed everywhere before any neighbour signals
+
+    gicc::DeviceCtx* d = rt.prepare();
+    hipLaunchKernelGGL(rs_fused_kernel, dim3(1), dim3(256), 0, 0,
+                       d, data_buf.index, recv_buf.index, flag_buf.index,
+                       one_buf.index, N, rank, chunk,
+                       d_data, d_recv, (volatile unsigned int*)d_flag);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+    rt.barrier();   // reduce-scatter fully drained before all-gather overwrites
+
+    d = rt.prepare();
+    hipLaunchKernelGGL(ag_fused_kernel, dim3(1), dim3(1), 0, 0,
+                       d, data_buf.index, flag_buf.index, one_buf.index,
+                       N, rank, chunk, (volatile unsigned int*)d_flag);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+    rt.barrier();
+}
+#endif  // GICC_CPU_PROXY
 
 // transport_name - for banner printing.
 inline const char* transport_name() {
