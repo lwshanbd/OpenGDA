@@ -33,24 +33,6 @@
 
 #include "coll_common.hpp"
 
-#ifdef GICC_CPU_PROXY
-// Proxy mode: one kernel issues every remote put, then a single quiet().
-__global__ void alltoall_put_kernel(gicc::DeviceCtx* ctx, int N, int rank,
-                                    int recv_buf, int send_buf,
-                                    size_t chunk_bytes) {
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        for (int j = 0; j < N; ++j) {
-            if (j == rank) continue;
-            gicc::put(ctx, j,
-                      recv_buf, (size_t)rank * chunk_bytes,   // peer's recv[rank]
-                      send_buf, (size_t)j * chunk_bytes,      // my send[j]
-                      chunk_bytes);
-        }
-        gicc::quiet(ctx);
-    }
-}
-#endif
-
 int main(int argc, char** argv) {
     gicc::Runtime rt;
     const int rank = rt.rank();
@@ -100,31 +82,9 @@ int main(int argc, char** argv) {
                gicc_coll::transport_name(), N, elems_per_chunk);
     }
 
-    // Local self-chunk: send[rank] -> recv[rank].
-    (void)hipMemcpy(d_recv + (size_t)rank * elems_per_chunk,
-                    d_send + (size_t)rank * elems_per_chunk,
-                    chunk_bytes, hipMemcpyDeviceToDevice);
-
-    // Remote chunks.
-#ifdef GICC_CPU_PROXY
-    gicc::DeviceCtx* d = rt.prepare();
-    hipLaunchKernelGGL(alltoall_put_kernel, dim3(1), dim3(1), 0, 0,
-                       d, N, rank, recv_buf.index, send_buf.index, chunk_bytes);
-    (void)hipDeviceSynchronize();
-    rt.reset();
-#else
-    for (int j = 0; j < N; ++j) {
-        if (j == rank) continue;
-        rt.put(send_buf, j, recv_buf.index, chunk_bytes,
-               /*src_off=*/(size_t)j * chunk_bytes,
-               /*dst_off=*/(size_t)rank * chunk_bytes);
-    }
-    gicc::DeviceCtx* d = rt.prepare();
-    hipLaunchKernelGGL(gicc_coll::dwq_flush_kernel, dim3(1), dim3(1), 0, 0, d);
-    (void)hipDeviceSynchronize();
-    rt.reset();
-#endif
-    rt.barrier();
+    gicc_coll::alltoall_run(rt, send_buf, d_send, recv_buf, d_recv,
+                            elems_per_chunk);
+    (void)chunk_bytes;
 
     // ---- Verify ----
     std::vector<int> h_recv(total_elems);

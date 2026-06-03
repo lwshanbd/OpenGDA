@@ -82,40 +82,8 @@ int main(int argc, char** argv) {
                gicc_coll::transport_name(), N, count, elems_per_chunk);
     }
 
-    const int next = (rank + 1) % N;
-    const int prev = (rank - 1 + N) % N;
-    const int threads = 256;
-    const int blocks  = (elems_per_chunk + threads - 1) / threads;
-
-    // ---- Reduce-scatter ----
-    for (int s = 0; s < N - 1; ++s) {
-        const int send_chunk = (rank - s + N) % N;
-        const int recv_chunk = (rank - 1 - s + N) % N;
-
-        // Send my data[send_chunk] -> next's recv buffer (slot 0).
-        gicc_coll::put_one(rt, next,
-                           recv_buf, /*dst_off=*/0,
-                           data_buf, /*src_off=*/(size_t)send_chunk * chunk_bytes,
-                           chunk_bytes);
-
-        // My recv buffer now holds prev's chunk (== recv_chunk). Add it.
-        hipLaunchKernelGGL(gicc_coll::add_kernel, dim3(blocks), dim3(threads),
-                           0, 0, d_data, d_recv,
-                           (size_t)recv_chunk * elems_per_chunk,
-                           elems_per_chunk);
-        (void)hipDeviceSynchronize();
-        rt.barrier();   // all adds done before recv is overwritten next step
-    }
-
-    // ---- All-gather ----
-    for (int s = 0; s < N - 1; ++s) {
-        const int send_chunk = (rank + 1 - s + 2 * N) % N;
-        // Write my finalised chunk straight into next's data buffer slot.
-        gicc_coll::put_one(rt, next,
-                           data_buf, /*dst_off=*/(size_t)send_chunk * chunk_bytes,
-                           data_buf, /*src_off=*/(size_t)send_chunk * chunk_bytes,
-                           chunk_bytes);
-    }
+    gicc_coll::ring_allreduce(rt, data_buf, d_data, recv_buf, d_recv,
+                              elems_per_chunk);
 
     // ---- Verify ----
     (void)hipMemcpy(h_data.data(), d_data, data_bytes, hipMemcpyDeviceToHost);
