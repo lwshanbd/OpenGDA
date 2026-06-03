@@ -7,9 +7,15 @@
 ; When proxy_aware=false (or no JSON), the host trace owns the work and
 ; the device-side body is erased.
 ;
+; The preserved body is additionally GATED to a single grid-wide lead
+; thread (workitem.id.x==0 && workgroup.id.x==0), mirroring the flush
+; lowering — each gicc::put site is one logical transfer, so the device
+; push must happen once, not once per thread (else the proxy ring
+; overflows and rt.reset()'s drain hangs).
+;
 ; Two kernels in one module exercise both branches:
 ;   kernel_dwq_only      → proxy_aware=false → put_no_db erased.
-;   kernel_proxy_aware   → proxy_aware=true  → put_no_db preserved.
+;   kernel_proxy_aware   → proxy_aware=true  → put_no_db preserved + guarded.
 ;
 ; RUN: rm -rf %t.metadir && mkdir -p %t.metadir
 ; RUN: cp %S/../Inputs/proxy_aware_meta/kernel_dwq_only.json    %t.metadir/
@@ -40,5 +46,8 @@ define amdgpu_kernel void @kernel_proxy_aware(ptr %ctx, i32 %p, i32 %b, i64 %off
 ; CHECK:       ret void
 
 ; CHECK-LABEL: define amdgpu_kernel void @kernel_proxy_aware
+; CHECK:       call i32 @llvm.amdgcn.workitem.id.x()
+; CHECK:       call i32 @llvm.amdgcn.workgroup.id.x()
+; CHECK:       br i1
 ; CHECK:       call void @_ZN4gicc9put_no_db
 ; CHECK:       ret void

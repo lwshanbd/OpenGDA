@@ -111,6 +111,48 @@ void lowerFlushAMDGCN(CallInst *CI) {
     CI->eraseFromParent();
 }
 
+// Wrap a PRESERVED device-side put/get/quiet call in a grid-wide lead-thread
+// guard on AMDGCN:
+//
+//   %lead = (workitem.id.x == 0) && (workgroup.id.x == 0)
+//   br i1 %lead, label %gicc.dev.do, label %gicc.dev.cont
+//   gicc.dev.do:   call <the preserved op>; br %gicc.dev.cont
+//   gicc.dev.cont: <rest of the original block>
+//
+// Rationale: in CPU-proxy mode the device op body is kept and pushes a
+// TransferCmd into the proxy ring. Each gicc::put site is ONE logical
+// transfer (the host-trace / DWQ path enqueues it exactly once), so the
+// device push must also happen once — not once per thread. Without this
+// guard a kernel launched with N threads pushes the same command N times,
+// overflowing the bounded ring and hanging rt.reset()'s drain. This mirrors
+// lowerFlushAMDGCN's own lead-thread gating so users don't have to hand-guard
+// every comm kernel; the op's arguments are computed before the split point
+// and therefore still dominate the moved call.
+void wrapPreservedOpLeadThreadAMDGCN(CallInst *CI) {
+    Module *M = CI->getModule();
+    BasicBlock *parent = CI->getParent();
+
+    // doBB := [CI, ...follow...]; cont := [...follow...]; doBB := [CI, br cont].
+    BasicBlock *doBB   = parent->splitBasicBlock(CI, "gicc.dev.do");
+    BasicBlock *contBB = doBB->splitBasicBlock(CI->getNextNode(), "gicc.dev.cont");
+
+    IRBuilder<> B(parent->getTerminator());
+    auto tidFn = M->getOrInsertFunction(
+        "llvm.amdgcn.workitem.id.x",
+        FunctionType::get(B.getInt32Ty(), {}, false));
+    auto bidFn = M->getOrInsertFunction(
+        "llvm.amdgcn.workgroup.id.x",
+        FunctionType::get(B.getInt32Ty(), {}, false));
+    Value *tid  = B.CreateCall(tidFn);
+    Value *bid  = B.CreateCall(bidFn);
+    Value *lead = B.CreateAnd(B.CreateICmpEQ(tid, B.getInt32(0)),
+                              B.CreateICmpEQ(bid, B.getInt32(0)));
+
+    Instruction *oldTerm = parent->getTerminator();   // the br doBB from split
+    BranchInst::Create(doBB, contBB, lead, oldTerm);
+    oldTerm->eraseFromParent();
+}
+
 }  // namespace
 
 PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
@@ -210,8 +252,19 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
 
     bool changed = false;
     for (auto &pr : putGetCalls) {
-        if (pr.second) continue;        // proxy-aware kernel: keep the body.
-        pr.first->eraseFromParent();
+        if (pr.second) {
+            // Proxy-aware kernel: keep the device body, but gate it to a
+            // single grid-wide lead thread so each logical op pushes the
+            // proxy ring exactly once (see wrapPreservedOpLeadThreadAMDGCN).
+            // NVPTX preservation stays unguarded until the Phase 4 backend
+            // lands its own intrinsic lowering.
+            if (isAMDGCN) {
+                wrapPreservedOpLeadThreadAMDGCN(pr.first);
+                changed = true;
+            }
+            continue;
+        }
+        pr.first->eraseFromParent();   // host trace owns the work.
         changed = true;
     }
     for (CallInst *CI : flushCalls) {
