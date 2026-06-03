@@ -30,6 +30,49 @@
 
 namespace gicc_coll {
 
+//----------------------------------------------------------------------------
+// Optional watchdog instrumentation (-DGICC_COLL_DEBUG). A monitor thread
+// prints, per rank, the last checkpoint reached and a heartbeat counter; if
+// the heartbeat stops advancing the offending call site is named. Zero cost
+// when GICC_COLL_DEBUG is not defined.
+//----------------------------------------------------------------------------
+#ifdef GICC_COLL_DEBUG
+#include <atomic>
+#include <thread>
+#include <chrono>
+#include <cstdio>
+inline std::atomic<long>& dbg_beat() { static std::atomic<long> b{0}; return b; }
+inline std::atomic<int>&  dbg_step() { static std::atomic<int>  s{-1}; return s; }
+inline const char*&       dbg_stage(){ static const char* s = "init"; return s; }
+#define COLL_CKPT(stg, stp) do {                       \
+        gicc_coll::dbg_stage() = (stg);                \
+        gicc_coll::dbg_step().store((stp));            \
+        gicc_coll::dbg_beat().fetch_add(1);            \
+    } while (0)
+inline void start_watchdog(int rank, int period_s = 2) {
+    std::thread([rank, period_s] {
+        long last = -1; int stuck = 0;
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(period_s));
+            long b = gicc_coll::dbg_beat().load();
+            if (b == last) {
+                stuck += period_s;
+                fprintf(stderr,
+                    "[WATCHDOG] rank %d STUCK %ds  stage='%s' step=%d beat=%ld\n",
+                    rank, stuck, gicc_coll::dbg_stage(),
+                    gicc_coll::dbg_step().load(), b);
+            } else {
+                stuck = 0;
+            }
+            last = b;
+        }
+    }).detach();
+}
+#else
+#define COLL_CKPT(stg, stp) ((void)0)
+inline void start_watchdog(int /*rank*/, int /*period_s*/ = 2) {}
+#endif
+
 #ifdef GICC_CPU_PROXY
 // Proxy mode: lead thread pushes one RMA write into the proxy ring, then
 // quiet() blocks until the worker reports the CQE (remote write complete).
@@ -80,6 +123,22 @@ __global__ void add_kernel(float* data, const float* recv,
 }
 
 //----------------------------------------------------------------------------
+// drain_with_progress - wait for the local device work (flush kernel on the
+// null stream + any same-node IPC copy on the IPC stream) to finish WHILE
+// pumping the libfabric CQ. Required in DWQ mode: a rank receiving an
+// incoming cross-node RMA write must service it (no proxy worker thread
+// exists), or its FI_HMEM DMA stalls the SDMA engine and a concurrent
+// outgoing IPC gpuMemcpyAsync (>=~32KB) deadlocks. See Runtime::progress().
+inline void drain_with_progress(gicc::Runtime& rt) {
+    hipStream_t ipc = rt.ipc_stream0();
+    for (;;) {
+        rt.progress();
+        bool busy = (hipStreamQuery(0) == hipErrorNotReady);
+        if (ipc && hipStreamQuery(ipc) == hipErrorNotReady) busy = true;
+        if (!busy) break;
+    }
+}
+
 // put_one - issue a single RMA write (this rank -> peer), wait for it to
 // complete remotely, and barrier so the result is visible to everyone.
 //
@@ -97,16 +156,31 @@ inline void put_one(gicc::Runtime& rt, int peer,
     hipLaunchKernelGGL(proxy_put_kernel, dim3(1), dim3(1), 0, 0,
                        d, peer, dst_buf.index, dst_off,
                        src_buf.index, src_off, bytes);
+    COLL_CKPT("proxy:devsync", peer);
     (void)hipDeviceSynchronize();
+    COLL_CKPT("proxy:reset", peer);
     rt.reset();
 #else
+    COLL_CKPT("dwq:rt.put", peer);
     rt.put(src_buf, peer, dst_buf.index, bytes, src_off, dst_off);
+    COLL_CKPT("dwq:prepare", peer);
     gicc::DeviceCtx* d = rt.prepare();
+    COLL_CKPT("dwq:launch", peer);
     hipLaunchKernelGGL(dwq_flush_kernel, dim3(1), dim3(1), 0, 0, d);
-    (void)hipDeviceSynchronize();
+    // CRITICAL: drain the device with libfabric progress interleaved, NOT a
+    // bare hipDeviceSynchronize. In DWQ mode there is no proxy worker thread,
+    // so if this rank is RECEIVING an incoming cross-node RMA write (even
+    // though it only SENT via same-node IPC) it must pump the CQ here, or that
+    // write's FI_HMEM DMA stalls the SDMA engine and our own outgoing IPC
+    // gpuMemcpyAsync (>=~32KB) deadlocks. See Runtime::progress().
+    COLL_CKPT("dwq:devsync", peer);
+    drain_with_progress(rt);
+    COLL_CKPT("dwq:reset", peer);
     rt.reset();
 #endif
+    COLL_CKPT("barrier", peer);
     rt.barrier();
+    COLL_CKPT("put_one:done", peer);
 }
 
 //----------------------------------------------------------------------------
@@ -129,16 +203,20 @@ inline void ring_allreduce(gicc::Runtime& rt,
     for (int s = 0; s < N - 1; ++s) {
         const int send_chunk = (rank - s + N) % N;
         const int recv_chunk = (rank - 1 - s + N) % N;
+        COLL_CKPT("RS:put_one", s);
         put_one(rt, next, recv_buf, 0, data_buf,
                 (size_t)send_chunk * chunk_bytes, chunk_bytes);
+        COLL_CKPT("RS:add", s);
         hipLaunchKernelGGL(add_kernel, dim3(blocks), dim3(threads), 0, 0,
                            d_data, d_recv,
                            (size_t)recv_chunk * elems_per_chunk, elems_per_chunk);
         (void)hipDeviceSynchronize();
+        COLL_CKPT("RS:barrier", s);
         rt.barrier();
     }
     for (int s = 0; s < N - 1; ++s) {
         const int send_chunk = (rank + 1 - s + 2 * N) % N;
+        COLL_CKPT("AG:put_one", s);
         put_one(rt, next, data_buf, (size_t)send_chunk * chunk_bytes,
                 data_buf, (size_t)send_chunk * chunk_bytes, chunk_bytes);
     }
@@ -173,7 +251,7 @@ inline void alltoall_run(gicc::Runtime& rt,
     }
     gicc::DeviceCtx* d = rt.prepare();
     hipLaunchKernelGGL(dwq_flush_kernel, dim3(1), dim3(1), 0, 0, d);
-    (void)hipDeviceSynchronize();
+    drain_with_progress(rt);   // pump CQ so incoming RMA can't deadlock our IPC
     rt.reset();
 #endif
     rt.barrier();
