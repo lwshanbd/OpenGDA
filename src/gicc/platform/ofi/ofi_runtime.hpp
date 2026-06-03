@@ -583,7 +583,8 @@ public:
         // removed in 25e08e2. Without the inline gpuMemcpyAsync below,
         // a non-LTO caller (bench_pingpong, put_two_rank_intranode) hits
         // the IPC peer fast-path and silently transfers ZERO bytes.
-        if (dest_rank != comm_->rank()
+        if (ipc_fastpath_
+            && dest_rank != comm_->rank()
             && local_peer_[dest_rank]
             && (int)peer_mapped_ptrs_[dest_rank].size() > dest_buf_index
             && peer_mapped_ptrs_[dest_rank][dest_buf_index] != nullptr)
@@ -976,6 +977,32 @@ public:
 
     void barrier() { comm_->barrier(); }
 
+    // progress — pump the libfabric CQ once (reads 0 entries: progress only,
+    // consumes nothing). DWQ mode has no proxy worker thread, so a rank that
+    // only SENT via same-node IPC but is RECEIVING an incoming cross-node RMA
+    // write must call this to service the incoming write; otherwise its
+    // FI_HMEM target DMA stalls the GPU SDMA engine and a concurrent outgoing
+    // IPC gpuMemcpyAsync (>=~32KB, which uses SDMA) deadlocks. Callers that
+    // block on the device (hipDeviceSynchronize / hipStreamSynchronize) while
+    // such a write is in flight should interleave progress() instead.
+    void progress() {
+        if (comm_ && comm_->fabric)
+            (void)fi_cq_read(comm_->fabric->cq, NULL, 0);
+    }
+
+    // First IPC dispatch stream (the one Runtime::put uses for the same-node
+    // fast path), or nullptr if host-wait mode was never enabled. Lets a
+    // caller poll it with hipStreamQuery while interleaving progress().
+    GpuStream_t ipc_stream0() const {
+        return ipc_streams_.empty() ? nullptr : ipc_streams_[0];
+    }
+
+    // Enable/disable the same-node IPC fast path in put() (default enabled).
+    // Disable it for host-orchestrated collectives that would otherwise mix
+    // same-node IPC copies with concurrent cross-node DWQ writes (SDMA-engine
+    // deadlock on AMD+CXI). See ipc_fastpath_.
+    void set_ipc_fastpath(bool on) { ipc_fastpath_ = on; }
+
     int rank()        const { return comm_->rank(); }
     int size()        const { return comm_->size(); }
     int window_size() const { return window_size_; }
@@ -1160,6 +1187,15 @@ private:
     // call gicc::quiet (no GPU-side completion polling); host gates via
     // rt.reset() which becomes a fi_cntr_read busy-poll on the shared cntr.
     bool                               host_wait_mode_;
+    // When false, put() skips the same-node IPC gpuMemcpyAsync fast path and
+    // routes same-node peers through the DWQ/NIC like any remote peer. Default
+    // true. Needed by host-orchestrated collectives that mix same-node IPC
+    // copies with concurrent cross-node DWQ writes: on AMD+CXI the IPC copy
+    // (GPU SDMA engine, >=~32KB) and an incoming one-sided RMA write (NIC
+    // FI_HMEM DMA, same SDMA engine) deadlock when both are in flight on one
+    // GPU and there is no proxy worker thread progressing libfabric. Forcing
+    // a single uniform transport avoids the contention.
+    bool                               ipc_fastpath_ = true;
     // Set by enable_host_wait_mode().  When true, prepare() writes nullptr
     // to DeviceCtx::proxy_ring / proxy_rings_arr so device-side gicc::put
     // and gicc::quiet bodies short-circuit -- prevents double-send when a
