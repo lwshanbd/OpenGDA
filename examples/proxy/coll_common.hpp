@@ -24,6 +24,9 @@
 #pragma once
 
 #include <hip/hip_runtime.h>
+#ifdef GICC_CPU_PROXY
+#include <hip/hip_cooperative_groups.h>
+#endif
 
 #include "gicc/platform/ofi/ofi_runtime.hpp"
 #include "gicc/platform/ofi/ofi_device.cuh"
@@ -355,6 +358,110 @@ inline void ring_allreduce_fused(gicc::Runtime& rt,
     hipLaunchKernelGGL(ag_fused_kernel, dim3(1), dim3(1), 0, 0,
                        d, data_buf.index, flag_buf.index, one_buf.index,
                        N, rank, chunk, (volatile unsigned int*)d_flag);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+    rt.barrier();
+}
+
+//============================================================================
+// COOPERATIVE fused ring all-reduce. Both phases run in ONE cooperative
+// kernel (grid-wide sync between comm and the reduction), which fixes two
+// limitations of rs_fused/ag_fused:
+//   1. the reduction now spans the WHOLE GPU (every block/thread), instead of
+//      a single block — the single-block add crippled large messages.
+//   2. reduce-scatter and all-gather are fused with NO host barrier / reset /
+//      relaunch between phases (one launch per all-reduce).
+// The lead thread (block 0, thread 0) drives the proxy put/quiet + neighbour
+// flag; all blocks grid.sync() around each comm + reduction.
+//============================================================================
+namespace cg = cooperative_groups;
+
+__global__ void coop_allreduce_kernel(gicc::DeviceCtx* ctx,
+                                      int data_idx, int recv_idx, int flag_idx,
+                                      int one_idx, int N, int rank, int chunk,
+                                      float* data, const float* recv,
+                                      volatile unsigned int* flag) {
+    cg::grid_group grid = cg::this_grid();
+    const bool   lead = (blockIdx.x == 0 && threadIdx.x == 0);
+    const size_t gtid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t nthr = (size_t)gridDim.x * blockDim.x;
+    const int    next = (rank + 1) % N;
+    const size_t cb   = (size_t)chunk * sizeof(float);
+
+    // ---- reduce-scatter ----
+    for (int s = 0; s < N - 1; ++s) {
+        const int sc = (rank - s + N) % N;
+        const int rc = (rank - 1 - s + N) % N;
+        if (lead) {
+            gicc::put(ctx, next, recv_idx, (size_t)s * cb,
+                      data_idx, (size_t)sc * cb, cb);
+            gicc::quiet(ctx);
+            gicc::put(ctx, next, flag_idx, (size_t)s * sizeof(unsigned int),
+                      one_idx, 0, sizeof(unsigned int));
+            gicc::quiet(ctx);
+            while (flag[s] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            __threadfence_system();
+        }
+        grid.sync();
+        for (size_t i = gtid; i < (size_t)chunk; i += nthr)
+            data[(size_t)rc * chunk + i] += recv[(size_t)s * chunk + i];
+        grid.sync();
+    }
+    // ---- all-gather (same kernel, no host barrier) ----
+    for (int s = 0; s < N - 1; ++s) {
+        const int sc = (rank + 1 - s + 2 * N) % N;
+        if (lead) {
+            gicc::put(ctx, next, data_idx, (size_t)sc * cb,
+                      data_idx, (size_t)sc * cb, cb);
+            gicc::quiet(ctx);
+            gicc::put(ctx, next, flag_idx,
+                      (size_t)(N - 1 + s) * sizeof(unsigned int),
+                      one_idx, 0, sizeof(unsigned int));
+            gicc::quiet(ctx);
+            while (flag[N - 1 + s] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            __threadfence_system();
+        }
+        grid.sync();
+    }
+}
+
+// Host driver for the cooperative all-reduce. Same buffer contract as
+// ring_allreduce_fused. Grid sized to full occupancy (cooperative launch
+// requires every block co-resident).
+inline void ring_allreduce_coop(gicc::Runtime& rt,
+                                const gicc::Buffer& data_buf, float* d_data,
+                                const gicc::Buffer& recv_buf, float* d_recv,
+                                const gicc::Buffer& flag_buf, unsigned int* d_flag,
+                                const gicc::Buffer& one_buf,
+                                int chunk) {
+    const int N    = rt.size();
+    const int rank = rt.rank();
+
+    static int grid_blocks = 0;
+    const int  block_threads = 256;
+    if (grid_blocks == 0) {
+        int per_sm = 0, n_sm = 0;
+        (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
+            &per_sm, (const void*)coop_allreduce_kernel, block_threads, 0);
+        (void)hipDeviceGetAttribute(&n_sm, hipDeviceAttributeMultiprocessorCount,
+                                    rt.gpu_id());
+        grid_blocks = (per_sm > 0 && n_sm > 0) ? per_sm * n_sm : 1;
+    }
+
+    (void)hipMemset(d_flag, 0, (size_t)2 * (N - 1) * sizeof(unsigned int));
+    (void)hipDeviceSynchronize();
+    rt.barrier();
+
+    gicc::DeviceCtx* d = rt.prepare();
+    int   data_idx = data_buf.index, recv_idx = recv_buf.index;
+    int   flag_idx = flag_buf.index, one_idx = one_buf.index;
+    int   n = N, r = rank, c = chunk;
+    volatile unsigned int* fp = (volatile unsigned int*)d_flag;
+    void* params[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx,
+                      &n, &r, &c, &d_data, &d_recv, &fp};
+    (void)hipLaunchCooperativeKernel((const void*)coop_allreduce_kernel,
+                                     dim3(grid_blocks), dim3(block_threads),
+                                     params, 0, 0);
     (void)hipDeviceSynchronize();
     rt.reset();
     rt.barrier();
