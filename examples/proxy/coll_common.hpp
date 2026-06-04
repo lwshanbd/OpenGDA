@@ -628,16 +628,22 @@ inline void ring_allreduce_pipe(gicc::Runtime& rt,
 // MEASURED RESULT (2026-06-03, 8 ranks/2 nodes Tioga): CORRECT at every size
 // (the flag-in-data poll works cross-node on CXI), but ~12x SLOWER than
 // ring_allreduce_coop (8KB: 8441us vs 686us). This is an AMD platform issue,
-// NOT the algorithm: NCCL's LL is fast on NVIDIA because a volatile global
-// load there is cheap AND system-coherent, so polling NIC-written HBM is free.
-// On gfx90a a volatile global load is served from L2, which the NIC's HBM write
-// does NOT invalidate -> the poll spins until natural L2 eviction (~hundreds of
-// us); and a system-scope atomic load (the coherent fix) serializes the memory
-// system and is even slower in a wide spin. Realizing LL perf on AMD needs
-// RCCL-style cache-control load intrinsics (buffer loads w/ glc/dlc bits) to
-// make the poll cheap+coherent -- a deeper platform-specific effort. Until
-// then, ring_allreduce_coop remains the best GICC collective on AMD. Kept as a
-// documented correctness-validated prototype of the NCCL/UCCL flag-in-data
+// NOT the algorithm: NCCL's LL is fast on NVIDIA because a volatile global load
+// there is cheap AND system-coherent, so polling NIC-written HBM is ~free.
+//
+// I tried FOUR poll variants to make it cheap+coherent on gfx90a, none worked:
+//   (a) plain volatile uint64 load  -> stale L2, spins to eviction (8441us)
+//   (b) __hip_atomic_load SYSTEM     -> coherent but serializes mem system, even slower
+//   (c) __builtin_nontemporal_load (glc+slc, L2 bypass) -> still ~12x (in use here)
+//   (d) pkt_recv in HOST-PINNED memory (poll over PCIe, like coop's flags) -> still slow
+// So the bottleneck is NOT simply poll-coherence (host-pinned recv didn't fix
+// it). The residual ~600us/step is structural to this LL path (per-step pack +
+// extra grid.sync + full-GPU poll-vs-proxy interaction) and was not isolated.
+// By contrast ring_allreduce_coop polls ONE tiny host-pinned flag/step (cheap)
+// and reduces straight from HBM -> that design fits AMD; NCCL's flag-in-HBM-data
+// fits NVIDIA. CONCLUSION: ring_allreduce_coop remains the best GICC collective
+// on AMD; LL flag-in-data ports correctly but needs deeper AMD-specific work to
+// be competitive. Kept as a correctness-validated prototype of the NCCL/UCCL
 // approach (see reference/nccl, reference/uccl).
 //============================================================================
 struct LLPkt { unsigned int d0, f0, d1, f1; };   // 16B: 2 floats + flag x2
@@ -650,10 +656,15 @@ bool ll_read(const LLPkt* p, unsigned int flag, float& a, float& b) {
     // served from L2, which the NIC's HBM write does not invalidate, so the
     // poll would spin until the line is naturally evicted (~hundreds of us).
     // The system-scope load is coherent with the NIC write.
-    const volatile unsigned long long* q =
-        reinterpret_cast<const volatile unsigned long long*>(p);
-    unsigned long long lo = q[0];
-    unsigned long long hi = q[1];
+    // Non-temporal load: on gfx90a this emits a load with the glc+slc cache
+    // bits, bypassing L1+L2 to read HBM directly -> it observes the NIC's HBM
+    // write immediately (coherent) AND is a single cheap load (unlike a
+    // serializing system-scope atomic, and unlike a plain volatile load which
+    // hits stale L2 and spins to eviction).
+    const unsigned long long* q =
+        reinterpret_cast<const unsigned long long*>(p);
+    unsigned long long lo = __builtin_nontemporal_load(q);
+    unsigned long long hi = __builtin_nontemporal_load(q + 1);
     if ((unsigned)(lo >> 32) != flag || (unsigned)(hi >> 32) != flag) return false;
     a = __uint_as_float((unsigned)lo);
     b = __uint_as_float((unsigned)hi);
