@@ -117,6 +117,55 @@ int main(int argc, char** argv) {
                    "ar-hier", bytes, gmax, mmax, mmax / gmax);
     }
 
+    // ---- DIRECT hierarchical: correctness + timing ----
+    for (int si = 0; si < n_sizes; ++si) {
+        const int count = N * chunks[si];
+        std::vector<float> hv(count);
+        for (int i = 0; i < count; ++i) hv[i] = (float)((rank + 1) + (i % 7));
+        (void)hipMemcpy(d_data, hv.data(), (size_t)count * sizeof(float), hipMemcpyHostToDevice);
+        (void)hipDeviceSynchronize();
+        gicc_coll::ring_allreduce_hier_direct(rt, data_buf, d_data, recv_buf, d_recv,
+                                              flag_buf, d_flag, one_buf, count, P);
+        (void)hipMemcpy(hv.data(), d_data, (size_t)count * sizeof(float), hipMemcpyDeviceToHost);
+        (void)hipDeviceSynchronize();
+        int errs = 0;
+        for (int i = 0; i < count; ++i) {
+            float want = (float)((double)N * (N + 1) / 2.0 + (double)N * (i % 7));
+            if (hv[i] != want) ++errs;
+        }
+        int all_errs = 0;
+        MPI_Reduce(&errs, &all_errs, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+        if (rank == 0)
+            printf("[hdir correctness @%zu B: %s, %d errors]\n",
+                   (size_t)count * sizeof(float), all_errs == 0 ? "PASS" : "FAIL", all_errs);
+    }
+    for (int si = 0; si < n_sizes; ++si) {
+        const int count = N * chunks[si];
+        const size_t bytes = (size_t)count * sizeof(float);
+        for (int w = 0; w < warmup; ++w)
+            gicc_coll::ring_allreduce_hier_direct(rt, data_buf, d_data, recv_buf, d_recv,
+                                                  flag_buf, d_flag, one_buf, count, P);
+        rt.barrier();
+        double t0 = MPI_Wtime();
+        for (int it = 0; it < iters; ++it)
+            gicc_coll::ring_allreduce_hier_direct(rt, data_buf, d_data, recv_buf, d_recv,
+                                                  flag_buf, d_flag, one_buf, count, P);
+        double gicc_us = (MPI_Wtime() - t0) / iters * 1e6;
+        for (int w = 0; w < warmup; ++w)
+            MPI_Allreduce(d_mpi_in, d_mpi_out, count, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Barrier(MPI_COMM_WORLD);
+        t0 = MPI_Wtime();
+        for (int it = 0; it < iters; ++it)
+            MPI_Allreduce(d_mpi_in, d_mpi_out, count, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+        double mpi_us = (MPI_Wtime() - t0) / iters * 1e6;
+        double gmax, mmax;
+        MPI_Reduce(&gicc_us, &gmax, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&mpi_us,  &mmax, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+        if (rank == 0)
+            printf("%-10s %12zu | %14.2f %14.2f %7.2fx\n",
+                   "ar-hdir", bytes, gmax, mmax, mmax / gmax);
+    }
+
     rt.barrier();
     (void)hipFree(d_data); (void)hipFree(d_recv); (void)hipFree(d_one);
     (void)hipFree(d_mpi_in); (void)hipFree(d_mpi_out); (void)hipHostFree(h_flag);

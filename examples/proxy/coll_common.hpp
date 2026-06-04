@@ -748,6 +748,139 @@ inline void ring_allreduce_hier(gicc::Runtime& rt,
 }
 
 //============================================================================
+// DIRECT hierarchical all-reduce (2 nodes, P ranks/node). Replaces the intra
+// RING (2(P-1) serial steps, each a grid.sync + proxy flag) with DIRECT
+// all-pairs xGMI passes that need NO per-step barrier and NO per-step flag:
+//   * direct reduce-scatter: each rank sums slice lp over all P same-node ranks
+//     by reading their data[lp] over xGMI. Race-free with NO cross-rank sync —
+//     each rank only WRITES its own slice and READS peers' OTHER slices, which
+//     they never write.
+//   * inter-node exchange of slice lp (proxy, all ranks parallel -> all NICs).
+//   * direct all-gather: each rank copies every other slice from its same-node
+//     owner over xGMI. Needs all phase-2 done first -> ONE host barrier between
+//     the two kernels (replaces 14 per-step flags).
+// Net: 2 grid.syncs + 1 cross flag total, vs the ring's ~42 grid.syncs + 15
+// flags. Requires N == 2*P, block layout, peer IPC table in DeviceCtx.
+//============================================================================
+
+// Kernel 1: direct intra reduce-scatter (no sync) + inter-node exchange.
+__global__ void hier_direct_rs_cross_kernel(gicc::DeviceCtx* ctx,
+                                            int data_idx, int recv_idx, int flag_idx,
+                                            int one_idx, int N, int rank, int count,
+                                            int P, float* data, float* recv,
+                                            volatile unsigned int* flag) {
+    cg::grid_group grid = cg::this_grid();
+    const bool   lead = (blockIdx.x == 0 && threadIdx.x == 0);
+    const size_t gtid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t nthr = (size_t)gridDim.x * blockDim.x;
+    const int    nb   = ctx->ipc_n_bufs;
+    void** ipc = ctx->peer_ipc_base;
+    const int lp        = rank % P;
+    const int node_base = rank - lp;
+    const int partner   = (rank + P) % N;
+    const int slice     = count / P;
+    const size_t base   = (size_t)lp * slice;     // my owned slice
+
+    // ---- direct intra reduce-scatter: data[base+e] = sum over node of slice lp
+    for (size_t e = gtid; e < (size_t)slice; e += nthr) {
+        float acc = data[base + e];
+        for (int q = 0; q < P; ++q) {
+            if (q == lp) continue;
+            const float* pq = (ipc && nb) ? (const float*)ipc[(size_t)(node_base + q) * nb + data_idx] : nullptr;
+            if (pq) acc += pq[base + e];
+        }
+        data[base + e] = acc;
+    }
+    grid.sync();
+
+    // ---- inter-node exchange of slice lp (proxy; all P ranks cross at once)
+    if (partner != rank) {
+        const size_t sb = (size_t)slice * sizeof(float);
+        if (lead) {
+            gicc::put(ctx, partner, recv_idx, 0, data_idx, base * sizeof(float), sb);
+            gicc::quiet(ctx);
+            gicc::put(ctx, partner, flag_idx, 0, one_idx, 0, sizeof(unsigned int));
+            gicc::quiet(ctx);
+            while (flag[0] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            __threadfence_system();
+        }
+        grid.sync();
+        for (size_t e = gtid; e < (size_t)slice; e += nthr)
+            data[base + e] += recv[e];
+        grid.sync();
+    }
+}
+
+// Kernel 2: direct intra all-gather. Each rank copies every other slice from
+// its same-node owner over xGMI (owners hold the global slice after kernel 1 +
+// the host barrier). No flags, no sync — pure parallel gather.
+__global__ void hier_direct_ag_kernel(gicc::DeviceCtx* ctx, int data_idx,
+                                      int N, int rank, int count, int P,
+                                      float* data) {
+    const size_t gtid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t nthr = (size_t)gridDim.x * blockDim.x;
+    const int    nb   = ctx->ipc_n_bufs;
+    void** ipc = ctx->peer_ipc_base;
+    const int lp        = rank % P;
+    const int node_base = rank - lp;
+    const int slice     = count / P;
+    for (int p = 0; p < P; ++p) {
+        if (p == lp) continue;                    // already own slice lp
+        const float* po = (ipc && nb) ? (const float*)ipc[(size_t)(node_base + p) * nb + data_idx] : nullptr;
+        if (!po) continue;
+        const size_t b = (size_t)p * slice;
+        for (size_t e = gtid; e < (size_t)slice; e += nthr)
+            data[b + e] = po[b + e];
+    }
+}
+
+inline void ring_allreduce_hier_direct(gicc::Runtime& rt,
+                                       const gicc::Buffer& data_buf, float* d_data,
+                                       const gicc::Buffer& recv_buf, float* d_recv,
+                                       const gicc::Buffer& flag_buf, unsigned int* d_flag,
+                                       const gicc::Buffer& one_buf,
+                                       int count, int P) {
+    const int N = rt.size();
+    const int rank = rt.rank();
+    static int gb1 = 0;
+    const int bt = 256;
+    if (gb1 == 0) {
+        int per_sm = 0, n_sm = 0;
+        (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
+            &per_sm, (const void*)hier_direct_rs_cross_kernel, bt, 0);
+        (void)hipDeviceGetAttribute(&n_sm, hipDeviceAttributeMultiprocessorCount, rt.gpu_id());
+        gb1 = (per_sm > 0 && n_sm > 0) ? per_sm * n_sm : 1;
+    }
+
+    (void)hipMemset(d_flag, 0, sizeof(unsigned int));
+    (void)hipDeviceSynchronize();
+    rt.barrier();
+
+    // kernel 1: direct RS + inter-node exchange (cooperative)
+    gicc::DeviceCtx* d = rt.prepare();
+    int data_idx = data_buf.index, recv_idx = recv_buf.index;
+    int flag_idx = flag_buf.index, one_idx = one_buf.index;
+    int n = N, r = rank, c = count, p = P;
+    volatile unsigned int* fp = (volatile unsigned int*)d_flag;
+    void* p1[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx,
+                  &n, &r, &c, &p, &d_data, &d_recv, &fp};
+    (void)hipLaunchCooperativeKernel((const void*)hier_direct_rs_cross_kernel,
+                                     dim3(gb1), dim3(bt), p1, 0, 0);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+    rt.barrier();                       // all ranks' global slices ready
+
+    // kernel 2: direct all-gather (plain kernel, no flags/sync)
+    d = rt.prepare();
+    const int blk = 512;
+    hipLaunchKernelGGL(hier_direct_ag_kernel, dim3(blk), dim3(bt), 0, 0,
+                       d, data_idx, n, r, c, p, d_data);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+    rt.barrier();
+}
+
+//============================================================================
 // PIPELINED cooperative ring all-reduce. Splits each ring step's chunk into P
 // segments and issues segment p+1's transfer (a non-blocking proxy push)
 // BEFORE reducing segment p, so the NIC streams seg p+1 while the GPU adds
