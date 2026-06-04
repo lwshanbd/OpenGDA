@@ -28,10 +28,19 @@ int main(int argc, char** argv) {
     const int P    = rt.boot().local_size();   // ranks per node (banner only)
     setvbuf(stdout, nullptr, _IONBF, 0);
 
-    // total bytes = N*chunk*4. At N=16: bytes = chunk*64 -> 16KB..256MB.
-    const int chunks[] = {256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304};
-    const int n_sizes  = (int)(sizeof(chunks) / sizeof(chunks[0]));
+    // Two size regimes. DTREE_SMALL => fixed SMALL total counts (the double
+    // tree's actual regime: latency-bound small messages, where its O(log N)
+    // depth is meant to win as node count grows). Else N*chunk bandwidth sweep.
+    const int big_chunks[]   = {256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304};
+    // multiples of 64 so count % N == 0 for N up to 64 (lets the ring run too),
+    // and >=256B (the flat tree has a tiny-count <256B coherence race).
+    const int small_totals[] = {64, 256, 1024, 4096, 16384, 65536, 262144, 1048576}; // 256B..4MB
+    const bool small_mode = (std::getenv("DTREE_SMALL") != nullptr);
+    const int n_sizes  = 8;
     const int MAXCHUNK = 4194304;
+    auto total_count = [&](int si) -> int {
+        return small_mode ? small_totals[si] : N * big_chunks[si];
+    };
     const int iters    = (argc > 1) ? std::atoi(argv[1]) : 10;
     const int warmup   = (argc > 2) ? std::atoi(argv[2]) : 2;
     const bool skip_flat = (std::getenv("DTREE_SKIP_FLAT") != nullptr);
@@ -45,6 +54,11 @@ int main(int argc, char** argv) {
     const bool hier_time = (std::getenv("DTREE_HIER_TIME") != nullptr);
     // Pipelined flat tree: stream each half in S chunks so tree levels overlap
     // (NCCL's technique). S via DTREE_PIPE_CHUNKS (default 8). Run with DTREE_PIPE.
+    // Compare against GICC's own cooperative RING allreduce (DTREE_RING): the
+    // double tree's algorithmic win is O(log N) steps vs the ring's O(N), so the
+    // tree should pull ahead of the ring as node count grows at small sizes.
+    // Needs count % N == 0 (chunk = count/N).
+    const bool do_ring = (std::getenv("DTREE_RING") != nullptr);
     const bool do_pipe = (std::getenv("DTREE_PIPE") != nullptr);
     const int  pipe_S  = (std::getenv("DTREE_PIPE_CHUNKS"))
                          ? std::atoi(std::getenv("DTREE_PIPE_CHUNKS")) : 8;
@@ -85,7 +99,7 @@ int main(int argc, char** argv) {
 
     // correctness per size
     for (int si = 0; si < n_sizes && !skip_flat; ++si) {
-        const int count = N * chunks[si];          // always even (N even)
+        const int count = total_count(si);          // always even (N even)
         std::vector<float> hv(count);
         for (int i = 0; i < count; ++i) hv[i] = (float)((rank + 1) + (i % 7));
         (void)hipMemcpy(d_data, hv.data(), (size_t)count * sizeof(float), hipMemcpyHostToDevice);
@@ -109,7 +123,7 @@ int main(int argc, char** argv) {
 
     // timing
     for (int si = 0; si < n_sizes && !skip_flat; ++si) {
-        const int count = N * chunks[si];
+        const int count = total_count(si);
         const size_t bytes = (size_t)count * sizeof(float);
         for (int w = 0; w < warmup; ++w)
             gicc_coll::allreduce_double_tree(rt, data_buf, d_data, recv_buf, d_recv,
@@ -139,13 +153,71 @@ int main(int argc, char** argv) {
                    "ar-dtree", bytes, gmax, mmax, mmax / gmax);
     }
 
+    // ---- GICC cooperative RING (the double tree's apples-to-apples rival) ----
+    if (do_ring) {
+        for (int si = 0; si < n_sizes; ++si) {
+            const int count = total_count(si);
+            const int chunk = count / N;               // ring chunk = count/N
+            if (chunk < 1) continue;
+            std::vector<float> hv(count);
+            for (int i = 0; i < count; ++i) hv[i] = (float)((rank + 1) + (i % 7));
+            (void)hipMemcpy(d_data, hv.data(), (size_t)count * sizeof(float), hipMemcpyHostToDevice);
+            (void)hipDeviceSynchronize();
+            rt.barrier();
+            gicc_coll::ring_allreduce_coop(rt, data_buf, d_data, recv_buf, d_recv,
+                                           flag_buf, d_flag, one_buf, chunk);
+            (void)hipMemcpy(hv.data(), d_data, (size_t)count * sizeof(float), hipMemcpyDeviceToHost);
+            (void)hipDeviceSynchronize();
+            int errs = 0;
+            for (int i = 0; i < count; ++i) {
+                float want = (float)((double)N * (N + 1) / 2.0 + (double)N * (i % 7));
+                if (hv[i] != want) ++errs;
+            }
+            int all_errs = 0;
+            MPI_Reduce(&errs, &all_errs, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+            if (rank == 0)
+                printf("[ring correctness @%zu B: %s, %d errors]\n",
+                       (size_t)count * sizeof(float), all_errs == 0 ? "PASS" : "FAIL", all_errs);
+        }
+        for (int si = 0; si < n_sizes; ++si) {
+            const int count = total_count(si);
+            const int chunk = count / N;
+            if (chunk < 1) continue;
+            const size_t bytes = (size_t)count * sizeof(float);
+            for (int w = 0; w < warmup; ++w)
+                gicc_coll::ring_allreduce_coop(rt, data_buf, d_data, recv_buf, d_recv,
+                                               flag_buf, d_flag, one_buf, chunk);
+            rt.barrier();
+            double t0 = MPI_Wtime();
+            for (int it = 0; it < iters; ++it) {
+                gicc_coll::ring_allreduce_coop(rt, data_buf, d_data, recv_buf, d_recv,
+                                               flag_buf, d_flag, one_buf, chunk);
+                rt.barrier();
+            }
+            double gicc_us = (MPI_Wtime() - t0) / iters * 1e6;
+            for (int w = 0; w < warmup; ++w)
+                MPI_Allreduce(d_mpi_in, d_mpi_out, count, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+            MPI_Barrier(MPI_COMM_WORLD);
+            t0 = MPI_Wtime();
+            for (int it = 0; it < iters; ++it)
+                MPI_Allreduce(d_mpi_in, d_mpi_out, count, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+            double mpi_us = (MPI_Wtime() - t0) / iters * 1e6;
+            double gmax, mmax;
+            MPI_Reduce(&gicc_us, &gmax, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+            MPI_Reduce(&mpi_us,  &mmax, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+            if (rank == 0)
+                printf("%-10s %12zu | %14.2f %14.2f %7.2fx\n",
+                       "ar-ring", bytes, gmax, mmax, mmax / gmax);
+        }
+    }
+
     // ---- PIPELINED flat double tree (NCCL-style chunked streaming) ----
     if (do_pipe) {
         (void)hipMemset(d_flag, 0, (size_t)NFLAG * sizeof(unsigned int));
         (void)hipDeviceSynchronize();
         rt.barrier();
         for (int si = 0; si < n_sizes; ++si) {
-            const int count = N * chunks[si];
+            const int count = total_count(si);
             std::vector<float> hv(count);
             for (int i = 0; i < count; ++i) hv[i] = (float)((rank + 1) + (i % 7));
             (void)hipMemcpy(d_data, hv.data(), (size_t)count * sizeof(float), hipMemcpyHostToDevice);
@@ -167,7 +239,7 @@ int main(int argc, char** argv) {
                        pipe_S, (size_t)count * sizeof(float), all_errs == 0 ? "PASS" : "FAIL", all_errs);
         }
         for (int si = 0; si < n_sizes; ++si) {
-            const int count = N * chunks[si];
+            const int count = total_count(si);
             const size_t bytes = (size_t)count * sizeof(float);
             for (int w = 0; w < warmup; ++w)
                 gicc_coll::allreduce_double_tree_pipe(rt, data_buf, d_data, recv_buf, d_recv,
@@ -201,7 +273,7 @@ int main(int argc, char** argv) {
     (void)hipDeviceSynchronize();
     rt.barrier();
     for (int si = 0; si < n_sizes && !skip_hier; ++si) {
-        const int count = N * chunks[si];
+        const int count = total_count(si);
         std::vector<float> hv(count);
         for (int i = 0; i < count; ++i) hv[i] = (float)((rank + 1) + (i % 7));
         (void)hipMemcpy(d_data, hv.data(), (size_t)count * sizeof(float), hipMemcpyHostToDevice);
@@ -223,7 +295,7 @@ int main(int argc, char** argv) {
                    (size_t)count * sizeof(float), all_errs == 0 ? "PASS" : "FAIL", all_errs);
     }
     for (int si = 0; si < n_sizes && !skip_hier && hier_time; ++si) {
-        const int count = N * chunks[si];
+        const int count = total_count(si);
         const size_t bytes = (size_t)count * sizeof(float);
         for (int w = 0; w < warmup; ++w)
             gicc_coll::allreduce_double_tree_hier(rt, data_buf, d_data, recv_buf, d_recv,
