@@ -490,6 +490,121 @@ inline void ring_allreduce_coop(gicc::Runtime& rt,
 }
 
 //============================================================================
+// LOCALITY-AWARE cooperative ring all-reduce. The big coop-vs-MPI gap was that
+// proxy mode runs EVERY ring link over the NIC, including the 6-of-8 intra-node
+// links. Here, for a SAME-NODE neighbour we copy the chunk straight into its
+// IPC-mapped buffer over xGMI (all threads, no NIC); only CROSS-NODE links use
+// the proxy. The completion flag still goes via the proxy (host-pinned, cheap
+// poll) in both cases, so the receive side is uniform. ctx->peer_ipc_base /
+// ipc_n_bufs come from the runtime (DeviceCtx, set in prepare()).
+//============================================================================
+__global__ void coop_allreduce_loc_kernel(gicc::DeviceCtx* ctx,
+                                          int data_idx, int recv_idx, int flag_idx,
+                                          int one_idx, int N, int rank, int chunk,
+                                          float* data, float* recv,
+                                          volatile unsigned int* flag) {
+    cg::grid_group grid = cg::this_grid();
+    const bool   lead = (blockIdx.x == 0 && threadIdx.x == 0);
+    const size_t gtid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t nthr = (size_t)gridDim.x * blockDim.x;
+    const int    next = (rank + 1) % N;
+    const size_t cb   = (size_t)chunk * sizeof(float);
+    const int    nb   = ctx->ipc_n_bufs;
+    void** ipc = ctx->peer_ipc_base;
+    // same-node peer's recv buffer (RS) / data buffer (AG), or null if cross-node
+    float* peer_recv = (ipc && nb) ? (float*)ipc[(size_t)next * nb + recv_idx] : nullptr;
+    float* peer_data = (ipc && nb) ? (float*)ipc[(size_t)next * nb + data_idx] : nullptr;
+
+    // ---- reduce-scatter ----
+    for (int s = 0; s < N - 1; ++s) {
+        const int sc = (rank - s + N) % N;
+        const int rc = (rank - 1 - s + N) % N;
+        if (peer_recv) {                                   // intra-node: xGMI
+            for (size_t i = gtid; i < (size_t)chunk; i += nthr)
+                peer_recv[(size_t)s * chunk + i] = data[(size_t)sc * chunk + i];
+        } else if (lead) {                                 // cross-node: proxy
+            gicc::put(ctx, next, recv_idx, (size_t)s * cb,
+                      data_idx, (size_t)sc * cb, cb);
+            gicc::quiet(ctx);
+        }
+        grid.sync();
+        if (lead) {
+            __threadfence_system();   // publish all blocks' xGMI writes to peer
+            gicc::put(ctx, next, flag_idx, (size_t)s * sizeof(unsigned int),
+                      one_idx, 0, sizeof(unsigned int));
+            gicc::quiet(ctx);
+            while (flag[s] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            __threadfence_system();
+        }
+        grid.sync();
+        for (size_t i = gtid; i < (size_t)chunk; i += nthr)
+            data[(size_t)rc * chunk + i] += recv[(size_t)s * chunk + i];
+        grid.sync();
+    }
+    // ---- all-gather ----
+    for (int s = 0; s < N - 1; ++s) {
+        const int sc = (rank + 1 - s + 2 * N) % N;
+        if (peer_data) {                                   // intra-node: xGMI
+            for (size_t i = gtid; i < (size_t)chunk; i += nthr)
+                peer_data[(size_t)sc * chunk + i] = data[(size_t)sc * chunk + i];
+        } else if (lead) {                                 // cross-node: proxy
+            gicc::put(ctx, next, data_idx, (size_t)sc * cb,
+                      data_idx, (size_t)sc * cb, cb);
+            gicc::quiet(ctx);
+        }
+        grid.sync();
+        if (lead) {
+            __threadfence_system();
+            gicc::put(ctx, next, flag_idx,
+                      (size_t)(N - 1 + s) * sizeof(unsigned int),
+                      one_idx, 0, sizeof(unsigned int));
+            gicc::quiet(ctx);
+            while (flag[N - 1 + s] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            __threadfence_system();
+        }
+        grid.sync();
+    }
+}
+
+inline void ring_allreduce_coop_loc(gicc::Runtime& rt,
+                                    const gicc::Buffer& data_buf, float* d_data,
+                                    const gicc::Buffer& recv_buf, float* d_recv,
+                                    const gicc::Buffer& flag_buf, unsigned int* d_flag,
+                                    const gicc::Buffer& one_buf,
+                                    int chunk) {
+    const int N    = rt.size();
+    const int rank = rt.rank();
+    static int grid_blocks = 0;
+    const int  block_threads = 256;
+    if (grid_blocks == 0) {
+        int per_sm = 0, n_sm = 0;
+        (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
+            &per_sm, (const void*)coop_allreduce_loc_kernel, block_threads, 0);
+        (void)hipDeviceGetAttribute(&n_sm, hipDeviceAttributeMultiprocessorCount,
+                                    rt.gpu_id());
+        grid_blocks = (per_sm > 0 && n_sm > 0) ? per_sm * n_sm : 1;
+    }
+
+    (void)hipMemset(d_flag, 0, (size_t)2 * (N - 1) * sizeof(unsigned int));
+    (void)hipDeviceSynchronize();
+    rt.barrier();
+
+    gicc::DeviceCtx* d = rt.prepare();
+    int data_idx = data_buf.index, recv_idx = recv_buf.index;
+    int flag_idx = flag_buf.index, one_idx = one_buf.index;
+    int n = N, r = rank, c = chunk;
+    volatile unsigned int* fp = (volatile unsigned int*)d_flag;
+    void* params[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx,
+                      &n, &r, &c, &d_data, &d_recv, &fp};
+    (void)hipLaunchCooperativeKernel((const void*)coop_allreduce_loc_kernel,
+                                     dim3(grid_blocks), dim3(block_threads),
+                                     params, 0, 0);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+    rt.barrier();
+}
+
+//============================================================================
 // PIPELINED cooperative ring all-reduce. Splits each ring step's chunk into P
 // segments and issues segment p+1's transfer (a non-blocking proxy push)
 // BEFORE reducing segment p, so the NIC streams seg p+1 while the GPU adds
