@@ -101,6 +101,8 @@ int main(int argc, char** argv) {
                                            flag_buf, d_flag, one_buf, count, P);
         double gicc_us = (MPI_Wtime() - t0) / iters * 1e6;
 
+        for (int w = 0; w < warmup; ++w)   // warm up MPI too (fair comparison)
+            MPI_Allreduce(d_mpi_in, d_mpi_out, count, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
         MPI_Barrier(MPI_COMM_WORLD);
         t0 = MPI_Wtime();
         for (int it = 0; it < iters; ++it)
