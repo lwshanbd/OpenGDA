@@ -1120,7 +1120,10 @@ inline void allreduce_double_tree(gicc::Runtime& rt,
             &per_sm, (const void*)dtree_allreduce_kernel, block_threads, 0);
         (void)hipDeviceGetAttribute(&n_sm, hipDeviceAttributeMultiprocessorCount,
                                     rt.gpu_id());
-        grid_blocks = (per_sm > 0 && n_sm > 0) ? per_sm * n_sm : 1;
+        // 50% headroom: requesting the occupancy MAX makes a cooperative
+        // grid.sync() deadlock-prone (no slack for all blocks to be resident).
+        int spm = (per_sm > 1) ? per_sm / 2 : 1;
+        grid_blocks = (spm > 0 && n_sm > 0) ? spm * n_sm : 1;
     }
 
     int up0, c0a, c0b, ct0, up1, c1a, c1b, ct1;
@@ -1143,8 +1146,166 @@ inline void allreduce_double_tree(gicc::Runtime& rt,
 }
 
 //============================================================================
+// PIPELINED flat double binary tree (the NCCL technique the plain version
+// lacks). The plain tree sends a whole half per edge level-by-level, so the
+// critical path is depth*(count/2) of serial transfer. NCCL instead streams the
+// buffer in CHUNKS through the tree with no per-chunk barrier: while chunk c is
+// being forwarded leaf->root, chunk c+1 is one level behind, so the pipeline
+// fills and the critical path drops to ~(count/2) + depth*chunk. Here each
+// (child,chunk) gets its own recv slot and flag, so chunks never collide and a
+// rank can race ahead on later chunks while the root is still on earlier ones.
+// recv = count floats (2 child slots x half); flags = 6*S uints (re-armed
+// in-kernel, memset once). Requires count even and (count/2) % S == 0 is NOT
+// required (last chunk takes the remainder). Caller MUST set_ipc_fastpath(false).
+//
+// MEASURED (16 ranks / 2 nodes, S=8, vs the un-pipelined plain tree, both vs MPI):
+//   bytes    plain    pipe     |  pipelining ~doubles large-message throughput
+//   16MB     0.30x    0.31x    |  crossover ~16MB; below it the per-chunk signal
+//   64MB     0.31x    0.56x    |  cost dominates (pipe is WORSE for small msgs,
+//   256MB    0.35x    0.72x    |  so prefer plain / S=1 there).
+// So pipelining is the right large-message lever (NCCL's chunking) — it still
+// trails MPI here because the FLAT tree funnels cross-node traffic through the
+// few NICs of the boundary ranks (the hierarchical variant spreads it, but has
+// its own hang); a size-aware caller should pick plain<16MB and pipe (S~8) above.
+//
+// GRID: cooperative launch MUST leave occupancy headroom (see driver) or
+// grid.sync() deadlocks. CAVEAT: like all the cooperative tree collectives here,
+// sustained back-to-back runs can still intermittently hang in the proxy/quiet
+// path under load (a transport-level robustness gap, separate from the grid
+// issue and from the algorithm); a single call is reliable and correctness
+// always passes.
+//============================================================================
+__global__ void dtree_allreduce_pipe_kernel(gicc::DeviceCtx* ctx,
+                                            int data_idx, int recv_idx, int flag_idx,
+                                            int one_idx, int rank, int count, int S,
+                                            int up0, int c0a, int c0b, int ct0,
+                                            int up1, int c1a, int c1b, int ct1,
+                                            float* data, float* recv,
+                                            volatile unsigned int* flag) {
+    cg::grid_group grid = cg::this_grid();
+    const bool   lead = (blockIdx.x == 0 && threadIdx.x == 0);
+    const size_t gtid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t nthr = (size_t)gridDim.x * blockDim.x;
+    const int    h    = count / 2;                    // half size
+    const int    ce   = h / S;                        // base chunk elems
+    const int    up[2] = {up0, up1};
+    const int    ca[2] = {c0a, c1a};
+    const int    cb[2] = {c0b, c1b};
+    const int    ct[2] = {ct0, ct1};
+
+    // ---- REDUCE (leaf -> root), pipelined over S chunks ----
+    for (int t = 0; t < 2; ++t) {
+        const int base = t * h;
+        const int kid[2] = {ca[t], cb[t]};
+        for (int c = 0; c < S; ++c) {
+            const int co = c * ce;                    // chunk offset within half
+            const int ne = (c == S - 1) ? (h - co) : ce;
+            for (int k = 0; k < 2; ++k) {
+                if (kid[k] < 0) continue;
+                const int fr = (t * 2 + k) * S + c;   // reduce flag slot
+                if (lead) {
+                    while (flag[fr] == 0u) { __builtin_amdgcn_s_sleep(1); }
+                    flag[fr] = 0u;
+                    __threadfence_system();
+                }
+                grid.sync();
+                for (size_t i = gtid; i < (size_t)ne; i += nthr)
+                    data[base + co + i] += recv[(size_t)k * h + co + i];
+                grid.sync();
+            }
+            if (up[t] >= 0) {
+                grid.sync();
+                dt_send_half(ctx, grid, up[t], recv_idx, (size_t)ct[t] * h + co,
+                             data_idx, data, (size_t)base + co, ne,
+                             flag_idx, (size_t)((t * 2 + ct[t]) * S + c), one_idx,
+                             lead, gtid, nthr);
+            }
+        }
+    }
+
+    // ---- BROADCAST (root -> leaf), pipelined over S chunks ----
+    for (int t = 0; t < 2; ++t) {
+        const int base = t * h;
+        const int kid[2] = {ca[t], cb[t]};
+        for (int c = 0; c < S; ++c) {
+            const int co = c * ce;
+            const int ne = (c == S - 1) ? (h - co) : ce;
+            const int fb = 4 * S + t * S + c;         // broadcast flag slot
+            if (up[t] >= 0 && lead) {
+                while (flag[fb] == 0u) { __builtin_amdgcn_s_sleep(1); }
+                flag[fb] = 0u;
+                __threadfence_system();
+            }
+            grid.sync();
+            for (int k = 0; k < 2; ++k) {
+                if (kid[k] < 0) continue;
+                dt_send_half(ctx, grid, kid[k], data_idx, (size_t)base + co,
+                             data_idx, data, (size_t)base + co, ne,
+                             flag_idx, (size_t)fb, one_idx, lead, gtid, nthr);
+            }
+        }
+    }
+}
+
+// Host driver for the pipelined flat double tree. nchunks S>=1 (S=1 reduces to
+// the plain tree). count must be even; recv >= count; flag host-pinned >= 6*S
+// uints (memset once by the caller).
+inline void allreduce_double_tree_pipe(gicc::Runtime& rt,
+                                       const gicc::Buffer& data_buf, float* d_data,
+                                       const gicc::Buffer& recv_buf, float* d_recv,
+                                       const gicc::Buffer& flag_buf, unsigned int* d_flag,
+                                       const gicc::Buffer& one_buf, int count, int nchunks) {
+    const int N    = rt.size();
+    const int rank = rt.rank();
+    int S = nchunks;
+    if (S < 1) S = 1;
+    if (S > count / 2) S = count / 2;                 // not more chunks than elems
+    static int grid_blocks = 0;
+    const int  block_threads = 256;
+    if (grid_blocks == 0) {
+        int per_sm = 0, n_sm = 0;
+        (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
+            &per_sm, (const void*)dtree_allreduce_pipe_kernel, block_threads, 0);
+        (void)hipDeviceGetAttribute(&n_sm, hipDeviceAttributeMultiprocessorCount,
+                                    rt.gpu_id());
+        // Cooperative launch needs ALL blocks co-resident or grid.sync()
+        // deadlocks. Requesting the occupancy-API MAX (e.g. 8 blocks/CU = full
+        // 2048 threads/CU on gfx90a) is unreliable: with zero headroom some
+        // block may never be scheduled and the whole grid hangs. Leave 50%
+        // headroom — these collectives are HBM/NIC-bound, so fewer blocks costs
+        // ~nothing. Env override for experiments.
+        int spm = (per_sm > 1) ? per_sm / 2 : 1;
+        grid_blocks = (spm > 0 && n_sm > 0) ? spm * n_sm : 1;
+        if (std::getenv("DTREE_PIPE_GB"))
+            grid_blocks = std::atoi(std::getenv("DTREE_PIPE_GB"));
+    }
+
+    int up0, c0a, c0b, ct0, up1, c1a, c1b, ct1;
+    dt_dtree(N, rank, up0, c0a, c0b, ct0, up1, c1a, c1b, ct1);
+
+    gicc::DeviceCtx* d = rt.prepare();
+    int data_idx = data_buf.index, recv_idx = recv_buf.index;
+    int flag_idx = flag_buf.index, one_idx = one_buf.index;
+    int r = rank, c = count, s = S;
+    volatile unsigned int* fp = (volatile unsigned int*)d_flag;
+    void* params[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx, &r, &c, &s,
+                      &up0, &c0a, &c0b, &ct0, &up1, &c1a, &c1b, &ct1,
+                      &d_data, &d_recv, &fp};
+    (void)hipLaunchCooperativeKernel((const void*)dtree_allreduce_pipe_kernel,
+                                     dim3(grid_blocks), dim3(block_threads),
+                                     params, 0, 0);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+    rt.barrier();
+}
+
+//============================================================================
 // HIERARCHICAL double binary tree all-reduce (K nodes, P ranks/node). Keeps the
 // winning intra-node xGMI structure of ring_allreduce_hier_direct and replaces
+// the inter-node phase with a double binary tree OVER THE K NODES (one tree per
+// same-local-position group, all P groups concurrent). This is the variant that
+// generalizes the 2-node hier to K>=4 nodes: the flat ring's K-1 serial cross
+// steps (or the K=2-only single exchange) become a 2*log2(K)-depth tree.
 // the inter-node phase with a double binary tree OVER THE K NODES (one tree per
 // same-local-position group, all P groups concurrent). This is the variant that
 // generalizes the 2-node hier to K>=4 nodes: the flat ring's K-1 serial cross
@@ -1286,6 +1447,8 @@ inline void allreduce_double_tree_hier(gicc::Runtime& rt,
             &per_sm, (const void*)dtree_hier_rs_tree_kernel, bt, 0);
         (void)hipDeviceGetAttribute(&n_sm, hipDeviceAttributeMultiprocessorCount, rt.gpu_id());
         gb_tree = (per_sm > 0 && n_sm > 0) ? per_sm * n_sm : 1;
+        if (std::getenv("DTREE_PIPE_GB"))            // debug: override grid size
+            gb_tree = std::atoi(std::getenv("DTREE_PIPE_GB"));
     }
 
     int data_idx = data_buf.index, recv_idx = recv_buf.index;
