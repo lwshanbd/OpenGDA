@@ -118,12 +118,17 @@ int main(int argc, char** argv) {
     }
 
     // ---- DIRECT hierarchical: correctness + timing ----
+    // one-time flag clear (hdir re-arms its own flag per call after that)
+    (void)hipMemset(d_flag, 0, (size_t)2 * N * sizeof(unsigned int));
+    (void)hipDeviceSynchronize();
+    rt.barrier();
     for (int si = 0; si < n_sizes; ++si) {
         const int count = N * chunks[si];
         std::vector<float> hv(count);
         for (int i = 0; i < count; ++i) hv[i] = (float)((rank + 1) + (i % 7));
         (void)hipMemcpy(d_data, hv.data(), (size_t)count * sizeof(float), hipMemcpyHostToDevice);
         (void)hipDeviceSynchronize();
+        rt.barrier();   // inputs ready on all ranks before direct xGMI reads (caller's contract)
         gicc_coll::ring_allreduce_hier_direct(rt, data_buf, d_data, recv_buf, d_recv,
                                               flag_buf, d_flag, one_buf, count, P);
         (void)hipMemcpy(hv.data(), d_data, (size_t)count * sizeof(float), hipMemcpyDeviceToHost);

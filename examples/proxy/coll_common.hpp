@@ -27,6 +27,9 @@
 #ifdef GICC_CPU_PROXY
 #include <hip/hip_cooperative_groups.h>
 #endif
+#include <chrono>
+#include <cstdlib>
+#include <cstdio>
 
 #include "gicc/platform/ofi/ofi_runtime.hpp"
 #include "gicc/platform/ofi/ofi_device.cuh"
@@ -802,6 +805,7 @@ __global__ void hier_direct_rs_cross_kernel(gicc::DeviceCtx* ctx,
             gicc::put(ctx, partner, flag_idx, 0, one_idx, 0, sizeof(unsigned int));
             gicc::quiet(ctx);
             while (flag[0] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            flag[0] = 0u;                 // re-arm for next call (no per-call memset)
             __threadfence_system();
         }
         grid.sync();
@@ -852,9 +856,18 @@ inline void ring_allreduce_hier_direct(gicc::Runtime& rt,
         gb1 = (per_sm > 0 && n_sm > 0) ? per_sm * n_sm : 1;
     }
 
-    (void)hipMemset(d_flag, 0, sizeof(unsigned int));
-    (void)hipDeviceSynchronize();
-    rt.barrier();
+    static int prof = (std::getenv("GICC_HDIR_PROF") != nullptr) ? 1 : 0;
+    using clk = std::chrono::high_resolution_clock;
+    auto us = [](clk::time_point a, clk::time_point b) {
+        return std::chrono::duration<double, std::micro>(b - a).count();
+    };
+    clk::time_point t0, t1, t2, t3, t4, t5;
+    if (prof) t0 = clk::now();
+
+    // No per-call flag memset/barrier: the receiver re-arms flag[0]=0 after
+    // consuming it in kernel 1, and the end barrier orders that before the next
+    // call's cross-write. Caller does a ONE-TIME memset of d_flag at setup.
+    if (prof) t1 = clk::now();
 
     // kernel 1: direct RS + inter-node exchange (cooperative)
     gicc::DeviceCtx* d = rt.prepare();
@@ -867,8 +880,10 @@ inline void ring_allreduce_hier_direct(gicc::Runtime& rt,
     (void)hipLaunchCooperativeKernel((const void*)hier_direct_rs_cross_kernel,
                                      dim3(gb1), dim3(bt), p1, 0, 0);
     (void)hipDeviceSynchronize();
+    if (prof) t2 = clk::now();   // K1 (RS+cross) done
     rt.reset();
     rt.barrier();                       // all ranks' global slices ready
+    if (prof) t3 = clk::now();   // inter-kernel ceremony done
 
     // kernel 2: direct all-gather (plain kernel, no flags/sync)
     d = rt.prepare();
@@ -876,8 +891,17 @@ inline void ring_allreduce_hier_direct(gicc::Runtime& rt,
     hipLaunchKernelGGL(hier_direct_ag_kernel, dim3(blk), dim3(bt), 0, 0,
                        d, data_idx, n, r, c, p, d_data);
     (void)hipDeviceSynchronize();
+    if (prof) t4 = clk::now();   // K2 (AG) done
     rt.reset();
     rt.barrier();
+    if (prof) {
+        t5 = clk::now();
+        if (rank == 0)
+            fprintf(stderr, "[hdir prof %dB] start=%.1f K1(rs+cross)=%.1f "
+                    "mid-cer=%.1f K2(ag)=%.1f end-cer=%.1f total=%.1f us\n",
+                    count * 4, us(t0, t1), us(t1, t2), us(t2, t3),
+                    us(t3, t4), us(t4, t5), us(t0, t5));
+    }
 }
 
 // Size-selected hierarchical all-reduce: DIRECT (latency-optimal) for small/mid,
