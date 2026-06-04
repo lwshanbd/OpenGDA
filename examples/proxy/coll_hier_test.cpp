@@ -26,9 +26,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const int chunks[] = {1024, 16384, 262144, 1048576};
+    // chunk = per-?? unit; total count = N*chunk, total bytes = N*chunk*4.
+    // At N=16: bytes = chunk*64  ->  16KB,64KB,256KB,1MB,4MB,16MB,64MB,256MB.
+    const int chunks[] = {256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304};
     const int n_sizes  = (int)(sizeof(chunks) / sizeof(chunks[0]));
-    const int MAXCHUNK = 1048576;
+    const int MAXCHUNK = 4194304;
     const int iters    = (argc > 1) ? std::atoi(argv[1]) : 10;
     const int warmup   = (argc > 2) ? std::atoi(argv[2]) : 2;
 
@@ -96,9 +98,11 @@ int main(int argc, char** argv) {
                                            flag_buf, d_flag, one_buf, count, P);
         rt.barrier();
         double t0 = MPI_Wtime();
-        for (int it = 0; it < iters; ++it)
+        for (int it = 0; it < iters; ++it) {
             gicc_coll::ring_allreduce_hier(rt, data_buf, d_data, recv_buf, d_recv,
                                            flag_buf, d_flag, one_buf, count, P);
+            rt.barrier();   // force standalone completion (no overlap of consecutive calls)
+        }
         double gicc_us = (MPI_Wtime() - t0) / iters * 1e6;
 
         for (int w = 0; w < warmup; ++w)   // warm up MPI too (fair comparison)
@@ -152,9 +156,11 @@ int main(int argc, char** argv) {
                                                   flag_buf, d_flag, one_buf, count, P);
         rt.barrier();
         double t0 = MPI_Wtime();
-        for (int it = 0; it < iters; ++it)
+        for (int it = 0; it < iters; ++it) {
             gicc_coll::ring_allreduce_hier_direct(rt, data_buf, d_data, recv_buf, d_recv,
                                                   flag_buf, d_flag, one_buf, count, P);
+            rt.barrier();   // force standalone completion (no overlap of consecutive calls)
+        }
         double gicc_us = (MPI_Wtime() - t0) / iters * 1e6;
         for (int w = 0; w < warmup; ++w)
             MPI_Allreduce(d_mpi_in, d_mpi_out, count, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
