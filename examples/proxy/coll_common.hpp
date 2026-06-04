@@ -605,6 +605,149 @@ inline void ring_allreduce_coop_loc(gicc::Runtime& rt,
 }
 
 //============================================================================
+// HIERARCHICAL all-reduce (2 nodes, P ranks/node, block layout). Avoids the
+// single-NIC cross-node funnel of a flat ring:
+//   Phase 1  intra-node reduce-scatter ring over P (xGMI) -> each local rank
+//            holds its node's partial sum of slice fp=(lp+1)%P (size count/P).
+//   Phase 2  inter-node exchange: every local rank swaps its slice fp with the
+//            same-position rank on the other node and sums -> ALL P ranks cross
+//            simultaneously => all NICs busy, and only count/P crosses per rank
+//            (total ~count vs ~2*count for the flat ring).
+//   Phase 3  intra-node all-gather ring over P (xGMI) -> everyone gets all
+//            global slices.
+// Only phase 2 touches the NIC; phases 1/3 are pure xGMI. flag layout:
+// [0,P-1) RS, [P-1] inter-node, [P,2P-1) AG.  Requires N == 2*P (K=2 nodes).
+//============================================================================
+__global__ void coop_allreduce_hier_kernel(gicc::DeviceCtx* ctx,
+                                           int data_idx, int recv_idx, int flag_idx,
+                                           int one_idx, int N, int rank, int count,
+                                           int P, float* data, float* recv,
+                                           volatile unsigned int* flag) {
+    cg::grid_group grid = cg::this_grid();
+    const bool   lead = (blockIdx.x == 0 && threadIdx.x == 0);
+    const size_t gtid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t nthr = (size_t)gridDim.x * blockDim.x;
+    const int    nb   = ctx->ipc_n_bufs;
+    void** ipc = ctx->peer_ipc_base;
+    const int lp        = rank % P;
+    const int node_base = rank - lp;
+    const int lnext     = node_base + (lp + 1) % P;     // same-node ring successor
+    const int partner   = (rank + P) % N;               // K=2 inter-node peer
+    const int slice     = count / P;
+    const size_t sb     = (size_t)slice * sizeof(float);
+    float* ln_recv = (ipc && nb) ? (float*)ipc[(size_t)lnext * nb + recv_idx] : nullptr;
+    float* ln_data = (ipc && nb) ? (float*)ipc[(size_t)lnext * nb + data_idx] : nullptr;
+
+    // ---- Phase 1: intra-node reduce-scatter ring over P (xGMI) ----
+    for (int s = 0; s < P - 1; ++s) {
+        const int sc = (lp - s + P) % P;
+        const int rc = (lp - 1 - s + P) % P;
+        if (ln_recv) {
+            for (size_t i = gtid; i < (size_t)slice; i += nthr)
+                ln_recv[(size_t)s * slice + i] = data[(size_t)sc * slice + i];
+        } else if (lead) {
+            gicc::put(ctx, lnext, recv_idx, (size_t)s * sb, data_idx, (size_t)sc * sb, sb);
+            gicc::quiet(ctx);
+        }
+        grid.sync();
+        if (lead) {
+            __threadfence_system();
+            gicc::put(ctx, lnext, flag_idx, (size_t)s * sizeof(unsigned int),
+                      one_idx, 0, sizeof(unsigned int));
+            gicc::quiet(ctx);
+            while (flag[s] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            __threadfence_system();
+        }
+        grid.sync();
+        for (size_t i = gtid; i < (size_t)slice; i += nthr)
+            data[(size_t)rc * slice + i] += recv[(size_t)s * slice + i];
+        grid.sync();
+    }
+    const int fp = (lp + 1) % P;   // slice this rank now owns (node-local sum)
+
+    // ---- Phase 2: inter-node exchange of slice fp (proxy, all ranks parallel) ----
+    if (partner != rank) {
+        const int xs = P - 1;      // recv slot reserved for the inter-node slice
+        if (lead) {
+            gicc::put(ctx, partner, recv_idx, (size_t)xs * sb,
+                      data_idx, (size_t)fp * sb, sb);
+            gicc::quiet(ctx);
+            gicc::put(ctx, partner, flag_idx, (size_t)(P - 1) * sizeof(unsigned int),
+                      one_idx, 0, sizeof(unsigned int));
+            gicc::quiet(ctx);
+            while (flag[P - 1] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            __threadfence_system();
+        }
+        grid.sync();
+        for (size_t i = gtid; i < (size_t)slice; i += nthr)
+            data[(size_t)fp * slice + i] += recv[(size_t)xs * slice + i];
+        grid.sync();
+    }
+
+    // ---- Phase 3: intra-node all-gather ring over P (xGMI) ----
+    for (int s = 0; s < P - 1; ++s) {
+        const int sc = (lp + 1 - s + 2 * P) % P;
+        if (ln_data) {
+            for (size_t i = gtid; i < (size_t)slice; i += nthr)
+                ln_data[(size_t)sc * slice + i] = data[(size_t)sc * slice + i];
+        } else if (lead) {
+            gicc::put(ctx, lnext, data_idx, (size_t)sc * sb, data_idx, (size_t)sc * sb, sb);
+            gicc::quiet(ctx);
+        }
+        grid.sync();
+        if (lead) {
+            __threadfence_system();
+            gicc::put(ctx, lnext, flag_idx, (size_t)(P + s) * sizeof(unsigned int),
+                      one_idx, 0, sizeof(unsigned int));
+            gicc::quiet(ctx);
+            while (flag[P + s] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            __threadfence_system();
+        }
+        grid.sync();
+    }
+}
+
+// Host driver. count = total elements (must be divisible by P = ranks/node).
+// recv >= count floats; flag >= 2*P uints (host-pinned); requires N == 2*P.
+inline void ring_allreduce_hier(gicc::Runtime& rt,
+                                const gicc::Buffer& data_buf, float* d_data,
+                                const gicc::Buffer& recv_buf, float* d_recv,
+                                const gicc::Buffer& flag_buf, unsigned int* d_flag,
+                                const gicc::Buffer& one_buf,
+                                int count, int P) {
+    const int N    = rt.size();
+    const int rank = rt.rank();
+    static int grid_blocks = 0;
+    const int  block_threads = 256;
+    if (grid_blocks == 0) {
+        int per_sm = 0, n_sm = 0;
+        (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
+            &per_sm, (const void*)coop_allreduce_hier_kernel, block_threads, 0);
+        (void)hipDeviceGetAttribute(&n_sm, hipDeviceAttributeMultiprocessorCount,
+                                    rt.gpu_id());
+        grid_blocks = (per_sm > 0 && n_sm > 0) ? per_sm * n_sm : 1;
+    }
+
+    (void)hipMemset(d_flag, 0, (size_t)2 * P * sizeof(unsigned int));
+    (void)hipDeviceSynchronize();
+    rt.barrier();
+
+    gicc::DeviceCtx* d = rt.prepare();
+    int data_idx = data_buf.index, recv_idx = recv_buf.index;
+    int flag_idx = flag_buf.index, one_idx = one_buf.index;
+    int n = N, r = rank, c = count, p = P;
+    volatile unsigned int* fp = (volatile unsigned int*)d_flag;
+    void* params[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx,
+                      &n, &r, &c, &p, &d_data, &d_recv, &fp};
+    (void)hipLaunchCooperativeKernel((const void*)coop_allreduce_hier_kernel,
+                                     dim3(grid_blocks), dim3(block_threads),
+                                     params, 0, 0);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+    rt.barrier();
+}
+
+//============================================================================
 // PIPELINED cooperative ring all-reduce. Splits each ring step's chunk into P
 // segments and issues segment p+1's transfer (a non-blocking proxy push)
 // BEFORE reducing segment p, so the NIC streams seg p+1 while the GPU adds
