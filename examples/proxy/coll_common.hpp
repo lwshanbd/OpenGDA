@@ -1136,6 +1136,15 @@ inline void allreduce_double_tree(gicc::Runtime& rt,
     int up0, c0a, c0b, ct0, up1, c1a, c1b, ct1;
     dt_dtree(N, rank, up0, c0a, c0b, ct0, up1, c1a, c1b, ct1);
 
+    // Adaptive grid: small messages are bound by the per-step proxy round-trip,
+    // not compute, so a big cooperative grid only adds grid.sync() cost (~230us
+    // at 440 blocks for 64 ranks). Use few blocks below ~256KB (cheap grid.sync),
+    // the full grid above (bandwidth). Skipped when grid is env-overridden.
+    int launch_gb = grid_blocks;
+    if (std::getenv("DTREE_PIPE_GB") == nullptr &&
+        (size_t)count * sizeof(float) <= (256u << 10) && grid_blocks > 16)
+        launch_gb = 16;
+
     gicc::DeviceCtx* d = rt.prepare();
     int data_idx = data_buf.index, recv_idx = recv_buf.index;
     int flag_idx = flag_buf.index, one_idx = one_buf.index;
@@ -1152,7 +1161,7 @@ inline void allreduce_double_tree(gicc::Runtime& rt,
     if (ktime) { (void)hipEventCreate(&ke0); (void)hipEventCreate(&ke1);
                  (void)hipEventRecord(ke0, 0); }
     (void)hipLaunchCooperativeKernel((const void*)dtree_allreduce_kernel,
-                                     dim3(grid_blocks), dim3(block_threads),
+                                     dim3(launch_gb), dim3(block_threads),
                                      params, 0, 0);
     if (ktime) {
         (void)hipEventRecord(ke1, 0);
