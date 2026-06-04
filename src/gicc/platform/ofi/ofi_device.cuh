@@ -82,6 +82,13 @@ struct DeviceCtx {
     void**             proxy_rings_arr;
     int                num_proxy_rings;
 #endif
+    // Locality-aware collectives: flat table of peer IPC-mapped buffer base
+    // pointers, indexed [peer * ipc_n_bufs + buf_idx]. Entry is non-null only
+    // when `peer` is same-node AND that buffer was IPC-mapped, so a kernel can
+    // write a same-node peer's buffer directly over xGMI (no NIC). Null entry
+    // => not local/mapped => fall back to put/proxy. Set by prepare().
+    void**             peer_ipc_base = nullptr;
+    int                ipc_n_bufs    = 0;
 };
 
 #ifdef GICC_CPU_PROXY

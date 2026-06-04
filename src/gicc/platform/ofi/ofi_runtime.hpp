@@ -384,6 +384,25 @@ public:
         // longer needed. The LTO host trace consults peer_mapped_ptrs_
         // and local_bufs_ on the host via the gicc_runtime_*_base
         // helpers; the kernel never reads an IPC map.
+
+        // Locality-aware collectives: re-expose a flat device-readable table
+        // of peer IPC-mapped buffer bases [peer * n_bufs_ + buf]. Host-pinned
+        // mapped so the GPU can read the pointer values; entries are the
+        // peer's device pointers (valid on this device) or null. Lets a
+        // collective kernel write a same-node peer's buffer over xGMI.
+        {
+            const size_t n = (size_t)nranks * (size_t)nbuf;
+            if (h_peer_ipc_) { (void)gpuHostFree(h_peer_ipc_); h_peer_ipc_ = nullptr; }
+            if (gpuHostMalloc((void**)&h_peer_ipc_, n * sizeof(void*),
+                              gpuHostMallocMapped) == GPU_SUCCESS) {
+                for (int r = 0; r < nranks; r++)
+                    for (int b = 0; b < nbuf; b++)
+                        h_peer_ipc_[(size_t)r * nbuf + b] =
+                            (local_peer_[r] && b < (int)peer_mapped_ptrs_[r].size())
+                                ? peer_mapped_ptrs_[r][b] : nullptr;
+                (void)gpuHostGetDevicePointer((void**)&d_peer_ipc_, h_peer_ipc_, 0);
+            }
+        }
     }
 
     RemoteBufferInfo remote_buffer(int rank, int buf_index) const {
@@ -828,6 +847,9 @@ public:
         } else {
             h_dev_ctx_->trigger_val_ = my_n_remote_ops_;
         }
+        // Locality-aware collectives: hand the device the peer IPC table.
+        h_dev_ctx_->peer_ipc_base = d_peer_ipc_;
+        h_dev_ctx_->ipc_n_bufs    = n_bufs_;
 #ifdef GICC_CPU_PROXY
         // Lazy-start the CPU proxy fleet on first prepare(). Stash both
         // the single ring 0 (DeviceCtx::proxy_ring, for back-compat with
@@ -1174,6 +1196,12 @@ private:
     // when the peer is off-node / the buffer had no IPC handle).
     std::vector<bool>                  local_peer_;
     std::vector<std::vector<void*>>    peer_mapped_ptrs_;
+
+    // Flat, device-readable (host-pinned mapped) table of peer IPC bases for
+    // locality-aware collectives. Indexed [peer * n_bufs_ + buf]; built in
+    // exchange(), pointed to by DeviceCtx::peer_ipc_base in prepare().
+    void**                             h_peer_ipc_ = nullptr;   // host vaddr
+    void**                             d_peer_ipc_ = nullptr;   // device-mapped
 
     // Per-runtime IPC map uploaded after exchange(). Indexed
     // [peer * n_bufs_ + buf_idx]. Each entry's mapped_ptr is non-null
