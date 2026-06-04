@@ -30,6 +30,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstdio>
+#ifdef GICC_BOOTSTRAP_MPI
+#include <mpi.h>
+#endif
 
 #include "gicc/platform/ofi/ofi_runtime.hpp"
 #include "gicc/platform/ofi/ofi_device.cuh"
@@ -1360,17 +1363,29 @@ inline void allreduce_double_tree_pipe(gicc::Runtime& rt,
 //
 // STABILITY: the caller MUST rt.set_ipc_fastpath(false) (the same-node flag
 // gicc::put otherwise routes through the IPC/SDMA fast path and contends with
-// cross-node proxy RMA -> AMD+CXI SDMA deadlock). With that set, the flat tree
-// is stable in sustained loops. This hierarchical variant has a RESIDUAL
-// intermittent deadlock in kernel 1's cooperative proxy path that persists even
-// with ipc_fastpath off (a single call is always reliable - correctness passes
-// every size every run - but sustained back-to-back timing intermittently hangs
-// in k1, never k2; the protocol is deadlock-free and correctness never fails,
-// so it is a runtime/proxy-level race in the cooperative + interleaved-grid.sync
-// + proxy-quiet pattern, not an algorithm bug). Because the tree has NO perf
-// benefit at K=2 (it is depth-1, strictly worse than the fused `hier`), the
-// coll_dtree_test timing path for this collective is opt-in (DTREE_HIER_TIME);
-// the residual race is future work for the K>=4 regime where the tree helps.
+// cross-node proxy RMA -> AMD+CXI SDMA deadlock).
+//
+// The "residual intermittent hang" this collective used to exhibit in sustained
+// back-to-back timing was ROOT-CAUSED to the host-side inter-kernel barrier, NOT
+// the cooperative proxy kernel. The tree finishes k1 at very different times per
+// rank (a leaf node returns immediately; a root node waits for its whole
+// subtree), so ranks enter the k1 barrier with large arrival skew. The OFI
+// dissemination barrier (rt.barrier) intermittently loses a step message under
+// that skew and one rank hangs INSIDE the barrier (proven: per-rank checkpoints
+// showed every rank past the kernel + reset, half stuck entering the k1 barrier,
+// half a full iteration ahead). The symmetric hier_direct/ring collectives never
+// expose this because all ranks finish their kernels near-simultaneously. Fix:
+// sequence the two device kernels with MPI_Barrier (skew-robust, on Cray MPI's
+// own progress, off the libfabric domain the proxy hammers). Verified by A/B in
+// one binary: GICC_DTREEH_RTBAR=1 (old rt.barrier) hangs within a few iters at
+// K=4/32 ranks; the default MPI_Barrier path completes 10 iters x 3 warmup x 8
+// sizes with zero hangs. The escape hatch env GICC_DTREEH_RTBAR restores the old
+// path for diagnosis. (Correctness still passes every size every run; the
+// separate intermittent <=1KB tiny-transfer coherence race is unrelated.)
+//
+// Timing for this collective is opt-in (DTREE_HIER_TIME): at K=2 the inter-node
+// tree is depth-1 (no perf benefit over the fused `hier`); it earns its log(K)
+// advantage only at K>=4 nodes.
 //============================================================================
 
 // Fused phase 1 + 2 (cooperative): intra-node direct reduce-scatter, then the
@@ -1486,15 +1501,37 @@ inline void allreduce_double_tree_hier(gicc::Runtime& rt,
     int flag_idx = flag_buf.index, one_idx = one_buf.index;
 
     static int dbg = (std::getenv("GICC_DTREEH_DBG") != nullptr) ? 1 : 0;
-    #define DTH_CKPT(msg) do { if (dbg && rank == 0) \
-        fprintf(stderr, "[dtreeh %d B] " msg "\n", count * 4); } while (0)
+    static int call_seq = 0;
+    const int my_seq = call_seq++;
+    // Host-side inter-kernel barrier. The tree produces large per-rank arrival
+    // skew (leaves finish immediately, roots wait for their whole subtree),
+    // unlike the symmetric hier_direct/ring collectives. Under that skew the
+    // OFI dissemination barrier (rt.barrier) intermittently loses a step
+    // message and one rank hangs entering it. MPI_Barrier sequences the two
+    // device kernels skew-robustly (it runs on Cray MPI's own progress, off
+    // the proxy/libfabric domain the kernel hammers). A/B-selectable via env
+    // for diagnosis; defaults to the robust path.
+#ifdef GICC_BOOTSTRAP_MPI
+    static int use_rtbar = (std::getenv("GICC_DTREEH_RTBAR") != nullptr) ? 1 : 0;
+    auto hbar = [&]() { if (use_rtbar) rt.barrier(); else MPI_Barrier(MPI_COMM_WORLD); };
+#else
+    auto hbar = [&]() { rt.barrier(); };
+#endif
+    // Per-rank, flushed checkpoint so a hang shows the LAST stage EACH rank
+    // reached (rank-0-only could not distinguish kernel-hang from barrier-wait
+    // nor identify the stuck rank). Stages are numbered + tagged with the
+    // per-rank call sequence so a tail-grep localizes the deadlock precisely
+    // (and reveals barrier drift between ranks).
+    #define DTH_CKPT(msg) do { if (dbg) { \
+        fprintf(stderr, "[dtreeh r%d call%d %d B] " msg "\n", rank, my_seq, count * 4); \
+        fflush(stderr); } } while (0)
 
     // Kernel 1 (cooperative): intra-node direct reduce-scatter + inter-node
     // double tree over K nodes. 2 kernels / 2 resets total (the proven-stable
     // hier_direct structure; a 3rd reset/proxy-drain cycle races the ring).
     int up0, c0a, c0b, ct0, up1, c1a, c1b, ct1;
     dt_dtree(K, nid, up0, c0a, c0b, ct0, up1, c1a, c1b, ct1);
-    DTH_CKPT("k1(rs+tree) launch");
+    DTH_CKPT("1-k1-launch");
     gicc::DeviceCtx* d = rt.prepare();
     int rk = rank, Px = P, c = count;
     volatile unsigned int* fp = (volatile unsigned int*)d_flag;
@@ -1504,18 +1541,21 @@ inline void allreduce_double_tree_hier(gicc::Runtime& rt,
     (void)hipLaunchCooperativeKernel((const void*)dtree_hier_rs_tree_kernel,
                                      dim3(gb_tree), dim3(bt), p1, 0, 0);
     (void)hipDeviceSynchronize();
+    DTH_CKPT("2-k1-sync");
     rt.reset();
-    rt.barrier();                                     // all global slices ready
-    DTH_CKPT("k1 done");
+    DTH_CKPT("3-k1-reset-enter-bar");
+    hbar();                                           // all global slices ready
+    DTH_CKPT("4-k1-barrier-exit");
 
     // Kernel 2: intra-node direct all-gather (reuses hier_direct_ag_kernel).
     d = rt.prepare();
     hipLaunchKernelGGL(hier_direct_ag_kernel, dim3(512), dim3(bt), 0, 0,
                        d, data_idx, N, rank, count, P, d_data);
     (void)hipDeviceSynchronize();
+    DTH_CKPT("5-k2-sync-enter-bar");
     rt.reset();
-    rt.barrier();
-    DTH_CKPT("k2(ag) done");
+    hbar();
+    DTH_CKPT("6-k2-barrier-exit");
     #undef DTH_CKPT
 }
 #endif  // GICC_CPU_PROXY
