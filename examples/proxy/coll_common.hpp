@@ -880,6 +880,23 @@ inline void ring_allreduce_hier_direct(gicc::Runtime& rt,
     rt.barrier();
 }
 
+// Size-selected hierarchical all-reduce: DIRECT (latency-optimal) for small/mid,
+// RING (bandwidth-optimal) for large — the same algorithm-by-size switch NCCL/MPI
+// use. Crossover ~8MB total (measured: 1MB direct wins, 16MB ring wins). Both
+// take the same buffers (recv >= count, flag host-pinned >= 2P).
+inline void ring_allreduce_best(gicc::Runtime& rt,
+                                const gicc::Buffer& data_buf, float* d_data,
+                                const gicc::Buffer& recv_buf, float* d_recv,
+                                const gicc::Buffer& flag_buf, unsigned int* d_flag,
+                                const gicc::Buffer& one_buf, int count, int P) {
+    if ((size_t)count * sizeof(float) >= (8u << 20))
+        ring_allreduce_hier(rt, data_buf, d_data, recv_buf, d_recv,
+                            flag_buf, d_flag, one_buf, count, P);
+    else
+        ring_allreduce_hier_direct(rt, data_buf, d_data, recv_buf, d_recv,
+                                   flag_buf, d_flag, one_buf, count, P);
+}
+
 //============================================================================
 // PIPELINED cooperative ring all-reduce. Splits each ring step's chunk into P
 // segments and issues segment p+1's transfer (a non-blocking proxy push)
