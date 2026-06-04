@@ -466,6 +466,152 @@ inline void ring_allreduce_coop(gicc::Runtime& rt,
     rt.reset();
     rt.barrier();
 }
+
+//============================================================================
+// PIPELINED cooperative ring all-reduce. Splits each ring step's chunk into P
+// segments and issues segment p+1's transfer (a non-blocking proxy push)
+// BEFORE reducing segment p, so the NIC streams seg p+1 while the GPU adds
+// seg p — hiding the add + grid-syncs (and per-step dead time) under
+// transfer. Data->flag ordering is preserved (quiet between a segment's data
+// and its flag), so it stays correct without provider WAW-ordering
+// assumptions. Reduce-scatter is pipelined (where the add overlap lives);
+// all-gather stays one-shot per step (no add to overlap).
+//
+// MEASURED RESULT (negative, kept on purpose): this is ~1.3-2x SLOWER than
+// ring_allreduce_coop at every size on Tioga. Reason: enabling the overlap
+// requires a SEPARATE cross-rank arrival signal per segment (data->flag,
+// quiet-ordered), so P segments cost P x the signaling round-trips per ring
+// step. Here the reduction (add) is only ~us while a proxy flag round-trip is
+// ~6us, so the signaling we add to enable the overlap costs far more than the
+// add it hides. Pipelining only wins when per-segment compute >> per-segment
+// signal cost; a put/quiet+flag ring all-reduce is signaling/latency-bound,
+// not bandwidth-bound. The right lever for the small-msg regime is FEWER
+// steps (recursive-doubling), not finer pipelining. Use ring_allreduce_coop.
+// flag layout: [0 .. (N-1)*P) reduce-scatter (per step,segment);
+//              [(N-1)*P .. (N-1)*P+(N-1)) all-gather (per step).
+//============================================================================
+__global__ void coop_allreduce_pipe_kernel(gicc::DeviceCtx* ctx,
+                                           int data_idx, int recv_idx,
+                                           int flag_idx, int one_idx,
+                                           int N, int rank, int chunk, int P,
+                                           float* data, const float* recv,
+                                           volatile unsigned int* flag) {
+    cg::grid_group grid = cg::this_grid();
+    const bool   lead = (blockIdx.x == 0 && threadIdx.x == 0);
+    const size_t gtid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t nthr = (size_t)gridDim.x * blockDim.x;
+    const int    next = (rank + 1) % N;
+    const int    seg  = chunk / P;                 // base segment length
+    const size_t fb   = sizeof(unsigned int);
+
+    // segment [off,len) in elements for segment p
+    #define SEG_OFF(p) ((size_t)(p) * seg)
+    #define SEG_LEN(p) ((p) == P - 1 ? (size_t)chunk - (size_t)(p) * seg : (size_t)seg)
+
+    // ---- reduce-scatter, pipelined over P segments ----
+    for (int s = 0; s < N - 1; ++s) {
+        const int    sc     = (rank - s + N) % N;
+        const int    rc     = (rank - 1 - s + N) % N;
+        const int    rsbase = s * P;
+        // prime segment 0
+        if (lead) {
+            gicc::put(ctx, next, recv_idx, ((size_t)s * chunk + SEG_OFF(0)) * sizeof(float),
+                      data_idx, ((size_t)sc * chunk + SEG_OFF(0)) * sizeof(float),
+                      SEG_LEN(0) * sizeof(float));
+            gicc::quiet(ctx);
+            gicc::put(ctx, next, flag_idx, (size_t)(rsbase + 0) * fb, one_idx, 0, fb);
+            gicc::quiet(ctx);
+        }
+        for (int p = 0; p < P; ++p) {
+            if (lead && p + 1 < P) {
+                // non-blocking push of seg p+1's data (proxy transfers it
+                // while we reduce seg p below)
+                gicc::put(ctx, next, recv_idx,
+                          ((size_t)s * chunk + SEG_OFF(p + 1)) * sizeof(float),
+                          data_idx,
+                          ((size_t)sc * chunk + SEG_OFF(p + 1)) * sizeof(float),
+                          SEG_LEN(p + 1) * sizeof(float));
+            }
+            if (lead) {
+                while (flag[rsbase + p] == 0u) { __builtin_amdgcn_s_sleep(1); }
+                __threadfence_system();
+            }
+            grid.sync();
+            const size_t off = (size_t)rc * chunk + SEG_OFF(p);
+            const size_t roff = (size_t)s * chunk + SEG_OFF(p);
+            const size_t len = SEG_LEN(p);
+            for (size_t i = gtid; i < len; i += nthr)
+                data[off + i] += recv[roff + i];
+            grid.sync();
+            if (lead && p + 1 < P) {
+                gicc::quiet(ctx);   // seg p+1 data has landed remotely
+                gicc::put(ctx, next, flag_idx, (size_t)(rsbase + p + 1) * fb,
+                          one_idx, 0, fb);
+                gicc::quiet(ctx);
+            }
+        }
+    }
+    // ---- all-gather (one-shot per step; no add to overlap) ----
+    const int agbase = (N - 1) * P;
+    const size_t cb = (size_t)chunk * sizeof(float);
+    for (int s = 0; s < N - 1; ++s) {
+        const int sc = (rank + 1 - s + 2 * N) % N;
+        if (lead) {
+            gicc::put(ctx, next, data_idx, (size_t)sc * cb, data_idx,
+                      (size_t)sc * cb, cb);
+            gicc::quiet(ctx);
+            gicc::put(ctx, next, flag_idx, (size_t)(agbase + s) * fb, one_idx, 0, fb);
+            gicc::quiet(ctx);
+            while (flag[agbase + s] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            __threadfence_system();
+        }
+        grid.sync();
+    }
+    #undef SEG_OFF
+    #undef SEG_LEN
+}
+
+inline void ring_allreduce_pipe(gicc::Runtime& rt,
+                                const gicc::Buffer& data_buf, float* d_data,
+                                const gicc::Buffer& recv_buf, float* d_recv,
+                                const gicc::Buffer& flag_buf, unsigned int* d_flag,
+                                const gicc::Buffer& one_buf,
+                                int chunk, int P = 4) {
+    const int N    = rt.size();
+    const int rank = rt.rank();
+    if (P < 1) P = 1;
+    if (P > chunk) P = chunk;          // can't have more segments than elements
+
+    static int grid_blocks = 0;
+    const int  block_threads = 256;
+    if (grid_blocks == 0) {
+        int per_sm = 0, n_sm = 0;
+        (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
+            &per_sm, (const void*)coop_allreduce_pipe_kernel, block_threads, 0);
+        (void)hipDeviceGetAttribute(&n_sm, hipDeviceAttributeMultiprocessorCount,
+                                    rt.gpu_id());
+        grid_blocks = (per_sm > 0 && n_sm > 0) ? per_sm * n_sm : 1;
+    }
+
+    const size_t n_flags = (size_t)(N - 1) * P + (size_t)(N - 1);
+    (void)hipMemset(d_flag, 0, n_flags * sizeof(unsigned int));
+    (void)hipDeviceSynchronize();
+    rt.barrier();
+
+    gicc::DeviceCtx* d = rt.prepare();
+    int   data_idx = data_buf.index, recv_idx = recv_buf.index;
+    int   flag_idx = flag_buf.index, one_idx = one_buf.index;
+    int   n = N, r = rank, c = chunk, p = P;
+    volatile unsigned int* fp = (volatile unsigned int*)d_flag;
+    void* params[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx,
+                      &n, &r, &c, &p, &d_data, &d_recv, &fp};
+    (void)hipLaunchCooperativeKernel((const void*)coop_allreduce_pipe_kernel,
+                                     dim3(grid_blocks), dim3(block_threads),
+                                     params, 0, 0);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+    rt.barrier();
+}
 #endif  // GICC_CPU_PROXY
 
 // transport_name - for banner printing.

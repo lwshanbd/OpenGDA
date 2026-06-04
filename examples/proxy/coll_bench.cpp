@@ -79,12 +79,13 @@ int main(int argc, char** argv) {
     // Fused proxy all-reduce buffers: in-place data, (N-1)-chunk recv staging,
     // host-pinned flags (PCIe-coherent for the GPU spin), 4-byte nonzero src.
     const size_t fr_bytes = (size_t)(N - 1) * MAXCHUNK * sizeof(float);
+    const size_t flag_uints = 1024;   // covers (N-1)*P+(N-1) for the pipelined path
     float *d_fz = nullptr, *d_fz_recv = nullptr;
     unsigned int *h_flag = nullptr, *d_flag = nullptr, *d_one = nullptr;
     (void)hipMalloc(&d_fz, ar_bytes);
     (void)hipMalloc(&d_fz_recv, fr_bytes);
     (void)hipMalloc(&d_one, sizeof(unsigned int));
-    (void)hipHostMalloc((void**)&h_flag, (size_t)2 * N * sizeof(unsigned int),
+    (void)hipHostMalloc((void**)&h_flag, flag_uints * sizeof(unsigned int),
                         hipHostMallocMapped);
     (void)hipHostGetDevicePointer((void**)&d_flag, h_flag, 0);
     (void)hipMemset(d_one, 1, sizeof(unsigned int));   // 0x01010101 (nonzero)
@@ -92,7 +93,7 @@ int main(int argc, char** argv) {
     gicc::Buffer fz_buf   = rt.register_buffer(d_fz, ar_bytes, true);
     gicc::Buffer fz_recv  = rt.register_buffer(d_fz_recv, fr_bytes, true);
     gicc::Buffer flag_buf = rt.register_buffer(d_flag,
-                                (size_t)2 * N * sizeof(unsigned int), true);
+                                flag_uints * sizeof(unsigned int), true);
     gicc::Buffer one_buf  = rt.register_buffer(d_one, sizeof(unsigned int), true);
 #endif
 
@@ -256,6 +257,61 @@ int main(int argc, char** argv) {
         if (rank == 0)
             printf("%-10s %12zu | %14.2f %14.2f %7.2fx\n",
                    "ar-coop", arr_bytes, gmax, mmax, mmax / gmax);
+    }
+
+    // ---- PIPELINED cooperative all-reduce (overlap transfer w/ reduce) ----
+    for (int si = 0; si < n_sizes; ++si) {
+        const int chunk = chunks[si];
+        const int count = N * chunk;
+        std::vector<float> hv(count);
+        for (int i = 0; i < count; ++i) hv[i] = (float)((rank + 1) + (i % 7));
+        (void)hipMemcpy(d_fz, hv.data(), (size_t)count * sizeof(float),
+                        hipMemcpyHostToDevice);
+        (void)hipDeviceSynchronize();
+        gicc_coll::ring_allreduce_pipe(rt, fz_buf, d_fz, fz_recv, d_fz_recv,
+                                       flag_buf, d_flag, one_buf, chunk, 4);
+        (void)hipMemcpy(hv.data(), d_fz, (size_t)count * sizeof(float),
+                        hipMemcpyDeviceToHost);
+        (void)hipDeviceSynchronize();
+        int errs = 0;
+        for (int i = 0; i < count; ++i) {
+            float want = (float)((double)N * (N + 1) / 2.0 + (double)N * (i % 7));
+            if (hv[i] != want) ++errs;
+        }
+        int all_errs = 0;
+        MPI_Reduce(&errs, &all_errs, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+        if (rank == 0)
+            printf("[pipe allreduce correctness @%zu B: %s, %d total errors]\n",
+                   (size_t)count * sizeof(float),
+                   all_errs == 0 ? "PASS" : "FAIL", all_errs);
+    }
+    for (int si = 0; si < n_sizes; ++si) {
+        const int chunk = chunks[si];
+        const size_t arr_bytes = (size_t)N * chunk * sizeof(float);
+        for (int w = 0; w < warmup; ++w)
+            gicc_coll::ring_allreduce_pipe(rt, fz_buf, d_fz, fz_recv, d_fz_recv,
+                                           flag_buf, d_flag, one_buf, chunk, 4);
+        rt.barrier();
+        double t0 = MPI_Wtime();
+        for (int it = 0; it < iters; ++it)
+            gicc_coll::ring_allreduce_pipe(rt, fz_buf, d_fz, fz_recv, d_fz_recv,
+                                           flag_buf, d_flag, one_buf, chunk, 4);
+        double gicc_us = (MPI_Wtime() - t0) / iters * 1e6;
+
+        const int count = N * chunk;
+        MPI_Barrier(MPI_COMM_WORLD);
+        t0 = MPI_Wtime();
+        for (int it = 0; it < iters; ++it)
+            MPI_Allreduce(d_mpi_in, d_mpi_out, count, MPI_FLOAT, MPI_SUM,
+                          MPI_COMM_WORLD);
+        double mpi_us = (MPI_Wtime() - t0) / iters * 1e6;
+
+        double gmax, mmax;
+        MPI_Reduce(&gicc_us, &gmax, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&mpi_us,  &mmax, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+        if (rank == 0)
+            printf("%-10s %12zu | %14.2f %14.2f %7.2fx\n",
+                   "ar-pipe", arr_bytes, gmax, mmax, mmax / gmax);
     }
 #endif
 
