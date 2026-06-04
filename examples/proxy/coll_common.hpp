@@ -922,6 +922,411 @@ inline void ring_allreduce_best(gicc::Runtime& rt,
 }
 
 //============================================================================
+// DOUBLE BINARY TREE all-reduce (Sanders-Speck-Träff / NCCL "dtree").
+//
+// A single binary tree wastes half the bandwidth: its leaves only ever SEND
+// (they have no children to receive from), and half a binary tree's nodes are
+// leaves. The double-tree fix builds TWO complementary in-order binary trees
+// whose internal/leaf roles are swapped (for even N, T1 is the mirror of T0:
+// T0's internal nodes are T1's leaves and vice-versa). The data is split in
+// half; half A is reduce-broadcast over T0, half B over T1. Every rank is then
+// internal in exactly one tree and a leaf in the other, so each rank drives a
+// full-bandwidth subtree for one half while only forwarding the other — total
+// per-rank traffic is balanced and the critical path is ~2*log2(N) steps
+// (vs the ring's 2*(N-1)). This is NCCL's default large-allreduce algorithm.
+//
+// Topology is integer arithmetic over rank ids (computed host-side, passed in).
+// Communication auto-routes per edge: a same-node peer is written directly over
+// xGMI (peer_ipc_base non-null); a cross-node peer goes through the proxy. The
+// arrival flag always goes through the proxy (host-pinned, cheap coherent poll),
+// matching coop_allreduce_loc_kernel.
+//
+// Flag layout (per rank, host-pinned): [0,1] T0 reduce from child slot 0/1,
+// [2,3] T1 reduce from child slot 0/1, [4] T0 broadcast from parent, [5] T1
+// broadcast from parent. recv buffer: 2 slots of count/2 (a rank parents in at
+// most ONE tree, so the two child slots never collide across trees).
+// Flags are re-armed in-kernel (receiver zeroes after consuming), so the caller
+// memsets the flag buffer ONCE at setup. Requires even `count`.
+//
+// STABILITY: the caller MUST rt.set_ipc_fastpath(false). dt_send_half sends the
+// arrival flag via gicc::put even for same-node edges; with the IPC fast path on
+// that becomes an SDMA hipMemcpyAsync that contends with concurrent cross-node
+// proxy RMA and intermittently deadlocks on AMD+CXI. With it off the flat tree
+// runs stably in sustained loops (see coll_dtree_test, which sets it).
+//============================================================================
+
+// In-order binary tree (NCCL ncclGetBtree): for `rank` among `nranks`, returns
+// parent `up` (-1 at root), the two children `d0`/`d1` (-1 if absent), and which
+// child slot this rank is of its parent (`ct` in {0,1}, -1 at root).
+inline void dt_btree(int nranks, int rank, int& up, int& d0, int& d1, int& ct) {
+    int bit;
+    for (bit = 1; bit < nranks; bit <<= 1)
+        if (bit & rank) break;
+    if (rank == 0) {
+        up = -1; d0 = -1;
+        d1 = (nranks > 1) ? (bit >> 1) : -1;
+        ct = -1;
+        return;
+    }
+    up = (rank ^ bit) | (bit << 1);
+    if (up >= nranks) up = rank ^ bit;
+    ct = (rank < up) ? 0 : 1;
+    int lowbit = bit >> 1;
+    d0 = (lowbit == 0) ? -1 : rank - lowbit;
+    d1 = (lowbit == 0) ? -1 : rank + lowbit;
+    while (d1 >= nranks) {            // pull child 1 in-bounds for non-pow2 N
+        lowbit >>= 1;
+        d1 = (lowbit == 0) ? -1 : rank + lowbit;
+    }
+}
+
+// Double binary tree (NCCL ncclGetDtree): T0 is the plain in-order tree; T1 is
+// its mirror (even N) or +1 shift (odd N), which swaps internal/leaf roles.
+inline void dt_dtree(int nranks, int rank,
+                     int& up0, int& c0a, int& c0b, int& ct0,
+                     int& up1, int& c1a, int& c1b, int& ct1) {
+    dt_btree(nranks, rank, up0, c0a, c0b, ct0);
+    if (nranks % 2 == 1) {
+        int sr = (rank - 1 + nranks) % nranks, u, d0, d1, ct;
+        dt_btree(nranks, sr, u, d0, d1, ct);
+        up1 = (u  == -1) ? -1 : (u  + 1) % nranks;
+        c1a = (d0 == -1) ? -1 : (d0 + 1) % nranks;
+        c1b = (d1 == -1) ? -1 : (d1 + 1) % nranks;
+        ct1 = ct;
+    } else {
+        int u, d0, d1, ct;
+        dt_btree(nranks, nranks - 1 - rank, u, d0, d1, ct);
+        up1 = (u  == -1) ? -1 : nranks - 1 - u;
+        c1a = (d0 == -1) ? -1 : nranks - 1 - d0;
+        c1b = (d1 == -1) ? -1 : nranks - 1 - d1;
+        ct1 = ct;
+    }
+}
+
+#ifdef GICC_CPU_PROXY
+// Send `len` floats from my data[src_off] to `peer`'s buffer `dst_idx`[dst_off]
+// then signal peer's flag[flag_slot]. Same-node => xGMI (all threads); else
+// proxy (lead only). The peer scalar is grid-uniform so the branch + any
+// grid.sync inside it are taken by the whole grid.
+__device__ inline void dt_send_half(gicc::DeviceCtx* ctx, cg::grid_group& grid,
+                                    int peer, int dst_idx, size_t dst_off,
+                                    int src_idx, float* mydata, size_t src_off,
+                                    int len, int flag_idx, size_t flag_slot,
+                                    int one_idx, bool lead,
+                                    size_t gtid, size_t nthr) {
+    const int nb = ctx->ipc_n_bufs;
+    void** ipc = ctx->peer_ipc_base;
+    float* peer_buf = (ipc && nb) ? (float*)ipc[(size_t)peer * nb + dst_idx] : nullptr;
+    if (peer_buf) {                                   // intra-node: xGMI
+        for (size_t i = gtid; i < (size_t)len; i += nthr)
+            peer_buf[dst_off + i] = mydata[src_off + i];
+        grid.sync();
+        if (lead) {
+            __threadfence_system();                   // publish xGMI writes
+            gicc::put(ctx, peer, flag_idx, flag_slot * sizeof(unsigned int),
+                      one_idx, 0, sizeof(unsigned int));
+            gicc::quiet(ctx);
+        }
+    } else if (lead) {                                // cross-node: proxy
+        __threadfence_system();
+        gicc::put(ctx, peer, dst_idx, dst_off * sizeof(float),
+                  src_idx, src_off * sizeof(float), (size_t)len * sizeof(float));
+        gicc::quiet(ctx);                             // data landed before flag
+        gicc::put(ctx, peer, flag_idx, flag_slot * sizeof(unsigned int),
+                  one_idx, 0, sizeof(unsigned int));
+        gicc::quiet(ctx);
+    }
+}
+
+// Cooperative double-tree all-reduce kernel. Reduce (leaf->root) then broadcast
+// (root->leaf), both trees, data split in half (T0:[0,h), T1:[h,count)).
+__global__ void dtree_allreduce_kernel(gicc::DeviceCtx* ctx,
+                                       int data_idx, int recv_idx, int flag_idx,
+                                       int one_idx, int rank, int count,
+                                       int up0, int c0a, int c0b, int ct0,
+                                       int up1, int c1a, int c1b, int ct1,
+                                       float* data, float* recv,
+                                       volatile unsigned int* flag) {
+    cg::grid_group grid = cg::this_grid();
+    const bool   lead = (blockIdx.x == 0 && threadIdx.x == 0);
+    const size_t gtid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t nthr = (size_t)gridDim.x * blockDim.x;
+    const int    h    = count / 2;                    // half size (count even)
+    const int    up[2] = {up0, up1};
+    const int    ca[2] = {c0a, c1a};
+    const int    cb[2] = {c0b, c1b};
+    const int    ct[2] = {ct0, ct1};
+
+    // ---- REDUCE (leaf -> root) ----
+    for (int t = 0; t < 2; ++t) {
+        const int  base   = t * h;                    // this tree's half
+        const int  kid[2] = {ca[t], cb[t]};
+        for (int k = 0; k < 2; ++k) {
+            if (kid[k] < 0) continue;                 // missing child
+            if (lead) {
+                while (flag[t * 2 + k] == 0u) { __builtin_amdgcn_s_sleep(1); }
+                flag[t * 2 + k] = 0u;                 // re-arm
+                __threadfence_system();
+            }
+            grid.sync();
+            for (size_t i = gtid; i < (size_t)h; i += nthr)
+                data[base + i] += recv[(size_t)k * h + i];
+            grid.sync();
+        }
+        if (up[t] >= 0) {                             // not this tree's root
+            grid.sync();                              // adds visible before send
+            dt_send_half(ctx, grid, up[t], recv_idx, (size_t)ct[t] * h,
+                         data_idx, data, (size_t)base, h,
+                         flag_idx, (size_t)(t * 2 + ct[t]), one_idx,
+                         lead, gtid, nthr);
+        }
+    }
+
+    // ---- BROADCAST (root -> leaf) ----
+    for (int t = 0; t < 2; ++t) {
+        const int base = t * h;
+        if (up[t] >= 0 && lead) {                     // non-root waits parent
+            while (flag[4 + t] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            flag[4 + t] = 0u;
+            __threadfence_system();
+        }
+        grid.sync();                                  // parent/root data visible
+        const int kid[2] = {ca[t], cb[t]};
+        for (int k = 0; k < 2; ++k) {
+            if (kid[k] < 0) continue;
+            dt_send_half(ctx, grid, kid[k], data_idx, (size_t)base,
+                         data_idx, data, (size_t)base, h,
+                         flag_idx, (size_t)(4 + t), one_idx,
+                         lead, gtid, nthr);
+        }
+    }
+}
+
+// Host driver for the flat double binary tree all-reduce. count must be even;
+// recv >= count floats; flag host-pinned >= 6 uints, memset to 0 ONCE by the
+// caller before the first call (re-armed in-kernel thereafter).
+inline void allreduce_double_tree(gicc::Runtime& rt,
+                                  const gicc::Buffer& data_buf, float* d_data,
+                                  const gicc::Buffer& recv_buf, float* d_recv,
+                                  const gicc::Buffer& flag_buf, unsigned int* d_flag,
+                                  const gicc::Buffer& one_buf, int count) {
+    const int N    = rt.size();
+    const int rank = rt.rank();
+    static int grid_blocks = 0;
+    const int  block_threads = 256;
+    if (grid_blocks == 0) {
+        int per_sm = 0, n_sm = 0;
+        (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
+            &per_sm, (const void*)dtree_allreduce_kernel, block_threads, 0);
+        (void)hipDeviceGetAttribute(&n_sm, hipDeviceAttributeMultiprocessorCount,
+                                    rt.gpu_id());
+        grid_blocks = (per_sm > 0 && n_sm > 0) ? per_sm * n_sm : 1;
+    }
+
+    int up0, c0a, c0b, ct0, up1, c1a, c1b, ct1;
+    dt_dtree(N, rank, up0, c0a, c0b, ct0, up1, c1a, c1b, ct1);
+
+    gicc::DeviceCtx* d = rt.prepare();
+    int data_idx = data_buf.index, recv_idx = recv_buf.index;
+    int flag_idx = flag_buf.index, one_idx = one_buf.index;
+    int r = rank, c = count;
+    volatile unsigned int* fp = (volatile unsigned int*)d_flag;
+    void* params[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx, &r, &c,
+                      &up0, &c0a, &c0b, &ct0, &up1, &c1a, &c1b, &ct1,
+                      &d_data, &d_recv, &fp};
+    (void)hipLaunchCooperativeKernel((const void*)dtree_allreduce_kernel,
+                                     dim3(grid_blocks), dim3(block_threads),
+                                     params, 0, 0);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+    rt.barrier();
+}
+
+//============================================================================
+// HIERARCHICAL double binary tree all-reduce (K nodes, P ranks/node). Keeps the
+// winning intra-node xGMI structure of ring_allreduce_hier_direct and replaces
+// the inter-node phase with a double binary tree OVER THE K NODES (one tree per
+// same-local-position group, all P groups concurrent). This is the variant that
+// generalizes the 2-node hier to K>=4 nodes: the flat ring's K-1 serial cross
+// steps (or the K=2-only single exchange) become a 2*log2(K)-depth tree.
+//
+//   Phase 1  intra-node DIRECT reduce-scatter (xGMI): rank lp sums slice lp over
+//            all P same-node ranks -> owns the node-local partial of slice lp.
+//   Phase 2  inter-node double tree on slice lp across the K nodes (proxy). The
+//            virtual ranks are node ids; physical peer = vrank*P + lp. slice is
+//            split in half, half0 over tree T0, half1 over T1 (role-swapped),
+//            so every node drives a full-bandwidth subtree for one half.
+//   Phase 3  intra-node DIRECT all-gather (xGMI, reuses hier_direct_ag_kernel).
+//
+// At K=2 the inter-node tree degenerates to a single balanced exchange (each
+// node is root of one half, leaf of the other) -> same result as hier_direct,
+// no real tree depth. The tree only earns its log(K) advantage at K>=4 nodes.
+// NOTE: like the flat tree, phase 2 is NOT pipelined, so at K>=4 it pays a
+// depth*slice critical-path cost on large messages (chunk phase 2 to fix).
+// Requires count % P == 0 and (count/P) even. flag host-pinned >= 6 uints
+// (memset once); recv >= count floats.
+//
+// STABILITY: the caller MUST rt.set_ipc_fastpath(false) (the same-node flag
+// gicc::put otherwise routes through the IPC/SDMA fast path and contends with
+// cross-node proxy RMA -> AMD+CXI SDMA deadlock). With that set, the flat tree
+// is stable in sustained loops. This hierarchical variant has a RESIDUAL
+// intermittent deadlock in kernel 1's cooperative proxy path that persists even
+// with ipc_fastpath off (a single call is always reliable - correctness passes
+// every size every run - but sustained back-to-back timing intermittently hangs
+// in k1, never k2; the protocol is deadlock-free and correctness never fails,
+// so it is a runtime/proxy-level race in the cooperative + interleaved-grid.sync
+// + proxy-quiet pattern, not an algorithm bug). Because the tree has NO perf
+// benefit at K=2 (it is depth-1, strictly worse than the fused `hier`), the
+// coll_dtree_test timing path for this collective is opt-in (DTREE_HIER_TIME);
+// the residual race is future work for the K>=4 regime where the tree helps.
+//============================================================================
+
+// Fused phase 1 + 2 (cooperative): intra-node direct reduce-scatter, then the
+// inter-node double tree on slice lp across the K nodes. Fusing them into ONE
+// cooperative kernel (grid.sync between) mirrors hier_direct's RS+cross kernel
+// and keeps the driver at 2 kernels / 2 resets — the proven-stable structure
+// (a 3rd reset/proxy-drain cycle races the CPU proxy ring). The inter-node tree
+// is over VIRTUAL ranks = node ids; physical peer = vrank*P + lp.
+__global__ void dtree_hier_rs_tree_kernel(gicc::DeviceCtx* ctx,
+                                          int data_idx, int recv_idx, int flag_idx,
+                                          int one_idx, int rank, int P, int count,
+                                          int up0, int c0a, int c0b, int ct0,
+                                          int up1, int c1a, int c1b, int ct1,
+                                          float* data, float* recv,
+                                          volatile unsigned int* flag) {
+    cg::grid_group grid = cg::this_grid();
+    const bool   lead = (blockIdx.x == 0 && threadIdx.x == 0);
+    const size_t gtid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t nthr = (size_t)gridDim.x * blockDim.x;
+    const int    nb   = ctx->ipc_n_bufs;
+    void** ipc = ctx->peer_ipc_base;
+    const int    lp        = rank % P;
+    const int    node_base = rank - lp;
+    const int    slice     = count / P;
+    const int    hh        = slice / 2;               // half of my slice
+    const size_t sbase     = (size_t)lp * slice;      // my slice region
+    const int    up[2] = {up0, up1};
+    const int    ca[2] = {c0a, c1a};
+    const int    cb[2] = {c0b, c1b};
+    const int    ct[2] = {ct0, ct1};
+
+    // ---- intra-node direct reduce-scatter (xGMI; reads peers' originals) ----
+    for (size_t e = gtid; e < (size_t)slice; e += nthr) {
+        float acc = data[sbase + e];
+        for (int q = 0; q < P; ++q) {
+            if (q == lp) continue;
+            const float* pq = (ipc && nb)
+                ? (const float*)ipc[(size_t)(node_base + q) * nb + data_idx] : nullptr;
+            if (pq) acc += pq[sbase + e];
+        }
+        data[sbase + e] = acc;
+    }
+    grid.sync();                                      // node-local slice ready
+
+    // ---- inter-node double tree REDUCE (leaf node -> root node) ----
+    for (int t = 0; t < 2; ++t) {
+        const size_t base = sbase + (size_t)t * hh;
+        const int    kid[2] = {ca[t], cb[t]};
+        for (int k = 0; k < 2; ++k) {
+            if (kid[k] < 0) continue;
+            if (lead) {
+                while (flag[t * 2 + k] == 0u) { __builtin_amdgcn_s_sleep(1); }
+                flag[t * 2 + k] = 0u;
+                __threadfence_system();
+            }
+            grid.sync();
+            for (size_t i = gtid; i < (size_t)hh; i += nthr)
+                data[base + i] += recv[(size_t)k * hh + i];
+            grid.sync();
+        }
+        if (up[t] >= 0) {
+            grid.sync();
+            dt_send_half(ctx, grid, up[t] * P + lp, recv_idx, (size_t)ct[t] * hh,
+                         data_idx, data, base, hh,
+                         flag_idx, (size_t)(t * 2 + ct[t]), one_idx,
+                         lead, gtid, nthr);
+        }
+    }
+
+    // ---- BROADCAST (root node -> leaf node) ----
+    for (int t = 0; t < 2; ++t) {
+        const size_t base = sbase + (size_t)t * hh;
+        if (up[t] >= 0 && lead) {
+            while (flag[4 + t] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            flag[4 + t] = 0u;
+            __threadfence_system();
+        }
+        grid.sync();
+        const int kid[2] = {ca[t], cb[t]};
+        for (int k = 0; k < 2; ++k) {
+            if (kid[k] < 0) continue;
+            dt_send_half(ctx, grid, kid[k] * P + lp, data_idx, base,
+                         data_idx, data, base, hh,
+                         flag_idx, (size_t)(4 + t), one_idx,
+                         lead, gtid, nthr);
+        }
+    }
+}
+
+inline void allreduce_double_tree_hier(gicc::Runtime& rt,
+                                       const gicc::Buffer& data_buf, float* d_data,
+                                       const gicc::Buffer& recv_buf, float* d_recv,
+                                       const gicc::Buffer& flag_buf, unsigned int* d_flag,
+                                       const gicc::Buffer& one_buf, int count, int P) {
+    const int N    = rt.size();
+    const int rank = rt.rank();
+    const int K    = N / P;                           // number of nodes
+    const int nid  = rank / P;                        // my node id (virtual rank)
+
+    static int gb_tree = 0;
+    const int  bt = 256;
+    if (gb_tree == 0) {
+        int per_sm = 0, n_sm = 0;
+        (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
+            &per_sm, (const void*)dtree_hier_rs_tree_kernel, bt, 0);
+        (void)hipDeviceGetAttribute(&n_sm, hipDeviceAttributeMultiprocessorCount, rt.gpu_id());
+        gb_tree = (per_sm > 0 && n_sm > 0) ? per_sm * n_sm : 1;
+    }
+
+    int data_idx = data_buf.index, recv_idx = recv_buf.index;
+    int flag_idx = flag_buf.index, one_idx = one_buf.index;
+
+    static int dbg = (std::getenv("GICC_DTREEH_DBG") != nullptr) ? 1 : 0;
+    #define DTH_CKPT(msg) do { if (dbg && rank == 0) \
+        fprintf(stderr, "[dtreeh %d B] " msg "\n", count * 4); } while (0)
+
+    // Kernel 1 (cooperative): intra-node direct reduce-scatter + inter-node
+    // double tree over K nodes. 2 kernels / 2 resets total (the proven-stable
+    // hier_direct structure; a 3rd reset/proxy-drain cycle races the ring).
+    int up0, c0a, c0b, ct0, up1, c1a, c1b, ct1;
+    dt_dtree(K, nid, up0, c0a, c0b, ct0, up1, c1a, c1b, ct1);
+    DTH_CKPT("k1(rs+tree) launch");
+    gicc::DeviceCtx* d = rt.prepare();
+    int rk = rank, Px = P, c = count;
+    volatile unsigned int* fp = (volatile unsigned int*)d_flag;
+    void* p1[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx, &rk, &Px, &c,
+                  &up0, &c0a, &c0b, &ct0, &up1, &c1a, &c1b, &ct1,
+                  &d_data, &d_recv, &fp};
+    (void)hipLaunchCooperativeKernel((const void*)dtree_hier_rs_tree_kernel,
+                                     dim3(gb_tree), dim3(bt), p1, 0, 0);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+    rt.barrier();                                     // all global slices ready
+    DTH_CKPT("k1 done");
+
+    // Kernel 2: intra-node direct all-gather (reuses hier_direct_ag_kernel).
+    d = rt.prepare();
+    hipLaunchKernelGGL(hier_direct_ag_kernel, dim3(512), dim3(bt), 0, 0,
+                       d, data_idx, N, rank, count, P, d_data);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+    rt.barrier();
+    DTH_CKPT("k2(ag) done");
+    #undef DTH_CKPT
+}
+#endif  // GICC_CPU_PROXY
+
+//============================================================================
 // PIPELINED cooperative ring all-reduce. Splits each ring step's chunk into P
 // segments and issues segment p+1's transfer (a non-blocking proxy push)
 // BEFORE reducing segment p, so the NIC streams seg p+1 while the GPU adds
