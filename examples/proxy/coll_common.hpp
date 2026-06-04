@@ -1102,6 +1102,11 @@ __global__ void dtree_allreduce_kernel(gicc::DeviceCtx* ctx,
     }
 }
 
+// Kernel-internal timing accumulators (populated when GICC_DTREE_KTIME is set),
+// so a caller can report on-device tree time excluding host launch/reset/barrier.
+inline double& dtree_kernel_us_acc() { static double a = 0.0; return a; }
+inline int&    dtree_kernel_calls()  { static int c = 0;      return c; }
+
 // Host driver for the flat double binary tree all-reduce. count must be even;
 // recv >= count floats; flag host-pinned >= 6 uints, memset to 0 ONCE by the
 // caller before the first call (re-armed in-kernel thereafter).
@@ -1124,6 +1129,8 @@ inline void allreduce_double_tree(gicc::Runtime& rt,
         // grid.sync() deadlock-prone (no slack for all blocks to be resident).
         int spm = (per_sm > 1) ? per_sm / 2 : 1;
         grid_blocks = (spm > 0 && n_sm > 0) ? spm * n_sm : 1;
+        if (std::getenv("DTREE_PIPE_GB"))            // debug: override grid size
+            grid_blocks = std::atoi(std::getenv("DTREE_PIPE_GB"));
     }
 
     int up0, c0a, c0b, ct0, up1, c1a, c1b, ct1;
@@ -1137,9 +1144,24 @@ inline void allreduce_double_tree(gicc::Runtime& rt,
     void* params[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx, &r, &c,
                       &up0, &c0a, &c0b, &ct0, &up1, &c1a, &c1b, &ct1,
                       &d_data, &d_recv, &fp};
+    // Optional kernel-internal timing (GICC_DTREE_KTIME): isolates the on-device
+    // tree+proxy time from the host launch/reset/barrier ceremony, for a fair
+    // algorithm comparison vs MPI (which launches no kernel).
+    static int ktime = (std::getenv("GICC_DTREE_KTIME") != nullptr) ? 1 : 0;
+    hipEvent_t ke0, ke1;
+    if (ktime) { (void)hipEventCreate(&ke0); (void)hipEventCreate(&ke1);
+                 (void)hipEventRecord(ke0, 0); }
     (void)hipLaunchCooperativeKernel((const void*)dtree_allreduce_kernel,
                                      dim3(grid_blocks), dim3(block_threads),
                                      params, 0, 0);
+    if (ktime) {
+        (void)hipEventRecord(ke1, 0);
+        (void)hipEventSynchronize(ke1);
+        float ms = 0.f; (void)hipEventElapsedTime(&ms, ke0, ke1);
+        dtree_kernel_us_acc() += (double)ms * 1000.0;
+        dtree_kernel_calls()  += 1;
+        (void)hipEventDestroy(ke0); (void)hipEventDestroy(ke1);
+    }
     (void)hipDeviceSynchronize();
     rt.reset();
     rt.barrier();

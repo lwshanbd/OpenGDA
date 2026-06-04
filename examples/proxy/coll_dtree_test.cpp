@@ -129,6 +129,8 @@ int main(int argc, char** argv) {
             gicc_coll::allreduce_double_tree(rt, data_buf, d_data, recv_buf, d_recv,
                                              flag_buf, d_flag, one_buf, count);
         rt.barrier();
+        gicc_coll::dtree_kernel_us_acc() = 0.0;       // reset kernel-time accumulator
+        gicc_coll::dtree_kernel_calls()  = 0;
         double t0 = MPI_Wtime();
         for (int it = 0; it < iters; ++it) {
             gicc_coll::allreduce_double_tree(rt, data_buf, d_data, recv_buf, d_recv,
@@ -136,6 +138,8 @@ int main(int argc, char** argv) {
             rt.barrier();   // standalone completion (no overlap of consecutive calls)
         }
         double gicc_us = (MPI_Wtime() - t0) / iters * 1e6;
+        double kcalls = (double)gicc_coll::dtree_kernel_calls();
+        double kern_us = kcalls > 0 ? gicc_coll::dtree_kernel_us_acc() / kcalls : 0.0;
 
         for (int w = 0; w < warmup; ++w)
             MPI_Allreduce(d_mpi_in, d_mpi_out, count, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
@@ -145,12 +149,14 @@ int main(int argc, char** argv) {
             MPI_Allreduce(d_mpi_in, d_mpi_out, count, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
         double mpi_us = (MPI_Wtime() - t0) / iters * 1e6;
 
-        double gmax, mmax;
+        double gmax, mmax, kmax;
         MPI_Reduce(&gicc_us, &gmax, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
         MPI_Reduce(&mpi_us,  &mmax, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&kern_us, &kmax, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
         if (rank == 0)
-            printf("%-10s %12zu | %14.2f %14.2f %7.2fx\n",
-                   "ar-dtree", bytes, gmax, mmax, mmax / gmax);
+            printf("%-10s %12zu | %14.2f %14.2f %7.2fx | kern %10.2f (%.2fx)\n",
+                   "ar-dtree", bytes, gmax, mmax, mmax / gmax,
+                   kmax, kmax > 0 ? mmax / kmax : 0.0);
     }
 
     // ---- GICC cooperative RING (the double tree's apples-to-apples rival) ----
