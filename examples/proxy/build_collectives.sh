@@ -85,5 +85,6 @@ build_one alltoall.cpp        alltoall_proxy        proxy
 build_one alltoall.cpp        alltoall_dwq          dwq
 build_one coll_bench.cpp      coll_bench_proxy      proxy
 build_one coll_bench.cpp      coll_bench_dwq        dwq
+build_one coll_ll_test.cpp    coll_ll_test_proxy    proxy
 
 echo "All collective binaries built into ${GICC_ROOT}/build_ofi/"

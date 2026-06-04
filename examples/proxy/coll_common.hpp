@@ -612,6 +612,163 @@ inline void ring_allreduce_pipe(gicc::Runtime& rt,
     rt.reset();
     rt.barrier();
 }
+
+//============================================================================
+// LL (low-latency) PACKET ring all-reduce — the NCCL/UCCL trick.
+//
+// The arrival flag is packed INTO the data line (16B = {f0bits,flag,f1bits,
+// flag}), so one RMA write carries data+flag and the receiver detects arrival
+// by polling the flag in the SAME line — NO separate, ordered flag message
+// (which is what made ring_allreduce_pipe a net loss). Relies on 8-byte write
+// atomicity (each (data,flag) pair) so a matching flag implies valid data.
+// Flags are a per-call MONOTONIC base (no per-iteration re-zeroing); distinct
+// recv slot per (phase,step) so stale lines carry an older (smaller) flag the
+// receiver simply never matches. Cost: 2x wire bytes (LL) — for SMALL msgs.
+//
+// MEASURED RESULT (2026-06-03, 8 ranks/2 nodes Tioga): CORRECT at every size
+// (the flag-in-data poll works cross-node on CXI), but ~12x SLOWER than
+// ring_allreduce_coop (8KB: 8441us vs 686us). This is an AMD platform issue,
+// NOT the algorithm: NCCL's LL is fast on NVIDIA because a volatile global
+// load there is cheap AND system-coherent, so polling NIC-written HBM is free.
+// On gfx90a a volatile global load is served from L2, which the NIC's HBM write
+// does NOT invalidate -> the poll spins until natural L2 eviction (~hundreds of
+// us); and a system-scope atomic load (the coherent fix) serializes the memory
+// system and is even slower in a wide spin. Realizing LL perf on AMD needs
+// RCCL-style cache-control load intrinsics (buffer loads w/ glc/dlc bits) to
+// make the poll cheap+coherent -- a deeper platform-specific effort. Until
+// then, ring_allreduce_coop remains the best GICC collective on AMD. Kept as a
+// documented correctness-validated prototype of the NCCL/UCCL flag-in-data
+// approach (see reference/nccl, reference/uccl).
+//============================================================================
+struct LLPkt { unsigned int d0, f0, d1, f1; };   // 16B: 2 floats + flag x2
+
+__device__ __forceinline__
+bool ll_read(const LLPkt* p, unsigned int flag, float& a, float& b) {
+    // Two 8-byte loads, each holds one (data,flag) pair contiguously, so a
+    // matching flag-half implies the data-half of the SAME write. Use a
+    // SYSTEM-scope atomic load: on AMD (gfx90a) a plain volatile global load is
+    // served from L2, which the NIC's HBM write does not invalidate, so the
+    // poll would spin until the line is naturally evicted (~hundreds of us).
+    // The system-scope load is coherent with the NIC write.
+    const volatile unsigned long long* q =
+        reinterpret_cast<const volatile unsigned long long*>(p);
+    unsigned long long lo = q[0];
+    unsigned long long hi = q[1];
+    if ((unsigned)(lo >> 32) != flag || (unsigned)(hi >> 32) != flag) return false;
+    a = __uint_as_float((unsigned)lo);
+    b = __uint_as_float((unsigned)hi);
+    return true;
+}
+
+// Both phases in one cooperative kernel. pkt_recv has 2*(N-1) slots, each
+// (chunk/2) lines: RS uses slots [0,N-1), AG uses [N-1,2N-2).
+__global__ void coop_allreduce_ll_kernel(gicc::DeviceCtx* ctx,
+                                         int data_idx, int pktsend_idx,
+                                         int pktrecv_idx, int N, int rank,
+                                         int chunk, unsigned int flag_base,
+                                         float* data, LLPkt* pkt_send,
+                                         LLPkt* pkt_recv) {
+    cg::grid_group grid = cg::this_grid();
+    const bool   lead = (blockIdx.x == 0 && threadIdx.x == 0);
+    const size_t gtid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t nthr = (size_t)gridDim.x * blockDim.x;
+    const int    next = (rank + 1) % N;
+    const size_t lines = (size_t)chunk / 2;        // 2 floats per line
+    const size_t line_bytes = sizeof(LLPkt);
+
+    // ---- reduce-scatter ----
+    for (int s = 0; s < N - 1; ++s) {
+        const int sc = (rank - s + N) % N;
+        const int rc = (rank - 1 - s + N) % N;
+        const unsigned int flag = flag_base + (unsigned)s + 1u;
+        for (size_t l = gtid; l < lines; l += nthr) {
+            pkt_send[l].d0 = __float_as_uint(data[(size_t)sc * chunk + 2 * l]);
+            pkt_send[l].f0 = flag;
+            pkt_send[l].d1 = __float_as_uint(data[(size_t)sc * chunk + 2 * l + 1]);
+            pkt_send[l].f1 = flag;
+        }
+        __threadfence_system();                    // packed data visible to NIC
+        grid.sync();
+        if (lead) {
+            gicc::put(ctx, next, pktrecv_idx, (size_t)s * lines * line_bytes,
+                      pktsend_idx, 0, lines * line_bytes);
+            gicc::quiet(ctx);                       // pkt_send reusable next step
+        }
+        LLPkt* slot = pkt_recv + (size_t)s * lines;
+        for (size_t l = gtid; l < lines; l += nthr) {
+            float a, b;
+            while (!ll_read(slot + l, flag, a, b)) { __builtin_amdgcn_s_sleep(1); }
+            data[(size_t)rc * chunk + 2 * l]     += a;
+            data[(size_t)rc * chunk + 2 * l + 1] += b;
+        }
+        grid.sync();
+    }
+    // ---- all-gather (overwrite, no reduce) ----
+    for (int s = 0; s < N - 1; ++s) {
+        const int sc = (rank + 1 - s + 2 * N) % N;  // chunk I forward
+        const int rc = (rank - s + N) % N;          // chunk I receive
+        const unsigned int flag = flag_base + (unsigned)(N - 1 + s) + 1u;
+        for (size_t l = gtid; l < lines; l += nthr) {
+            pkt_send[l].d0 = __float_as_uint(data[(size_t)sc * chunk + 2 * l]);
+            pkt_send[l].f0 = flag;
+            pkt_send[l].d1 = __float_as_uint(data[(size_t)sc * chunk + 2 * l + 1]);
+            pkt_send[l].f1 = flag;
+        }
+        __threadfence_system();
+        grid.sync();
+        if (lead) {
+            gicc::put(ctx, next, pktrecv_idx,
+                      (size_t)(N - 1 + s) * lines * line_bytes,
+                      pktsend_idx, 0, lines * line_bytes);
+            gicc::quiet(ctx);
+        }
+        LLPkt* slot = pkt_recv + (size_t)(N - 1 + s) * lines;
+        for (size_t l = gtid; l < lines; l += nthr) {
+            float a, b;
+            while (!ll_read(slot + l, flag, a, b)) { __builtin_amdgcn_s_sleep(1); }
+            data[(size_t)rc * chunk + 2 * l]     = a;
+            data[(size_t)rc * chunk + 2 * l + 1] = b;
+        }
+        grid.sync();
+    }
+}
+
+// Host driver. chunk must be even. pkt_send >= (chunk/2) lines; pkt_recv >=
+// 2*(N-1)*(chunk/2) lines. flag_base is monotonic across calls (caller bumps
+// by 2*(N-1) each call) so no flag buffer ever needs zeroing.
+inline void ring_allreduce_ll(gicc::Runtime& rt,
+                              const gicc::Buffer& data_buf, float* d_data,
+                              const gicc::Buffer& pktsend_buf, LLPkt* d_pkt_send,
+                              const gicc::Buffer& pktrecv_buf, LLPkt* d_pkt_recv,
+                              int chunk, unsigned int flag_base) {
+    const int N = rt.size();
+    const int rank = rt.rank();
+
+    static int grid_blocks = 0;
+    const int  block_threads = 256;
+    if (grid_blocks == 0) {
+        int per_sm = 0, n_sm = 0;
+        (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
+            &per_sm, (const void*)coop_allreduce_ll_kernel, block_threads, 0);
+        (void)hipDeviceGetAttribute(&n_sm, hipDeviceAttributeMultiprocessorCount,
+                                    rt.gpu_id());
+        grid_blocks = (per_sm > 0 && n_sm > 0) ? per_sm * n_sm : 1;
+    }
+
+    rt.barrier();   // no flag memset needed (monotonic flags); just line up ranks
+    gicc::DeviceCtx* d = rt.prepare();
+    int data_idx = data_buf.index, ps_idx = pktsend_buf.index, pr_idx = pktrecv_buf.index;
+    int n = N, r = rank, c = chunk;
+    unsigned int fb = flag_base;
+    void* params[] = {&d, &data_idx, &ps_idx, &pr_idx, &n, &r, &c, &fb,
+                      &d_data, &d_pkt_send, &d_pkt_recv};
+    (void)hipLaunchCooperativeKernel((const void*)coop_allreduce_ll_kernel,
+                                     dim3(grid_blocks), dim3(block_threads),
+                                     params, 0, 0);
+    (void)hipDeviceSynchronize();
+    rt.reset();
+    rt.barrier();
+}
 #endif  // GICC_CPU_PROXY
 
 // transport_name - for banner printing.
