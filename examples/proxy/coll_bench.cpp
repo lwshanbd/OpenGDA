@@ -259,6 +259,41 @@ int main(int argc, char** argv) {
                    "ar-coop", arr_bytes, gmax, mmax, mmax / gmax);
     }
 
+    // ---- coop with per-step sub-put pipelining (splits = puts/quiet) ----
+    // Raises proxy pipeline depth to keep the NIC busy on large messages.
+    for (int sp : {2, 4, 8}) {
+        for (int si = 0; si < n_sizes; ++si) {
+            const int chunk = chunks[si];
+            const size_t arr_bytes = (size_t)N * chunk * sizeof(float);
+            for (int w = 0; w < warmup; ++w)
+                gicc_coll::ring_allreduce_coop(rt, fz_buf, d_fz, fz_recv, d_fz_recv,
+                                               flag_buf, d_flag, one_buf, chunk, sp);
+            rt.barrier();
+            double t0 = MPI_Wtime();
+            for (int it = 0; it < iters; ++it)
+                gicc_coll::ring_allreduce_coop(rt, fz_buf, d_fz, fz_recv, d_fz_recv,
+                                               flag_buf, d_flag, one_buf, chunk, sp);
+            double gicc_us = (MPI_Wtime() - t0) / iters * 1e6;
+
+            const int count = N * chunk;
+            MPI_Barrier(MPI_COMM_WORLD);
+            t0 = MPI_Wtime();
+            for (int it = 0; it < iters; ++it)
+                MPI_Allreduce(d_mpi_in, d_mpi_out, count, MPI_FLOAT, MPI_SUM,
+                              MPI_COMM_WORLD);
+            double mpi_us = (MPI_Wtime() - t0) / iters * 1e6;
+
+            double gmax, mmax;
+            MPI_Reduce(&gicc_us, &gmax, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+            MPI_Reduce(&mpi_us,  &mmax, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+            if (rank == 0) {
+                char name[16]; snprintf(name, sizeof(name), "ar-coop/%d", sp);
+                printf("%-10s %12zu | %14.2f %14.2f %7.2fx\n",
+                       name, arr_bytes, gmax, mmax, mmax / gmax);
+            }
+        }
+    }
+
     // ---- PIPELINED cooperative all-reduce (overlap transfer w/ reduce) ----
     for (int si = 0; si < n_sizes; ++si) {
         const int chunk = chunks[si];

@@ -376,9 +376,30 @@ inline void ring_allreduce_fused(gicc::Runtime& rt,
 //============================================================================
 namespace cg = cooperative_groups;
 
+// Issue one chunk as `splits` independent sub-puts WITHOUT quieting between
+// them, so the proxy keeps `splits` fi_writes in flight (raises pipeline depth
+// = puts-per-quiet, the one CPU-side lever with teeth on cross-node bandwidth).
+// Still ONE quiet + ONE flag per ring step afterward -> no extra signaling.
+__device__ inline void put_split(gicc::DeviceCtx* ctx, int next,
+                                 int dst_idx, size_t dst_off,
+                                 int src_idx, size_t src_off,
+                                 size_t bytes, int splits) {
+    if (splits <= 1) {
+        gicc::put(ctx, next, dst_idx, dst_off, src_idx, src_off, bytes);
+        return;
+    }
+    const size_t sub = bytes / splits;
+    for (int k = 0; k < splits; ++k) {
+        const size_t off = (size_t)k * sub;
+        const size_t len = (k == splits - 1) ? (bytes - off) : sub;
+        gicc::put(ctx, next, dst_idx, dst_off + off, src_idx, src_off + off, len);
+    }
+}
+
 __global__ void coop_allreduce_kernel(gicc::DeviceCtx* ctx,
                                       int data_idx, int recv_idx, int flag_idx,
                                       int one_idx, int N, int rank, int chunk,
+                                      int splits,
                                       float* data, const float* recv,
                                       volatile unsigned int* flag) {
     cg::grid_group grid = cg::this_grid();
@@ -393,8 +414,8 @@ __global__ void coop_allreduce_kernel(gicc::DeviceCtx* ctx,
         const int sc = (rank - s + N) % N;
         const int rc = (rank - 1 - s + N) % N;
         if (lead) {
-            gicc::put(ctx, next, recv_idx, (size_t)s * cb,
-                      data_idx, (size_t)sc * cb, cb);
+            put_split(ctx, next, recv_idx, (size_t)s * cb,
+                      data_idx, (size_t)sc * cb, cb, splits);
             gicc::quiet(ctx);
             gicc::put(ctx, next, flag_idx, (size_t)s * sizeof(unsigned int),
                       one_idx, 0, sizeof(unsigned int));
@@ -411,8 +432,8 @@ __global__ void coop_allreduce_kernel(gicc::DeviceCtx* ctx,
     for (int s = 0; s < N - 1; ++s) {
         const int sc = (rank + 1 - s + 2 * N) % N;
         if (lead) {
-            gicc::put(ctx, next, data_idx, (size_t)sc * cb,
-                      data_idx, (size_t)sc * cb, cb);
+            put_split(ctx, next, data_idx, (size_t)sc * cb,
+                      data_idx, (size_t)sc * cb, cb, splits);
             gicc::quiet(ctx);
             gicc::put(ctx, next, flag_idx,
                       (size_t)(N - 1 + s) * sizeof(unsigned int),
@@ -433,7 +454,7 @@ inline void ring_allreduce_coop(gicc::Runtime& rt,
                                 const gicc::Buffer& recv_buf, float* d_recv,
                                 const gicc::Buffer& flag_buf, unsigned int* d_flag,
                                 const gicc::Buffer& one_buf,
-                                int chunk) {
+                                int chunk, int splits = 1) {
     const int N    = rt.size();
     const int rank = rt.rank();
 
@@ -447,6 +468,7 @@ inline void ring_allreduce_coop(gicc::Runtime& rt,
                                     rt.gpu_id());
         grid_blocks = (per_sm > 0 && n_sm > 0) ? per_sm * n_sm : 1;
     }
+    if (splits < 1) splits = 1;
 
     (void)hipMemset(d_flag, 0, (size_t)2 * (N - 1) * sizeof(unsigned int));
     (void)hipDeviceSynchronize();
@@ -455,10 +477,10 @@ inline void ring_allreduce_coop(gicc::Runtime& rt,
     gicc::DeviceCtx* d = rt.prepare();
     int   data_idx = data_buf.index, recv_idx = recv_buf.index;
     int   flag_idx = flag_buf.index, one_idx = one_buf.index;
-    int   n = N, r = rank, c = chunk;
+    int   n = N, r = rank, c = chunk, sp = splits;
     volatile unsigned int* fp = (volatile unsigned int*)d_flag;
     void* params[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx,
-                      &n, &r, &c, &d_data, &d_recv, &fp};
+                      &n, &r, &c, &sp, &d_data, &d_recv, &fp};
     (void)hipLaunchCooperativeKernel((const void*)coop_allreduce_kernel,
                                      dim3(grid_blocks), dim3(block_threads),
                                      params, 0, 0);
