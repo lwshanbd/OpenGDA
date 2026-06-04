@@ -1526,6 +1526,20 @@ inline void allreduce_double_tree_hier(gicc::Runtime& rt,
         fprintf(stderr, "[dtreeh r%d call%d %d B] " msg "\n", rank, my_seq, count * 4); \
         fflush(stderr); } } while (0)
 
+    // Optional phase breakdown: how much of the wall time is the 2 host
+    // barriers vs the 2 device kernels (incl. launch+sync) vs the 2 resets.
+    // Settles "is the host barrier the floor?" with numbers, not assertion.
+    // Running averages printed on rank 0 each call when GICC_DTREEH_TIME set.
+#ifdef GICC_BOOTSTRAP_MPI
+    static int tdbg = (std::getenv("GICC_DTREEH_TIME") != nullptr) ? 1 : 0;
+    double tw = tdbg ? MPI_Wtime() : 0.0, tk = 0, tb = 0, tr = 0, t0;
+    #define DTH_T(v) do { if (tdbg) { (v) += MPI_Wtime() - t0; } } while (0)
+    #define DTH_T0() do { if (tdbg) t0 = MPI_Wtime(); } while (0)
+#else
+    #define DTH_T(v)  do {} while (0)
+    #define DTH_T0()  do {} while (0)
+#endif
+
     // Kernel 1 (cooperative): intra-node direct reduce-scatter + inter-node
     // double tree over K nodes. 2 kernels / 2 resets total (the proven-stable
     // hier_direct structure; a 3rd reset/proxy-drain cycle races the ring).
@@ -1538,25 +1552,39 @@ inline void allreduce_double_tree_hier(gicc::Runtime& rt,
     void* p1[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx, &rk, &Px, &c,
                   &up0, &c0a, &c0b, &ct0, &up1, &c1a, &c1b, &ct1,
                   &d_data, &d_recv, &fp};
+    DTH_T0();
     (void)hipLaunchCooperativeKernel((const void*)dtree_hier_rs_tree_kernel,
                                      dim3(gb_tree), dim3(bt), p1, 0, 0);
     (void)hipDeviceSynchronize();
+    DTH_T(tk);
     DTH_CKPT("2-k1-sync");
-    rt.reset();
+    DTH_T0(); rt.reset(); DTH_T(tr);
     DTH_CKPT("3-k1-reset-enter-bar");
-    hbar();                                           // all global slices ready
+    DTH_T0(); hbar(); DTH_T(tb);                       // all global slices ready
     DTH_CKPT("4-k1-barrier-exit");
 
     // Kernel 2: intra-node direct all-gather (reuses hier_direct_ag_kernel).
     d = rt.prepare();
+    DTH_T0();
     hipLaunchKernelGGL(hier_direct_ag_kernel, dim3(512), dim3(bt), 0, 0,
                        d, data_idx, N, rank, count, P, d_data);
     (void)hipDeviceSynchronize();
+    DTH_T(tk);
     DTH_CKPT("5-k2-sync-enter-bar");
-    rt.reset();
-    hbar();
+    DTH_T0(); rt.reset(); DTH_T(tr);
+    DTH_T0(); hbar(); DTH_T(tb);
     DTH_CKPT("6-k2-barrier-exit");
     #undef DTH_CKPT
+#ifdef GICC_BOOTSTRAP_MPI
+    if (tdbg && rank == 0) {
+        double tt = MPI_Wtime() - tw;
+        fprintf(stderr, "[dtreeh-time %d B] kernels=%.1f barriers=%.1f resets=%.1f "
+                "total=%.1f us\n", count * 4,
+                tk * 1e6, tb * 1e6, tr * 1e6, tt * 1e6);
+    }
+    #undef DTH_T
+    #undef DTH_T0
+#endif
 }
 #endif  // GICC_CPU_PROXY
 
