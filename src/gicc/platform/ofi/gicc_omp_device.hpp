@@ -59,7 +59,9 @@ inline uint64_t atomic_push(gicc::proxy::ProxyRing* r, const gicc::proxy::Transf
         h = __atomic_load_n(&r->head, __ATOMIC_RELAXED);
         uint64_t t = __atomic_load_n(&r->tail, __ATOMIC_RELAXED);
         while (h - t == kCap) {                       // ring full: back off
+#ifdef __AMDGCN__
             __builtin_amdgcn_s_sleep(1);
+#endif
             t = __atomic_load_n(&r->tail, __ATOMIC_RELAXED);
         }
         uint64_t expected = h;
@@ -133,7 +135,9 @@ inline void quiet(gicc::DeviceCtx* ctx, int lane = 0) {
     c.cmd_type = gicc::proxy::CmdType::QUIET;
     uint64_t my_slot = detail::atomic_push(ring, c);
     while (detail::tail_volatile(ring) <= my_slot) {
+#ifdef __AMDGCN__
         __builtin_amdgcn_s_sleep(1);
+#endif
     }
     detail::fence_system();
 }
