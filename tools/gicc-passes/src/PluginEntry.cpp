@@ -3,6 +3,7 @@
 #include "GICCHKAnalysis.h"
 #include "GICCHostDiscovery.h"
 #include "GICCOmpDeviceDiscovery.h"
+#include "GICCOmpHostDiscovery.h"
 #include "GICCPassConfig.h"
 #include "GICCTraceSynthesis.h"
 #ifndef GICC_PASSES_ANALYZE_ONLY
@@ -101,6 +102,20 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                 GICC_EP_LAMBDA_HEAD(MPM) {
                     MPM.addPass(GICCSentinelPass());
                 });
+            // Phase 2 (omp-dwq): the OpenMP markers survive only AFTER the
+            // inliner has run, so the omp passes attach at OptimizerLast.
+            // Each pass self-gates on Mode::OmpDwq, so this block is inert
+            // in every other mode (Discover / Lower / Passthrough).
+            PB.registerOptimizerLastEPCallback(
+                GICC_EP_LAMBDA_HEAD(MPM) {
+                    MPM.addPass(GICCOmpDeviceDiscoveryPass());
+                    MPM.addPass(GICCOmpHostDiscoveryPass());
+                    MPM.addPass(GICCTraceSynthesisPass());
+#ifndef GICC_PASSES_ANALYZE_ONLY
+                    MPM.addPass(GICCDispatchLoweringPass());
+                    MPM.addPass(GICCDeviceLoweringPass());
+#endif
+                });
             // Named-pass registration so tests can drive the plugin via
             // opt -passes='gicc-sentinel' / 'gicc-device-discovery'.
             PB.registerPipelineParsingCallback(
@@ -132,6 +147,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-omp-device-discovery") {
                         MPM.addPass(GICCOmpDeviceDiscoveryPass());
+                        return true;
+                    }
+                    if (Name == "gicc-omp-host-discovery") {
+                        MPM.addPass(GICCOmpHostDiscoveryPass());
                         return true;
                     }
 #ifndef GICC_PASSES_ANALYZE_ONLY

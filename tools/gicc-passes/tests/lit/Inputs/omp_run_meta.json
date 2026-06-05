@@ -1,0 +1,113 @@
+{
+  "kernel_mangled": "_Z3runPN4gicc9DeviceCtxEiimimm",
+  "kernel_simple": "_Z3runPN4gicc9DeviceCtxEiimimm",
+  "ops": [
+    {
+      "args": {
+        "dst_buf": {
+          "children": [
+            {
+              "kind": "param",
+              "param": 3
+            }
+          ],
+          "kind": "cast",
+          "op": "trunc"
+        },
+        "dst_off": {
+          "kind": "param",
+          "param": 4
+        },
+        "size": {
+          "kind": "param",
+          "param": 7
+        },
+        "src_buf": {
+          "children": [
+            {
+              "kind": "param",
+              "param": 5
+            }
+          ],
+          "kind": "cast",
+          "op": "trunc"
+        },
+        "src_off": {
+          "kind": "param",
+          "param": 6
+        },
+        "target_rank": {
+          "children": [
+            {
+              "kind": "param",
+              "param": 2
+            }
+          ],
+          "kind": "cast",
+          "op": "trunc"
+        }
+      },
+      "compute_before": 0,
+      "guard": {
+        "kind": "unknown"
+      },
+      "hk_capable": true,
+      "kind": "put_no_db",
+      "site_id": "?:?:__omp_offloading_14_7363c44__Z3runPN4gicc9DeviceCtxEiimimm_l3::0"
+    },
+    {
+      "args": {},
+      "compute_before": 0,
+      "guard": {
+        "kind": "unknown"
+      },
+      "hk_capable": true,
+      "kind": "flush",
+      "site_id": "?:?:__omp_offloading_14_7363c44__Z3runPN4gicc9DeviceCtxEiimimm_l3::1"
+    }
+  ],
+  "params": [
+    {
+      "idx": 0,
+      "name": "",
+      "type": "ptr"
+    },
+    {
+      "idx": 1,
+      "name": "",
+      "type": "ptr"
+    },
+    {
+      "idx": 2,
+      "name": "",
+      "type": "i64"
+    },
+    {
+      "idx": 3,
+      "name": "",
+      "type": "i64"
+    },
+    {
+      "idx": 4,
+      "name": "",
+      "type": "i64"
+    },
+    {
+      "idx": 5,
+      "name": "",
+      "type": "i64"
+    },
+    {
+      "idx": 6,
+      "name": "",
+      "type": "i64"
+    },
+    {
+      "idx": 7,
+      "name": "",
+      "type": "i64"
+    }
+  ],
+  "proxy_aware": false,
+  "version": 1
+}

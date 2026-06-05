@@ -1,5 +1,6 @@
 #include "GICCTraceSynthesis.h"
 #include "GICCHostDiscovery.h"
+#include "MetadataIO.h"
 #include "GICCPassConfig.h"
 #include "KernelInventory.h"
 #include "LaunchSiteInventory.h"
@@ -47,29 +48,6 @@ Type *typeFromStr(LLVMContext &Ctx, StringRef s) {
     // Default: i64 (sufficient for indices/offsets/sizes, the common
     // template-arg types). Pointers should always be tagged "ptr".
     return Type::getInt64Ty(Ctx);
-}
-
-// Trace function signature: ptr %rt, then one parameter per kernel
-// formal except the leading DeviceCtx* (formal 0). Returns the new
-// Function* (declaration if it already existed).
-Function *getOrCreateTraceFn(Module &M, const KernelTemplate &t) {
-    LLVMContext &Ctx  = M.getContext();
-    std::string  name = "gicc_trace_" + t.simpleName;
-    if (auto *F = M.getFunction(name)) return F;
-
-    SmallVector<Type *, 16> params;
-    params.push_back(PointerType::getUnqual(Ctx));      // rt
-    for (size_t i = 1; i < t.params.size(); ++i)
-        params.push_back(typeFromStr(Ctx, t.params[i].typeStr));
-
-    auto *FT = FunctionType::get(Type::getVoidTy(Ctx), params, false);
-    auto *F  = Function::Create(FT, GlobalValue::InternalLinkage, name, &M);
-    F->getArg(0)->setName("rt");
-    for (size_t i = 1; i < t.params.size(); ++i)
-        F->getArg(i)->setName(t.params[i].name.empty()
-                                  ? ("arg" + std::to_string(i))
-                                  : t.params[i].name);
-    return F;
 }
 
 // Convert an arbitrary integer Value `v` to type `target` via trunc /
@@ -516,23 +494,6 @@ void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,
     B.CreateBr(contBB);
 }
 
-void emitTraceBody(Module &M, Function *traceFn, const KernelTemplate &t) {
-    LLVMContext &Ctx = M.getContext();
-    BasicBlock *entry = BasicBlock::Create(Ctx, "entry", traceFn);
-    IRBuilder<>  B(entry);
-
-    BasicBlock *cur = entry;
-    for (const auto &op : t.ops) {
-        BasicBlock *next = BasicBlock::Create(
-            Ctx, "after." + op.siteId, traceFn);
-        B.SetInsertPoint(cur);
-        emitOp(M, B, traceFn, op, t, next);
-        cur = next;
-    }
-    B.SetInsertPoint(cur);
-    B.CreateRetVoid();
-}
-
 // Map launch CallInst arguments to trace function arguments. Pattern:
 // the launch wrapper has signature
 //   gicc::launch<K>(Runtime&, dim3, dim3, [shmem, stream,] kernel_user_args...)
@@ -584,6 +545,47 @@ void insertTraceCall(CallBase *launch, Function *traceFn,
 }
 
 }  // namespace
+
+// Trace function signature: ptr %rt, then one parameter per kernel
+// formal except the leading DeviceCtx* (formal 0). Returns the new
+// Function* (declaration if it already existed). Public so the OpenMP
+// host-discovery pass can reuse it.
+Function *getOrCreateTraceFn(Module &M, const KernelTemplate &t) {
+    LLVMContext &Ctx  = M.getContext();
+    std::string  name = "gicc_trace_" + t.simpleName;
+    if (auto *F = M.getFunction(name)) return F;
+
+    SmallVector<Type *, 16> params;
+    params.push_back(PointerType::getUnqual(Ctx));      // rt
+    for (size_t i = 1; i < t.params.size(); ++i)
+        params.push_back(typeFromStr(Ctx, t.params[i].typeStr));
+
+    auto *FT = FunctionType::get(Type::getVoidTy(Ctx), params, false);
+    auto *F  = Function::Create(FT, GlobalValue::InternalLinkage, name, &M);
+    F->getArg(0)->setName("rt");
+    for (size_t i = 1; i < t.params.size(); ++i)
+        F->getArg(i)->setName(t.params[i].name.empty()
+                                  ? ("arg" + std::to_string(i))
+                                  : t.params[i].name);
+    return F;
+}
+
+void emitTraceBody(Module &M, Function *traceFn, const KernelTemplate &t) {
+    LLVMContext &Ctx = M.getContext();
+    BasicBlock *entry = BasicBlock::Create(Ctx, "entry", traceFn);
+    IRBuilder<>  B(entry);
+
+    BasicBlock *cur = entry;
+    for (const auto &op : t.ops) {
+        BasicBlock *next = BasicBlock::Create(
+            Ctx, "after." + op.siteId, traceFn);
+        B.SetInsertPoint(cur);
+        emitOp(M, B, traceFn, op, t, next);
+        cur = next;
+    }
+    B.SetInsertPoint(cur);
+    B.CreateRetVoid();
+}
 
 PreservedAnalyses GICCTraceSynthesisPass::run(Module &M,
                                               ModuleAnalysisManager &) {

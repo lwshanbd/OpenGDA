@@ -77,6 +77,7 @@ set(_GICC_PASS_SOURCES
     src/MetadataIO.cpp
     src/TraceTemplateBuilder.cpp
     src/GICCHostDiscovery.cpp
+    src/GICCOmpHostDiscovery.cpp
     src/GICCFeatureExtraction.cpp
     src/GICCTraceSynthesis.cpp
 )
