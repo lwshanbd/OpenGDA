@@ -51,6 +51,19 @@ size_t count_mismatches(unsigned char expected, size_t bytes) {
     return bad;
 }
 
+void fill_region(size_t offset, unsigned char value, size_t len) {
+    std::vector<unsigned char> h(len, value);
+    gpuMemcpy(static_cast<char*>(g_buf) + offset, h.data(), len, gpuMemcpyHostToDevice);
+}
+
+size_t count_region_mismatches(size_t offset, unsigned char expected, size_t len) {
+    std::vector<unsigned char> h(len, 0);
+    gpuMemcpy(h.data(), static_cast<char*>(g_buf) + offset, len, gpuMemcpyDeviceToHost);
+    size_t bad = 0;
+    for (size_t i = 0; i < len; ++i) if (h[i] != expected) ++bad;
+    return bad;
+}
+
 void finalize() {
     if (g_buf) { gpuFree(g_buf); g_buf = nullptr; }
     delete g_rt; g_rt = nullptr;

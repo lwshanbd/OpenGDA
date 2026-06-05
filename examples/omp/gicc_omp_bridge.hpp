@@ -35,6 +35,12 @@ void fill_buffer(unsigned char value, size_t bytes);
 // Count bytes in the registered buffer that differ from `expected` (device -> host).
 size_t count_mismatches(unsigned char expected, size_t bytes);
 
+// Fill a sub-range [offset, offset+len) of the registered buffer with `value`.
+void fill_region(size_t offset, unsigned char value, size_t len);
+
+// Count bytes in [offset, offset+len) that differ from `expected`.
+size_t count_region_mismatches(size_t offset, unsigned char expected, size_t len);
+
 // Free buffer + MPI_Finalize (if we initialized it).
 void finalize();
 
