@@ -1475,11 +1475,156 @@ __global__ void dtree_hier_rs_tree_kernel(gicc::DeviceCtx* ctx,
     }
 }
 
+// FUSED single-kernel hierarchical double tree: phases 1+2+3 in ONE cooperative
+// kernel, eliminating the host bounce (hipDeviceSynchronize + global rt.barrier
+// + 2nd launch) the 2-kernel version paid between the inter-node tree and the
+// all-gather. The phase2->phase3 dependency (the all-gather reads a same-node
+// peer's slice, which that peer finalized in its inter-node broadcast) is a
+// CROSS-RANK ordering boundary that grid.sync (one GPU only) cannot provide, so
+// the 2-kernel version went to the host for it. Here it is an ON-DEVICE
+// node-local barrier over xGMI: each same-node rank writes a generation stamp
+// into every peer's `nbar` slot and spins until all P slots reach `gen`. The
+// host flag buffer is host-pinned (no IPC handle) so it cannot be peer-written;
+// `nbar` is a small hipMalloc'd device buffer that IS IPC-shareable. The barrier
+// is node-local (the all-gather only reads same-node peers) -> cheaper + more
+// correct than the old GLOBAL host barrier. `gen` is the per-call sequence
+// (identical across ranks in SPMD), so no flag re-arm is needed and a peer that
+// races into the next call (writes gen+1) still satisfies the `>= gen` wait.
+__global__ void dtree_hier_fused_kernel(gicc::DeviceCtx* ctx,
+                                        int data_idx, int recv_idx, int flag_idx,
+                                        int one_idx, int nbar_idx, int rank,
+                                        int P, int count, unsigned int gen,
+                                        int up0, int c0a, int c0b, int ct0,
+                                        int up1, int c1a, int c1b, int ct1,
+                                        float* data, float* recv,
+                                        volatile unsigned int* flag,
+                                        volatile unsigned int* nbar) {
+    cg::grid_group grid = cg::this_grid();
+    const bool   lead = (blockIdx.x == 0 && threadIdx.x == 0);
+    const size_t gtid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t nthr = (size_t)gridDim.x * blockDim.x;
+    const int    nb   = ctx->ipc_n_bufs;
+    void** ipc = ctx->peer_ipc_base;
+    const int    lp        = rank % P;
+    const int    node_base = rank - lp;
+    const int    slice     = count / P;
+    const int    hh        = slice / 2;
+    const size_t sbase     = (size_t)lp * slice;
+    const int    up[2] = {up0, up1};
+    const int    ca[2] = {c0a, c1a};
+    const int    cb[2] = {c0b, c1b};
+    const int    ct[2] = {ct0, ct1};
+
+    // ---- phase 1: intra-node direct reduce-scatter (xGMI) ----
+    for (size_t e = gtid; e < (size_t)slice; e += nthr) {
+        float acc = data[sbase + e];
+        for (int q = 0; q < P; ++q) {
+            if (q == lp) continue;
+            const float* pq = (ipc && nb)
+                ? (const float*)ipc[(size_t)(node_base + q) * nb + data_idx] : nullptr;
+            if (pq) acc += pq[sbase + e];
+        }
+        data[sbase + e] = acc;
+    }
+    grid.sync();
+
+    // ---- phase 2: inter-node double tree REDUCE (leaf node -> root node) ----
+    for (int t = 0; t < 2; ++t) {
+        const size_t base = sbase + (size_t)t * hh;
+        const int    kid[2] = {ca[t], cb[t]};
+        for (int k = 0; k < 2; ++k) {
+            if (kid[k] < 0) continue;
+            if (lead) {
+                while (flag[t * 2 + k] == 0u) { __builtin_amdgcn_s_sleep(1); }
+                flag[t * 2 + k] = 0u;
+                __threadfence_system();
+            }
+            grid.sync();
+            for (size_t i = gtid; i < (size_t)hh; i += nthr)
+                data[base + i] += recv[(size_t)k * hh + i];
+            grid.sync();
+        }
+        if (up[t] >= 0) {
+            grid.sync();
+            dt_send_half(ctx, grid, up[t] * P + lp, recv_idx, (size_t)ct[t] * hh,
+                         data_idx, data, base, hh,
+                         flag_idx, (size_t)(t * 2 + ct[t]), one_idx,
+                         lead, gtid, nthr);
+        }
+    }
+
+    // ---- phase 2: BROADCAST (root node -> leaf node) ----
+    for (int t = 0; t < 2; ++t) {
+        const size_t base = sbase + (size_t)t * hh;
+        if (up[t] >= 0 && lead) {
+            while (flag[4 + t] == 0u) { __builtin_amdgcn_s_sleep(1); }
+            flag[4 + t] = 0u;
+            __threadfence_system();
+        }
+        grid.sync();
+        const int kid[2] = {ca[t], cb[t]};
+        for (int k = 0; k < 2; ++k) {
+            if (kid[k] < 0) continue;
+            dt_send_half(ctx, grid, kid[k] * P + lp, data_idx, base,
+                         data_idx, data, base, hh,
+                         flag_idx, (size_t)(4 + t), one_idx,
+                         lead, gtid, nthr);
+        }
+    }
+
+    // ---- on-device node-local barrier (xGMI): remote-STORE / local-ATOMIC-poll.
+    // AMD coherence wall (measured the hard way): plain/volatile global loads on
+    // gfx90a hit stale L2, so a spin loop never sees a peer's xGMI write -- and
+    // REMOTE atomic loads over an IPC-mapped pointer also hang. The combination
+    // that works: each rank PLAIN-stores its stamp into every peer's slot (remote
+    // plain stores are fine -- same as the RS/AG data writes), then polls its OWN
+    // slots with a SYSTEM-scope atomic load, which invalidates L2 so the peers'
+    // stamps become visible. The acquire also orders the phase-3 data reads after
+    // the phase-2 data writes. `gen` is the per-call sequence (no flag re-arm).
+    grid.sync();
+    if (lead) {
+        __threadfence_system();                       // publish my slice writes
+        // Announce: plain remote store of my stamp into every peer's slot lp
+        // (remote plain stores are supported - same as the RS/AG data writes).
+        for (int q = 0; q < P; ++q) {
+            if (q == lp) continue;
+            unsigned int* pf = (ipc && nb)
+                ? (unsigned int*)ipc[(size_t)(node_base + q) * nb + nbar_idx] : nullptr;
+            if (pf) pf[lp] = gen;
+        }
+        __threadfence_system();                       // flush the remote stamps
+        // Wait: SYSTEM-scope atomic load of my OWN slots invalidates L2 so the
+        // peers' stamps become visible (plain/volatile local polls stay stale).
+        unsigned int* myn = (unsigned int*)nbar;
+        for (int q = 0; q < P; ++q) {
+            if (q == lp) continue;
+            while (__hip_atomic_load(&myn[q], __ATOMIC_ACQUIRE,
+                                     __HIP_MEMORY_SCOPE_SYSTEM) < gen)
+                { __builtin_amdgcn_s_sleep(1); }
+        }
+        __threadfence_system();
+    }
+    grid.sync();
+
+    // ---- phase 3: intra-node direct all-gather (xGMI) ----
+    for (int p = 0; p < P; ++p) {
+        if (p == lp) continue;
+        const float* po = (ipc && nb)
+            ? (const float*)ipc[(size_t)(node_base + p) * nb + data_idx] : nullptr;
+        if (!po) continue;
+        const size_t b = (size_t)p * slice;
+        for (size_t e = gtid; e < (size_t)slice; e += nthr)
+            data[b + e] = po[b + e];
+    }
+}
+
 inline void allreduce_double_tree_hier(gicc::Runtime& rt,
                                        const gicc::Buffer& data_buf, float* d_data,
                                        const gicc::Buffer& recv_buf, float* d_recv,
                                        const gicc::Buffer& flag_buf, unsigned int* d_flag,
-                                       const gicc::Buffer& one_buf, int count, int P) {
+                                       const gicc::Buffer& one_buf, int count, int P,
+                                       const gicc::Buffer& nbar_buf = gicc::Buffer{},
+                                       unsigned int* d_nbar = nullptr) {
     const int N    = rt.size();
     const int rank = rt.rank();
     const int K    = N / P;                           // number of nodes
@@ -1488,11 +1633,20 @@ inline void allreduce_double_tree_hier(gicc::Runtime& rt,
     static int gb_tree = 0;
     const int  bt = 256;
     if (gb_tree == 0) {
-        int per_sm = 0, n_sm = 0;
+        // Occupancy must come from the LARGER of the two cooperative kernels and
+        // leave 50% headroom: a cooperative grid.sync deadlocks if any block is
+        // not co-resident, and the fused kernel (RS+tree+barrier+all-gather) has
+        // lower max occupancy than the 2-kernel RS+tree. Use min(occupancy)/2 so
+        // both the fused and legacy paths are safely under full occupancy.
+        int ps_fused = 0, ps_rs = 0, n_sm = 0;
         (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
-            &per_sm, (const void*)dtree_hier_rs_tree_kernel, bt, 0);
+            &ps_fused, (const void*)dtree_hier_fused_kernel, bt, 0);
+        (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
+            &ps_rs, (const void*)dtree_hier_rs_tree_kernel, bt, 0);
         (void)hipDeviceGetAttribute(&n_sm, hipDeviceAttributeMultiprocessorCount, rt.gpu_id());
-        gb_tree = (per_sm > 0 && n_sm > 0) ? per_sm * n_sm : 1;
+        int per_sm = (ps_fused < ps_rs) ? ps_fused : ps_rs;
+        int spm = (per_sm > 1) ? per_sm / 2 : per_sm;   // 50% headroom
+        gb_tree = (spm > 0 && n_sm > 0) ? spm * n_sm : 1;
         if (std::getenv("DTREE_PIPE_GB"))            // debug: override grid size
             gb_tree = std::atoi(std::getenv("DTREE_PIPE_GB"));
     }
@@ -1540,15 +1694,40 @@ inline void allreduce_double_tree_hier(gicc::Runtime& rt,
     #define DTH_T0()  do {} while (0)
 #endif
 
-    // Kernel 1 (cooperative): intra-node direct reduce-scatter + inter-node
-    // double tree over K nodes. 2 kernels / 2 resets total (the proven-stable
-    // hier_direct structure; a 3rd reset/proxy-drain cycle races the ring).
     int up0, c0a, c0b, ct0, up1, c1a, c1b, ct1;
     dt_dtree(K, nid, up0, c0a, c0b, ct0, up1, c1a, c1b, ct1);
-    DTH_CKPT("1-k1-launch");
-    gicc::DeviceCtx* d = rt.prepare();
     int rk = rank, Px = P, c = count;
     volatile unsigned int* fp = (volatile unsigned int*)d_flag;
+
+    // Default = FUSED single kernel (no host bounce) when a node-barrier buffer
+    // is supplied; GICC_DTREEH_2KERNEL forces the legacy 2-kernel path for A/B.
+    static int use_2k = (std::getenv("GICC_DTREEH_2KERNEL") != nullptr) ? 1 : 0;
+    if (d_nbar && !use_2k) {
+        int nbar_idx = nbar_buf.index;
+        unsigned int gen = (unsigned int)(my_seq + 1);
+        volatile unsigned int* np = (volatile unsigned int*)d_nbar;
+        DTH_CKPT("1-fused-launch");
+        gicc::DeviceCtx* d = rt.prepare();
+        void* pf[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx, &nbar_idx,
+                      &rk, &Px, &c, &gen,
+                      &up0, &c0a, &c0b, &ct0, &up1, &c1a, &c1b, &ct1,
+                      &d_data, &d_recv, &fp, &np};
+        DTH_T0();
+        (void)hipLaunchCooperativeKernel((const void*)dtree_hier_fused_kernel,
+                                         dim3(gb_tree), dim3(bt), pf, 0, 0);
+        (void)hipDeviceSynchronize();
+        DTH_T(tk);
+        DTH_CKPT("2-fused-sync");
+        DTH_T0(); rt.reset(); DTH_T(tr);
+        DTH_T0(); hbar(); DTH_T(tb);                  // one collective-end barrier
+        DTH_CKPT("3-fused-done");
+        goto fused_done;
+    }
+
+    // ---- Legacy 2-kernel path (host bounce between k1 and k2) ----
+    {
+    DTH_CKPT("1-k1-launch");
+    gicc::DeviceCtx* d = rt.prepare();
     void* p1[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx, &rk, &Px, &c,
                   &up0, &c0a, &c0b, &ct0, &up1, &c1a, &c1b, &ct1,
                   &d_data, &d_recv, &fp};
@@ -1574,6 +1753,8 @@ inline void allreduce_double_tree_hier(gicc::Runtime& rt,
     DTH_T0(); rt.reset(); DTH_T(tr);
     DTH_T0(); hbar(); DTH_T(tb);
     DTH_CKPT("6-k2-barrier-exit");
+    }
+fused_done:;
     #undef DTH_CKPT
 #ifdef GICC_BOOTSTRAP_MPI
     if (tdbg && rank == 0) {
