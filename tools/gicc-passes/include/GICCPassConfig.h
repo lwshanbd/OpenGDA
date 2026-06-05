@@ -8,6 +8,7 @@ enum class Mode {
     Discover,
     FeatureExtract,
     Lower,
+    OmpDwq,        // Phase 2: DWQ-from-OpenMP (post-inline, gated)
     Passthrough,
 };
 

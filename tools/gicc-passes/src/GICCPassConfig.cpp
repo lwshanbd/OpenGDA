@@ -14,6 +14,7 @@ Mode parseMode(const char *e) {
     if (s == "discover")        return Mode::Discover;
     if (s == "feature-extract") return Mode::FeatureExtract;
     if (s == "lower")           return Mode::Lower;
+    if (s == "omp-dwq")         return Mode::OmpDwq;
     return Mode::Passthrough;
 }
 
@@ -52,6 +53,7 @@ const char *modeName(Mode m) {
         case Mode::Discover:        return "discover";
         case Mode::FeatureExtract:  return "feature-extract";
         case Mode::Lower:           return "lower";
+        case Mode::OmpDwq:          return "omp-dwq";
         case Mode::Passthrough:     return "passthrough";
     }
     return "?";
