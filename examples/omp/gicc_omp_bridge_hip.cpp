@@ -37,6 +37,7 @@ int buf_index() { return g_bufidx; }
 gicc::DeviceCtx* prepare() { return g_rt->prepare(); }
 void reset()               { g_rt->reset(); }
 void barrier()             { MPI_Barrier(MPI_COMM_WORLD); }
+double wtime()             { return MPI_Wtime(); }
 
 void fill_buffer(unsigned char value, size_t bytes) {
     std::vector<unsigned char> h(bytes, value);

@@ -29,6 +29,9 @@ void reset();
 // MPI_Barrier(MPI_COMM_WORLD).
 void barrier();
 
+// Wall-clock seconds (MPI_Wtime). MPI must already be initialized (init()).
+double wtime();
+
 // Fill the entire registered buffer with `value` (host -> device).
 void fill_buffer(unsigned char value, size_t bytes);
 

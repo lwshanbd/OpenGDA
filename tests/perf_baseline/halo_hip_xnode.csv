@@ -1,0 +1,15 @@
+# GICC-HIP halo_bench (fixed face mix): ranks=2 steps=200 topology=cross-node
+# faces: 64+512+2048+32768+262144 = 297536 bytes/step, one direction (right neighbor)
+# halo_bench mode=proxy ranks=2 steps=200 faces=5 bytes/step=297536
+HALO proxy 75.513 us/step
+# ---
+# HIP size sweep (xnode_proxy_bench batch=1): one-directional put per iteration
+# size_bytes,us_per_put,GBps
+256,28.449,0.01
+1024,27.816,0.04
+4096,28.236,0.15
+16384,29.265,0.56
+65536,31.538,2.08
+262144,41.041,6.39
+1048576,78.339,13.39
+4194304,200.998,20.87
