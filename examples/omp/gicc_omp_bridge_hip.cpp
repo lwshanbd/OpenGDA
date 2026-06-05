@@ -30,9 +30,10 @@ void init(size_t bytes) {
     g_rt->exchange();
 }
 
-int rank()      { return g_rt->rank(); }
-int nranks()    { int n = 0; MPI_Comm_size(MPI_COMM_WORLD, &n); return n; }
-int buf_index() { return g_bufidx; }
+int rank()         { return g_rt->rank(); }
+int nranks()       { int n = 0; MPI_Comm_size(MPI_COMM_WORLD, &n); return n; }
+int buf_index()    { return g_bufidx; }
+void* device_buffer() { return g_buf; }
 
 gicc::DeviceCtx* prepare() { return g_rt->prepare(); }
 void reset()               { g_rt->reset(); }

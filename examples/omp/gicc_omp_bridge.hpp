@@ -19,6 +19,10 @@ int  rank();
 int  nranks();
 int  buf_index();
 
+// Raw device pointer to the registered buffer (for on-device reads inside a
+// target region via is_device_ptr).
+void* device_buffer();
+
 // Per-iteration: returns the DEVICE pointer to the DeviceCtx (pass to the
 // omp target region via is_device_ptr).
 gicc::DeviceCtx* prepare();
