@@ -2,6 +2,7 @@
 #include "GICCFeatureExtraction.h"
 #include "GICCHKAnalysis.h"
 #include "GICCHostDiscovery.h"
+#include "GICCOmpDeviceDiscovery.h"
 #include "GICCPassConfig.h"
 #include "GICCTraceSynthesis.h"
 #ifndef GICC_PASSES_ANALYZE_ONLY
@@ -127,6 +128,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-trace-synthesis") {
                         MPM.addPass(GICCTraceSynthesisPass());
+                        return true;
+                    }
+                    if (Name == "gicc-omp-device-discovery") {
+                        MPM.addPass(GICCOmpDeviceDiscoveryPass());
                         return true;
                     }
 #ifndef GICC_PASSES_ANALYZE_ONLY

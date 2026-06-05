@@ -71,6 +71,7 @@ set(_GICC_PASS_SOURCES
     src/SiteId.cpp
     src/HostMirrorAnnotation.cpp
     src/GICCDeviceDiscovery.cpp
+    src/GICCOmpDeviceDiscovery.cpp
     src/HKAnalysis.cpp
     src/GICCHKAnalysis.cpp
     src/MetadataIO.cpp
