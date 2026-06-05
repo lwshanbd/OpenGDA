@@ -27,6 +27,22 @@
  */
 #pragma once
 
+// When this header is included from a translation unit that is NOT compiled
+// in HIP/CUDA device-attribute mode (e.g. a plain `-fopenmp` TU that only
+// needs the ring's data layout), `__device__` / `__host__` are not keywords.
+// Define them as no-ops so the struct's method declarations still parse. The
+// method BODIES are already gated on __CUDA_ARCH__/__HIP_DEVICE_COMPILE__ and
+// compile to harmless stubs here; OpenMP code never calls them (it uses the
+// gicc::omp::* port instead).
+#if !defined(__HIPCC__) && !defined(__CUDACC__)
+  #ifndef __device__
+    #define __device__
+  #endif
+  #ifndef __host__
+    #define __host__
+  #endif
+#endif
+
 #include "transfer_cmd.hpp"
 #include <cstdint>
 #include <cstdio>
