@@ -335,7 +335,8 @@ buildSiteHKMap(Module &M, const std::string &metaDir) {
 PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
                                                  ModuleAnalysisManager &) {
     const auto &cfg = getConfig();
-    if (cfg.mode != Mode::Lower) return PreservedAnalyses::all();
+    if (cfg.mode != Mode::Lower && cfg.mode != Mode::OmpDwq)
+        return PreservedAnalyses::all();
 
     HintFile hints;
     if (!cfg.hintIn.empty()) {

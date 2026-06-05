@@ -158,7 +158,8 @@ void wrapPreservedOpLeadThreadAMDGCN(CallInst *CI) {
 PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
                                               ModuleAnalysisManager &) {
     const auto &cfg = getConfig();
-    if (cfg.mode != Mode::Lower) return PreservedAnalyses::all();
+    if (cfg.mode != Mode::Lower && cfg.mode != Mode::OmpDwq)
+        return PreservedAnalyses::all();
 
     Triple T(M.getTargetTriple());
     bool isAMDGCN = T.isAMDGCN();
