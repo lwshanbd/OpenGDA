@@ -1,0 +1,9 @@
+# GICC-from-OpenMP DWQ halo: ranks=2 iters=50 topology=cross-node
+# size_bytes,us_per_halo,GBps
+256,51.444,0.01
+1024,71.916,0.03
+4096,58.728,0.14
+16384,63.021,0.52
+65536,82.450,1.59
+262144,92.661,5.66
+1048576,165.666,12.66
