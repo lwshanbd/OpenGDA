@@ -67,9 +67,14 @@ int main(int argc, char** argv) {
     float *d_data = nullptr, *d_recv = nullptr, *d_one = nullptr;
     float *d_mpi_in = nullptr, *d_mpi_out = nullptr;
     unsigned int *h_flag = nullptr, *d_flag = nullptr;
+    // Node-barrier buffer for the FUSED hier double tree: must be DEVICE memory
+    // (host-pinned flags have no IPC handle -> not peer-writable over xGMI).
+    unsigned int *d_nbar = nullptr;
+    const int NBAR = 64;     // >= ranks-per-node (P)
     if (hipMalloc(&d_data, cnt_max * sizeof(float)) != hipSuccess ||
         hipMalloc(&d_recv, cnt_max * sizeof(float)) != hipSuccess ||
         hipMalloc(&d_one, sizeof(float)) != hipSuccess ||
+        hipMalloc(&d_nbar, (size_t)NBAR * sizeof(unsigned int)) != hipSuccess ||
         hipMalloc(&d_mpi_in, cnt_max * sizeof(float)) != hipSuccess ||
         hipMalloc(&d_mpi_out, cnt_max * sizeof(float)) != hipSuccess) {
         fprintf(stderr, "rank %d: hipMalloc failed\n", rank); return 2;
@@ -81,12 +86,14 @@ int main(int argc, char** argv) {
     (void)hipMemset(d_one, 1, sizeof(float));
     (void)hipMemset(d_mpi_in, 1, cnt_max * sizeof(float));
     (void)hipMemset(d_flag, 0, (size_t)NFLAG * sizeof(unsigned int));   // one-time
+    (void)hipMemset(d_nbar, 0, (size_t)NBAR * sizeof(unsigned int));    // one-time
     (void)hipDeviceSynchronize();
 
     gicc::Buffer data_buf = rt.register_buffer(d_data, cnt_max * sizeof(float), true);
     gicc::Buffer recv_buf = rt.register_buffer(d_recv, cnt_max * sizeof(float), true);
     gicc::Buffer flag_buf = rt.register_buffer(d_flag, (size_t)NFLAG * sizeof(unsigned int), true);
     gicc::Buffer one_buf  = rt.register_buffer(d_one, sizeof(float), true);
+    gicc::Buffer nbar_buf = rt.register_buffer(d_nbar, (size_t)NBAR * sizeof(unsigned int), true);
     rt.exchange();
     rt.barrier();   // all flag buffers zeroed everywhere before any signal
 
@@ -286,7 +293,8 @@ int main(int argc, char** argv) {
         (void)hipDeviceSynchronize();
         rt.barrier();
         gicc_coll::allreduce_double_tree_hier(rt, data_buf, d_data, recv_buf, d_recv,
-                                              flag_buf, d_flag, one_buf, count, P);
+                                              flag_buf, d_flag, one_buf, count, P,
+                                              nbar_buf, d_nbar);
         (void)hipMemcpy(hv.data(), d_data, (size_t)count * sizeof(float), hipMemcpyDeviceToHost);
         (void)hipDeviceSynchronize();
         int errs = 0;
@@ -305,12 +313,14 @@ int main(int argc, char** argv) {
         const size_t bytes = (size_t)count * sizeof(float);
         for (int w = 0; w < warmup; ++w)
             gicc_coll::allreduce_double_tree_hier(rt, data_buf, d_data, recv_buf, d_recv,
-                                                  flag_buf, d_flag, one_buf, count, P);
+                                                  flag_buf, d_flag, one_buf, count, P,
+                                              nbar_buf, d_nbar);
         rt.barrier();
         double t0 = MPI_Wtime();
         for (int it = 0; it < iters; ++it) {
             gicc_coll::allreduce_double_tree_hier(rt, data_buf, d_data, recv_buf, d_recv,
-                                                  flag_buf, d_flag, one_buf, count, P);
+                                                  flag_buf, d_flag, one_buf, count, P,
+                                              nbar_buf, d_nbar);
             rt.barrier();
         }
         double gicc_us = (MPI_Wtime() - t0) / iters * 1e6;
@@ -330,7 +340,7 @@ int main(int argc, char** argv) {
     }
 
     rt.barrier();
-    (void)hipFree(d_data); (void)hipFree(d_recv); (void)hipFree(d_one);
+    (void)hipFree(d_data); (void)hipFree(d_recv); (void)hipFree(d_one); (void)hipFree(d_nbar);
     (void)hipFree(d_mpi_in); (void)hipFree(d_mpi_out); (void)hipHostFree(h_flag);
     return 0;
 }
