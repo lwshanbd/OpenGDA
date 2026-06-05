@@ -56,6 +56,14 @@ void gicc_runtime_dwq_enqueue_batched(gicc::Runtime    *rt,
                                        const std::size_t *src_offs,
                                        const std::size_t *sizes);
 
+// OpenMP-DWQ trigger arming (used by GICCOmpHostDiscovery). Called AFTER the
+// synthesized trace has enqueued the region's DWQ ops and BEFORE the
+// __tgt_target_kernel launch. Re-arms DeviceCtx::trigger_val_ to the post-trace
+// delta, because the OpenMP flow calls Runtime::prepare() before the region
+// (when no ops are staged yet) and so would otherwise leave trigger_val_=0 and
+// the kernel's flush would never fire the descriptors. No-op-safe on null rt.
+void gicc_runtime_arm_dwq_trigger(gicc::Runtime *rt);
+
 // Device-side helpers (called from device IR emitted by GICCDeviceLowering).
 volatile std::uint64_t *gicc_runtime_trigger_addr(gicc::Runtime *rt);
 std::uint64_t           gicc_runtime_trigger_val (gicc::Runtime *rt);

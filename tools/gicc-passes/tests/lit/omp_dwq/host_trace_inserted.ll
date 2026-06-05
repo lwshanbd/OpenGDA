@@ -51,9 +51,12 @@ target triple = "x86_64-unknown-linux-gnu"
 @.offloading.entry.__omp_offloading_14_7363c44__Z3runPN4gicc9DeviceCtxEiimimm_l3 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { ptr @.__omp_offloading_14_7363c44__Z3runPN4gicc9DeviceCtxEiimimm_l3.region_id, ptr @.offloading.entry_name, i64 0, i32 0, i32 0 }, section "omp_offloading_entries", align 1
 
 ; The trace call must be inserted BEFORE the launch and carry, in order:
-;   rt(=ctx ptr), ctx ptr, peer, dbuf, doff, sbuf, soff, n.
+;   rt(=live Runtime from gicc_runtime_current()), ctx ptr, peer, dbuf, doff,
+;   sbuf, soff, n. arg0 is sourced from a call to the bridge C ABI
+;   gicc_runtime_current(), NOT the ctx pointer stand-in.
 ; CHECK-LABEL: define dso_local void @_Z3runPN4gicc9DeviceCtxEiimimm(
-; CHECK: call void @gicc_trace__Z3runPN4gicc9DeviceCtxEiimimm(
+; CHECK: %[[RT:.*]] = call ptr @gicc_runtime_current()
+; CHECK: call void @gicc_trace__Z3runPN4gicc9DeviceCtxEiimimm(ptr %[[RT]],
 ; CHECK: call i32 @__tgt_target_kernel(
 
 define dso_local void @_Z3runPN4gicc9DeviceCtxEiimimm(ptr noundef %0, i32 noundef %1, i32 noundef %2, i64 noundef %3, i32 noundef %4, i64 noundef %5, i64 noundef %6) {

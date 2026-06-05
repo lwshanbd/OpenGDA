@@ -65,6 +65,22 @@ void gicc_runtime_dwq_enqueue(gicc::Runtime *rt,
     rt->my_pending_.push_back(dwq);
 }
 
+// OpenMP-DWQ trigger arming. The HIP path calls Runtime::prepare() AFTER the
+// pass-inserted trace (gicc::launch runs prepare() internally), so prepare()
+// snapshots trigger_val_ with this region's ops already counted. The OpenMP
+// path must call prepare() BEFORE the omp target region (to obtain the device
+// ctx pointer for is_device_ptr), so prepare() snapshots a STALE trigger_val_
+// (0 on the first iter). The omp-dwq host pass calls this AFTER the trace has
+// enqueued, re-arming trigger_val_ to the post-trace delta so the kernel's
+// flush MMIO store fires the queued descriptors. Mirrors the host-wait branch
+// of Runtime::prepare()'s trigger block; the CXI trigger counter is
+// add-on-write, so we write the DELTA since the last trigger.
+void gicc_runtime_arm_dwq_trigger(gicc::Runtime *rt) {
+    if (!rt) return;
+    rt->h_dev_ctx_->trigger_val_ = rt->mono_total_ops_ - rt->mono_last_triggered_;
+    rt->mono_last_triggered_     = rt->mono_total_ops_;
+}
+
 // Batched form: queues N RMA writes in one host call. Each descriptor's
 // trigger threshold is its 1-based slot within the batch (the kernel's
 // single trigger MMIO write at flush-time fires all of them). Saves the

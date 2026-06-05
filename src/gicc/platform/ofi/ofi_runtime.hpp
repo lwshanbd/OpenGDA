@@ -76,6 +76,7 @@ class Runtime {
                                                             std::size_t, int,
                                                             std::size_t,
                                                             std::size_t);
+    friend void             (::gicc_runtime_arm_dwq_trigger)(Runtime *);
     friend void             (::gicc_runtime_dwq_enqueue_batched)
                                        (Runtime *, int,
                                         const int *, const int *,

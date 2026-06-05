@@ -75,9 +75,15 @@ static std::string resolveSrcMangled(Module &M, Value *regionId) {
     if (!cda || !cda->isString()) return {};
     StringRef name = cda->getAsCString();  // "__omp_offloading_<hex>_<hex>_<Src>_l<line>"
 
-    // Source-mangled portion begins at the first "_Z".
+    // This MUST mirror GICCOmpDeviceDiscovery::extractOmpKernelKey exactly so
+    // the host looks the JSON up under the same key the device wrote. The
+    // source-mangled portion begins at the first "_Z"; if there is no "_Z"
+    // (e.g. the target region lives directly in `main`, an unmangled C name)
+    // the device returns the FULL kernel name unchanged (no "_l" strip), so
+    // we do the same here instead of failing.
     auto zpos = name.find("_Z");
-    if (zpos == StringRef::npos) return {};
+    if (zpos == StringRef::npos)
+        return name.str();
     StringRef src = name.drop_front(zpos);
 
     // Strip the trailing "_l<digits>" suffix.
@@ -222,17 +228,28 @@ PreservedAnalyses GICCOmpHostDiscoveryPass::run(Module &M,
         // traceFn->getArg(k) directly, so we feed each trace arg k the
         // recovered host value for device param k.
         //
-        //   trace arg 0  = rt        -> ctx pointer (device param 1 / ctx;
-        //                               the body never dereferences rt for
-        //                               this template, so the ctx pointer
-        //                               is a safe stand-in handle)
+        //   trace arg 0  = rt        -> live gicc::Runtime* obtained at the
+        //                               launch site by calling the bridge C
+        //                               ABI `gicc_runtime_current()`. The
+        //                               trace body forwards this to
+        //                               gicc_runtime_dwq_enqueue, which needs
+        //                               the real Runtime (the old ctx-pointer
+        //                               stand-in compiled but was WRONG).
         //   trace arg 1  = device param 1 (ctx, is_device_ptr) -> capture[1]
         //   trace arg k  = device param k (k=2..) captured scalar -> capture[k]
+        IRBuilder<> B(CI);
+
+        // Declare `ptr @gicc_runtime_current()` if absent, then call it just
+        // before the trace call to source the live Runtime handle.
+        FunctionCallee rtCur = M.getOrInsertFunction(
+            "gicc_runtime_current",
+            FunctionType::get(B.getPtrTy(), /*isVarArg=*/false));
+        Value *rtVal = B.CreateCall(rtCur, {}, "gicc_rt");
+
         SmallVector<Value *, 16> callArgs(traceFn->arg_size(), nullptr);
 
-        Value *ctxVal = captures.count(1) ? captures[1] : nullptr;
-        // arg0 (rt): use the ctx pointer as the runtime handle stand-in.
-        callArgs[0] = ctxVal;
+        // arg0 (rt): the live Runtime from gicc_runtime_current().
+        callArgs[0] = rtVal;
         for (unsigned k = 1; k < traceFn->arg_size(); ++k) {
             auto it = captures.find(k);
             callArgs[k] = (it != captures.end()) ? it->second : nullptr;
@@ -241,7 +258,6 @@ PreservedAnalyses GICCOmpHostDiscoveryPass::run(Module &M,
         // Coerce each arg to the trace-fn parameter type (trunc/zext for
         // ints, pass-through for pointers); fall back to a typed zero so a
         // missing capture never produces a verifier error.
-        IRBuilder<> B(CI);
         for (unsigned k = 0; k < traceFn->arg_size(); ++k) {
             Type *expected = traceFn->getArg(k)->getType();
             Value *v = callArgs[k];
@@ -271,6 +287,18 @@ PreservedAnalyses GICCOmpHostDiscoveryPass::run(Module &M,
         }
 
         B.CreateCall(traceFn, callArgs);
+
+        // Re-arm the DWQ trigger AFTER the trace enqueued this region's ops and
+        // BEFORE the __tgt_target_kernel launch. The OpenMP app calls prepare()
+        // before the region (to get d_ctx for is_device_ptr), so prepare()
+        // snapshotted a stale trigger_val_=0; without this re-arm the kernel's
+        // flush writes 0 and the queued DWQ descriptors never fire (reset()
+        // would then hang on the completion counter). The HIP path doesn't need
+        // it: gicc::launch calls prepare() AFTER the pass-inserted trace.
+        FunctionCallee armTrig = M.getOrInsertFunction(
+            "gicc_runtime_arm_dwq_trigger",
+            FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, /*isVarArg=*/false));
+        B.CreateCall(armTrig, {rtVal});
         changed = true;
 
         errs() << "[omp-host-discovery] inserted trace call for " << srcMangled
