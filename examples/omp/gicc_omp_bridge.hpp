@@ -52,3 +52,8 @@ size_t count_region_mismatches(size_t offset, unsigned char expected, size_t len
 void finalize();
 
 }  // namespace gicc_omp_bridge
+
+// C ABI the compiler-synthesized host trace (DWQ path) calls to obtain the
+// live gicc::Runtime* it forwards to gicc_runtime_dwq_enqueue. Defined in
+// gicc_omp_bridge_hip.cpp; returns the bridge's static Runtime (set by init()).
+extern "C" void *gicc_runtime_current();
