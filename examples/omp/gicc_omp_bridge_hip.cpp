@@ -46,6 +46,28 @@ void init(size_t bytes) {
     g_rt->exchange();
 }
 
+// Runtime-only init (no bridge-owned buffer): for apps that register their OWN
+// device buffers (e.g. an OpenMP target-mapped field via register_external()).
+// Defaults to proxy mode (locality-agnostic: IPC intra-node + NIC cross-node),
+// which is what a real multi-GPU stencil halo needs.
+void init_runtime_only() {
+    int inited = 0; MPI_Initialized(&inited);
+    if (!inited) { int argc = 0; char** argv = nullptr; MPI_Init(&argc, &argv); g_we_init_mpi = true; }
+    g_rt = new gicc::Runtime();
+}
+
+// Register an already-allocated device buffer (e.g. the device pointer obtained
+// from `#pragma omp target data use_device_ptr(field)`) with GICC for RMA, and
+// return its buffer index for use in gicc::omp::put/get. Call exchange_buffers()
+// once after all registrations.
+int register_external(void* dev_ptr, size_t bytes) {
+    auto bh = g_rt->register_buffer(dev_ptr, bytes, /*is_device=*/true);
+    return bh.index;
+}
+
+// Collective exchange of the RMA address book; call after register_external().
+void exchange_buffers() { g_rt->exchange(); }
+
 // C ABI the compiler-synthesized host trace calls to obtain the live Runtime.
 // g_rt is set by init() above before any omp target region runs, so the trace
 // function always sees a fully-constructed gicc::Runtime here.

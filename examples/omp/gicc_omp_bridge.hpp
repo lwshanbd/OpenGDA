@@ -19,6 +19,14 @@ int  rank();
 int  nranks();
 int  buf_index();
 
+// Runtime-only init + external-buffer registration (for apps that own their
+// device buffers, e.g. an OpenMP target-mapped stencil field). Use INSTEAD of
+// init(): init_runtime_only(); register_external(dev_ptr,bytes); exchange_buffers();
+// Defaults to proxy mode (locality-agnostic IPC + NIC).
+void init_runtime_only();
+int  register_external(void* dev_ptr, size_t bytes);
+void exchange_buffers();
+
 // Raw device pointer to the registered buffer (for on-device reads inside a
 // target region via is_device_ptr).
 void* device_buffer();
