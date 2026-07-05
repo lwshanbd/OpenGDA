@@ -8,10 +8,15 @@
 //   DWQ (needs -fpass-plugin, guarded): ompx_dwq_put/ompx_dwq_flush.
 //
 // The HIP-compiled runtime lives in libgicc_omp; this header is safe to include
-// in a -fopenmp TU (only the HIP-free DeviceCtx crosses the boundary).
+// in a -fopenmp TU AND in a -x hip host-only TU (the device inline functions are
+// guarded away from the HIP compiler, which cannot handle omp declare target).
 #pragma once
 #include <cstddef>
+#ifndef __HIPCC__
 #include "gicc/platform/ofi/gicc_omp_device.hpp"   // device-side gicc::omp::put/get/quiet + put_auto + DeviceCtx
+#else
+#include "gicc/platform/ofi/device_ctx.hpp"         // just gicc::DeviceCtx (HIP-free), enough for host API
+#endif
 
 // ---- host-side buffer handle: bridges DiOMP pointer model + GICC index model
 struct ompx_buffer { void* ptr; int index; size_t bytes; };
@@ -30,6 +35,10 @@ void   ompx_barrier();                               // reused DiOMP name
 void   ompx_quiet_host();                            // host-side drain (== runtime reset())
 
 // ---- device-side RMA (call INSIDE #pragma omp target) ------------------------
+// Not visible to the HIP compiler (-x hip host TU): HIP ignores omp declare target
+// and cannot compile the gicc::omp::* device functions that gicc_omp_device.hpp
+// defines. Only the OpenMP offload toolchain needs these wrappers.
+#ifndef __HIPCC__
 #pragma omp declare target
 inline void ompx_put(gicc::DeviceCtx* ctx, int node,
                      int dst_buf, size_t dst_off,
@@ -56,3 +65,4 @@ inline void ompx_dwq_put(gicc::DeviceCtx* ctx, int node,
 inline void ompx_dwq_flush(gicc::DeviceCtx* ctx) { gicc::omp_dwq::flush(ctx); }
 #pragma omp end declare target
 #endif
+#endif  // !__HIPCC__
