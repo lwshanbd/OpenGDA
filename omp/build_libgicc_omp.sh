@@ -1,0 +1,39 @@
+#!/bin/bash
+# build_libgicc_omp.sh - produce libgicc_omp.{so,a} from the -x hip runtime TUs
+# + ompx_host.cpp, using the clang-21 diomp toolchain (the proven recipe from
+# examples/omp/build_omp_matmul.sh). Export LD_LIBRARY_PATH before running.
+set -euo pipefail
+GICC_ROOT="${GICC_ROOT:-/p/lustre2/shan4/new-gicc}"
+ROCM=/opt/rocm-6.4.3
+HIPCC=/p/lustre2/shan4/softwares/diomp/bin/clang++
+LIBFAB=/opt/cray/libfabric/2.1
+MPI=/opt/cray/pe/mpich/9.0.1/ofi/cray/20.0
+OUTDIR="${GICC_ROOT}/build_ofi/lib"; mkdir -p "${OUTDIR}"
+OBJ="$(mktemp -d)"; trap 'rm -rf "${OBJ}"' EXIT
+
+DEFS=( -DGICC_BOOTSTRAP_MPI=1 -DGICC_PLATFORM_OFI -DGICC_GPU_HIP=1 -DGICC_CPU_PROXY=1
+       -D__HIP_PLATFORM_AMD__=1 -D__HIP_ROCclr__=1 )
+INCS=( -I"${GICC_ROOT}" -I"${GICC_ROOT}/src" -I"${GICC_ROOT}/src/gicc/platform/ofi/internal"
+       -I"${ROCM}/include" -I"${LIBFAB}/include" -isystem "${MPI}/include" )
+
+SRCS=(
+  "${GICC_ROOT}/src/gicc/omp/ompx_host.cpp"
+  "${GICC_ROOT}/examples/omp/gicc_omp_bridge_hip.cpp"
+  "${GICC_ROOT}/src/gicc/platform/ofi/runtime_helpers.cpp"
+  "${GICC_ROOT}/src/gicc/platform/ofi/proxy/proxy_thread.cpp"
+  "${GICC_ROOT}/src/gicc/platform/ofi/proxy/proxy_libfabric.cpp"
+)
+OBJS=()
+for s in "${SRCS[@]}"; do
+  o="${OBJ}/$(basename "${s%.cpp}").o"
+  "${HIPCC}" -x hip -O3 -fPIC --offload-arch=gfx90a --rocm-path="${ROCM}" -std=gnu++17 -fopenmp \
+      "${DEFS[@]}" "${INCS[@]}" -c "${s}" -o "${o}"
+  OBJS+=("${o}")
+done
+
+# static
+ar rcs "${OUTDIR}/libgicc_omp.a" "${OBJS[@]}"
+# shared
+"${HIPCC}" -shared -fPIC --offload-arch=gfx90a --rocm-path="${ROCM}" \
+    "${OBJS[@]}" -o "${OUTDIR}/libgicc_omp.so"
+echo "BUILT: ${OUTDIR}/libgicc_omp.so ${OUTDIR}/libgicc_omp.a"
