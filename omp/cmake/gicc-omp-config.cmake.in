@@ -1,0 +1,33 @@
+# gicc-omp-config.cmake - find_package(gicc-omp) => gicc::omp, gicc::omp_dwq.
+@PACKAGE_INIT@
+set(GICC_OMP_ROOT   "@GICC_ROOT@")
+set(GICC_OMP_LIBDIR "@GICC_ROOT@/build_ofi/lib")
+set(GICC_OMP_ROCM   "/opt/rocm-6.4.3")
+set(GICC_OMP_LIBFAB "/opt/cray/libfabric/2.1")
+set(GICC_OMP_MPI    "/opt/cray/pe/mpich/9.0.1/ofi/cray/20.0")
+set(GICC_OMP_OMPLIB "/p/lustre2/shan4/softwares/diomp/lib/x86_64-unknown-linux-gnu")
+set(GICC_OMP_PASS   "@GICC_ROOT@/tools/gicc-passes/build/libgicc-passes.so")
+
+add_library(gicc::omp INTERFACE IMPORTED)
+target_include_directories(gicc::omp INTERFACE
+    "${GICC_OMP_ROOT}" "${GICC_OMP_ROOT}/src"
+    "${GICC_OMP_ROOT}/src/gicc/platform/ofi/internal"
+    "${GICC_OMP_ROCM}/include" "${GICC_OMP_LIBFAB}/include")
+target_compile_options(gicc::omp INTERFACE
+    -fopenmp --offload-arch=gfx90a
+    -DGICC_BOOTSTRAP_MPI=1 -DGICC_PLATFORM_OFI -DGICC_GPU_HIP=1 -DGICC_CPU_PROXY=1
+    -D__HIP_PLATFORM_AMD__=1 -D__HIP_ROCclr__=1)
+target_link_libraries(gicc::omp INTERFACE
+    "${GICC_OMP_LIBDIR}/libgicc_omp.so"
+    "${GICC_OMP_LIBFAB}/lib64/libfabric.so" /usr/lib64/libhwloc.so -lpthread
+    "${GICC_OMP_ROCM}/lib/libamdhip64.so" "${GICC_OMP_MPI}/lib/libmpi_cray.so"
+    "${GICC_OMP_OMPLIB}/libomptarget.so")
+target_link_options(gicc::omp INTERFACE
+    -fopenmp --offload-arch=gfx90a --rtlib=compiler-rt -unwindlib=libgcc
+    "-Wl,-rpath,${GICC_OMP_LIBDIR}:${GICC_OMP_LIBFAB}/lib64:${GICC_OMP_MPI}/lib:${GICC_OMP_OMPLIB}:${GICC_OMP_ROCM}/lib")
+
+# DWQ variant: same link surface + the compile-time pass flags.
+add_library(gicc::omp_dwq INTERFACE IMPORTED)
+target_link_libraries(gicc::omp_dwq INTERFACE gicc::omp)
+target_compile_options(gicc::omp_dwq INTERFACE
+    -DGIOMP_ENABLE_DWQ -foffload-lto "-fpass-plugin=${GICC_OMP_PASS}")
