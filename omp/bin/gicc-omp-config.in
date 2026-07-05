@@ -1,0 +1,37 @@
+#!/bin/bash
+# gicc-omp-config - emit compile/link flags for GiOMP (mpicxx/pkg-config style).
+#   clang++ $(gicc-omp-config --cflags) app.cpp $(gicc-omp-config --libs) -o app
+# Add --dwq to either for the DWQ (pass-plugin) path.
+GICC_ROOT="@GICC_ROOT@"
+ROCM=/opt/rocm-6.4.3
+LIBFAB=/opt/cray/libfabric/2.1
+MPI=/opt/cray/pe/mpich/9.0.1/ofi/cray/20.0
+OMPLIB=/p/lustre2/shan4/softwares/diomp/lib/x86_64-unknown-linux-gnu
+LIBDIR="${GICC_ROOT}/build_ofi/lib"
+PASS="${GICC_ROOT}/tools/gicc-passes/build/libgicc-passes.so"
+
+want_dwq=0; for a in "$@"; do [ "$a" = "--dwq" ] && want_dwq=1; done
+
+cflags() {
+  echo -n "-fopenmp --offload-arch=gfx90a "
+  echo -n "-DGICC_BOOTSTRAP_MPI=1 -DGICC_PLATFORM_OFI -DGICC_GPU_HIP=1 -DGICC_CPU_PROXY=1 "
+  echo -n "-D__HIP_PLATFORM_AMD__=1 -D__HIP_ROCclr__=1 "
+  echo -n "-I${GICC_ROOT} -I${GICC_ROOT}/src -I${GICC_ROOT}/src/gicc/platform/ofi/internal "
+  echo -n "-I${ROCM}/include -I${LIBFAB}/include -isystem ${MPI}/include "
+  [ "$want_dwq" = 1 ] && echo -n "-DGIOMP_ENABLE_DWQ -foffload-lto -fpass-plugin=${PASS} "
+  echo
+}
+libs() {
+  echo -n "-fopenmp --offload-arch=gfx90a --rtlib=compiler-rt -unwindlib=libgcc "
+  echo -n "-L${LIBDIR} -lgicc_omp "
+  echo -n "${LIBFAB}/lib64/libfabric.so /usr/lib64/libhwloc.so -lpthread "
+  echo -n "${ROCM}/lib/libamdhip64.so ${MPI}/lib/libmpi_cray.so ${OMPLIB}/libomptarget.so "
+  echo -n "-Wl,-rpath,${LIBDIR}:${LIBFAB}/lib64:${MPI}/lib:${OMPLIB}:${ROCM}/lib"
+  echo
+}
+cmd=""; for a in "$@"; do [ "$a" != "--dwq" ] && { cmd="$a"; break; }; done
+case "$cmd" in
+  --cflags) cflags ;;
+  --libs)   libs ;;
+  *) echo "usage: gicc-omp-config --cflags|--libs [--dwq]" >&2; exit 1 ;;
+esac
