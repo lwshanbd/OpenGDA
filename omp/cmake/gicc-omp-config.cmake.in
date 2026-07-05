@@ -24,6 +24,7 @@ target_link_libraries(gicc::omp INTERFACE
     "${GICC_OMP_OMPLIB}/libomptarget.so")
 target_link_options(gicc::omp INTERFACE
     -fopenmp --offload-arch=gfx90a --rtlib=compiler-rt -unwindlib=libgcc
+    "-Wl,--allow-shlib-undefined"
     "-Wl,-rpath,${GICC_OMP_LIBDIR}:${GICC_OMP_LIBFAB}/lib64:${GICC_OMP_MPI}/lib:${GICC_OMP_OMPLIB}:${GICC_OMP_ROCM}/lib")
 
 # DWQ variant: same link surface + the compile-time pass flags.

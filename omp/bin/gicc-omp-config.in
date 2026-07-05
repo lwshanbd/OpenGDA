@@ -26,6 +26,7 @@ libs() {
   echo -n "-L${LIBDIR} -lgicc_omp "
   echo -n "${LIBFAB}/lib64/libfabric.so /usr/lib64/libhwloc.so -lpthread "
   echo -n "${ROCM}/lib/libamdhip64.so ${MPI}/lib/libmpi_cray.so ${OMPLIB}/libomptarget.so "
+  echo -n "-Wl,--allow-shlib-undefined "
   echo -n "-Wl,-rpath,${LIBDIR}:${LIBFAB}/lib64:${MPI}/lib:${OMPLIB}:${ROCM}/lib"
   echo
 }
