@@ -2,10 +2,13 @@
 @PACKAGE_INIT@
 set(GICC_OMP_ROOT   "@GICC_ROOT@")
 set(GICC_OMP_LIBDIR "@GICC_ROOT@/build_ofi/lib")
-set(GICC_OMP_ROCM   "/opt/rocm-6.4.3")
+# ROCm 6.4.0 clang toolchain (same LLVM the pass plugin is built against, so the
+# DWQ path can load -fpass-plugin and link this library with one compiler).
+set(GICC_OMP_ROCM   "/opt/rocm-6.4.0")
 set(GICC_OMP_LIBFAB "/opt/cray/libfabric/2.1")
 set(GICC_OMP_MPI    "/opt/cray/pe/mpich/9.0.1/ofi/cray/20.0")
-set(GICC_OMP_OMPLIB "/p/lustre2/shan4/softwares/diomp/lib/x86_64-unknown-linux-gnu")
+set(GICC_OMP_OMPLIB "/opt/rocm-6.4.0/lib/llvm/lib")
+set(GICC_OMP_CRAYPE "/opt/cray/pe/lib64")
 set(GICC_OMP_PASS   "@GICC_ROOT@/tools/gicc-passes/build/libgicc-passes.so")
 
 add_library(gicc::omp INTERFACE IMPORTED)
@@ -25,10 +28,15 @@ target_link_libraries(gicc::omp INTERFACE
 target_link_options(gicc::omp INTERFACE
     -fopenmp --offload-arch=gfx90a --rtlib=compiler-rt -unwindlib=libgcc
     "-Wl,--allow-shlib-undefined"
-    "-Wl,-rpath,${GICC_OMP_LIBDIR}:${GICC_OMP_LIBFAB}/lib64:${GICC_OMP_MPI}/lib:${GICC_OMP_OMPLIB}:${GICC_OMP_ROCM}/lib")
+    "-Wl,-rpath,${GICC_OMP_LIBDIR}:${GICC_OMP_LIBFAB}/lib64:${GICC_OMP_MPI}/lib:${GICC_OMP_OMPLIB}:${GICC_OMP_ROCM}/lib:${GICC_OMP_CRAYPE}")
 
-# DWQ variant: same link surface + the compile-time pass flags.
+# DWQ variant: same link surface + the compile-time pass flags. The
+# -openmp-opt-disable is CRITICAL: without it OpenMPOpt argument-specializes the
+# put marker's constant operands away, so the host trace would enqueue a
+# zero-byte DWQ write. Requires GICC_MODE=omp-dwq + GICC_META_DIR in the env at
+# compile time, and a two-pass compile (the pass populates then consumes JSON).
 add_library(gicc::omp_dwq INTERFACE IMPORTED)
 target_link_libraries(gicc::omp_dwq INTERFACE gicc::omp)
 target_compile_options(gicc::omp_dwq INTERFACE
-    -DGIOMP_ENABLE_DWQ -foffload-lto "-fpass-plugin=${GICC_OMP_PASS}")
+    -DGIOMP_ENABLE_DWQ -foffload-lto "-fpass-plugin=${GICC_OMP_PASS}"
+    -mllvm -openmp-opt-disable=true)

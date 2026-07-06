@@ -1,11 +1,13 @@
 #!/bin/bash
 # build_libgicc_omp.sh - produce libgicc_omp.{so,a} from the -x hip runtime TUs
-# + ompx_host.cpp, using the clang-21 diomp toolchain (the proven recipe from
-# examples/omp/build_omp_matmul.sh). Export LD_LIBRARY_PATH before running.
+# + ompx_host.cpp, using the ROCm 6.4.0 clang. This is the SAME toolchain the
+# GICC LTO pass plugin (libgicc-passes.so) is built against, so the DWQ path
+# (app TU compiled -fpass-plugin) links this library cleanly -- a clang-21
+# build could not, because the LLVM-19 pass plugin will not load in clang-21.
 set -euo pipefail
 GICC_ROOT="${GICC_ROOT:-/p/lustre2/shan4/new-gicc}"
-ROCM=/opt/rocm-6.4.3
-HIPCC=/p/lustre2/shan4/softwares/diomp/bin/clang++
+ROCM=/opt/rocm-6.4.0
+HIPCC=/opt/rocm-6.4.0/lib/llvm/bin/clang++
 LIBFAB=/opt/cray/libfabric/2.1
 MPI=/opt/cray/pe/mpich/9.0.1/ofi/cray/20.0
 OUTDIR="${GICC_ROOT}/build_ofi/lib"; mkdir -p "${OUTDIR}"

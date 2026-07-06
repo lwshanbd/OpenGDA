@@ -3,10 +3,12 @@
 #   clang++ $(gicc-omp-config --cflags) app.cpp $(gicc-omp-config --libs) -o app
 # Add --dwq to either for the DWQ (pass-plugin) path.
 GICC_ROOT="@GICC_ROOT@"
-ROCM=/opt/rocm-6.4.3
+# ROCm 6.4.0 clang toolchain (matches the pass plugin's LLVM, so --dwq works).
+ROCM=/opt/rocm-6.4.0
 LIBFAB=/opt/cray/libfabric/2.1
 MPI=/opt/cray/pe/mpich/9.0.1/ofi/cray/20.0
-OMPLIB=/p/lustre2/shan4/softwares/diomp/lib/x86_64-unknown-linux-gnu
+OMPLIB=/opt/rocm-6.4.0/lib/llvm/lib
+CRAYPE=/opt/cray/pe/lib64
 LIBDIR="${GICC_ROOT}/build_ofi/lib"
 PASS="${GICC_ROOT}/tools/gicc-passes/build/libgicc-passes.so"
 
@@ -18,7 +20,7 @@ cflags() {
   echo -n "-D__HIP_PLATFORM_AMD__=1 -D__HIP_ROCclr__=1 "
   echo -n "-I${GICC_ROOT} -I${GICC_ROOT}/src -I${GICC_ROOT}/src/gicc/platform/ofi/internal "
   echo -n "-I${ROCM}/include -I${LIBFAB}/include -isystem ${MPI}/include "
-  [ "$want_dwq" = 1 ] && echo -n "-DGIOMP_ENABLE_DWQ -foffload-lto -fpass-plugin=${PASS} "
+  [ "$want_dwq" = 1 ] && echo -n "-DGIOMP_ENABLE_DWQ -foffload-lto -fpass-plugin=${PASS} -mllvm -openmp-opt-disable=true "
   echo
 }
 libs() {
@@ -27,7 +29,7 @@ libs() {
   echo -n "${LIBFAB}/lib64/libfabric.so /usr/lib64/libhwloc.so -lpthread "
   echo -n "${ROCM}/lib/libamdhip64.so ${MPI}/lib/libmpi_cray.so ${OMPLIB}/libomptarget.so "
   echo -n "-Wl,--allow-shlib-undefined "
-  echo -n "-Wl,-rpath,${LIBDIR}:${LIBFAB}/lib64:${MPI}/lib:${OMPLIB}:${ROCM}/lib"
+  echo -n "-Wl,-rpath,${LIBDIR}:${LIBFAB}/lib64:${MPI}/lib:${OMPLIB}:${ROCM}/lib:${CRAYPE}"
   echo
 }
 cmd=""; for a in "$@"; do [ "$a" != "--dwq" ] && { cmd="$a"; break; }; done
