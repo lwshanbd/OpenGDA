@@ -25,7 +25,7 @@ libfabric:   /opt/cray/libfabric/2.1/
 Cray MPI:    /opt/cray/pe/mpich/9.0.1/ofi/cray/20.0/
 ```
 
-Always use `srun -p pci -t 2` (the default debug queue is congested). For 32-rank minimod runs, also export `PMI_MAX_KVS_ENTRIES=512` and `FI_MR_CACHE_MAX_COUNT=0`.
+Prefer `srun -p pci -t 2` (the default debug queue is congested). **`pci` and `pdebug` are interchangeable for these runs — if one is full, use the other.** In practice `pci` schedules small/single-node jobs fast but can stall on multi-node (4+ node) requests; `pdebug` is the better fallback for multi-node jobs (watch its ETA — it sometimes shows hours). For 32-rank minimod runs, also export `PMI_MAX_KVS_ENTRIES=512` and `FI_MR_CACHE_MAX_COUNT=0`.
 
 ```bash
 PMI_MAX_KVS_ENTRIES=512 FI_MR_CACHE_MAX_COUNT=0 \
@@ -139,6 +139,116 @@ This bypasses the AST-plugin wrapper script and uses plain hipcc with `-fpass-pl
 
 The 3-pass build (feature-extract → decider → lower) is at `benchmarks/Minimod_MPI/scripts/gicc-lto-3pass.sh` (also gitignored).
 
+### GICC-from-OpenMP minimod (DiOMP comparison)
+
+A separate effort ports minimod to call `gicc::omp::put` **inside `#pragma omp target`
+regions** (no LTO pass), to compare against the SC25 paper's DiOMP. It lives in the
+**gitignored** tree `/p/lustre2/shan4/DiOMP/benchmarks/benchmarks/Minimod_DiOMP/`
+(target `targets/omp_gicc/`). Sources `#include` GICC headers from this repo via
+`GICC_ROOT`, so changes here are picked up on rebuild.
+
+**Build** (`targets/omp_gicc/build_gicc_clang21.sh` — single clang-21 toolchain from
+`module load diomp/1.0`, compiles both the omp-target compute TUs and the `-x hip`
+GICC runtime/proxy TUs). **You MUST export `LD_LIBRARY_PATH` before building** or the
+link fails on `libomptarget.so`'s indirect LLVM deps:
+
+```bash
+export LD_LIBRARY_PATH=/p/lustre2/shan4/softwares/diomp/lib:/p/lustre2/shan4/softwares/diomp/lib/x86_64-unknown-linux-gnu:/opt/rocm-6.4.3/lib:$LD_LIBRARY_PATH
+export PATH=/p/lustre2/shan4/softwares/diomp/bin:$PATH
+cd /p/lustre2/shan4/DiOMP/benchmarks/benchmarks/Minimod_DiOMP/targets/omp_gicc
+GICC_ROOT=/p/lustre2/shan4/new-gicc bash ./build_gicc_clang21.sh   # -> ../../main_omp_gicc_clang21
+```
+
+**Run / ablation** — canonical driver: `Minimod_DiOMP/run_gicc_diomp_ablation.sh`
+(runs N*8 GPUs, grid 1200, `GICC_HALO_OVERLAP` 0 and 1, IPC+proxy hybrid). Four
+launch requirements are mandatory — each one is a real failure mode, not optional:
+
+1. **`HSA_XNACK=1`** — without it, any run with >1 rank/node faults with
+   `Memory access fault ... virtual address (nil)` in `gicc_halo_issue` (the
+   device-side proxy put / in-kernel xGMI store touches host-mapped memory that
+   MI250X only reaches with XNACK). 1-rank/node runs happen to work without it.
+2. **Top-level `flux run -o mpibind=off`** (run from a login shell, NOT inside
+   `flux alloc`; do NOT use `srun`). Multi-node IPC needs every node GPU visible
+   so the per-rank device select works. `srun` strong-binds 1 GPU/task (IPC stays
+   dark → cross-node still works but same-node hits the NIC); nesting `flux run`
+   inside `flux alloc` gives ndev=0.
+3. **`ROCR_VISIBLE_DEVICES=0,1,2,3,4,5,6,7` + `GICC_HALO_IPC=1`** — enables per-rank
+   device select and the same-node xGMI IPC fast path. (Do NOT also set
+   `HIP_VISIBLE_DEVICES`; setting both breaks GPU visibility.)
+4. `GICC_PROXY_ENABLED=1 GICC_SKIP_DWQ_INIT=1` + the build `LD_LIBRARY_PATH`.
+
+Reference (paper DiOMP, grid 1200, `SC25/Minimod_DiOMP_*_1.log`): 8 GPU 23.93 s,
+16 GPU 13.12 s, 24 GPU 9.63 s, 32 GPU 7.73 s (64 GPU OOMs). Fresh full sweep
+(2026-06-19, every run bit-exact `field_xor 85c0f82d50171bb9`):
+
+| GPU | GICC overlap-OFF | GICC overlap-ON | DiOMP (paper) |
+|----:|----:|----:|----:|
+|  8  | 23.09 | 23.07 | 23.93 |
+| 16  | 12.22 | 11.58 | 13.12 |
+| 24  |  8.57 |  8.29 |  9.63 |
+| 32  |  6.86 |  6.60 |  7.73 |
+
+GICC beats DiOMP at every scale in **both** modes; the overlap-OFF column (IPC alone)
+already wins, and the gap grows with scale. **GICC wins via two independent levers,
+either alone enough**: overlap (hide comm under compute) OR IPC (move same-node
+faces to xGMI, ~free comm). The in-kernel xGMI IPC path has a known intermittent
+startup race that faults more often the more same-node faces a run has — worst at
+8 GPU (1 node, every face is IPC), rare at ≥16 GPU. The driver retries each run up
+to `MAX_TRIES` (default 4) to ride through it; fixing the race itself is open work.
+
+### GiOMP single-header library (`gicc/omp.h` + `libgicc_omp`)
+
+A friendly repackaging of the GICC-from-OpenMP path: an app includes ONE header
+and links ONE prebuilt library — no `gicc_omp_bridge` forward-decl boilerplate,
+no hand-written multi-TU build. GiOMP = DiOMP + GICC: the API reuses DiOMP names
+(`omp_get_rank_num`, `omp_get_num_ranks`, `ompx_barrier`) where they map 1:1.
+
+**Toolchain: ROCm 6.4.0 clang** (`/opt/rocm-6.4.0/lib/llvm/bin/clang++`), NOT the
+diomp clang-21. This is deliberate: the LTO pass plugin is built against ROCm
+6.4.0's LLVM-19 and will NOT load in clang-21 (`undefined symbol:
+llvm::DisableABIBreakingChecks`), so the DWQ path needs 6.4.0 — and building the
+library + examples with one compiler lets proxy and DWQ share it. Runtime
+`LD_LIBRARY_PATH` = `/opt/rocm-6.4.0/lib/llvm/lib:/opt/rocm-6.4.0/lib:/opt/cray/pe/lib64`
+(export in the shell; do NOT pass inline to `flux run` — it drops flux's Cray PE
+paths and breaks PMI at runtime).
+
+**Build the library once:**
+```bash
+export LD_LIBRARY_PATH=/opt/rocm-6.4.0/lib/llvm/lib:/opt/rocm-6.4.0/lib:/opt/cray/pe/lib64
+GICC_ROOT=/p/lustre2/shan4/new-gicc bash omp/build_libgicc_omp.sh   # -> build_ofi/lib/libgicc_omp.{so,a}
+# then regenerate the CMake config + flags script from the templates:
+sed -e 's#@PACKAGE_INIT@##' -e 's#@GICC_ROOT@#/p/lustre2/shan4/new-gicc#g' \
+  omp/cmake/gicc-omp-config.cmake.in > build_ofi/lib/cmake/gicc-omp/gicc-omp-config.cmake
+sed 's#@GICC_ROOT@#/p/lustre2/shan4/new-gicc#g' omp/bin/gicc-omp-config.in > build_ofi/lib/bin/gicc-omp-config
+```
+
+**Consume via CMake** (`CMAKE_PREFIX_PATH=<root>/build_ofi/lib/cmake/gicc-omp`):
+```cmake
+find_package(gicc-omp REQUIRED)
+target_link_libraries(app PRIVATE gicc::omp)          # or gicc::omp_dwq for the DWQ path
+```
+**Or via flags** (non-CMake): `clang++ $(gicc-omp-config --cflags) app.cpp $(gicc-omp-config --libs)` (add `--dwq`).
+
+**API:** `ompx_init/finalize`, `omp_get_rank_num/num_ranks`, `ompx_alloc` (returns
+`ompx_buffer{ptr,index,bytes}`, alloc+register) / `ompx_register` / `ompx_free`,
+`ompx_exchange`, `ompx_prepare`, `ompx_barrier`, `ompx_quiet_host` (host);
+`ompx_put/get/quiet` inside `#pragma omp target` (proxy/IPC); `ompx_dwq_put/flush`
+(DWQ). Examples: `examples/omp/{hello_giomp,omp_matmul,omp_pingpong}.cpp`.
+
+**Multi-rank SAME-node needs the full launch recipe** (per-rank device select),
+else the compute kernels fault ("write to read-only page") on a mismatched GPU:
+```bash
+HSA_XNACK=1 GICC_PROXY_ENABLED=1 GICC_SKIP_DWQ_INIT=1 \
+GICC_HALO_IPC=1 ROCR_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+flux run -N1 -n8 -g1 -o mpibind=off ./omp_matmul 4096
+```
+Cross-node (2 ranks / 2 nodes) does not need `GICC_HALO_IPC`/`ROCR_VISIBLE_DEVICES`.
+
+**DWQ is a separate build** (`examples/omp/build_omp_dwq.sh`): only the app TU
+needs the pass (2-pass compile, `GICC_MODE=omp-dwq` + `GICC_META_DIR` env,
+`-mllvm -openmp-opt-disable=true`), then it links the prebuilt `libgicc_omp`. Run
+with `GICC_HALO_DWQ=1` and WITHOUT `GICC_SKIP_DWQ_INIT` (so the trigger BAR maps).
+
 ## GICC API
 
 ### Host
@@ -224,7 +334,7 @@ cd /p/lustre2/shan4/opengda
 - **Acronym casing**: `BootstrapMPI` not `BootstrapMpi`, `IPC` not `Ipc`.
 - **Planning docs stay local**: `docs/` (specs, plans, notes) is gitignored — never `git add` it.
 - **Test timeout cap**: srun tests > 1 min are broken, not slow. Stop and diagnose instead.
-- **Use `srun -p pci`**: the default debug queue is congested.
+- **Partition**: prefer `srun -p pci`; if it's full (esp. multi-node jobs that stall in the queue), fall back to `-p pdebug`. The two are interchangeable for these runs.
 
 ## Performance baseline (current)
 
