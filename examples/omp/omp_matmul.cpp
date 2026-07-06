@@ -13,8 +13,12 @@
 // (ompx_put vs ompx_dget) differs.
 //
 // Build: clang++ $(gicc-omp-config --cflags) omp_matmul.cpp $(gicc-omp-config --libs)
-// Run  : HSA_XNACK=1 GICC_PROXY_ENABLED=1 GICC_SKIP_DWQ_INIT=1 \
-//        flux run -N <nodes> -n <ranks> -g1 -o mpibind=off ./omp_matmul [N]
+// Run  : multi-rank/node needs the full launch recipe (per CLAUDE.md) -- without
+//        per-rank device select the compute kernels fault ("write to read-only
+//        page") on a mismatched GPU:
+//   HSA_XNACK=1 GICC_PROXY_ENABLED=1 GICC_SKIP_DWQ_INIT=1 \
+//   GICC_HALO_IPC=1 ROCR_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+//   flux run -N <nodes> -n <ranks> -g1 -o mpibind=off ./omp_matmul [N]
 
 #include "gicc/omp.h"
 #include <omp.h>
