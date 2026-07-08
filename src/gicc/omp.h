@@ -1,11 +1,15 @@
 // gicc/omp.h - GiOMP public API. GiOMP = DiOMP + GICC: a DiOMP-aligned ompx_*
-// surface backed by the GICC proxy/IPC/DWQ transport. ONE include for an app.
+// surface backed by the GICC IPC / proxy / DWQ transports. ONE include for an app.
 //
 //   Host (ordinary code):   ompx_init/finalize, omp_get_rank_num/num_ranks,
 //                           ompx_alloc/register/free/exchange, ompx_prepare,
 //                           ompx_barrier, ompx_quiet_host.
-//   Device (#pragma omp target): ompx_put/ompx_get/ompx_quiet.
-//   DWQ (needs -fpass-plugin, guarded): ompx_dwq_put/ompx_dwq_flush.
+//   Smart PUT (host-side):  ompx_put(ctx, peer, ...)  -- picks IPC if the peer is
+//                           same-node reachable, else the cross-node transport
+//                           (proxy or DWQ, selected by the xport argument). It
+//                           issues the omp target region(s) for you.
+//   Advanced device-side (call INSIDE your own #pragma omp target):
+//                           ompx_put_proxy / ompx_get / ompx_quiet.
 //
 // The HIP-compiled runtime lives in libgicc_omp; this header is safe to include
 // in a -fopenmp TU AND in a -x hip host-only TU (the device inline functions are
@@ -13,7 +17,7 @@
 #pragma once
 #include <cstddef>
 #ifndef __HIPCC__
-#include "gicc/platform/ofi/gicc_omp_device.hpp"   // device-side gicc::omp::put/get/quiet + put_auto + DeviceCtx
+#include "gicc/platform/ofi/gicc_omp_device.hpp"   // device-side gicc::omp::put/get/quiet + DeviceCtx
 #else
 #include "gicc/platform/ofi/device_ctx.hpp"         // just gicc::DeviceCtx (HIP-free), enough for host API
 #endif
@@ -32,17 +36,31 @@ void   ompx_free(ompx_buffer b);
 void   ompx_exchange();                              // exchange RMA address book (after all registrations)
 gicc::DeviceCtx* ompx_prepare();                     // per-iteration device ctx (stream-like)
 void   ompx_barrier();                               // reused DiOMP name
-void   ompx_quiet_host();                            // host-side drain (== runtime reset())
+void   ompx_quiet_host();                            // host-side drain (IPC sync + proxy/DWQ completion)
 
-// ---- device-side RMA (call INSIDE #pragma omp target) ------------------------
-// Not visible to the HIP compiler (-x hip host TU): HIP ignores omp declare target
-// and cannot compile the gicc::omp::* device functions that gicc_omp_device.hpp
-// defines. Only the OpenMP offload toolchain needs these wrappers.
+// ---- cross-node transport selector for the smart ompx_put ---------------------
+// (IPC is always preferred when the peer is same-node reachable; this only picks
+//  what to do for a NON-IPC / cross-node peer.)
+enum ompx_xport { OMPX_PROXY = 0, OMPX_DWQ = 1 };
+
+// Internal host helpers used by the inline smart ompx_put below. Defined in
+// libgicc_omp (ompx_host.cpp); visible to both the -fopenmp app TU (which inlines
+// ompx_put) and the -x hip library TU (which defines them). Apps do not call
+// these directly.
+extern "C" int   ompx_ipc_reachable(int peer, int buf);   // 1 if same-node IPC-mapped
+extern "C" void* ompx_peer_ipc_base(int peer, int buf);   // peer's xGMI-mapped buffer base
+extern "C" void* ompx_local_base(int buf);                // our own buffer device base
+extern "C" void  ompx_dwq_stage(int peer, int dst_buf, size_t dst_off,
+                                int src_buf, size_t src_off, size_t bytes);
+extern "C" void  ompx_dwq_arm();
+
 #ifndef __HIPCC__
+
+// ---- advanced device-side RMA (call INSIDE your own #pragma omp target) -------
 #pragma omp declare target
-inline void ompx_put(gicc::DeviceCtx* ctx, int node,
-                     int dst_buf, size_t dst_off,
-                     int src_buf, size_t src_off, size_t bytes) {
+inline void ompx_put_proxy(gicc::DeviceCtx* ctx, int node,
+                           int dst_buf, size_t dst_off,
+                           int src_buf, size_t src_off, size_t bytes) {
     gicc::omp::put(ctx, node, dst_buf, dst_off, src_buf, src_off, bytes);
 }
 inline void ompx_get(gicc::DeviceCtx* ctx, int node,
@@ -53,7 +71,42 @@ inline void ompx_get(gicc::DeviceCtx* ctx, int node,
 inline void ompx_quiet(gicc::DeviceCtx* ctx) { gicc::omp::quiet(ctx); }
 #pragma omp end declare target
 
-// ---- DWQ path (opt-in; app TU must compile with -fpass-plugin -foffload-lto) --
+// ---- smart PUT (host-side): IPC-first, else cross-node proxy/DWQ --------------
+// Issues the omp target region(s) internally, so the caller does NOT write a
+// #pragma omp target. Preference order:
+//   1. same-node & IPC-mapped  -> in-kernel xGMI store straight into the peer's
+//      buffer (no NIC, cheapest);
+//   2. otherwise               -> the cross-node transport `xport`:
+//        OMPX_PROXY (default)  -> device pushes a TransferCmd; CPU proxy fi_write;
+//        OMPX_DWQ              -> host pre-stages a triggered RMA descriptor and a
+//                                 lead-thread device MMIO write fires the NIC.
+// Completion is separate: call ompx_quiet_host() before reading the delivered data.
+inline void ompx_put(gicc::DeviceCtx* ctx, int peer,
+                     int dst_buf, size_t dst_off,
+                     int src_buf, size_t src_off, size_t bytes,
+                     ompx_xport xport = OMPX_PROXY) {
+    if (ompx_ipc_reachable(peer, dst_buf)) {
+        float*       d = reinterpret_cast<float*>(
+                             static_cast<char*>(ompx_peer_ipc_base(peer, dst_buf)) + dst_off);
+        const float* s = reinterpret_cast<const float*>(
+                             static_cast<char*>(ompx_local_base(src_buf)) + src_off);
+        const size_t n = bytes / sizeof(float);
+        #pragma omp target teams distribute parallel for is_device_ptr(d, s) firstprivate(n)
+        for (size_t i = 0; i < n; ++i) d[i] = s[i];
+    } else if (xport == OMPX_DWQ) {
+        ompx_dwq_stage(peer, dst_buf, dst_off, src_buf, src_off, bytes);
+        ompx_dwq_arm();
+        #pragma omp target is_device_ptr(ctx)
+        { *(ctx->trigger_addr_) = ctx->trigger_val_; }   // lead-thread MMIO trigger
+    } else {
+        #pragma omp target is_device_ptr(ctx) \
+                firstprivate(peer, dst_buf, dst_off, src_buf, src_off, bytes)
+        { gicc::omp::put(ctx, peer, dst_buf, dst_off, src_buf, src_off, bytes); }
+    }
+}
+
+// ---- DWQ marker path (opt-in; app TU must compile with -fpass-plugin -foffload-lto)
+// Alternative to the runtime DWQ above: the pass synthesizes the host trace.
 #ifdef GIOMP_ENABLE_DWQ
 #include "examples/omp/gicc_omp_dwq.hpp"             // gicc::omp_dwq::put/flush markers
 #pragma omp declare target

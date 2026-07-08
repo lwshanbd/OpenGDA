@@ -33,4 +33,29 @@ void ompx_exchange() { gicc_omp_bridge::exchange_buffers(); }
 gicc::DeviceCtx* ompx_prepare() { return gicc_omp_bridge::prepare(); }
 
 void ompx_barrier()    { gicc_omp_bridge::barrier(); }
-void ompx_quiet_host() { gicc_omp_bridge::reset(); }
+void ompx_quiet_host() { gicc_omp_bridge::ipc_sync(); gicc_omp_bridge::reset(); }
+
+// ---- helpers for the inline smart ompx_put (declared in gicc/omp.h) ----------
+// The smart ompx_put lives inline in the app's -fopenmp TU (so its omp target
+// regions get device codegen); these host helpers resolve the IPC reachability /
+// peer pointers and stage the runtime DWQ descriptor from libgicc_omp.
+namespace gicc { class Runtime; }
+extern "C" void  gicc_runtime_dwq_enqueue(gicc::Runtime*, int peer,
+                                          int dst_buf, size_t dst_off,
+                                          int src_buf, size_t src_off, size_t size);
+
+extern "C" int   ompx_ipc_reachable(int peer, int buf) {
+    return gicc_omp_bridge::ipc_peer_local(peer, buf) ? 1 : 0;
+}
+extern "C" void* ompx_peer_ipc_base(int peer, int buf) {
+    return gicc_omp_bridge::peer_ipc_ptr(peer, buf);
+}
+extern "C" void* ompx_local_base(int buf) {
+    return gicc_omp_bridge::local_ptr(buf);
+}
+extern "C" void  ompx_dwq_stage(int peer, int dst_buf, size_t dst_off,
+                                int src_buf, size_t src_off, size_t bytes) {
+    gicc_runtime_dwq_enqueue(static_cast<gicc::Runtime*>(gicc_runtime_current()),
+                             peer, dst_buf, dst_off, src_buf, src_off, bytes);
+}
+extern "C" void  ompx_dwq_arm() { gicc_omp_bridge::dwq_arm(); }
