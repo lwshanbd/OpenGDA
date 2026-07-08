@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
             if (rank == 0) {
                 d_ctx = ompx_prepare();
                 #pragma omp target is_device_ptr(d_ctx) firstprivate(peer, buf, bytes)
-                { ompx_put(d_ctx, peer, buf, 0, buf, 0, bytes); }
+                { ompx_put_proxy(d_ctx, peer, buf, 0, buf, 0, bytes); }
                 ompx_quiet_host();
             }
         }
@@ -104,7 +104,7 @@ int main(int argc, char** argv) {
                 #pragma omp target is_device_ptr(d_ctx) firstprivate(peer, buf, bytes)
                 {
                     for (int i = 0; i < N; ++i)
-                        ompx_put(d_ctx, peer, buf, 0, buf, 0, bytes);
+                        ompx_put_proxy(d_ctx, peer, buf, 0, buf, 0, bytes);
                 }
                 ompx_quiet_host();   // single completion barrier for all N
             }
@@ -129,7 +129,7 @@ int main(int argc, char** argv) {
                     for (int i = 0; i < kBatch; ++i) {
                         d_ctx = ompx_prepare();
                         #pragma omp target is_device_ptr(d_ctx) firstprivate(peer, buf, bytes)
-                        { ompx_put(d_ctx, peer, buf, 0, buf, 0, bytes); }
+                        { ompx_put_proxy(d_ctx, peer, buf, 0, buf, 0, bytes); }
                         ompx_quiet_host();
                     }
                 } else {
@@ -139,7 +139,7 @@ int main(int argc, char** argv) {
                     #pragma omp target is_device_ptr(d_ctx) firstprivate(peer, buf, bytes, nb)
                     {
                         for (int i = 0; i < nb; ++i)
-                            ompx_put(d_ctx, peer, buf, 0, buf, 0, bytes);
+                            ompx_put_proxy(d_ctx, peer, buf, 0, buf, 0, bytes);
                     }
                     ompx_quiet_host();
                 }

@@ -83,9 +83,9 @@ int main(int argc, char** argv) {
             const int block_num = (mype + s) % npes;
             d_ctx = ompx_prepare();
             // (1) send my current B stripe to my left neighbor (-> its Bn).
-            //     ompx_put picks IPC (same-node xGMI) vs proxy (cross-node) itself.
-            #pragma omp target is_device_ptr(d_ctx) firstprivate(left, iBn, iBs, stripe)
-            { ompx_put(d_ctx, left, iBn, 0, iBs, 0, stripe); }
+            //     Smart host-side put: IPC (same-node xGMI) if reachable, else
+            //     proxy; issues the omp target region internally.
+            ompx_put(d_ctx, left, iBn, 0, iBs, 0, stripe);
 
             // (2) local block matmul, identical loop to DiOMP's diomp_mm.cpp.
             #pragma omp target is_device_ptr(dAs, curBs, dCs) firstprivate(N, Ns, block_num)

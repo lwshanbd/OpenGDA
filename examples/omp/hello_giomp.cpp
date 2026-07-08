@@ -11,9 +11,9 @@ int main() {
     ompx_exchange();
     gicc::DeviceCtx* c = ompx_prepare();
     const int peer = (me + 1) % np;
-    #pragma omp target is_device_ptr(c)
-    { ompx_put(c, peer, b.index, 0, b.index, 0, 1024 * sizeof(float)); }
-    ompx_quiet(c);
+    // Smart host-side put: picks IPC (same-node) or proxy (cross-node) itself;
+    // issues the omp target region internally, so no #pragma omp target here.
+    ompx_put(c, peer, b.index, 0, b.index, 0, 1024 * sizeof(float));
     ompx_quiet_host();
     ompx_barrier();
     if (me == 0) printf("hello_giomp: %d ranks, ok\n", np);
