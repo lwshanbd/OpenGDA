@@ -231,9 +231,15 @@ target_link_libraries(app PRIVATE gicc::omp)          # or gicc::omp_dwq for the
 
 **API:** `ompx_init/finalize`, `omp_get_rank_num/num_ranks`, `ompx_alloc` (returns
 `ompx_buffer{ptr,index,bytes}`, alloc+register) / `ompx_register` / `ompx_free`,
-`ompx_exchange`, `ompx_prepare`, `ompx_barrier`, `ompx_quiet_host` (host);
-`ompx_put/get/quiet` inside `#pragma omp target` (proxy/IPC); `ompx_dwq_put/flush`
-(DWQ). Examples: `examples/omp/{hello_giomp,omp_matmul,omp_pingpong}.cpp`.
+`ompx_exchange`, `ompx_prepare`, `ompx_barrier`, `ompx_quiet_host` (host).
+`ompx_put(ctx,peer,dbuf,doff,sbuf,soff,bytes,xport)` is a **smart host-side put**:
+IPC (in-kernel xGMI) if the peer is same-node reachable, else the cross-node
+transport `xport` (`OMPX_PROXY` default, or `OMPX_DWQ` runtime-triggered); it
+issues the `#pragma omp target` region itself. For batching many puts in one
+kernel, call the device-side `ompx_put_proxy`/`ompx_get`/`ompx_quiet` inside your
+own `#pragma omp target`. `ompx_dwq_put/flush` markers = the pass-based DWQ.
+Examples: `examples/omp/{hello_giomp,omp_matmul,omp_pingpong}.cpp`; the minimod
+halo (`Minimod_DiOMP/targets/omp_gicc/gicc_halo.cpp`) uses the smart `ompx_put`.
 
 **Multi-rank SAME-node needs the full launch recipe** (per-rank device select),
 else the compute kernels fault ("write to read-only page") on a mismatched GPU:
