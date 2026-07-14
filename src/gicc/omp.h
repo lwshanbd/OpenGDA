@@ -42,6 +42,7 @@ void   ompx_quiet_host();                            // host-side drain (IPC syn
 // (IPC is always preferred when the peer is same-node reachable; this only picks
 //  what to do for a NON-IPC / cross-node peer.)
 enum ompx_xport { OMPX_PROXY = 0, OMPX_DWQ = 1 };
+bool ompx_dwq_enabled();
 
 // Internal host helpers used by the inline smart ompx_put below. Defined in
 // libgicc_omp (ompx_host.cpp); visible to both the -fopenmp app TU (which inlines
@@ -60,15 +61,19 @@ extern "C" void  ompx_dwq_arm();
 #pragma omp declare target
 inline void ompx_put_proxy(gicc::DeviceCtx* ctx, int node,
                            int dst_buf, size_t dst_off,
-                           int src_buf, size_t src_off, size_t bytes) {
-    gicc::omp::put(ctx, node, dst_buf, dst_off, src_buf, src_off, bytes);
+                           int src_buf, size_t src_off, size_t bytes,
+                           int lane = 0) {
+    gicc::omp::put(ctx, node, dst_buf, dst_off, src_buf, src_off, bytes, lane);
 }
 inline void ompx_get(gicc::DeviceCtx* ctx, int node,
                      int src_buf, size_t src_off,
-                     int dst_buf, size_t dst_off, size_t bytes) {
-    gicc::omp::get(ctx, node, src_buf, src_off, dst_buf, dst_off, bytes);
+                     int dst_buf, size_t dst_off, size_t bytes,
+                     int lane = 0) {
+    gicc::omp::get(ctx, node, src_buf, src_off, dst_buf, dst_off, bytes, lane);
 }
-inline void ompx_quiet(gicc::DeviceCtx* ctx) { gicc::omp::quiet(ctx); }
+inline void ompx_quiet(gicc::DeviceCtx* ctx, int lane = 0) {
+    gicc::omp::quiet(ctx, lane);
+}
 #pragma omp end declare target
 
 // ---- smart PUT (host-side): IPC-first, else cross-node proxy/DWQ --------------
