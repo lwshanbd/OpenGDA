@@ -8,50 +8,55 @@
 #include <cstdio>
 #include <cstddef>
 
-#include "gicc/platform/ofi/gicc_omp_device.hpp"   // gicc::omp::put/quiet + DeviceCtx
-#include "examples/omp/gicc_omp_bridge.hpp"
+#include "gicc/omp.h"
+#include "examples/omp/giomp_example_utils.hpp"
 
 int main() {
     const size_t bytes = 4096;       // small: this is a backpressure test, not bandwidth
     const int    NITER = 20000;      // > 4096 ring capacity -> forces ring-full backoff
-    gicc_omp_bridge::init(bytes);
+    ompx_init();
+    ompx_buffer buffer = ompx_alloc(bytes);
+    ompx_exchange();
 
-    int my = gicc_omp_bridge::rank();
-    int nr = gicc_omp_bridge::nranks();
+    int my = omp_get_rank_num();
+    int nr = omp_get_num_ranks();
     if (nr != 2) {
         if (my == 0) fprintf(stderr, "need 2 ranks\n");
-        gicc_omp_bridge::finalize();
+        ompx_free(buffer);
+        ompx_finalize();
         return 1;
     }
     int peer = my ^ 1;
-    int bidx = gicc_omp_bridge::buf_index();
+    int bidx = buffer.index;
 
-    gicc_omp_bridge::fill_buffer(my == 0 ? 0xAB : 0x00, bytes);
+    giomp_example::fill_buffer(buffer, my == 0 ? 0xAB : 0x00);
+    ompx_barrier();
 
-    gicc::DeviceCtx* d_ctx = gicc_omp_bridge::prepare();
+    gicc::DeviceCtx* d_ctx = ompx_prepare();
 
     if (my == 0) {
         #pragma omp target is_device_ptr(d_ctx)
         {
             for (int i = 0; i < NITER; ++i)
-                gicc::omp::put(d_ctx, peer, bidx, /*dst_off=*/0,
-                                      bidx, /*src_off=*/0, bytes);
-            gicc::omp::quiet(d_ctx);   // device-side fence: must drain before returning
+                ompx_put_proxy(d_ctx, peer, bidx, /*dst_off=*/0,
+                               bidx, /*src_off=*/0, bytes);
+            ompx_quiet(d_ctx);   // device-side fence: must drain before returning
         }
-        gicc_omp_bridge::reset();
+        ompx_quiet_host();
     } else {
-        gicc_omp_bridge::reset();
+        ompx_quiet_host();
     }
-    gicc_omp_bridge::barrier();
+    ompx_barrier();
 
     int rc = 0;
     if (my == 1) {
-        size_t bad = gicc_omp_bridge::count_mismatches(0xAB, bytes);
+        size_t bad = giomp_example::count_mismatches(buffer, 0xAB);
         printf("recv: bad_bytes=%zu/%zu after %d puts : %s\n",
                bad, bytes, NITER, bad == 0 ? "PASS" : "FAIL");
         rc = (bad == 0) ? 0 : 2;
     }
-    gicc_omp_bridge::barrier();
-    gicc_omp_bridge::finalize();
+    ompx_barrier();
+    ompx_free(buffer);
+    ompx_finalize();
     return rc;
 }

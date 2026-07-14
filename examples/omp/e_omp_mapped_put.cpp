@@ -11,17 +11,16 @@
 #include <cstddef>
 #include <cstdlib>
 
-#include "gicc/platform/ofi/gicc_omp_device.hpp"   // gicc::omp::put + DeviceCtx
-#include "examples/omp/gicc_omp_bridge.hpp"
+#include "gicc/omp.h"
 
 int main() {
     const size_t n = 65536;                       // bytes in the "field"
     unsigned char* v = (unsigned char*)malloc(n);
 
-    gicc_omp_bridge::init_runtime_only();
-    int my = gicc_omp_bridge::rank();
-    int nr = gicc_omp_bridge::nranks();
-    if (nr != 2) { if (!my) fprintf(stderr, "need 2 ranks\n"); gicc_omp_bridge::finalize(); return 1; }
+    ompx_init();
+    int my = omp_get_rank_num();
+    int nr = omp_get_num_ranks();
+    if (nr != 2) { if (!my) fprintf(stderr, "need 2 ranks\n"); ompx_finalize(); return 1; }
     int peer = my ^ 1;
 
     for (size_t i = 0; i < n; ++i) v[i] = (my == 0) ? 0xAB : 0x00;
@@ -34,22 +33,22 @@ int main() {
     int bidx = -1;
     #pragma omp target data use_device_ptr(v)
     {
-        bidx = gicc_omp_bridge::register_external(v, n);
+        bidx = ompx_register(v, n);
     }
-    gicc_omp_bridge::exchange_buffers();
+    ompx_exchange();
 
-    gicc::DeviceCtx* d_ctx = gicc_omp_bridge::prepare();
+    gicc::DeviceCtx* d_ctx = ompx_prepare();
 
     if (my == 0) {
         #pragma omp target is_device_ptr(d_ctx)
         {
-            gicc::omp::put(d_ctx, peer, bidx, /*dst_off=*/0, bidx, /*src_off=*/0, n);
+            ompx_put_proxy(d_ctx, peer, bidx, /*dst_off=*/0, bidx, /*src_off=*/0, n);
         }
-        gicc_omp_bridge::reset();
+        ompx_quiet_host();
     } else {
-        gicc_omp_bridge::reset();
+        ompx_quiet_host();
     }
-    gicc_omp_bridge::barrier();
+    ompx_barrier();
 
     // Copy the OMP-mapped device field back to host and verify on the receiver.
     #pragma omp target exit data map(from: v[0:n])
@@ -61,8 +60,8 @@ int main() {
         printf("omp-mapped put: bad_bytes=%zu/%zu : %s\n", bad, n, bad == 0 ? "PASS" : "FAIL");
         rc = (bad == 0) ? 0 : 2;
     }
-    gicc_omp_bridge::barrier();
+    ompx_barrier();
     free(v);
-    gicc_omp_bridge::finalize();
+    ompx_finalize();
     return rc;
 }

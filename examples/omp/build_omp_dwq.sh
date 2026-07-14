@@ -22,7 +22,8 @@ CRAYPE=/opt/cray/pe/lib64
 LIBDIR="${GICC_ROOT}/build_ofi/lib"
 PLUGIN="${GICC_ROOT}/tools/gicc-passes/build/libgicc-passes.so"
 META_DIR="${GICC_META_DIR:-/tmp/gicc-omp-dwq-meta}"
-OUT="${GICC_ROOT}/build_ofi/omp_dwq"
+SOURCE="${GIOMP_DWQ_SOURCE:-${GICC_ROOT}/examples/omp/e_dwq_single.cpp}"
+OUT="${GIOMP_DWQ_OUT:-${GICC_ROOT}/build_ofi/omp_dwq}"
 
 if [[ ! -f "${PLUGIN}" ]]; then echo "error: pass plugin not built at ${PLUGIN}" >&2; exit 1; fi
 if [[ ! -f "${LIBDIR}/libgicc_omp.so" ]]; then
@@ -44,14 +45,14 @@ for pass in 1 2; do
       -mllvm -openmp-opt-disable=true -fpass-plugin="${PLUGIN}" \
       -DGIOMP_ENABLE_DWQ -O3 -std=gnu++17 \
       "${DEFS[@]}" "${INCS[@]}" \
-      -c "${GICC_ROOT}/examples/omp/e_dwq_single.cpp" -o "${OBJ}/e_dwq.o"
+      -c "${SOURCE}" -o "${OBJ}/app.o"
 done
 
 # (2) link against the prebuilt libgicc_omp (runtime + proxy + ompx_* host).
 "${CLANG}" -fopenmp --offload-arch=gfx90a \
     --rtlib=compiler-rt -unwindlib=libgcc \
     -Wl,--whole-archive,-lhugetlbfs,--no-whole-archive \
-    "${OBJ}/e_dwq.o" \
+    "${OBJ}/app.o" \
     -L"${LIBDIR}" -lgicc_omp \
     "${LIBFAB}/lib64/libfabric.so" /usr/lib64/libhwloc.so -lpthread \
     "${ROCM}/lib/libamdhip64.so" "${MPI}/lib/libmpi_cray.so" "${OMPLIB}/libomptarget.so" \
