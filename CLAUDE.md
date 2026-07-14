@@ -148,8 +148,8 @@ regions** (no LTO pass), to compare against the SC25 paper's DiOMP. It lives in 
 `GICC_ROOT`, so changes here are picked up on rebuild.
 
 **Build** (`targets/omp_gicc/build_gicc_clang21.sh` — single clang-21 toolchain from
-`module load diomp/1.0`, compiles both the omp-target compute TUs and the `-x hip`
-GICC runtime/proxy TUs). **You MUST export `LD_LIBRARY_PATH` before building** or the
+`module load diomp/1.0`; the application compiles its omp-target TUs and links a
+matching `libgicc_omp.a`). **You MUST export `LD_LIBRARY_PATH` before building** or the
 link fails on `libomptarget.so`'s indirect LLVM deps:
 
 ```bash
@@ -199,8 +199,8 @@ to `MAX_TRIES` (default 4) to ride through it; fixing the race itself is open wo
 ### GiOMP single-header library (`gicc/omp.h` + `libgicc_omp`)
 
 A friendly repackaging of the GICC-from-OpenMP path: an app includes ONE header
-and links ONE prebuilt library — no `gicc_omp_bridge` forward-decl boilerplate,
-no hand-written multi-TU build. GiOMP = DiOMP + GICC: the API reuses DiOMP names
+and links ONE prebuilt library — no application-owned runtime adapter and no
+hand-written multi-TU build. GiOMP = DiOMP + GICC: the API reuses DiOMP names
 (`omp_get_rank_num`, `omp_get_num_ranks`, `ompx_barrier`) where they map 1:1.
 
 **Toolchain: ROCm 6.4.0 clang** (`/opt/rocm-6.4.0/lib/llvm/bin/clang++`), NOT the
