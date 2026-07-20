@@ -14,9 +14,17 @@ case "${MODE}" in
     smoke) RANKS=(2); RUNS=1; WARMUP=0; ITERS=10; ALLOC_NODES=2 ;;
     quick) RANKS=(8 16); RUNS=3; WARMUP=1; ITERS=100; ALLOC_NODES=2 ;;
     full)  RANKS=(8 16 32); RUNS=5; WARMUP=2; ITERS=200; ALLOC_NODES=4 ;;
-    *) echo "usage: $0 [smoke|quick|full] [output-directory]" >&2; exit 2 ;;
+    paper) RANKS=(1 2 4 8 16 32 64); RUNS=5; WARMUP=2; ITERS=200; ALLOC_NODES=8 ;;
+    *) echo "usage: $0 [smoke|quick|full|paper] [output-directory]" >&2; exit 2 ;;
 esac
 
+RANKS_SPEC="${GIOMP_JACOBI_RANKS:-}"
+if [[ -n "${RANKS_SPEC}" ]]; then
+    read -r -a RANKS <<<"${RANKS_SPEC}"
+fi
+ALLOC_NODES="${GIOMP_JACOBI_ALLOC_NODES:-${ALLOC_NODES}}"
+ALLOC_TIME="${GIOMP_JACOBI_ALLOC_TIME:-60m}"
+CASE_TIME="${GIOMP_JACOBI_CASE_TIME:-10m}"
 NX="${GIOMP_JACOBI_NX:-2048}"
 ROWS="${GIOMP_JACOBI_ROWS:-256}"
 RUNS="${GIOMP_JACOBI_RUNS:-${RUNS}}"
@@ -25,9 +33,13 @@ ITERS="${GIOMP_JACOBI_ITERS:-${ITERS}}"
 export LD_LIBRARY_PATH="/p/lustre2/shan4/softwares/diomp/lib:/p/lustre2/shan4/softwares/diomp/lib/x86_64-unknown-linux-gnu:/opt/rocm-6.4.3/lib:/opt/cray/pe/lib64:${LD_LIBRARY_PATH:-}"
 
 if [[ "${GIOMP_JACOBI_INNER:-0}" != "1" ]]; then
-    exec flux alloc -q "${QUEUE}" -t 60m -N "${ALLOC_NODES}" \
+    exec flux alloc -q "${QUEUE}" -t "${ALLOC_TIME}" -N "${ALLOC_NODES}" \
         -n "$((ALLOC_NODES * 8))" -c2 -g1 --cwd="${GICC_ROOT}" \
         --env=GIOMP_JACOBI_INNER=1 --env=GIOMP_JACOBI_BACKENDS="${BACKENDS_SPEC}" \
+        --env=GIOMP_JACOBI_RANKS="${RANKS_SPEC}" \
+        --env=GIOMP_JACOBI_ALLOC_NODES="${ALLOC_NODES}" \
+        --env=GIOMP_JACOBI_ALLOC_TIME="${ALLOC_TIME}" \
+        --env=GIOMP_JACOBI_CASE_TIME="${CASE_TIME}" \
         --env=GIOMP_JACOBI_NX="${NX}" --env=GIOMP_JACOBI_ROWS="${ROWS}" \
         --env=GIOMP_JACOBI_RUNS="${RUNS}" --env=GIOMP_JACOBI_WARMUP="${WARMUP}" \
         --env=GIOMP_JACOBI_ITERS="${ITERS}" --env=LD_LIBRARY_PATH="${LD_LIBRARY_PATH}" \
@@ -41,7 +53,7 @@ if [[ ! -x "${BIN_DIR}/giomp_jacobi_eval" ||
 fi
 mkdir -p "${OUT}"
 
-COMMON=(flux run -t 10m -c2 -g1 -o mpibind=off
+COMMON=(flux run -t "${CASE_TIME}" -c2 -g1 -o mpibind=off
         --env=HSA_XNACK=1 --env=FI_MR_CACHE_MAX_COUNT=0
         --env=PMI_MAX_KVS_ENTRIES=512 --env=ROCR_VISIBLE_DEVICES=0,1,2,3,4,5,6,7)
 ARGS=(--nx="${NX}" --local-rows="${ROWS}" --iterations="${ITERS}"
