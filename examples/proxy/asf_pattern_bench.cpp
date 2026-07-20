@@ -4,7 +4,7 @@
  *
  * What ASF does each step:
  *   1. rt.reset() to drain prev step's NIC completions
- *   2. For each cross-node peer: rt.put_no_db(data) + rt.put_no_db(flag)
+ *   2. For each cross-node peer: rt.put(data) + rt.put(flag)
  *   3. rt.prepare() to refresh trigger_val
  *   4. Launch a kernel that writes flag_buf[27] = epoch + MMIO trigger
  *   5. hipDeviceSynchronize
@@ -34,6 +34,7 @@
 #include <hip/hip_runtime.h>
 #include <mpi.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -70,6 +71,23 @@ __global__ void trigger_kernel(uint64_t* flag_buf, uint64_t epoch,
     if (ctx->trigger_addr_ != nullptr) {
         *ctx->trigger_addr_ = ctx->trigger_val_;
         __threadfence_system();
+    }
+}
+
+// SPLIT variant: write `1` to trigger_addr `n_writes` times instead of one
+// write of `n_writes`.  Net CXI counter advance is identical (ADD-on-write),
+// so this isolates the per-MMIO-write cost from the batched path.
+__global__ void trigger_kernel_split(uint64_t* flag_buf, uint64_t epoch,
+                                      gicc::DeviceCtx* ctx, int n_writes)
+{
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    flag_buf[kSrcSlot] = epoch;
+    __threadfence_system();
+    if (ctx->trigger_addr_ != nullptr) {
+        for (int k = 0; k < n_writes; k++) {
+            *ctx->trigger_addr_ = 1;
+            __threadfence_system();
+        }
     }
 }
 
@@ -125,7 +143,10 @@ int main(int argc, char** argv) {
 
     // --- Iteration loop ---
     std::vector<uint64_t> hflag(kFlagSlots);
+    std::vector<double> trig_us;     // trigger-only latency per iter
+    std::vector<double> step_us;     // trigger + reset + barrier per iter
     int failures = 0;
+    int warmup = 5;
     for (int it = 1; it <= niter; ++it) {
         // Bump epoch to current iter.
         uint64_t epoch = (uint64_t)it;
@@ -144,13 +165,13 @@ int main(int argc, char** argv) {
             if (!minimal) {
                 // Data put: write into peer's data_buf at rank-keyed offset.
                 size_t data_dst_off = (size_t)rank * kDataBytes;
-                rt.put_no_db(bh_data, peer, bh_data.index, kDataBytes,
+                rt.put(bh_data, peer, bh_data.index, kDataBytes,
                              /*src_off=*/0, data_dst_off);
             }
             // Flag put: peer's flag_buf[my_rank] gets our flag_buf[kSrcSlot].
             size_t flag_src_off = (size_t)kSrcSlot * sizeof(uint64_t);
             size_t flag_dst_off = (size_t)rank * sizeof(uint64_t);
-            rt.put_no_db(bh_flag, peer, bh_flag.index, sizeof(uint64_t),
+            rt.put(bh_flag, peer, bh_flag.index, sizeof(uint64_t),
                          flag_src_off, flag_dst_off);
         }
 
@@ -175,36 +196,73 @@ int main(int argc, char** argv) {
         //   default                          → kernel writes MMIO
         const char* _host_trig = std::getenv("ASF_PATTERN_BENCH_HOST_TRIGGER");
         const char* _no_trig   = std::getenv("ASF_PATTERN_BENCH_NO_TRIGGER");
+        const char* _split     = std::getenv("ASF_PATTERN_BENCH_SPLIT");
+        bool split = (_split && _split[0] == '1');
+        // trigger_val_ holds the delta for THIS step = number of descriptors
+        // queued this iter.  In SPLIT mode the trigger MMIO is hit that
+        // many times with `1`; otherwise once with the full delta.
+        uint64_t n_writes = ctx->trigger_val_;
+
+        auto t_trig_start = std::chrono::steady_clock::now();
         if (_no_trig && _no_trig[0] == '1') {
             // Skip the trigger entirely.
             (void)ctx;
         } else if (_host_trig && _host_trig[0] == '1') {
             volatile uint64_t* host_trig =
                 (volatile uint64_t*)rt.fabric().fabric->trigger_mmio_addr;
-            *host_trig = ctx->trigger_val_;
-            __sync_synchronize();
+            if (split) {
+                for (uint64_t k = 0; k < n_writes; ++k) {
+                    *host_trig = 1;
+                    __sync_synchronize();
+                }
+            } else {
+                *host_trig = n_writes;
+                __sync_synchronize();
+            }
         } else {
-            trigger_kernel<<<1, 1>>>(flag_buf, epoch, ctx);
+            if (split) {
+                trigger_kernel_split<<<1, 1>>>(flag_buf, epoch, ctx,
+                                                (int)n_writes);
+            } else {
+                trigger_kernel<<<1, 1>>>(flag_buf, epoch, ctx);
+            }
             HIP_CHECK(hipDeviceSynchronize());
         }
+        auto t_trig_end = std::chrono::steady_clock::now();
 
         // Read trigger counter value as libfabric sees it.  If this
         // doesn't increment monotonically across iters, the MMIO write
         // isn't actually reaching the NIC counter and DWQ descriptors
-        // can't fire.
-        uint64_t trig_val_after = fi_cntr_read(rt.fabric().fabric->trigger_cntr);
-        uint64_t comp_val_before = fi_cntr_read(/*shared_completion_cntr*/
-            rt.fabric().fabric->completion_cntr);
-        if (rank == 0) {
-            printf("iter %d: trigger_cntr=%llu  completion_cntr=%llu  "
-                   "expected_trigger=%llu\n",
-                   it, (unsigned long long)trig_val_after,
-                   (unsigned long long)comp_val_before,
-                   (unsigned long long)ctx->trigger_val_);
+        // can't fire.  Skipped in quiet/timing mode (set ASF_PATTERN_BENCH_QUIET=1).
+        const char* _quiet = std::getenv("ASF_PATTERN_BENCH_QUIET");
+        bool quiet = (_quiet && _quiet[0] == '1');
+        if (!quiet) {
+            uint64_t trig_val_after = fi_cntr_read(rt.fabric().fabric->trigger_cntr);
+            uint64_t comp_val_before = fi_cntr_read(/*shared_completion_cntr*/
+                rt.fabric().fabric->completion_cntr);
+            if (rank == 0) {
+                printf("iter %d: trigger_cntr=%llu  completion_cntr=%llu  "
+                       "expected_trigger=%llu\n",
+                       it, (unsigned long long)trig_val_after,
+                       (unsigned long long)comp_val_before,
+                       (unsigned long long)ctx->trigger_val_);
+            }
         }
 
         // Drain THIS iter's NIC.
+        auto t_reset_start = std::chrono::steady_clock::now();
         rt.reset();
+        auto t_reset_end = std::chrono::steady_clock::now();
+
+        // Record timings (skip warmup iters).
+        if (it > warmup) {
+            double t_trig = std::chrono::duration<double, std::micro>(
+                t_trig_end - t_trig_start).count();
+            double t_step = std::chrono::duration<double, std::micro>(
+                t_reset_end - t_trig_start).count();
+            trig_us.push_back(t_trig);
+            step_us.push_back(t_step);
+        }
 
         // Explicit libfabric progress polling — many fi_cq_read calls to
         // make sure the receive-side has actually processed incoming
@@ -239,7 +297,7 @@ int main(int argc, char** argv) {
                              hipMemcpyDeviceToHost));
 
         int local_fail = 0;
-        if (rank == 0) {
+        if (rank == 0 && !quiet) {
             printf("iter %d: rank 0 flag_buf={", it);
             for (int p = 0; p < nranks; ++p) {
                 printf("%llu%s", (unsigned long long)hflag[p],
@@ -265,11 +323,40 @@ int main(int argc, char** argv) {
         int global_fail = 0;
         MPI_Allreduce(&local_fail, &global_fail, 1, MPI_INT, MPI_SUM,
                       MPI_COMM_WORLD);
-        if (rank == 0) {
+        if (rank == 0 && !quiet) {
             printf("iter %d: global_failures_in_iter=%d\n", it, global_fail);
         }
         MPI_Barrier(MPI_COMM_WORLD);
     }
+
+    // Timing summary (mean / p50 / p99) over post-warmup samples.
+    auto summarize = [&](const std::vector<double>& v, const char* label) {
+        if (v.empty() || rank != 0) return;
+        std::vector<double> s = v;
+        std::sort(s.begin(), s.end());
+        double sum = 0; for (double x : s) sum += x;
+        double mean = sum / s.size();
+        double p50  = s[s.size() / 2];
+        double p99  = s[(s.size() * 99) / 100];
+        double mn   = s.front();
+        double mx   = s.back();
+        printf("  %-12s  n=%zu  mean=%.2fus  p50=%.2fus  p99=%.2fus  "
+               "min=%.2fus  max=%.2fus\n",
+               label, s.size(), mean, p50, p99, mn, mx);
+    };
+    if (rank == 0) {
+        const char* _split     = std::getenv("ASF_PATTERN_BENCH_SPLIT");
+        const char* _host_trig = std::getenv("ASF_PATTERN_BENCH_HOST_TRIGGER");
+        bool split = (_split && _split[0] == '1');
+        bool ht    = (_host_trig && _host_trig[0] == '1');
+        printf("=== TIMING (mode=%s%s, nranks=%d, niter=%d, warmup=%d, "
+               "puts_per_iter=%d) ===\n",
+               ht ? "host" : "kernel",
+               split ? "+split" : "",
+               nranks, niter, warmup, (nranks - 1) * 2);
+    }
+    summarize(trig_us, "trigger");
+    summarize(step_us, "trig+reset");
 
     int total_global_fail = 0;
     MPI_Allreduce(&failures, &total_global_fail, 1, MPI_INT, MPI_SUM,
