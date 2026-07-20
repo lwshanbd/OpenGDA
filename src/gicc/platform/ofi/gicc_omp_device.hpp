@@ -88,6 +88,38 @@ inline uint64_t atomic_push(gicc::proxy::ProxyRing* r, const gicc::proxy::Transf
     return h;
 }
 
+// Lower-overhead reservation for kernels that guarantee exactly one producer
+// work-item for this ring.  The general atomic_push CAS loop is required when
+// multiple GPU work-items may enqueue concurrently; a fused lead-thread site
+// has no competing producer and can publish head with one relaxed store.  The
+// slot still uses the identical payload -> system fence -> cmd_type protocol,
+// so the CPU consumer's readiness/ack logic is unchanged.
+inline uint64_t single_producer_push(
+        gicc::proxy::ProxyRing* r, const gicc::proxy::TransferCmd& c) {
+    constexpr uint32_t kMask = gicc::proxy::ProxyRing::mask();
+    constexpr uint64_t kCap  = gicc::proxy::kProxyRingCapacity;
+    const uint64_t h = __atomic_load_n(&r->head, __ATOMIC_RELAXED);
+    uint64_t t = __atomic_load_n(&r->tail, __ATOMIC_RELAXED);
+    while (h - t == kCap) {
+#ifdef __AMDGCN__
+        __builtin_amdgcn_s_sleep(1);
+#endif
+        t = __atomic_load_n(&r->tail, __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&r->head, h + 1, __ATOMIC_RELAXED);
+
+    const uint32_t idx = static_cast<uint32_t>(h) & kMask;
+    r->buf[idx].dst_rank   = c.dst_rank;
+    r->buf[idx].src_buf    = c.src_buf;
+    r->buf[idx].dst_buf    = c.dst_buf;
+    r->buf[idx].bytes      = c.bytes;
+    r->buf[idx].src_offset = c.src_offset;
+    r->buf[idx].dst_offset = c.dst_offset;
+    fence_system();
+    r->buf[idx].cmd_type = c.cmd_type;
+    return h;
+}
+
 }  // namespace detail
 
 inline void put(gicc::DeviceCtx* ctx, int target_rank,
@@ -127,6 +159,25 @@ inline void get(gicc::DeviceCtx* ctx, int source_rank,
     detail::atomic_push(ring, c);
 }
 
+// Single-producer variant for a grid-wide lead-thread call site.
+inline void get_single(gicc::DeviceCtx* ctx, int source_rank,
+                       int src_buf, size_t src_offset,
+                       int dst_buf, size_t dst_offset,
+                       size_t size, int lane = 0) {
+    if (!ctx) return;
+    auto* ring = detail::lane_to_ring(ctx, lane);
+    if (!ring) return;
+    gicc::proxy::TransferCmd c;
+    c.cmd_type   = gicc::proxy::CmdType::READ;
+    c.dst_rank   = static_cast<uint8_t>(source_rank);
+    c.src_buf    = static_cast<uint8_t>(dst_buf);
+    c.dst_buf    = static_cast<uint8_t>(src_buf);
+    c.bytes      = static_cast<uint32_t>(size);
+    c.src_offset = dst_offset;
+    c.dst_offset = src_offset;
+    detail::single_producer_push(ring, c);
+}
+
 inline void quiet(gicc::DeviceCtx* ctx, int lane = 0) {
     if (!ctx) return;
     auto* ring = detail::lane_to_ring(ctx, lane);
@@ -146,3 +197,46 @@ inline void quiet(gicc::DeviceCtx* ctx, int lane = 0) {
 }  // namespace gicc
 
 #pragma omp end declare target
+
+// ===========================================================================
+// Host-side auto-dispatched put (NOT in declare target).
+//
+// Issued from HOST code. Chooses the transport per call from the runtime's
+// locality tables: if `peer` is a same-node IPC-mapped neighbor, copy our src
+// buffer straight into the peer's dst buffer over xGMI from a parallel omp
+// target region; otherwise push the transfer onto the CPU-proxy ring. Callers
+// (halo, matmul, ...) never hand-roll IPC -- they just call put_auto and the
+// library picks IPC vs proxy. `bytes` must be a multiple of sizeof(float).
+// ===========================================================================
+namespace gicc { class Runtime; }
+extern "C" void* gicc_runtime_current();
+extern "C" void* gicc_runtime_peer_ipc_base(gicc::Runtime*, int peer, int buf_idx);
+extern "C" void* gicc_runtime_local_buf_base(gicc::Runtime*, int buf_idx);
+
+namespace gicc {
+namespace omp {
+
+inline void put_auto(gicc::DeviceCtx* ctx, int peer,
+                     int dst_buf, size_t dst_off,
+                     int src_buf, size_t src_off, size_t bytes) {
+    gicc::Runtime* rt = static_cast<gicc::Runtime*>(gicc_runtime_current());
+    void* peer_base  = rt ? gicc_runtime_peer_ipc_base(rt, peer, dst_buf) : nullptr;
+    void* local_base = rt ? gicc_runtime_local_buf_base(rt, src_buf)      : nullptr;
+
+    if (peer_base && local_base) {
+        // Same-node fast path: in-kernel xGMI store into the peer's buffer.
+        float*       d = reinterpret_cast<float*>(static_cast<char*>(peer_base)  + dst_off);
+        const float* s = reinterpret_cast<const float*>(static_cast<char*>(local_base) + src_off);
+        const size_t n = bytes / sizeof(float);
+        #pragma omp target teams distribute parallel for is_device_ptr(d, s) firstprivate(n)
+        for (size_t i = 0; i < n; ++i) d[i] = s[i];
+    } else {
+        // Cross-node (or no IPC mapping): push onto the CPU-proxy ring.
+        #pragma omp target is_device_ptr(ctx) \
+                firstprivate(peer, dst_buf, dst_off, src_buf, src_off, bytes)
+        { gicc::omp::put(ctx, peer, dst_buf, dst_off, src_buf, src_off, bytes); }
+    }
+}
+
+}  // namespace omp
+}  // namespace gicc

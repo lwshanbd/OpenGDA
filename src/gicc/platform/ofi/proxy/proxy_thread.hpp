@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <optional>
 #include <thread>
+#include <vector>
 
 namespace gicc { class Runtime; }
 
@@ -82,6 +83,25 @@ private:
     // hot QUIET drain. Updated alongside set/reset.
     size_t                       in_flight_count_ = 0;
     std::optional<PendingRetry>  pending_retry_;
+
+    // --- Optional hot-path profiling (GICC_PROXY_PROFILE=1) -----------------
+    // Measures where each op's time goes WITHOUT a GPU profiler (the cost is
+    // in the CPU proxy loop + NIC round-trip, which rocprof can't see). For
+    // each submitted op we stamp submit_ns_[ring_idx]; on its completion we
+    // accumulate (now - submit). Also tracks the max in-flight depth actually
+    // achieved — the key signal for "NIC-bound (deep pipeline) vs serialized
+    // (depth ~1)". Zero cost when disabled. Dumped to stderr in the dtor.
+    bool                         prof_enabled_   = false;
+    std::vector<uint64_t>        prof_submit_ns_;        // per ring-idx stamp
+    uint64_t                     prof_op_count_  = 0;
+    uint64_t                     prof_lat_sum_ns_ = 0;
+    uint64_t                     prof_lat_max_ns_ = 0;
+    uint64_t                     prof_lat_min_ns_ = ~0ull;
+    size_t                       prof_max_inflight_ = 0;
+    uint64_t                     prof_submit_calls_ = 0; // fi_write submit count
+    uint64_t                     prof_poll_empty_ = 0;   // loop passes, CQ empty
+    uint64_t                     prof_poll_hit_   = 0;    // loop passes, CQ had >=1
+    void prof_record_completion(size_t bit);
 };
 
 } // namespace proxy

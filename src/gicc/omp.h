@@ -44,15 +44,17 @@ void   ompx_quiet_host();                            // host-side drain (IPC syn
 enum ompx_xport { OMPX_PROXY = 0, OMPX_DWQ = 1 };
 bool ompx_dwq_enabled();
 
-// Internal host helpers used by the inline smart ompx_put below. Defined in
-// libgicc_omp (ompx_host.cpp); visible to both the -fopenmp app TU (which inlines
-// ompx_put) and the -x hip library TU (which defines them). Apps do not call
-// these directly.
+// Host helpers used by the inline smart ompx_put and the explicit batched-DWQ
+// API below. Defined in libgicc_omp (ompx_host.cpp); visible to both the
+// -fopenmp app TU (which inlines the public wrappers) and the -x hip library TU
+// (which defines them).
 extern "C" int   ompx_ipc_reachable(int peer, int buf);   // 1 if same-node IPC-mapped
 extern "C" void* ompx_peer_ipc_base(int peer, int buf);   // peer's xGMI-mapped buffer base
 extern "C" void* ompx_local_base(int buf);                // our own buffer device base
 extern "C" void  ompx_dwq_stage(int peer, int dst_buf, size_t dst_off,
                                 int src_buf, size_t src_off, size_t bytes);
+extern "C" void  ompx_dwq_stage_get_impl(int peer, int src_buf, size_t src_off,
+                                         int dst_buf, size_t dst_off, size_t bytes);
 extern "C" void  ompx_dwq_arm();
 
 #ifndef __HIPCC__
@@ -70,6 +72,15 @@ inline void ompx_get(gicc::DeviceCtx* ctx, int node,
                      int dst_buf, size_t dst_off, size_t bytes,
                      int lane = 0) {
     gicc::omp::get(ctx, node, src_buf, src_off, dst_buf, dst_off, bytes, lane);
+}
+// Faster lead-thread form.  Caller guarantees only one work-item enqueues to
+// this lane until the corresponding host/device quiet completes.
+inline void ompx_get_single(gicc::DeviceCtx* ctx, int node,
+                            int src_buf, size_t src_off,
+                            int dst_buf, size_t dst_off, size_t bytes,
+                            int lane = 0) {
+    gicc::omp::get_single(
+        ctx, node, src_buf, src_off, dst_buf, dst_off, bytes, lane);
 }
 inline void ompx_quiet(gicc::DeviceCtx* ctx, int lane = 0) {
     gicc::omp::quiet(ctx, lane);
@@ -108,6 +119,31 @@ inline void ompx_put(gicc::DeviceCtx* ctx, int peer,
                 firstprivate(peer, dst_buf, dst_off, src_buf, src_off, bytes)
         { gicc::omp::put(ctx, peer, dst_buf, dst_off, src_buf, src_off, bytes); }
     }
+}
+
+// ---- explicit batched DWQ (host-side) ---------------------------------------
+// These calls expose the GPU-triggered transport without requiring the LTO
+// marker pass. Stage one or more operations, then call ompx_dwq_trigger once;
+// ompx_quiet_host completes the batch. This is useful when an application has
+// host-known transfer descriptors and wants one GPU MMIO trigger for the batch.
+// GICC_HALO_DWQ=1 must be set before ompx_init().
+inline void ompx_dwq_stage_put(int peer,
+                               int dst_buf, size_t dst_off,
+                               int src_buf, size_t src_off, size_t bytes) {
+    ompx_dwq_stage(peer, dst_buf, dst_off, src_buf, src_off, bytes);
+}
+
+inline void ompx_dwq_stage_get(int peer,
+                               int src_buf, size_t src_off,
+                               int dst_buf, size_t dst_off, size_t bytes) {
+    ompx_dwq_stage_get_impl(peer, src_buf, src_off,
+                            dst_buf, dst_off, bytes);
+}
+
+inline void ompx_dwq_trigger(gicc::DeviceCtx* ctx) {
+    ompx_dwq_arm();
+    #pragma omp target is_device_ptr(ctx)
+    { *(ctx->trigger_addr_) = ctx->trigger_val_; }
 }
 
 // ---- DWQ marker path (opt-in; app TU must compile with -fpass-plugin -foffload-lto)

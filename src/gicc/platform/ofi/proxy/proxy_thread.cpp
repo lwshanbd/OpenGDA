@@ -26,10 +26,21 @@ namespace gicc {
 namespace proxy {
 
 namespace {
-constexpr int kSubmitBatch = 32;
-// CQ poll batch — bumped up from 32. 256 drains a typical burst in one
-// syscall and amortizes the per-fi_cq_read overhead.
-constexpr int kCqBatch     = 256;
+// Submit/poll batch sizes. Tunable at runtime for cross-node proxy studies:
+//   GICC_PROXY_SUBMIT_BATCH  (default 32)  cmds drained+submitted per loop pass
+//   GICC_PROXY_CQ_BATCH      (default 256) completions reaped per fi_cq_read
+// kCqBatchMax bounds the on-stack completion array; the runtime value is
+// clamped into [1, kCqBatchMax].
+constexpr int kCqBatchMax = 256;
+inline int proxy_env_int(const char* name, int dflt, int lo, int hi) {
+    if (const char* v = std::getenv(name)) {
+        int x = std::atoi(v);
+        if (x >= lo && x <= hi) return x;
+    }
+    return dflt;
+}
+const int kSubmitBatch = proxy_env_int("GICC_PROXY_SUBMIT_BATCH", 32, 1, 4096);
+const int kCqBatch     = proxy_env_int("GICC_PROXY_CQ_BATCH", 256, 1, kCqBatchMax);
 
 // Bounded drain timeouts. Without these, a dropped completion (peer dead,
 // provider stuck) would hang ~ProxyThread() forever, and a hung QUIET would
@@ -47,8 +58,20 @@ constexpr auto kQuietDrainTimeout    = std::chrono::seconds(30);
 // Above kIdleSleep: sleep for a few µs. After ~20ms of pure idle (between
 // shots or in finalize) we drop to near-zero CPU, freeing memory bandwidth
 // for numpy / zlib on the host.
-constexpr int kIdleYield = 1000;     // ~200µs at ~200ns/iter
-constexpr int kIdleSleep = 100000;   // ~20ms
+//
+// Tunable for the latency-vs-host-contention trade-off:
+//   GICC_PROXY_IDLE_YIELD  (default 1000)   empty iters before yield()
+//   GICC_PROXY_IDLE_SLEEP  (default 100000) empty iters before sleep()
+//   GICC_PROXY_SLEEP_US    (default 10)     sleep duration (µs) in deep idle
+// Bigger thresholds = stay hot longer = lower wake-up latency but more CPU
+// stolen from co-located host compute; smaller = friendlier to the host but
+// adds wake-up latency to the next op. Pass-/ML-selectable per launch
+// scenario (pure-comm kernel wants big; comm overlapped with heavy host
+// numpy/zlib wants small).
+const int kIdleYield = proxy_env_int("GICC_PROXY_IDLE_YIELD", 1000, 0, 1 << 30);
+const int kIdleSleep =
+    proxy_env_int("GICC_PROXY_IDLE_SLEEP", 100000, 1, 1 << 30);
+const int kSleepUs   = proxy_env_int("GICC_PROXY_SLEEP_US", 10, 1, 100000);
 
 inline void cpu_relax() {
 #if defined(__x86_64__) || defined(_M_X64)
@@ -56,6 +79,12 @@ inline void cpu_relax() {
 #else
     __asm__ __volatile__("" ::: "memory");
 #endif
+}
+
+// Monotonic nanosecond clock for hot-path profiling.
+inline uint64_t now_ns() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 } // namespace
 
@@ -67,15 +96,52 @@ ProxyThread::ProxyThread(::gicc::Runtime& rt, int ep_idx)
     , lf_(rt.fabric(), rt, ep_idx)
 {
     ring_host_ = allocate_d2h_ring_host<kProxyRingCapacity>(&ring_device_);
+    if (const char* p = std::getenv("GICC_PROXY_PROFILE")) {
+        if (std::atoi(p) != 0) {
+            prof_enabled_ = true;
+            prof_submit_ns_.assign(kProxyRingCapacity, 0);
+        }
+    }
 }
 
 ProxyThread::~ProxyThread() {
     stop();
+    if (prof_enabled_ && prof_op_count_ > 0) {
+        double avg_us = (prof_lat_sum_ns_ / (double)prof_op_count_) / 1e3;
+        uint64_t poll_total = prof_poll_empty_ + prof_poll_hit_;
+        double cq_hit_rate = poll_total ? (100.0 * prof_poll_hit_ / poll_total) : 0.0;
+        fprintf(stderr,
+            "[proxy-profile] ops=%lu submit_calls=%lu\n"
+            "  submit->completion latency (NIC round-trip): "
+            "avg=%.3f us min=%.3f us max=%.3f us\n"
+            "  max_inflight_depth=%zu (ring_cap=%u)\n"
+            "  CQ-poll passes: hit=%lu empty=%lu hit_rate=%.1f%% "
+            "(low hit_rate => proxy spins waiting on NIC = NIC-bound)\n",
+            (unsigned long)prof_op_count_, (unsigned long)prof_submit_calls_,
+            avg_us,
+            prof_lat_min_ns_ == ~0ull ? 0.0 : prof_lat_min_ns_ / 1e3,
+            prof_lat_max_ns_ / 1e3,
+            prof_max_inflight_, (unsigned)kProxyRingCapacity,
+            (unsigned long)prof_poll_hit_, (unsigned long)prof_poll_empty_,
+            cq_hit_rate);
+    }
     if (ring_host_) {
         free_d2h_ring_host<kProxyRingCapacity>(ring_host_);
         ring_host_   = nullptr;
         ring_device_ = nullptr;
     }
+}
+
+// Record a completed op: latency = now - submit-stamp for this ring slot.
+void ProxyThread::prof_record_completion(size_t bit) {
+    uint64_t submit = prof_submit_ns_[bit];
+    if (submit == 0) return;  // not a profiled WRITE/READ/ATOMIC (e.g. QUIET)
+    uint64_t lat = now_ns() - submit;
+    prof_submit_ns_[bit] = 0;
+    ++prof_op_count_;
+    prof_lat_sum_ns_ += lat;
+    if (lat > prof_lat_max_ns_) prof_lat_max_ns_ = lat;
+    if (lat < prof_lat_min_ns_) prof_lat_min_ns_ = lat;
 }
 
 void ProxyThread::start() {
@@ -147,6 +213,12 @@ void ProxyThread::main_loop() {
                 size_t bit = ring_idx(pending_retry_->slot);
                 in_flight_.set(bit);
                 ++in_flight_count_;
+                if (prof_enabled_) {
+                    prof_submit_ns_[bit] = now_ns();
+                    ++prof_submit_calls_;
+                    if (in_flight_count_ > prof_max_inflight_)
+                        prof_max_inflight_ = in_flight_count_;
+                }
                 pending_retry_.reset();
                 did_work = true;
             }
@@ -188,6 +260,12 @@ void ProxyThread::main_loop() {
                     }
                     in_flight_.set(bit);
                     ++in_flight_count_;
+                    if (prof_enabled_) {
+                        prof_submit_ns_[bit] = now_ns();
+                        ++prof_submit_calls_;
+                        if (in_flight_count_ > prof_max_inflight_)
+                            prof_max_inflight_ = in_flight_count_;
+                    }
                     break;
                 }
                 case CmdType::READ: {
@@ -199,6 +277,12 @@ void ProxyThread::main_loop() {
                     }
                     in_flight_.set(bit);
                     ++in_flight_count_;
+                    if (prof_enabled_) {
+                        prof_submit_ns_[bit] = now_ns();
+                        ++prof_submit_calls_;
+                        if (in_flight_count_ > prof_max_inflight_)
+                            prof_max_inflight_ = in_flight_count_;
+                    }
                     break;
                 }
                 case CmdType::ATOMIC: {
@@ -210,6 +294,12 @@ void ProxyThread::main_loop() {
                     }
                     in_flight_.set(bit);
                     ++in_flight_count_;
+                    if (prof_enabled_) {
+                        prof_submit_ns_[bit] = now_ns();
+                        ++prof_submit_calls_;
+                        if (in_flight_count_ > prof_max_inflight_)
+                            prof_max_inflight_ = in_flight_count_;
+                    }
                     break;
                 }
                 case CmdType::QUIET:
@@ -224,16 +314,22 @@ void ProxyThread::main_loop() {
         }
 
         // 2. Poll CQ.
-        Completion comps[kCqBatch];
+        Completion comps[kCqBatchMax];
         int n = lf_.poll(comps, kCqBatch);
         for (int i = 0; i < n; ++i) {
             uint64_t s = reinterpret_cast<uint64_t>(comps[i].context);
             ring_host_->mark_acked(s);
             size_t bit = ring_idx(s);
+            if (prof_enabled_) prof_record_completion(bit);
             if (in_flight_.test(bit)) {
                 in_flight_.reset(bit);
                 --in_flight_count_;
             }
+        }
+        if (prof_enabled_ && in_flight_count_ > 0) {
+            // Count poll passes only while we have ops outstanding — that's
+            // when "CQ empty" means "waiting on the NIC". hit=got>=1 completion.
+            if (n > 0) ++prof_poll_hit_; else ++prof_poll_empty_;
         }
         if (n > 0) {
             ring_host_->advance_tail_from_mask();
@@ -248,7 +344,7 @@ void ProxyThread::main_loop() {
             } else if (idle_iters < kIdleSleep) {
                 std::this_thread::yield();
             } else {
-                std::this_thread::sleep_for(std::chrono::microseconds(10));
+                std::this_thread::sleep_for(std::chrono::microseconds(kSleepUs));
             }
         }
     }
@@ -259,7 +355,7 @@ void ProxyThread::main_loop() {
     auto drain_deadline = std::chrono::steady_clock::now() + kShutdownDrainTimeout;
     while (in_flight_count_ > 0 &&
            std::chrono::steady_clock::now() < drain_deadline) {
-        Completion comps[kCqBatch];
+        Completion comps[kCqBatchMax];
         int n = lf_.poll(comps, kCqBatch);
         for (int i = 0; i < n; ++i) {
             uint64_t s = reinterpret_cast<uint64_t>(comps[i].context);
@@ -295,7 +391,7 @@ void ProxyThread::handle_quiet(uint64_t quiet_slot) {
     auto deadline = std::chrono::steady_clock::now() + kQuietDrainTimeout;
     while (target_remaining > 0 &&
            std::chrono::steady_clock::now() < deadline) {
-        Completion comps[kCqBatch];
+        Completion comps[kCqBatchMax];
         int n = lf_.poll(comps, kCqBatch);
         for (int i = 0; i < n; ++i) {
             uint64_t s = reinterpret_cast<uint64_t>(comps[i].context);

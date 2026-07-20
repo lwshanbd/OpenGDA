@@ -73,8 +73,17 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
             //     flush / quiet calls are still callable functions.
             // PipelineStart is too early (mem2reg hasn't run yet);
             // OptimizerLast is too late (inliner has consumed the calls).
+            //
+            // In omp-dwq mode the whole HIP EarlySimplification block is
+            // SKIPPED: the OpenMP markers are still callable functions at
+            // this point and the shared GICCDeviceLowering would erase them
+            // here (it runs in OmpDwq mode too), leaving nothing for the
+            // omp-dwq discovery at OptimizerLast to find. The omp-dwq
+            // pipeline below is fully self-contained, so registering these
+            // passes at all in OmpDwq mode is both unnecessary and harmful.
             PB.registerPipelineEarlySimplificationEPCallback(
                 GICC_EP_LAMBDA_HEAD(MPM) {
+                    if (getConfig().mode == Mode::OmpDwq) return;
                     MPM.addPass(GICCDeviceDiscoveryPass());
                     MPM.addPass(GICCHKAnalysisPass());
                     // CRITICAL: order matters — DeviceLowering reads

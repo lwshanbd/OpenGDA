@@ -175,6 +175,16 @@ extern "C" void ompx_dwq_stage(int peer, int dst_buffer, size_t dst_offset,
                              src_buffer, src_offset, bytes);
 }
 
+extern "C" void ompx_dwq_stage_get_impl(int peer, int src_buffer,
+                                         size_t src_offset, int dst_buffer,
+                                         size_t dst_offset, size_t bytes) {
+    if (!g_runtime) return;
+    const gicc::Buffer& local_dst = g_runtime->buffer_by_lkey(dst_buffer);
+    g_runtime->get(local_dst, peer, src_buffer, bytes,
+                   /*local_offset=*/dst_offset,
+                   /*remote_offset=*/src_offset);
+}
+
 extern "C" void ompx_dwq_arm() {
     gicc_runtime_arm_dwq_trigger(g_runtime);
 }
