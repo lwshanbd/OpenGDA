@@ -114,8 +114,10 @@ public:
         // is pure scheduling luck. Measured on GH200 + Slingshot with a
         // 2-rank Jacobi halo exchange, identical binaries varied 68x run to
         // run (0.20 vs 13.6 ms/iter), with the stall moving between reset()
-        // and the barrier depending on which rank lost the race. Set
-        // GICC_DWQ_CQ_THREAD=0 to leave progress to the caller.
+        // and the barrier depending on which rank lost the race.
+        // Host-wait mode stops this thread automatically because Runtime::reset
+        // polls the CQ itself. GICC_DWQ_CQ_THREAD=0 prevents the initial start;
+        // setting it to 1 explicitly keeps the thread for diagnostics.
         const char* cq_thread_env = std::getenv("GICC_DWQ_CQ_THREAD");
         const bool want_cq_thread =
             (cq_thread_env == nullptr || std::atoi(cq_thread_env) != 0);

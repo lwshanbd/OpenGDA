@@ -180,4 +180,5 @@ inline void ompx_dwq_put(gicc::DeviceCtx* ctx, int node,
     gicc::omp_dwq::put(ctx, node, dst_buf, dst_off, src_buf, src_off, bytes);
 }
 inline void ompx_dwq_flush(gicc::DeviceCtx* ctx) { gicc::omp_dwq::flush(ctx); }
+#pragma omp end declare target
 #endif  // !__HIPCC__

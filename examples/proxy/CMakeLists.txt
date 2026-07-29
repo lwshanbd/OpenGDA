@@ -54,14 +54,6 @@ if(GICC_BOOTSTRAP STREQUAL "mpi")
         endif()
     endif()
     set(PROXY_EX_BOOTSTRAP_LIBS MPI::MPI_CXX)
-    find_library(_PROXY_EX_MPI_LIB
-        NAMES mpi_gnu_112 mpi
-        PATHS /opt/cray/pe/mpich/8.1.32/ofi/gnu/11.2/lib
-              /opt/cray/pe/mpich/9.0.1/ofi/cray/20.0/lib
-        NO_DEFAULT_PATH)
-    if(_PROXY_EX_MPI_LIB)
-        list(APPEND PROXY_EX_BOOTSTRAP_LIBS ${_PROXY_EX_MPI_LIB})
-    endif()
 elseif(GICC_BOOTSTRAP STREQUAL "pmi2")
     set(PMI_ROOT "/opt/cray/pe/pmi/6.1.15" CACHE PATH "Cray PMI path")
     find_path(PMI2_INCLUDE_DIR pmi2.h
@@ -74,6 +66,30 @@ elseif(GICC_BOOTSTRAP STREQUAL "pmi2")
     set(PROXY_EX_BOOTSTRAP_DEFINE GICC_BOOTSTRAP_PMI2=1)
     set(PROXY_EX_BOOTSTRAP_INCLUDES ${PMI2_INCLUDE_DIR})
     set(PROXY_EX_BOOTSTRAP_LIBS     ${PMI2_LIBRARY})
+endif()
+
+# Cray MPICH needs a backend-specific GPU Transport Layer when an example
+# passes device pointers to MPI.  MPI::MPI_CXX does not add it automatically.
+set(GICC_MPI_GTL_ROOT "" CACHE PATH "Optional Cray MPICH GTL root")
+if(GICC_BOOTSTRAP STREQUAL "mpi")
+    if(GICC_GPU_API STREQUAL "hip")
+        set(_PROXY_EX_GTL_NAME mpi_gtl_hsa)
+    elseif(GICC_GPU_API STREQUAL "cuda")
+        set(_PROXY_EX_GTL_NAME mpi_gtl_cuda)
+    endif()
+    if(DEFINED _PROXY_EX_GTL_NAME)
+        find_library(PROXY_EX_GPU_GTL_LIBRARY
+            NAMES ${_PROXY_EX_GTL_NAME}
+            HINTS ${GICC_MPI_GTL_ROOT}
+            PATHS /opt/cray/pe/mpich/9.0.1/gtl
+                  /opt/cray/pe/lib64
+            PATH_SUFFIXES lib)
+        if(NOT PROXY_EX_GPU_GTL_LIBRARY)
+            message(WARNING
+                "examples/proxy: ${_PROXY_EX_GTL_NAME} not found; "
+                "GPU-aware MPI benchmark modes will not initialize")
+        endif()
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -460,6 +476,9 @@ foreach(_app jacobi_bench mm_bench)
             ${PROXY_EX_BOOTSTRAP_LIBS}
             pthread)
     endif()
+    if(PROXY_EX_GPU_GTL_LIBRARY)
+        target_link_libraries(${_app} PRIVATE ${PROXY_EX_GPU_GTL_LIBRARY})
+    endif()
     _proxy_example_setup(${_app})
 endforeach()
 
@@ -485,12 +504,6 @@ if(GICC_GPU_API STREQUAL "cuda")
         ${PROXY_EX_HWLOC_LIBRARY}
         ${PROXY_EX_BOOTSTRAP_LIBS}
         pthread)
-    # Cray MPICH GPU-aware link: requires the GTL library when
-    # MPICH_GPU_SUPPORT_ENABLED=1 (enables sending GPU pointers via MPI).
-    if(EXISTS "/opt/cray/pe/lib64/libmpi_gtl_cuda.so")
-        target_link_libraries(bench_pingpong PRIVATE
-            "/opt/cray/pe/lib64/libmpi_gtl_cuda.so")
-    endif()
 elseif(GICC_GPU_API STREQUAL "hip")
     set_source_files_properties(bench_pingpong.cpp
                                 ${PROXY_LIBFABRIC_SRC}
@@ -508,5 +521,8 @@ elseif(GICC_GPU_API STREQUAL "hip")
         ${PROXY_EX_HWLOC_LIBRARY}
         ${PROXY_EX_BOOTSTRAP_LIBS}
         pthread)
+endif()
+if(PROXY_EX_GPU_GTL_LIBRARY)
+    target_link_libraries(bench_pingpong PRIVATE ${PROXY_EX_GPU_GTL_LIBRARY})
 endif()
 _proxy_example_setup(bench_pingpong)

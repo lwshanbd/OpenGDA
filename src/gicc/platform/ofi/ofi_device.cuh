@@ -109,8 +109,11 @@ void flush(DeviceCtx* ctx) {
         // MMIO BAR). Skip the store rather than dereference null and
         // crash; the proxy path does not need a trigger.
         if (ctx->trigger_addr_ != nullptr) {
-            *ctx->trigger_addr_ = ctx->trigger_val_;
+            // Publish every producer write before ringing the NIC doorbell.
+            // A fence after the MMIO store does not order HBM writes ahead of
+            // the device that starts reading them in response to that store.
             __threadfence_system();
+            *ctx->trigger_addr_ = ctx->trigger_val_;
         }
     }
 }

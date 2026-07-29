@@ -508,6 +508,20 @@ public:
 
     void enable_host_wait_mode() {
         if (host_wait_mode_) return;
+        // reset() below drives CQ progress itself while waiting on the shared
+        // completion counter.  Leaving FabricDwqContext's background poller
+        // active makes the two host threads contend on the FI_THREAD_SAFE
+        // domain lock.  This hurts both CXI backends: on Tioga it roughly
+        // doubled small-message DWQ latency (about 1.05 -> 1.98 us), and the
+        // same lock convoy caused much larger run-to-run swings on GH200.
+        //
+        // Keep the background thread for legacy device-wait flows, which do
+        // not call reset() to make progress.  An explicit value of 1 is also
+        // a diagnostic escape hatch for host-wait callers.
+        const char* cq_thread_env = std::getenv("GICC_DWQ_CQ_THREAD");
+        if (cq_thread_env == nullptr || std::atoi(cq_thread_env) == 0) {
+            comm_->fabric->stop_cq_progress_thread();
+        }
         struct fi_cntr_attr cntr_attr = {};
         cntr_attr.events = FI_CNTR_EVENTS_COMP;
         int ret = fi_cntr_open(comm_->fabric->domain, &cntr_attr,
