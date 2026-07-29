@@ -513,6 +513,13 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
                 }
                 case DispatchKind::IpcPush:
                 case DispatchKind::IpcOrDwq: {
+                    // omp-dwq traces stage NIC work only (IPC never flows
+                    // through the trace), so the default IPC_OR_DWQ hint
+                    // simply means DWQ there.
+                    if (cfg.mode == Mode::OmpDwq) {
+                        PH->setCalledFunction(H.enqBatchedFn);
+                        break;
+                    }
                     // The batched-loop pattern only makes sense for DWQ
                     // because each iteration's args are computed from a
                     // host-mirrored array. IPC dispatch wants per-call
