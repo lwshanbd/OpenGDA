@@ -428,11 +428,11 @@ int main(int argc, char** argv) {
         const uint8_t pat_byte = (uint8_t)((s * 17 + 0xA1) & 0xFF);
         const int src_rank_for_check = (op == "put") ? 0 : 1;
         if (rank == src_rank_for_check) {
-            (void)hipMemset(d_buf, pat_byte, std::max<size_t>(bytes, 64));
+            (void)gpuMemset(d_buf, pat_byte, std::max<size_t>(bytes, 64));
         } else {
-            (void)hipMemset(d_buf, 0x00, std::max<size_t>(bytes, 64));
+            (void)gpuMemset(d_buf, 0x00, std::max<size_t>(bytes, 64));
         }
-        (void)hipDeviceSynchronize();
+        (void)gpuDeviceSynchronize();
         rt.barrier();
 
         // --- warmup ---
@@ -616,10 +616,10 @@ int main(int argc, char** argv) {
         if (rank == dst_rank_for_check) {
             uint8_t first_dst = 0xFF, last_dst = 0xFF;
             size_t check_len = std::max<size_t>(bytes, 1);
-            (void)hipMemcpy(&first_dst, d_buf, 1, hipMemcpyDeviceToHost);
-            (void)hipMemcpy(&last_dst,
+            (void)gpuMemcpy(&first_dst, d_buf, 1, gpuMemcpyDeviceToHost);
+            (void)gpuMemcpy(&last_dst,
                             (char*)d_buf + (check_len - 1), 1,
-                            hipMemcpyDeviceToHost);
+                            gpuMemcpyDeviceToHost);
             if (first_dst != pat_byte || last_dst != pat_byte) {
                 char sb[32]; fmt_size(bytes, sb);
                 fprintf(stderr,
