@@ -84,10 +84,14 @@ public:
         init_fabric();
         init_counters();
         // GICC_SKIP_DWQ_INIT=1 lets CPU-proxy-only callers bypass the
-        // CXI MMIO -> GPU mapping, which fails on platforms whose CUDA
-        // runtime cannot cudaHostRegister the trigger BAR (notably
-        // Grace Hopper / GH200 + CXI). The proxy path does not use
+        // CXI MMIO -> GPU mapping entirely. The proxy path does not use
         // dev_trigger_cntr; DWQ-trigger callers must NOT set this.
+        //
+        // This used to be the only way to run on Grace Hopper, where the
+        // mapping failed. That was a wrong registration flag, not a
+        // hardware limit: the trigger BAR needs the I/O-memory flag (see
+        // gpuHostRegisterMmio). Verified working on GH200 + Slingshot,
+        // so the DWQ-trigger path is available there.
         if (std::getenv("GICC_SKIP_DWQ_INIT") == nullptr) {
             init_mmio_mapping();
         } else if (rank == 0) {
@@ -302,12 +306,14 @@ private:
                                                   &completion_mmio_addr, &completion_mmio_len),
               "get_mmio_addr(completion)");
 
-        // Map MMIO to GPU
+        // Map MMIO to GPU. These are NIC BAR pages, not ordinary host memory,
+        // so they need the I/O-memory registration flag (see
+        // gpuHostRegisterMmio in gpu_device_context.hpp).
         check_gpu(gpuHostRegister(trigger_mmio_addr, trigger_mmio_len,
-                                  gpuHostRegisterMapped),
+                                  gpuHostRegisterMmio),
                   "gpuHostRegister(trigger)");
         check_gpu(gpuHostRegister(completion_mmio_addr, completion_mmio_len,
-                                  gpuHostRegisterMapped),
+                                  gpuHostRegisterMmio),
                   "gpuHostRegister(completion)");
 
         // Get device pointers
@@ -374,7 +380,7 @@ public:
 
         // Map to GPU
         check_gpu(gpuHostRegister(cp.trigger_mmio_addr, cp.trigger_mmio_len,
-                                  gpuHostRegisterMapped),
+                                  gpuHostRegisterMmio),
                   "gpuHostRegister(trigger)");
         check_gpu(gpuHostGetDevicePointer((void**)&cp.dev_trigger_cntr,
                                           cp.trigger_mmio_addr, 0),
