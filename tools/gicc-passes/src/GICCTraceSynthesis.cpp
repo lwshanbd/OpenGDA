@@ -195,6 +195,11 @@ Value *evalGuard(IRBuilder<> &B, Function *traceFn, const GuardSpec &g) {
         if (!p->getType()->isIntegerTy()) return B.getFalse();
         return B.CreateICmpEQ(p, ConstantInt::get(p->getType(), g.constVal));
     }
+    if (g.kind == GuardSpec::Kind::ParamCmpConst) {
+        if (!p->getType()->isIntegerTy()) return B.getFalse();
+        return B.CreateICmp(static_cast<ICmpInst::Predicate>(g.pred), p,
+                            ConstantInt::get(p->getType(), g.constVal));
+    }
     // Unknown / BinOp: be safe — take the op every time so behavior is
     // never accidentally suppressed.
     return B.getTrue();
@@ -574,16 +579,85 @@ void emitTraceBody(Module &M, Function *traceFn, const KernelTemplate &t) {
     LLVMContext &Ctx = M.getContext();
     BasicBlock *entry = BasicBlock::Create(Ctx, "entry", traceFn);
     IRBuilder<>  B(entry);
+    Type *i32Ty = Type::getInt32Ty(Ctx);
+    Type *i64Ty = Type::getInt64Ty(Ctx);
+
+    // Straight-line (non-loop) PUTs stage through ONE batched placeholder:
+    // each op's guard block appends its evaluated args to stack arrays and
+    // a single call is issued at the end, so per-descriptor enqueue cost
+    // stays off the per-launch critical path. Loop ops keep their own
+    // batched emission (emitOpInLoop); GETs and everything else keep the
+    // per-op path.
+    // OmpDwq-only: the HIP path's default IPC_OR_DWQ dispatch cannot lower
+    // a batched placeholder, so keep its per-op emission unchanged.
+    const bool batchStraight = getConfig().mode == Mode::OmpDwq;
+    SmallVector<const OpTemplate *, 16> straightPuts;
+    if (batchStraight)
+        for (const auto &op : t.ops)
+            if (opKindFromStr(op.kind) == GICCOpKind::PutNoDb &&
+                !op.loop.inLoop)
+                straightPuts.push_back(&op);
+
+    Value *arrs[6] = {nullptr};
+    Value *countPtr = nullptr;
+    if (!straightPuts.empty()) {
+        auto *n = B.getInt32(static_cast<int>(straightPuts.size()));
+        Type *eltTy[6] = {i32Ty, i32Ty, i64Ty, i32Ty, i64Ty, i64Ty};
+        static const char *arrName[6] = {"b.peers", "b.dst_bufs", "b.dst_offs",
+                                         "b.src_bufs", "b.src_offs", "b.sizes"};
+        for (int i = 0; i < 6; ++i)
+            arrs[i] = B.CreateAlloca(eltTy[i], n, arrName[i]);
+        countPtr = B.CreateAlloca(i32Ty, nullptr, "b.count");
+        B.CreateStore(B.getInt32(0), countPtr);
+    }
 
     BasicBlock *cur = entry;
     for (const auto &op : t.ops) {
         BasicBlock *next = BasicBlock::Create(
             Ctx, "after." + op.siteId, traceFn);
         B.SetInsertPoint(cur);
-        emitOp(M, B, traceFn, op, t, next);
+        bool isStraightPut = batchStraight &&
+            opKindFromStr(op.kind) == GICCOpKind::PutNoDb && !op.loop.inLoop;
+        if (isStraightPut) {
+            Value *guard = evalGuard(B, traceFn, op.guard);
+            BasicBlock *doBB = BasicBlock::Create(
+                Ctx, "stage." + op.siteId, traceFn, next);
+            B.CreateCondBr(guard, doBB, next);
+            B.SetInsertPoint(doBB);
+            Value *c = B.CreateLoad(i32Ty, countPtr);
+            for (size_t i = 0; i < putGetArgOrder().size(); ++i) {
+                Type *expected = (i == 0 || i == 1 || i == 3) ? i32Ty : i64Ty;
+                auto  it = op.args.find(putGetArgOrder()[i]);
+                Value *v = (it == op.args.end())
+                               ? ConstantInt::get(expected, 0)
+                               : evalArgRef(B, traceFn, it->second, expected,
+                                            /*currentIv=*/nullptr);
+                B.CreateStore(v, B.CreateGEP(expected, arrs[i], c));
+            }
+            B.CreateStore(B.CreateAdd(c, B.getInt32(1)), countPtr);
+            B.CreateBr(next);
+        } else {
+            emitOp(M, B, traceFn, op, t, next);
+        }
         cur = next;
     }
     B.SetInsertPoint(cur);
+    if (!straightPuts.empty()) {
+        Value *c = B.CreateLoad(i32Ty, countPtr);
+        BasicBlock *enqBB = BasicBlock::Create(Ctx, "b.enq", traceFn);
+        BasicBlock *retBB = BasicBlock::Create(Ctx, "b.ret", traceFn);
+        B.CreateCondBr(B.CreateICmpNE(c, B.getInt32(0)), enqBB, retBB);
+        B.SetInsertPoint(enqBB);
+        auto callee = getBatchedPlaceholder(M, GICCOpKind::PutNoDb);
+        auto *CI = B.CreateCall(callee, {traceFn->getArg(0), c, arrs[0],
+                                         arrs[1], arrs[2], arrs[3], arrs[4],
+                                         arrs[5]});
+        auto *md = MDNode::get(
+            Ctx, MDString::get(Ctx, straightPuts.front()->siteId));
+        CI->setMetadata("gicc.site_id", md);
+        B.CreateBr(retBB);
+        B.SetInsertPoint(retBB);
+    }
     B.CreateRetVoid();
 }
 

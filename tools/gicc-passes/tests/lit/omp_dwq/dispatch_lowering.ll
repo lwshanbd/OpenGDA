@@ -18,8 +18,11 @@
 ; RUN:     -passes='gicc-omp-host-discovery,gicc-trace-synthesis,gicc-dispatch-lowering' \
 ; RUN:     -S %s | %FileCheck %s
 ;
-; CHECK: call void @gicc_runtime_dwq_enqueue(
+; The omp trace stages straight-line PUTs through the batched enqueue: the
+; guard blocks append into stack arrays and one batched call is issued.
+; CHECK: call void @gicc_runtime_dwq_enqueue_batched(
 ; CHECK-NOT: gicc.runtime.put_no_db.placeholder
+; CHECK-NOT: gicc.runtime.put_no_db.batched.placeholder
 
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-linux-gnu"
