@@ -103,8 +103,13 @@ int main(int argc, char** argv) {
             ompx_flush(ctx);
         }
         ompx_quiet_host();
-        ompx_barrier();
         if (it >= WARM) t_comm += omp_get_wtime() - c0;
+        // The attribution timer stops at local communication completion.
+        // Keep the iteration barrier outside it: otherwise rank-to-rank
+        // variation in the preceding Jacobi kernel is charged to the rank
+        // that reaches communication first, which can dominate large-face
+        // measurements even though the communication path is unchanged.
+        ompx_barrier();
         src = 1 - src;
     }
     t_total = omp_get_wtime() - t_total;

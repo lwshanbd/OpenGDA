@@ -115,9 +115,9 @@ public:
         // 2-rank Jacobi halo exchange, identical binaries varied 68x run to
         // run (0.20 vs 13.6 ms/iter), with the stall moving between reset()
         // and the barrier depending on which rank lost the race.
-        // Host-wait mode stops this thread automatically because Runtime::reset
-        // polls the CQ itself. GICC_DWQ_CQ_THREAD=0 prevents the initial start;
-        // setting it to 1 explicitly keeps the thread for diagnostics.
+        // Runtime::reset detects whether this thread is active and leaves CQ
+        // progress to it instead of becoming a second reader.  Setting
+        // GICC_DWQ_CQ_THREAD=0 leaves progress entirely to the caller.
         const char* cq_thread_env = std::getenv("GICC_DWQ_CQ_THREAD");
         const bool want_cq_thread =
             (cq_thread_env == nullptr || std::atoi(cq_thread_env) != 0);
@@ -182,6 +182,27 @@ public:
         if (cq_progress_thread_.joinable()) {
             cq_progress_thread_.join();
         }
+    }
+
+    bool cq_progress_thread_active() const noexcept {
+        return cq_progress_thread_.joinable();
+    }
+
+    // Exactly one CQ reader should drive a FI_THREAD_SAFE domain. If the
+    // background reader is alive, the caller only relaxes while rechecking its
+    // completion counter; otherwise the caller must pump the CQ itself.
+    void progress_cq_from_caller() {
+        if (!cq_progress_thread_active()) {
+            (void)fi_cq_read(cq, NULL, 0);
+            return;
+        }
+#if defined(__x86_64__)
+        __asm__ __volatile__("pause" ::: "memory");
+#elif defined(__aarch64__)
+        __asm__ __volatile__("yield" ::: "memory");
+#else
+        std::this_thread::yield();
+#endif
     }
 
     // fast_flush is now a no-op since background thread handles CQ progress
