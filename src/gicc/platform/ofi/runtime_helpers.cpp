@@ -55,13 +55,22 @@ void gicc_runtime_dwq_enqueue(gicc::Runtime *rt,
     ++rt->mono_total_ops_;
     ++rt->my_n_remote_ops_;
     auto *dwq = rt->dwq_get_();
-    dwq->queue_rma_write(
-        rt->comm_->fabric->domain, rt->comm_->fabric->ep,
-        static_cast<char *>(ob.ptr) + src_off, ob.desc_, size,
-        rt->comm_->av_addrs[peer], remote_addr, ri.rma_key,
-        rt->comm_->fabric->trigger_cntr,
-        rt->shared_completion_cntr_,
-        /*threshold=*/rt->mono_total_ops_);
+    if (rt->dwq_stage_async_enabled_()) {
+        rt->dwq_stage_push_(
+            {dwq, rt->comm_->fabric->domain, rt->comm_->fabric->ep,
+             static_cast<char *>(ob.ptr) + src_off, ob.desc_, size,
+             rt->comm_->av_addrs[peer], remote_addr, ri.rma_key,
+             rt->comm_->fabric->trigger_cntr, rt->shared_completion_cntr_,
+             rt->mono_total_ops_});
+    } else {
+        dwq->queue_rma_write(
+            rt->comm_->fabric->domain, rt->comm_->fabric->ep,
+            static_cast<char *>(ob.ptr) + src_off, ob.desc_, size,
+            rt->comm_->av_addrs[peer], remote_addr, ri.rma_key,
+            rt->comm_->fabric->trigger_cntr,
+            rt->shared_completion_cntr_,
+            /*threshold=*/rt->mono_total_ops_);
+    }
     rt->my_pending_.push_back(dwq);
 }
 
@@ -116,13 +125,22 @@ void gicc_runtime_dwq_enqueue_batched(gicc::Runtime    *rt,
             batch_top - static_cast<std::uint64_t>(n_ops - 1 - i);
 
         auto *dwq = rt->dwq_get_();
-        dwq->queue_rma_write(
-            rt->comm_->fabric->domain, rt->comm_->fabric->ep,
-            static_cast<char *>(ob.ptr) + src_offs[i], ob.desc_, sizes[i],
-            rt->comm_->av_addrs[peers[i]], remote_addr, ri.rma_key,
-            rt->comm_->fabric->trigger_cntr,
-            rt->shared_completion_cntr_,
-            threshold);
+        if (rt->dwq_stage_async_enabled_()) {
+            rt->dwq_stage_push_(
+                {dwq, rt->comm_->fabric->domain, rt->comm_->fabric->ep,
+                 static_cast<char *>(ob.ptr) + src_offs[i], ob.desc_,
+                 sizes[i], rt->comm_->av_addrs[peers[i]], remote_addr,
+                 ri.rma_key, rt->comm_->fabric->trigger_cntr,
+                 rt->shared_completion_cntr_, threshold});
+        } else {
+            dwq->queue_rma_write(
+                rt->comm_->fabric->domain, rt->comm_->fabric->ep,
+                static_cast<char *>(ob.ptr) + src_offs[i], ob.desc_, sizes[i],
+                rt->comm_->av_addrs[peers[i]], remote_addr, ri.rma_key,
+                rt->comm_->fabric->trigger_cntr,
+                rt->shared_completion_cntr_,
+                threshold);
+        }
         rt->my_pending_.push_back(dwq);
     }
 }

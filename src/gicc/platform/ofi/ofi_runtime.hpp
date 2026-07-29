@@ -26,7 +26,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <mutex>
+#include <sched.h>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -205,6 +210,9 @@ public:
     }
 
     ~Runtime() {
+        // Stop the async staging worker before touching any libfabric
+        // state it may still be submitting to.
+        dwq_stage_shutdown_();
 #ifdef GICC_CPU_PROXY
         // Stop all proxy workers before tearing down any libfabric state
         // they may still be polling. ProxyThread::stop() joins the worker.
@@ -539,6 +547,101 @@ private:
     void dwq_release_all_pending_to_pool_() {
         for (auto* op : my_pending_) dwq_pool_.push_back(op);
         my_pending_.clear();
+    }
+
+    // ---- async DWQ staging -------------------------------------------------
+    // fi_control(FI_QUEUE_WORK) costs ~10us per descriptor (a per-op CXI
+    // driver call with no batched form), so the enqueue helpers push the
+    // request here and a worker thread performs the staging off the
+    // critical path. This is safe under the monotonic-threshold scheme:
+    // staging EARLY cannot fire an op prematurely (its threshold is above
+    // the counter), and staging LATE is caught by libfabric's triggered-op
+    // rule that a descriptor whose threshold is already satisfied executes
+    // immediately. reset() drains the queue before waiting on completions
+    // and before recycling builders. Opt-in via GICC_DWQ_ASYNC_STAGE=1:
+    // async staging only pays off when a concurrently running kernel or
+    // enough per-op wire time hides the worker's serial FI_QUEUE_WORK
+    // calls; with nothing to hide behind, the per-op handoff adds cost
+    // (measured: batch_e2e n=64 sync 740us vs async 896us, while the
+    // jacobi halo improved 50.3->46.9us and its 4-byte launch delta
+    // dropped below Proxy's, 26.7 vs 29.0us).
+    struct DwqStageReq {
+        DwqWorkBuilder    *dwq;
+        struct fid_domain *domain;
+        struct fid_ep     *ep;
+        void              *src;
+        void              *desc;
+        std::size_t        size;
+        fi_addr_t          dest;
+        std::uint64_t      raddr;
+        std::uint64_t      rkey;
+        struct fid_cntr   *trig;
+        struct fid_cntr   *comp;
+        std::uint64_t      threshold;
+    };
+    std::thread               dwq_stage_thread_;
+    std::mutex                dwq_stage_mu_;
+    std::condition_variable   dwq_stage_cv_;
+    std::deque<DwqStageReq>   dwq_stage_q_;
+    bool                      dwq_stage_stop_      = false;
+    int                       dwq_stage_async_     = -1;   // -1 = env unread
+    std::uint64_t             dwq_stage_submitted_ = 0;    // producer thread only
+    std::atomic<std::uint64_t> dwq_stage_done_{0};
+
+    void dwq_stage_worker_() {
+        std::unique_lock<std::mutex> lk(dwq_stage_mu_);
+        for (;;) {
+            dwq_stage_cv_.wait(lk, [&] {
+                return dwq_stage_stop_ || !dwq_stage_q_.empty();
+            });
+            if (dwq_stage_q_.empty()) {
+                if (dwq_stage_stop_) return;
+                continue;
+            }
+            DwqStageReq r = dwq_stage_q_.front();
+            dwq_stage_q_.pop_front();
+            lk.unlock();
+            r.dwq->queue_rma_write(r.domain, r.ep, r.src, r.desc, r.size,
+                                   r.dest, r.raddr, r.rkey,
+                                   r.trig, r.comp, r.threshold);
+            dwq_stage_done_.fetch_add(1, std::memory_order_release);
+            lk.lock();
+        }
+    }
+
+    bool dwq_stage_async_enabled_() {
+        if (dwq_stage_async_ < 0) {
+            const char *e = std::getenv("GICC_DWQ_ASYNC_STAGE");
+            dwq_stage_async_ = (e != nullptr && std::atoi(e) != 0) ? 1 : 0;
+            if (dwq_stage_async_)
+                dwq_stage_thread_ = std::thread([this] { dwq_stage_worker_(); });
+        }
+        return dwq_stage_async_ == 1;
+    }
+
+    void dwq_stage_push_(DwqStageReq r) {
+        {
+            std::lock_guard<std::mutex> lk(dwq_stage_mu_);
+            dwq_stage_q_.push_back(r);
+        }
+        ++dwq_stage_submitted_;
+        dwq_stage_cv_.notify_one();
+    }
+
+    void dwq_stage_drain_() {
+        while (dwq_stage_done_.load(std::memory_order_acquire) <
+               dwq_stage_submitted_)
+            sched_yield();
+    }
+
+    void dwq_stage_shutdown_() {
+        if (!dwq_stage_thread_.joinable()) return;
+        {
+            std::lock_guard<std::mutex> lk(dwq_stage_mu_);
+            dwq_stage_stop_ = true;
+        }
+        dwq_stage_cv_.notify_one();
+        dwq_stage_thread_.join();
     }
 
 #ifdef GICC_CPU_PROXY
@@ -937,6 +1040,9 @@ public:
     //--------------------------------------------------------------------------
     void reset() {
         if (host_wait_mode_) {
+            // Async staging must be fully submitted before we wait on
+            // completions or recycle builders.
+            dwq_stage_drain_();
             // Fast path: poll the SHARED completion counter against the
             // monotonic threshold. No per-slot loop, no counter reset.
             // DwqWorkBuilders go back to the pool instead of being deleted.
