@@ -71,9 +71,9 @@ void select_local_device() {
     require_gpu(gpuSetDevice(g_local_device), "select rank-local device");
     for (int device = 0; device < device_count; ++device) {
         if (device == g_local_device) continue;
-        hipError_t err = hipDeviceEnablePeerAccess(device, 0);
-        if (err != hipSuccess && err != hipErrorPeerAccessAlreadyEnabled) {
-            (void)hipGetLastError();
+        GpuError err = gpuDeviceEnablePeerAccess(device, 0);
+        if (err != GPU_SUCCESS && err != gpuErrorPeerAccessAlreadyEnabled) {
+            (void)gpuGetLastError();
         }
     }
 }

@@ -84,10 +84,14 @@ public:
         init_fabric();
         init_counters();
         // GICC_SKIP_DWQ_INIT=1 lets CPU-proxy-only callers bypass the
-        // CXI MMIO -> GPU mapping, which fails on platforms whose CUDA
-        // runtime cannot cudaHostRegister the trigger BAR (notably
-        // Grace Hopper / GH200 + CXI). The proxy path does not use
+        // CXI MMIO -> GPU mapping entirely. The proxy path does not use
         // dev_trigger_cntr; DWQ-trigger callers must NOT set this.
+        //
+        // This used to be the only way to run on Grace Hopper, where the
+        // mapping failed. That was a wrong registration flag, not a
+        // hardware limit: the trigger BAR needs the I/O-memory flag (see
+        // gpuHostRegisterMmio). Verified working on GH200 + Slingshot,
+        // so the DWQ-trigger path is available there.
         if (std::getenv("GICC_SKIP_DWQ_INIT") == nullptr) {
             init_mmio_mapping();
         } else if (rank == 0) {
@@ -97,20 +101,32 @@ public:
                     "Runtime; CPU-proxy path is unaffected)\n");
         }
         get_local_address();
-        // The background CQ progress thread is required for DWQ-triggered
-        // ops (kernel writes the trigger counter, then host-side completion
-        // counters tick only as the CQ is drained). For pure CPU-proxy mode
-        // it is not just unnecessary — it actively HURTS, because the
-        // domain hint requests FI_THREAD_SAFE (init_fabric below), and the
-        // bg thread's tight fi_cq_read loop holds the per-domain mutex
-        // contended against the proxy thread's fi_write calls. Skip it
-        // when GICC_SKIP_DWQ_INIT is set.
-        if (std::getenv("GICC_SKIP_DWQ_INIT") == nullptr) {
+        // The background CQ progress thread drains the CQ so host-side
+        // completion counters tick after a kernel fires the trigger. It is
+        // only useful when nothing else polls: the domain hint requests
+        // FI_THREAD_SAFE (init_fabric below), so its tight fi_cq_read loop
+        // holds the per-domain mutex against everyone else. For pure
+        // CPU-proxy mode that contends with the proxy thread's fi_write.
+        //
+        // It contends just as badly with a caller that drives progress
+        // itself — Runtime::reset() spins fi_cq_read on this same CQ, so in
+        // host-wait mode the two threads form a lock convoy whose severity
+        // is pure scheduling luck. Measured on GH200 + Slingshot with a
+        // 2-rank Jacobi halo exchange, identical binaries varied 68x run to
+        // run (0.20 vs 13.6 ms/iter), with the stall moving between reset()
+        // and the barrier depending on which rank lost the race. Set
+        // GICC_DWQ_CQ_THREAD=0 to leave progress to the caller.
+        const char* cq_thread_env = std::getenv("GICC_DWQ_CQ_THREAD");
+        const bool want_cq_thread =
+            (cq_thread_env == nullptr || std::atoi(cq_thread_env) != 0);
+        if (std::getenv("GICC_SKIP_DWQ_INIT") == nullptr && want_cq_thread) {
             start_cq_progress_thread();
         } else if (rank == 0) {
             fprintf(stderr,
-                    "[gicc] GICC_SKIP_DWQ_INIT=1: skipping background CQ "
-                    "progress thread (CPU-proxy thread does its own polling)\n");
+                    "[gicc] skipping background CQ progress thread (%s); "
+                    "the caller must drain the CQ itself\n",
+                    want_cq_thread ? "GICC_SKIP_DWQ_INIT=1"
+                                   : "GICC_DWQ_CQ_THREAD=0");
         }
     }
 
@@ -302,12 +318,14 @@ private:
                                                   &completion_mmio_addr, &completion_mmio_len),
               "get_mmio_addr(completion)");
 
-        // Map MMIO to GPU
+        // Map MMIO to GPU. These are NIC BAR pages, not ordinary host memory,
+        // so they need the I/O-memory registration flag (see
+        // gpuHostRegisterMmio in gpu_device_context.hpp).
         check_gpu(gpuHostRegister(trigger_mmio_addr, trigger_mmio_len,
-                                  gpuHostRegisterMapped),
+                                  gpuHostRegisterMmio),
                   "gpuHostRegister(trigger)");
         check_gpu(gpuHostRegister(completion_mmio_addr, completion_mmio_len,
-                                  gpuHostRegisterMapped),
+                                  gpuHostRegisterMmio),
                   "gpuHostRegister(completion)");
 
         // Get device pointers
@@ -374,7 +392,7 @@ public:
 
         // Map to GPU
         check_gpu(gpuHostRegister(cp.trigger_mmio_addr, cp.trigger_mmio_len,
-                                  gpuHostRegisterMapped),
+                                  gpuHostRegisterMmio),
                   "gpuHostRegister(trigger)");
         check_gpu(gpuHostGetDevicePointer((void**)&cp.dev_trigger_cntr,
                                           cp.trigger_mmio_addr, 0),

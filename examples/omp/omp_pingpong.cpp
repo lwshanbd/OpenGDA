@@ -44,12 +44,43 @@ static const char* fmt_size(size_t s, char* b) {
     return b;
 }
 
+// --xport selects the cross-node transport. Both forms are hand-written: no
+// LTO pass is involved in either.
+//
+//   proxy : the device pushes a TransferCmd into the mapped ring from inside
+//           an omp target region; a host worker thread drains it and issues
+//           fi_write.
+//   dwq   : the host pre-stages n triggered RMA descriptors, then ONE device
+//           MMIO store to the CXI trigger counter fires all of them. The NIC
+//           moves the bytes with no host involvement after the store.
+enum class Xport { Proxy, Dwq };
+static Xport g_xport = Xport::Proxy;
+
+// Issue `n` puts of `bytes` to `peer`. Completion is the caller's job
+// (ompx_quiet_host), so both transports are timed over the same window.
+static void issue_puts(gicc::DeviceCtx* d_ctx, int peer, int buf,
+                       size_t bytes, int n) {
+    if (g_xport == Xport::Dwq) {
+        for (int i = 0; i < n; ++i)
+            ompx_dwq_stage_put(peer, buf, 0, buf, 0, bytes);
+        ompx_dwq_trigger(d_ctx);          // one MMIO store fires all n
+    } else {
+        #pragma omp target is_device_ptr(d_ctx) firstprivate(peer, buf, bytes, n)
+        {
+            for (int i = 0; i < n; ++i)
+                ompx_put_proxy(d_ctx, peer, buf, 0, buf, 0, bytes);
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     std::string mode = "pipelined";
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a.rfind("--mode=", 0) == 0) mode = a.substr(7);
+        else if (a.rfind("--xport=", 0) == 0)
+            g_xport = (a.substr(8) == "dwq") ? Xport::Dwq : Xport::Proxy;
     }
     const bool per_msg = (mode == "per-msg");
     const bool bulk    = (mode == "bulk");   // N puts in ONE region, ONE quiet_host at end
@@ -71,7 +102,8 @@ int main(int argc, char** argv) {
     gicc::DeviceCtx* d_ctx = ompx_prepare();
 
     if (rank == 0) {
-        printf("\n=== omp_pingpong (mode=%s) — ompx_put from #pragma omp target ===\n", mode.c_str());
+        printf("\n=== omp_pingpong (mode=%s xport=%s) ===\n", mode.c_str(),
+               g_xport == Xport::Dwq ? "dwq (GPU trigger)" : "proxy");
         printf("ranks=%d  outer=%d  batch=%d  warmup=%d\n", nranks, kOuter, kBatch, kWarmup);
         printf("\n%-10s %14s %14s\n", "size", "mean_us/msg", "median_us/msg");
         printf("---------------------------------------------------\n");
@@ -84,8 +116,7 @@ int main(int argc, char** argv) {
         for (int w = 0; w < kWarmup; ++w) {
             if (rank == 0) {
                 d_ctx = ompx_prepare();
-                #pragma omp target is_device_ptr(d_ctx) firstprivate(peer, buf, bytes)
-                { ompx_put_proxy(d_ctx, peer, buf, 0, buf, 0, bytes); }
+                issue_puts(d_ctx, peer, buf, bytes, 1);
                 ompx_quiet_host();
             }
         }
@@ -101,11 +132,7 @@ int main(int argc, char** argv) {
             double t0 = omp_get_wtime();
             if (rank == 0) {
                 d_ctx = ompx_prepare();
-                #pragma omp target is_device_ptr(d_ctx) firstprivate(peer, buf, bytes)
-                {
-                    for (int i = 0; i < N; ++i)
-                        ompx_put_proxy(d_ctx, peer, buf, 0, buf, 0, bytes);
-                }
+                issue_puts(d_ctx, peer, buf, bytes, N);
                 ompx_quiet_host();   // single completion barrier for all N
             }
             double t1 = omp_get_wtime();
@@ -128,19 +155,13 @@ int main(int argc, char** argv) {
                 if (per_msg) {
                     for (int i = 0; i < kBatch; ++i) {
                         d_ctx = ompx_prepare();
-                        #pragma omp target is_device_ptr(d_ctx) firstprivate(peer, buf, bytes)
-                        { ompx_put_proxy(d_ctx, peer, buf, 0, buf, 0, bytes); }
+                        issue_puts(d_ctx, peer, buf, bytes, 1);
                         ompx_quiet_host();
                     }
                 } else {
                     // pipelined: one prepare, all puts in one target region, one quiet_host
                     d_ctx = ompx_prepare();
-                    int nb = kBatch;
-                    #pragma omp target is_device_ptr(d_ctx) firstprivate(peer, buf, bytes, nb)
-                    {
-                        for (int i = 0; i < nb; ++i)
-                            ompx_put_proxy(d_ctx, peer, buf, 0, buf, 0, bytes);
-                    }
+                    issue_puts(d_ctx, peer, buf, bytes, kBatch);
                     ompx_quiet_host();
                 }
             }

@@ -225,6 +225,19 @@ public:
             proxy_rings_arr_dev_  = nullptr;
         }
 #endif
+        // Retire the provider's deferred work queue BEFORE freeing anything it
+        // points at. Every queued op holds raw pointers into a DwqWorkBuilder
+        // (fi_deferred_work / fi_op_rma / iovec) and into
+        // shared_completion_cntr_, both of which this destructor is about to
+        // destroy. reset() only waits for the completion counter to reach the
+        // threshold; the provider can still hold the descriptor briefly after
+        // that, so tearing down immediately let it write into freed memory --
+        // observed as "malloc(): mismatching next->prev_size" at exit, and
+        // timing-dependent enough to vanish under a debugger.
+        if (comm_ && comm_->fabric && comm_->fabric->domain) {
+            (void)fi_control(&comm_->fabric->domain->fid, FI_FLUSH_WORK, NULL);
+        }
+
         for (auto* op : my_pending_) delete op;
         my_pending_.clear();
         for (int i = 0; i < POOL_SIZE; i++) {
@@ -537,7 +550,7 @@ private:
     // we read, so we skip the defensive memset that the constructor does.
     DwqWorkBuilder* dwq_get_() {
         if (dwq_pool_.empty()) {
-            return new DwqWorkBuilder(comm_->rank());
+            return new DwqWorkBuilder(comm_->rank(), comm_->fabric->cq);
         }
         DwqWorkBuilder* d = dwq_pool_.back();
         dwq_pool_.pop_back();
@@ -766,7 +779,7 @@ public:
         const uint64_t trigger_threshold = my_n_remote_ops_ + 1;
         my_n_remote_ops_++;
 
-        auto* dwq = new DwqWorkBuilder(comm_->rank());
+        auto* dwq = new DwqWorkBuilder(comm_->rank(), comm_->fabric->cq);
         dwq->queue_rma_write(
             comm_->fabric->domain, comm_->fabric->ep,
             (char*)ob.ptr + src_offset, ob.desc_, size,
@@ -888,7 +901,7 @@ public:
             ? (ri.rma_addr + remote_offset)
             : (ri.rma_addr - ri.base_addr) + remote_offset;
 
-        auto* dwq = new DwqWorkBuilder(comm_->rank());
+        auto* dwq = new DwqWorkBuilder(comm_->rank(), comm_->fabric->cq);
         dwq->queue_rma_read(
             comm_->fabric->domain, comm_->fabric->ep,
             (char*)ob.ptr + local_offset, ob.desc_, size,

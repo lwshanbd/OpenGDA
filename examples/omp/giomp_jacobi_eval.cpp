@@ -36,6 +36,7 @@ struct Options {
     int warmup = 2;
     int teams = 64;
     int threads = 256;
+    bool dwq = false;      // cross-node transport: false = CPU proxy, true = DWQ
 };
 
 struct Buffer {
@@ -77,6 +78,8 @@ Options parse_options(int argc, char** argv) {
             o.warmup = parse_nonnegative(arg.c_str() + 9);
         else if (arg.rfind("--teams=", 0) == 0)
             o.teams = parse_positive(arg.c_str() + 8);
+        else if (arg == "--transport=dwq") o.dwq = true;
+        else if (arg == "--transport=proxy") o.dwq = false;
         else if (arg.rfind("--threads=", 0) == 0)
             o.threads = parse_positive(arg.c_str() + 10);
         else {
@@ -84,7 +87,8 @@ Options parse_options(int argc, char** argv) {
                 std::fprintf(stderr, "unknown option: %s\n", arg.c_str());
             std::fprintf(stderr,
                 "usage: %s [--nx=N] [--local-rows=N] [--iterations=N] "
-                "[--runs=N] [--warmup=N] [--teams=N] [--threads=N]\n",
+                "[--runs=N] [--warmup=N] [--teams=N] [--threads=N] "
+                "[--transport=proxy|dwq]\n",
                 argv[0]);
             std::exit((arg == "--help" || arg == "-h") ? 0 : 2);
         }
@@ -97,9 +101,11 @@ Options parse_options(int argc, char** argv) {
     return o;
 }
 
+const char* g_backend_label = "giomp";
+
 const char* backend_name() {
 #if defined(JACOBI_BACKEND_GIOMP)
-    return "giomp";
+    return g_backend_label;
 #elif defined(JACOBI_BACKEND_DIOMP)
     return "diomp";
 #else
@@ -217,7 +223,7 @@ void compute_interior(float* current, float* next, int nx, int rows,
 #if defined(JACOBI_BACKEND_GIOMP)
 void giomp_fused_step(float* current, float* next, int next_index,
                       int nx, int rows, int top, int bottom,
-                      int teams, int threads, int nranks) {
+                      int teams, int threads, int nranks, bool use_dwq) {
     const size_t row_bytes = static_cast<size_t>(nx) * sizeof(float);
     const bool communicate = nranks > 1;
     const bool top_ipc = communicate && ompx_ipc_reachable(top, next_index);
@@ -228,9 +234,26 @@ void giomp_fused_step(float* current, float* next, int next_index,
         ? static_cast<float*>(ompx_peer_ipc_base(bottom, next_index)) : nullptr;
     gicc::DeviceCtx* ctx = ompx_prepare();
 
+    // DWQ transport: the descriptors are staged HERE, on the host, before the
+    // kernel runs. The only device-side work left is a single MMIO store, so
+    // team 0 never spins waiting on a host proxy round trip the way
+    // ompx_quiet(ctx, lane) does -- it fires the NIC and returns.
+    const bool dwq_top    = use_dwq && communicate && !top_ipc;
+    const bool dwq_bottom = use_dwq && communicate && !bottom_ipc;
+    if (dwq_top)
+        ompx_dwq_stage_put(top, next_index,
+                           static_cast<size_t>(rows + 1) * row_bytes,
+                           next_index, row_bytes, row_bytes);
+    if (dwq_bottom)
+        ompx_dwq_stage_put(bottom, next_index, 0,
+                           next_index, static_cast<size_t>(rows) * row_bytes,
+                           row_bytes);
+    const bool dwq_fire = dwq_top || dwq_bottom;
+    if (dwq_fire) ompx_dwq_arm();
+
     #pragma omp target teams num_teams(teams) thread_limit(threads) \
         is_device_ptr(current, next, top_peer, bottom_peer, ctx) \
-        firstprivate(next_index, nx, rows, top, bottom, row_bytes, communicate, top_ipc, bottom_ipc)
+        firstprivate(next_index, nx, rows, top, bottom, row_bytes, communicate, top_ipc, bottom_ipc, use_dwq, dwq_fire)
     {
         const int team = omp_get_team_num();
         const int nteams = omp_get_num_teams();
@@ -255,7 +278,7 @@ void giomp_fused_step(float* current, float* next, int next_index,
                     for (int x = tid; x < nx; x += nth)
                         top_peer[static_cast<size_t>(rows + 1) * nx + x] =
                             next[static_cast<size_t>(nx) + x];
-                } else if (communicate && tid == 0) {
+                } else if (communicate && !use_dwq && tid == 0) {
                     ompx_put_proxy(ctx, top, next_index,
                         static_cast<size_t>(rows + 1) * row_bytes,
                         next_index, row_bytes, row_bytes, 0);
@@ -264,13 +287,22 @@ void giomp_fused_step(float* current, float* next, int next_index,
                 if (communicate && bottom_ipc) {
                     for (int x = tid; x < nx; x += nth)
                         bottom_peer[x] = next[static_cast<size_t>(rows) * nx + x];
-                } else if (communicate && tid == 0) {
+                } else if (communicate && !use_dwq && tid == 0) {
                     ompx_put_proxy(ctx, bottom, next_index, 0,
                         next_index, static_cast<size_t>(rows) * row_bytes,
                         row_bytes, 1);
                 }
+
+                // One store fires both staged halo writes. The barrier above
+                // guarantees this team wrote its boundary rows; the fence
+                // publishes them before the NIC reads them.
+                if (dwq_fire && tid == 0) {
+                    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+                    *(ctx->trigger_addr_) = ctx->trigger_val_;
+                }
+
                 #pragma omp barrier
-                if (communicate && tid == 0) {
+                if (communicate && !use_dwq && tid == 0) {
                     if (!top_ipc) ompx_quiet(ctx, 0);
                     if (!bottom_ipc) ompx_quiet(ctx, 1);
                 }
@@ -343,6 +375,9 @@ double checksum(float* data, int nx, int rows) {
 
 int main(int argc, char** argv) {
     const Options options = parse_options(argc, argv);
+#if defined(JACOBI_BACKEND_GIOMP)
+    g_backend_label = options.dwq ? "giomp-dwq" : "giomp-proxy";
+#endif
     int rank = -1;
     int nranks = 0;
     runtime_init(argc, argv, rank, nranks);
@@ -383,7 +418,8 @@ int main(int argc, char** argv) {
             giomp_fused_step(buffers[current].ptr, buffers[next].ptr,
                              buffers[next].index, options.nx,
                              options.local_rows, top, bottom,
-                             options.teams, options.threads, nranks);
+                             options.teams, options.threads, nranks,
+                             options.dwq);
 #else
             split_step(buffers[current].ptr, buffers[next].ptr,
                        options.nx, options.local_rows, top, bottom,

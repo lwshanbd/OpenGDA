@@ -38,7 +38,13 @@ public:
 
     int rank;  // For error messages
 
-    explicit DwqWorkBuilder(int rank_) : rank(rank_),
+    // Optional CQ used to drive progress while retrying a full deferred work
+    // queue. The domain is opened FI_PROGRESS_MANUAL, so without draining the
+    // CQ a retry loop would spin forever against a queue that never empties.
+    struct fid_cq* progress_cq;
+
+    explicit DwqWorkBuilder(int rank_, struct fid_cq* progress_cq_ = nullptr)
+        : rank(rank_), progress_cq(progress_cq_),
         stored_rma_desc(nullptr), stored_atomic_desc(nullptr) {
         memset(&work, 0, sizeof(work));
         memset(&op_rma, 0, sizeof(op_rma));
@@ -55,6 +61,27 @@ public:
     // No copy/move
     DwqWorkBuilder(const DwqWorkBuilder&) = delete;
     DwqWorkBuilder& operator=(const DwqWorkBuilder&) = delete;
+
+    // fi_control(FI_QUEUE_WORK) returns -FI_EAGAIN when the provider's
+    // deferred work queue is full -- CXI's is finite, and a caller that
+    // stages a large batch before triggering will hit it. Treating that as
+    // fatal (the original behaviour) turns ordinary backpressure into an
+    // exit(1); the queue drains as previously-triggered work completes, so
+    // the correct response is to progress and retry.
+    void queue_work_retrying(struct fid_domain* domain,
+                             struct fi_deferred_work* w,
+                             const char* what) {
+        for (;;) {
+            int ret = fi_control(&domain->fid, FI_QUEUE_WORK, w);
+            if (ret == 0) return;
+            if (ret != -FI_EAGAIN) {
+                fprintf(stderr, "Rank %d: fi_control(FI_QUEUE_WORK/%s) failed: "
+                        "%s (%d)\n", rank, what, fi_strerror(-ret), ret);
+                exit(1);
+            }
+            if (progress_cq) fi_cq_read(progress_cq, NULL, 0);
+        }
+    }
 
     // Queue an RMA write operation
     // Triggered by trigger_cntr reaching threshold
@@ -105,12 +132,7 @@ public:
         work.op_type = FI_OP_WRITE;
         work.op.rma = &op_rma;
 
-        int ret = fi_control(&domain->fid, FI_QUEUE_WORK, &work);
-        if (ret) {
-            fprintf(stderr, "Rank %d: fi_control(FI_QUEUE_WORK/RMA) failed: %s (%d)\n",
-                    rank, fi_strerror(-ret), ret);
-            exit(1);
-        }
+        queue_work_retrying(domain, &work, "RMA");
     }
 
     // Queue an RMA read operation
@@ -163,12 +185,7 @@ public:
         work.op_type = FI_OP_READ;
         work.op.rma = &op_rma;
 
-        int ret = fi_control(&domain->fid, FI_QUEUE_WORK, &work);
-        if (ret) {
-            fprintf(stderr, "Rank %d: fi_control(FI_QUEUE_WORK/RMA_READ) failed: %s (%d)\n",
-                    rank, fi_strerror(-ret), ret);
-            exit(1);
-        }
+        queue_work_retrying(domain, &work, "RMA_READ");
     }
 
     // Queue an atomic signal operation
@@ -222,11 +239,6 @@ public:
         atomic_work.completion_cntr = completion_cntr;
         atomic_work.threshold = threshold;
 
-        int ret = fi_control(&domain->fid, FI_QUEUE_WORK, &atomic_work);
-        if (ret) {
-            fprintf(stderr, "Rank %d: fi_control(FI_QUEUE_WORK/ATOMIC) failed: %s (%d)\n",
-                    rank, fi_strerror(-ret), ret);
-            exit(1);
-        }
+        queue_work_retrying(domain, &atomic_work, "ATOMIC");
     }
 };

@@ -40,6 +40,8 @@ using GpuIpcMemHandle_t = hipIpcMemHandle_t;
 #define gpuDeviceSynchronize     hipDeviceSynchronize
 #define gpuDeviceCanAccessPeer   hipDeviceCanAccessPeer
 #define gpuDeviceEnablePeerAccess hipDeviceEnablePeerAccess
+#define gpuGetLastError          hipGetLastError
+#define gpuErrorPeerAccessAlreadyEnabled hipErrorPeerAccessAlreadyEnabled
 
 // Host-pinned memory (mapped into the device address space).
 #define gpuHostMalloc            hipHostMalloc
@@ -50,6 +52,11 @@ using GpuIpcMemHandle_t = hipIpcMemHandle_t;
 #define gpuHostRegister          hipHostRegister
 #define gpuHostUnregister        hipHostUnregister
 #define gpuHostRegisterMapped    hipHostRegisterMapped
+
+// Flag for registering a NIC BAR page (the CXI trigger/completion counter
+// doorbells) so a kernel can store to it. ROCr accepts the plain mapped flag
+// for device MMIO, so this is the historical Tioga behaviour unchanged.
+#define gpuHostRegisterMmio      hipHostRegisterMapped
 
 // Streams.
 #define gpuStreamCreateWithFlags hipStreamCreateWithFlags
@@ -112,6 +119,8 @@ using GpuIpcMemHandle_t = cudaIpcMemHandle_t;
 #define gpuDeviceSynchronize     cudaDeviceSynchronize
 #define gpuDeviceCanAccessPeer   cudaDeviceCanAccessPeer
 #define gpuDeviceEnablePeerAccess cudaDeviceEnablePeerAccess
+#define gpuGetLastError          cudaGetLastError
+#define gpuErrorPeerAccessAlreadyEnabled cudaErrorPeerAccessAlreadyEnabled
 
 // Host-pinned memory (mapped into the device address space). CUDA's
 // equivalent of hipHostMalloc(p, n, hipHostMallocMapped) is
@@ -124,6 +133,14 @@ using GpuIpcMemHandle_t = cudaIpcMemHandle_t;
 #define gpuHostRegister          cudaHostRegister
 #define gpuHostUnregister        cudaHostUnregister
 #define gpuHostRegisterMapped    cudaHostRegisterMapped
+
+// Flag for registering a NIC BAR page (the CXI trigger/completion counter
+// doorbells) so a kernel can store to it. CUDA rejects cudaHostRegisterMapped
+// on I/O memory with cudaErrorInvalidValue -- device MMIO needs
+// cudaHostRegisterIoMemory, the same flag NVSHMEM's IBGDA path uses for the
+// mlx5 doorbell. Verified on GH200 + Slingshot: with Mapped the registration
+// fails outright; with IoMemory a kernel store reaches the CXI counter.
+#define gpuHostRegisterMmio      cudaHostRegisterIoMemory
 
 // Streams.
 #define gpuStreamCreateWithFlags cudaStreamCreateWithFlags

@@ -94,8 +94,17 @@ function(_proxy_example_setup tgt)
     # Use -flto so the comparison vs bench_pingpong_lto isolates the
     # LTO pass's trace-synthesis effect from the cross-TU inlining
     # effect that the LTO bench gets for free via -flto.
-    target_compile_options(${tgt} PRIVATE -O3 -flto)
-    target_link_options(${tgt} PRIVATE -flto)
+    #
+    # CUDA builds must opt out: nvcc embeds device code as a `fatbinData`
+    # object, and GNU LTO re-emits it per translation unit, so the link
+    # fails with "symbol `fatbinData' is already defined". The flag only
+    # ever mattered for the HIP bench comparison anyway.
+    if(GICC_GPU_API STREQUAL "cuda")
+        target_compile_options(${tgt} PRIVATE -O3)
+    else()
+        target_compile_options(${tgt} PRIVATE -O3 -flto)
+        target_link_options(${tgt} PRIVATE -flto)
+    endif()
 endfunction()
 
 # ---------------------------------------------------------------------------
@@ -413,6 +422,48 @@ endif()
 _proxy_example_setup(get_stress_dwq)
 
 # ---------------------------------------------------------------------------
+# jacobi_bench / mm_bench - application-shaped benchmarks that compare the
+# DWQ (GPU-trigger) transport against Cray MPI on the same compute kernels.
+# Host-side Runtime API only, so they need no LTO pass.
+# ---------------------------------------------------------------------------
+foreach(_app jacobi_bench mm_bench)
+    if(GICC_GPU_API STREQUAL "cuda")
+        set_source_files_properties(${_app}.cpp
+                                    ${PROXY_LIBFABRIC_SRC}
+                                    ${PROXY_THREAD_SRC}
+            PROPERTIES LANGUAGE CUDA)
+        add_executable(${_app}
+            ${_app}.cpp
+            ${PROXY_LIBFABRIC_SRC}
+            ${PROXY_THREAD_SRC})
+        target_link_libraries(${_app} PRIVATE
+            CUDA::cudart
+            ${PROXY_EX_LIBFABRIC_LIBRARY}
+            ${PROXY_EX_HWLOC_LIBRARY}
+            ${PROXY_EX_BOOTSTRAP_LIBS}
+            pthread)
+    elseif(GICC_GPU_API STREQUAL "hip")
+        set_source_files_properties(${_app}.cpp
+                                    ${PROXY_LIBFABRIC_SRC}
+                                    ${PROXY_THREAD_SRC}
+                                    ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp
+            PROPERTIES LANGUAGE HIP)
+        add_executable(${_app}
+            ${_app}.cpp
+            ${PROXY_LIBFABRIC_SRC}
+            ${PROXY_THREAD_SRC}
+            ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp)
+        target_link_libraries(${_app} PRIVATE
+            hip::device
+            ${PROXY_EX_LIBFABRIC_LIBRARY}
+            ${PROXY_EX_HWLOC_LIBRARY}
+            ${PROXY_EX_BOOTSTRAP_LIBS}
+            pthread)
+    endif()
+    _proxy_example_setup(${_app})
+endforeach()
+
+# ---------------------------------------------------------------------------
 # bench_pingpong - latency benchmark comparing CPU Proxy and Cray MPI for
 # unidirectional GPU-buffer-to-GPU-buffer transfers across a size sweep.
 # Selects mode at runtime via --mode={mpi,proxy}.
@@ -421,11 +472,13 @@ if(GICC_GPU_API STREQUAL "cuda")
     set_source_files_properties(bench_pingpong.cpp
                                 ${PROXY_LIBFABRIC_SRC}
                                 ${PROXY_THREAD_SRC}
+                                ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp
         PROPERTIES LANGUAGE CUDA)
     add_executable(bench_pingpong
         bench_pingpong.cpp
         ${PROXY_LIBFABRIC_SRC}
-        ${PROXY_THREAD_SRC})
+        ${PROXY_THREAD_SRC}
+        ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp)
     target_link_libraries(bench_pingpong PRIVATE
         CUDA::cudart
         ${PROXY_EX_LIBFABRIC_LIBRARY}
