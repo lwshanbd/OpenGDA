@@ -43,6 +43,21 @@
   #endif
 #endif
 
+// True only when this TU is genuinely being compiled as GPU device code by a
+// CUDA or HIP compiler, which is the only time the atomicAdd / atomicCAS /
+// __nanosleep / __threadfence_system intrinsics used below are declared.
+//
+// __CUDA_ARCH__ alone is NOT sufficient. Clang also defines it for the NVPTX
+// device pass of an OpenMP offload compile (-fopenmp --offload-arch=sm_90),
+// where cuda_runtime.h's device intrinsics are absent and this header must
+// fall back to the host stub -- the OpenMP port pushes to the ring through
+// gicc_omp_device.hpp's C11 __atomic_* path instead. __CUDACC__ is set only
+// for -x cuda / nvcc, so the pair distinguishes the two. HIP needs no such
+// qualifier: __HIP_DEVICE_COMPILE__ is already only set by -x hip.
+#if (defined(__CUDA_ARCH__) && defined(__CUDACC__)) || defined(__HIP_DEVICE_COMPILE__)
+#define GICC_D2H_RING_DEVICE_INTRINSICS 1
+#endif
+
 #include "transfer_cmd.hpp"
 #include <cstdint>
 #include <cstdio>
@@ -108,7 +123,7 @@ struct alignas(128) D2HRing {
     // declared at namespace scope under -x c++. The function is __device__
     // and never called from host code, so the stub is unreachable.
     __device__ uint64_t atomic_push(const TransferCmd& c) {
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#ifdef GICC_D2H_RING_DEVICE_INTRINSICS
         unsigned long long h, prev;
         do {
             h = atomicAdd(reinterpret_cast<unsigned long long*>(&head), 0ULL);
@@ -158,7 +173,7 @@ struct alignas(128) D2HRing {
 
     // Volatile read of the host-published tail (so the GPU sees space free up).
     __device__ uint64_t device_tail_volatile() const {
-#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#ifdef GICC_D2H_RING_DEVICE_INTRINSICS
         unsigned long long t;
 #if defined(__CUDA_ARCH__)
         asm volatile("ld.volatile.global.u64 %0, [%1];"
