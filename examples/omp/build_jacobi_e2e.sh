@@ -16,8 +16,11 @@ OMPLIB=/opt/rocm-6.4.0/lib/llvm/lib
 CRAYPE=/opt/cray/pe/lib64
 LIBDIR="${GICC_ROOT}/build_ofi/lib"
 PLUGIN="${GICC_ROOT}/tools/gicc-passes/build/libgicc-passes.so"
-META_DIR="${GICC_META_DIR:-/tmp/gicc-jacobi-e2e-meta}"
-SRC="${GICC_ROOT}/examples/omp/jacobi_e2e.cpp"
+# Override SRC/OUT_STEM to build another single-source e2e benchmark
+# (e.g. SRC=.../batch_e2e.cpp OUT_STEM=batch_e2e).
+SRC="${GIOMP_E2E_SRC:-${GICC_ROOT}/examples/omp/jacobi_e2e.cpp}"
+OUT_STEM="${GIOMP_E2E_OUT:-jacobi_e2e}"
+META_DIR="${GICC_META_DIR:-/tmp/gicc-${OUT_STEM}-meta}"
 
 DEFS=( -DGICC_BOOTSTRAP_MPI=1 -DGICC_PLATFORM_OFI -DGICC_GPU_HIP=1 -DGICC_CPU_PROXY=1
        -D__HIP_PLATFORM_AMD__=1 -D__HIP_ROCclr__=1 )
@@ -42,7 +45,7 @@ OBJ="$(mktemp -d)"; trap 'rm -rf "${OBJ}"' EXIT
 "${CLANG}" -fopenmp --offload-arch=gfx90a -foffload-lto \
     -mllvm -openmp-opt-disable=true -O3 -std=gnu++17 \
     "${DEFS[@]}" "${INCS[@]}" -c "${SRC}" -o "${OBJ}/proxy.o"
-link_bin "${OBJ}/proxy.o" "${GICC_ROOT}/build_ofi/jacobi_e2e_proxy"
+link_bin "${OBJ}/proxy.o" "${GICC_ROOT}/build_ofi/${OUT_STEM}_proxy"
 
 # ---- dwq variant (2-pass compile through the LTO pass) ----
 mkdir -p "${META_DIR}"; rm -f "${META_DIR}"/*.json
@@ -53,8 +56,8 @@ for pass in 1 2; do
       -O3 -std=gnu++17 \
       "${DEFS[@]}" "${INCS[@]}" -c "${SRC}" -o "${OBJ}/dwq.o"
 done
-link_bin "${OBJ}/dwq.o" "${GICC_ROOT}/build_ofi/jacobi_e2e_dwq"
+link_bin "${OBJ}/dwq.o" "${GICC_ROOT}/build_ofi/${OUT_STEM}_dwq"
 
 echo "META_DIR JSON:"; ls "${META_DIR}"/*.json 2>/dev/null || echo "  (none)"
-echo "BUILT: ${GICC_ROOT}/build_ofi/jacobi_e2e_proxy"
-echo "BUILT: ${GICC_ROOT}/build_ofi/jacobi_e2e_dwq"
+echo "BUILT: ${GICC_ROOT}/build_ofi/${OUT_STEM}_proxy"
+echo "BUILT: ${GICC_ROOT}/build_ofi/${OUT_STEM}_dwq"
