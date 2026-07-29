@@ -8,8 +8,10 @@
 //                           same-node reachable, else the cross-node transport
 //                           (proxy or DWQ, selected by the xport argument). It
 //                           issues the omp target region(s) for you.
-//   Advanced device-side (call INSIDE your own #pragma omp target):
-//                           ompx_put_proxy / ompx_get / ompx_quiet.
+//   Device-side (call INSIDE your own #pragma omp target):
+//                           ompx_dput / ompx_dget / ompx_flush / ompx_quiet.
+//                           (ompx_put_proxy / ompx_get remain as deprecated
+//                           aliases of the Proxy-only forms.)
 //
 // The HIP-compiled runtime lives in libgicc_omp; this header is safe to include
 // in a -fopenmp TU AND in a -x hip host-only TU (the device inline functions are
@@ -146,17 +148,36 @@ inline void ompx_dwq_trigger(gicc::DeviceCtx* ctx) {
     { *(ctx->trigger_addr_) = ctx->trigger_val_; }
 }
 
-// ---- DWQ marker path (opt-in; app TU must compile with -fpass-plugin -foffload-lto)
-// Alternative to the runtime DWQ above: the pass synthesizes the host trace.
-#ifdef GIOMP_ENABLE_DWQ
-#include "examples/omp/gicc_omp_dwq.hpp"             // gicc::omp_dwq::put/flush markers
+// ---- unified device-side RMA: ompx_dput / ompx_dget / ompx_flush ------------
+// ONE name, transport chosen by the build. Without the GICC pass, ompx_dput
+// executes the Proxy path and ompx_flush is a no-op, so the same source runs
+// on any OpenMP toolchain. Compiled through the LTO pass in omp-dwq mode
+// (2-pass, -fpass-plugin -foffload-lto), qualifying dput sites are erased and
+// pre-staged by the compiler-synthesized host trace, and flush becomes the
+// lead-thread MMIO trigger. The names follow DiOMP's ompx_dput/ompx_dget, but
+// the operations issue INSIDE the target region.
+#include "examples/omp/gicc_omp_dwq.hpp"    // gicc::omp_dwq::put/flush (pass markers)
 #pragma omp declare target
+inline void ompx_dput(gicc::DeviceCtx* ctx, int node,
+                      int dst_buf, size_t dst_off,
+                      int src_buf, size_t src_off, size_t bytes,
+                      int lane = 0) {
+    gicc::omp_dwq::put(ctx, node, dst_buf, dst_off, src_buf, src_off, bytes,
+                       lane);
+}
+inline void ompx_dget(gicc::DeviceCtx* ctx, int node,
+                      int src_buf, size_t src_off,
+                      int dst_buf, size_t dst_off, size_t bytes,
+                      int lane = 0) {
+    gicc::omp::get(ctx, node, src_buf, src_off, dst_buf, dst_off, bytes, lane);
+}
+inline void ompx_flush(gicc::DeviceCtx* ctx) { gicc::omp_dwq::flush(ctx); }
+
+// Deprecated spellings kept for existing builds (pre-unification).
 inline void ompx_dwq_put(gicc::DeviceCtx* ctx, int node,
                          int dst_buf, size_t dst_off,
                          int src_buf, size_t src_off, size_t bytes) {
     gicc::omp_dwq::put(ctx, node, dst_buf, dst_off, src_buf, src_off, bytes);
 }
 inline void ompx_dwq_flush(gicc::DeviceCtx* ctx) { gicc::omp_dwq::flush(ctx); }
-#pragma omp end declare target
-#endif
 #endif  // !__HIPCC__
