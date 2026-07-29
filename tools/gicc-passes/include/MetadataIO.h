@@ -47,10 +47,15 @@ struct GuardSpec {
     //                    Used by ASF's IPC-skip pattern
     //                    `if (transfers[i].peer_recv_addr != nullptr) continue;`
     //   Unknown        - guarded but pass can't model; degraded.
-    enum class Kind { Always, ParamTruthy, ParamEqConst, BinOp, FieldNotNull, Unknown };
+    //   ParamCmpConst  - `if (kernel_formal CMP constVal)`; the icmp
+    //                    predicate (llvm::CmpInst::Predicate) is in `pred`,
+    //                    already inverted when the op sits on the false edge.
+    enum class Kind { Always, ParamTruthy, ParamEqConst, ParamCmpConst,
+                      BinOp, FieldNotNull, Unknown };
     Kind     kind     = Kind::Always;
     unsigned paramIdx = 0;
     int64_t  constVal = 0;
+    int      pred     = 0;   // ParamCmpConst only
     // FieldNotNull-only: the field-load expression we compare against null.
     // Stored as a single-element vector to keep the type forward-declared
     // (ArgRef is defined just above).

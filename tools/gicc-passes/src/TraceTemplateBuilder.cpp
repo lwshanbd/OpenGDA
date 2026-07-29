@@ -194,30 +194,62 @@ GuardSpec deriveGuard(const CallInst *CI, const Function *K,
         }
     }
 
+    // Look through casts and freeze to the underlying kernel formal, so
+    // guards survive the freeze/zext wrappers LLVM inserts on branch
+    // conditions at O3.
+    auto asFormal = [K](Value *V) -> Argument * {
+        while (V) {
+            if (auto *A = dyn_cast<Argument>(V))
+                return A->getParent() == K ? A : nullptr;
+            if (auto *C = dyn_cast<CastInst>(V)) { V = C->getOperand(0); continue; }
+            if (auto *F = dyn_cast<FreezeInst>(V)) { V = F->getOperand(0); continue; }
+            return nullptr;
+        }
+        return nullptr;
+    };
+
     if (auto *icmp = dyn_cast<ICmpInst>(cond)) {
         Value *lhs = icmp->getOperand(0);
         Value *rhs = icmp->getOperand(1);
 
+        // Normalize `const CMP formal` to `formal CMP' const`.
+        ICmpInst::Predicate normPred = icmp->getPredicate();
+        if (isa<ConstantInt>(lhs) && !isa<ConstantInt>(rhs)) {
+            std::swap(lhs, rhs);
+            normPred = ICmpInst::getSwappedPredicate(normPred);
+        }
+
         // icmp ne / eq vs zero of a kernel formal → ParamTruthy.
         auto *RC = dyn_cast<ConstantInt>(rhs);
-        auto *LA = dyn_cast<Argument>(lhs);
-        if (RC && LA && LA->getParent() == K) {
+        auto *LA = asFormal(lhs);
+        if (RC && LA) {
             if (RC->isZero()) {
-                bool truthy = (icmp->getPredicate() == ICmpInst::ICMP_NE)
+                bool truthy = (normPred == ICmpInst::ICMP_NE)
                                   ? takeWhenCondTrue
                                   : !takeWhenCondTrue;
-                if (truthy) {
+                if ((normPred == ICmpInst::ICMP_NE ||
+                     normPred == ICmpInst::ICMP_EQ) && truthy) {
                     g.kind = GuardSpec::Kind::ParamTruthy;
                     g.paramIdx = LA->getArgNo();
                     return g;
                 }
             }
-            if (icmp->getPredicate() == ICmpInst::ICMP_EQ && takeWhenCondTrue) {
+            if (normPred == ICmpInst::ICMP_EQ && takeWhenCondTrue) {
                 g.kind = GuardSpec::Kind::ParamEqConst;
                 g.paramIdx = LA->getArgNo();
                 g.constVal = RC->getSExtValue();
                 return g;
             }
+            // General `param CMP const` guard, e.g. `if (I < n)` after LLVM
+            // canonicalizes the constant to the RHS. Invert the predicate
+            // when the op executes on the false edge.
+            g.kind     = GuardSpec::Kind::ParamCmpConst;
+            g.paramIdx = LA->getArgNo();
+            g.constVal = RC->getSExtValue();
+            g.pred     = static_cast<int>(
+                takeWhenCondTrue ? normPred
+                                 : ICmpInst::getInversePredicate(normPred));
+            return g;
         }
 
         // icmp <eq/ne> ptr <field_load>, null — the ASF IPC-skip

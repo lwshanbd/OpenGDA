@@ -42,6 +42,7 @@ const char *guardKindStr(GuardSpec::Kind k) {
         case GuardSpec::Kind::Always:        return "always";
         case GuardSpec::Kind::ParamTruthy:   return "param_truthy";
         case GuardSpec::Kind::ParamEqConst:  return "param_eq_const";
+        case GuardSpec::Kind::ParamCmpConst: return "param_cmp_const";
         case GuardSpec::Kind::BinOp:         return "binop";
         case GuardSpec::Kind::FieldNotNull:  return "field_not_null";
         case GuardSpec::Kind::Unknown:       return "unknown";
@@ -53,6 +54,7 @@ bool parseGuardKind(StringRef s, GuardSpec::Kind &out) {
     if (s == "always")          { out = GuardSpec::Kind::Always;       return true; }
     if (s == "param_truthy")    { out = GuardSpec::Kind::ParamTruthy;  return true; }
     if (s == "param_eq_const")  { out = GuardSpec::Kind::ParamEqConst; return true; }
+    if (s == "param_cmp_const") { out = GuardSpec::Kind::ParamCmpConst; return true; }
     if (s == "binop")           { out = GuardSpec::Kind::BinOp;        return true; }
     if (s == "field_not_null")  { out = GuardSpec::Kind::FieldNotNull; return true; }
     if (s == "unknown")         { out = GuardSpec::Kind::Unknown;      return true; }
@@ -159,11 +161,16 @@ json::Value guardToJSON(const GuardSpec &g) {
     json::Object o;
     o["kind"] = guardKindStr(g.kind);
     if (g.kind == GuardSpec::Kind::ParamTruthy ||
-        g.kind == GuardSpec::Kind::ParamEqConst) {
+        g.kind == GuardSpec::Kind::ParamEqConst ||
+        g.kind == GuardSpec::Kind::ParamCmpConst) {
         o["param"] = static_cast<int64_t>(g.paramIdx);
     }
-    if (g.kind == GuardSpec::Kind::ParamEqConst) {
+    if (g.kind == GuardSpec::Kind::ParamEqConst ||
+        g.kind == GuardSpec::Kind::ParamCmpConst) {
         o["value"] = g.constVal;
+    }
+    if (g.kind == GuardSpec::Kind::ParamCmpConst) {
+        o["pred"] = static_cast<int64_t>(g.pred);
     }
     if (g.kind == GuardSpec::Kind::FieldNotNull && !g.fieldArg.empty()) {
         o["field"] = argRefToJSON(g.fieldArg[0]);
@@ -178,15 +185,22 @@ bool guardFromJSON(const json::Value &v, GuardSpec &out) {
     if (!kindStr) return false;
     if (!parseGuardKind(*kindStr, out.kind)) return false;
     if (out.kind == GuardSpec::Kind::ParamTruthy ||
-        out.kind == GuardSpec::Kind::ParamEqConst) {
+        out.kind == GuardSpec::Kind::ParamEqConst ||
+        out.kind == GuardSpec::Kind::ParamCmpConst) {
         auto p = o->getInteger("param");
         if (!p) return false;
         out.paramIdx = static_cast<unsigned>(*p);
     }
-    if (out.kind == GuardSpec::Kind::ParamEqConst) {
+    if (out.kind == GuardSpec::Kind::ParamEqConst ||
+        out.kind == GuardSpec::Kind::ParamCmpConst) {
         auto v2 = o->getInteger("value");
         if (!v2) return false;
         out.constVal = *v2;
+    }
+    if (out.kind == GuardSpec::Kind::ParamCmpConst) {
+        auto pr = o->getInteger("pred");
+        if (!pr) return false;
+        out.pred = static_cast<int>(*pr);
     }
     if (out.kind == GuardSpec::Kind::FieldNotNull) {
         const auto *f = o->get("field");
