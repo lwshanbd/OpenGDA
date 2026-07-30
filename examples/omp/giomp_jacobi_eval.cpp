@@ -354,7 +354,10 @@ void split_step(float* current, float* next, int nx, int rows,
     compute_interior(current, next, nx, rows, threads);
 
 #if defined(JACOBI_BACKEND_DIOMP)
-    if (nranks > 1) ompx_fence();
+    // Wait for the two outstanding RMA puts, matching MPI_Waitall below.
+    // giomp_mm_eval.cpp already spells this diomp_waitALLRMA(); ompx_fence()
+    // is not exported by the DiOMP revision vendored under reference/.
+    if (nranks > 1) diomp_waitALLRMA();
 #elif defined(JACOBI_BACKEND_MPI)
     if (nranks > 1) MPI_Waitall(4, req, MPI_STATUSES_IGNORE);
 #endif
