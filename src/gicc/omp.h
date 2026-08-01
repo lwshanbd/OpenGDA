@@ -69,6 +69,14 @@ inline void ompx_put_proxy(gicc::DeviceCtx* ctx, int node,
                            int lane = 0) {
     gicc::omp::put(ctx, node, dst_buf, dst_off, src_buf, src_off, bytes, lane);
 }
+// Faster form for a call site with exactly one producer work-item per lane.
+inline void ompx_put_proxy_single(gicc::DeviceCtx* ctx, int node,
+                                  int dst_buf, size_t dst_off,
+                                  int src_buf, size_t src_off, size_t bytes,
+                                  int lane = 0) {
+    gicc::omp::put_single(
+        ctx, node, dst_buf, dst_off, src_buf, src_off, bytes, lane);
+}
 inline void ompx_get(gicc::DeviceCtx* ctx, int node,
                      int src_buf, size_t src_off,
                      int dst_buf, size_t dst_off, size_t bytes,
@@ -86,6 +94,9 @@ inline void ompx_get_single(gicc::DeviceCtx* ctx, int node,
 }
 inline void ompx_quiet(gicc::DeviceCtx* ctx, int lane = 0) {
     gicc::omp::quiet(ctx, lane);
+}
+inline void ompx_quiet_single(gicc::DeviceCtx* ctx, int lane = 0) {
+    gicc::omp::quiet_single(ctx, lane);
 }
 #pragma omp end declare target
 

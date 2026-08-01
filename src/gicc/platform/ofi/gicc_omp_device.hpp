@@ -140,6 +140,25 @@ inline void put(gicc::DeviceCtx* ctx, int target_rank,
     detail::atomic_push(ring, c);
 }
 
+// Lower-overhead form for a call site with exactly one producer work-item.
+inline void put_single(gicc::DeviceCtx* ctx, int target_rank,
+                       int dst_buf, size_t dst_offset,
+                       int src_buf, size_t src_offset,
+                       size_t size, int lane = 0) {
+    if (!ctx) return;
+    auto* ring = detail::lane_to_ring(ctx, lane);
+    if (!ring) return;
+    gicc::proxy::TransferCmd c;
+    c.cmd_type   = gicc::proxy::CmdType::WRITE;
+    c.dst_rank   = static_cast<uint8_t>(target_rank);
+    c.src_buf    = static_cast<uint8_t>(src_buf);
+    c.dst_buf    = static_cast<uint8_t>(dst_buf);
+    c.bytes      = static_cast<uint32_t>(size);
+    c.src_offset = src_offset;
+    c.dst_offset = dst_offset;
+    detail::single_producer_push(ring, c);
+}
+
 inline void get(gicc::DeviceCtx* ctx, int source_rank,
                 int src_buf, size_t src_offset,
                 int dst_buf, size_t dst_offset,
@@ -185,6 +204,22 @@ inline void quiet(gicc::DeviceCtx* ctx, int lane = 0) {
     gicc::proxy::TransferCmd c{};
     c.cmd_type = gicc::proxy::CmdType::QUIET;
     uint64_t my_slot = detail::atomic_push(ring, c);
+    while (detail::tail_volatile(ring) <= my_slot) {
+#ifdef __AMDGCN__
+        __builtin_amdgcn_s_sleep(1);
+#endif
+    }
+    detail::fence_system();
+}
+
+// Single-producer counterpart of quiet().
+inline void quiet_single(gicc::DeviceCtx* ctx, int lane = 0) {
+    if (!ctx) return;
+    auto* ring = detail::lane_to_ring(ctx, lane);
+    if (!ring) return;
+    gicc::proxy::TransferCmd c{};
+    c.cmd_type = gicc::proxy::CmdType::QUIET;
+    uint64_t my_slot = detail::single_producer_push(ring, c);
     while (detail::tail_volatile(ring) <= my_slot) {
 #ifdef __AMDGCN__
         __builtin_amdgcn_s_sleep(1);
