@@ -932,6 +932,24 @@ public:
     uint64_t staged_ops() const { return mono_total_ops_; }
 
     //--------------------------------------------------------------------------
+    // proxy_pushes — total commands the device has pushed into the proxy
+    // rings. Counterpart of staged_ops(): together they attribute every op to a
+    // dispatch path, which is what lets a test assert that the compiler's
+    // routing decision was actually honored rather than inferring it from
+    // the fact that the bytes arrived (both paths deliver the same bytes).
+    //--------------------------------------------------------------------------
+    uint64_t proxy_pushes() const {
+#ifdef GICC_CPU_PROXY
+        uint64_t n = 0;
+        for (const auto &pt : proxy_threads_)
+            if (pt && pt->ring_host()) n += pt->ring_host()->head_volatile();
+        return n;
+#else
+        return 0;
+#endif
+    }
+
+    //--------------------------------------------------------------------------
     // prepare_delta — prepare() with an explicit trigger step.
     //
     // prepare() arms flush() to add "everything staged since the last
