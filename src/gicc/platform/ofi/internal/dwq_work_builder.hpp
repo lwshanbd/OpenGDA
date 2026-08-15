@@ -38,6 +38,27 @@ public:
 
     int rank;  // For error messages
 
+    // FI_QUEUE_WORK returns -FI_EAGAIN when the provider's deferred work
+    // queue is momentarily full — backpressure from work that has not
+    // drained yet, not a failure. Retry while driving progress. Bounded:
+    // if the queue is full because nothing will fire until the caller
+    // triggers, spinning forever would deadlock, so give up and let the
+    // caller see a descriptive error. This bound is also what limits how
+    // many descriptors a caller can pre-stage ahead of a trigger.
+    static constexpr int kQueueWorkRetries = 4096;
+
+    static int queue_work_retry_(struct fid_domain* domain,
+                                 struct fi_deferred_work* w,
+                                 struct fid_cntr* progress_cntr) {
+        int ret = fi_control(&domain->fid, FI_QUEUE_WORK, w);
+        for (int attempt = 0;
+             ret == -FI_EAGAIN && attempt < kQueueWorkRetries; ++attempt) {
+            if (progress_cntr) (void)fi_cntr_read(progress_cntr);
+            ret = fi_control(&domain->fid, FI_QUEUE_WORK, w);
+        }
+        return ret;
+    }
+
     explicit DwqWorkBuilder(int rank_) : rank(rank_),
         stored_rma_desc(nullptr), stored_atomic_desc(nullptr) {
         memset(&work, 0, sizeof(work));
@@ -105,10 +126,14 @@ public:
         work.op_type = FI_OP_WRITE;
         work.op.rma = &op_rma;
 
-        int ret = fi_control(&domain->fid, FI_QUEUE_WORK, &work);
+        int ret = queue_work_retry_(domain, &work, completion_cntr);
         if (ret) {
-            fprintf(stderr, "Rank %d: fi_control(FI_QUEUE_WORK/RMA) failed: %s (%d)\n",
-                    rank, fi_strerror(-ret), ret);
+            fprintf(stderr, "Rank %d: fi_control(FI_QUEUE_WORK/RMA) failed: %s (%d)%s\n",
+                    rank, fi_strerror(-ret), ret,
+                    ret == -FI_EAGAIN
+                        ? " — deferred work queue full; stage fewer descriptors "
+                          "before triggering"
+                        : "");
             exit(1);
         }
     }
@@ -163,10 +188,14 @@ public:
         work.op_type = FI_OP_READ;
         work.op.rma = &op_rma;
 
-        int ret = fi_control(&domain->fid, FI_QUEUE_WORK, &work);
+        int ret = queue_work_retry_(domain, &work, completion_cntr);
         if (ret) {
-            fprintf(stderr, "Rank %d: fi_control(FI_QUEUE_WORK/RMA_READ) failed: %s (%d)\n",
-                    rank, fi_strerror(-ret), ret);
+            fprintf(stderr, "Rank %d: fi_control(FI_QUEUE_WORK/RMA_READ) failed: %s (%d)%s\n",
+                    rank, fi_strerror(-ret), ret,
+                    ret == -FI_EAGAIN
+                        ? " — deferred work queue full; stage fewer descriptors "
+                          "before triggering"
+                        : "");
             exit(1);
         }
     }
