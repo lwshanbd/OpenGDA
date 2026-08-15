@@ -1,4 +1,9 @@
 #include "TraceTemplateBuilder.h"
+
+#include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/IR/CFG.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "HKAnalysis.h"
 #include "HostMirrorAnnotation.h"
 
@@ -321,6 +326,8 @@ struct LoopShape {
     int64_t  start      = 0;
     int64_t  step       = 1;
     bool     ivBoundKnown = false;
+    bool     boundIsConst = false;
+    int64_t  constBound   = 0;
     unsigned ivParamIdx = 0;
     bool     valid      = false;   // true → safe to emit a loop in the trace
 };
@@ -395,6 +402,18 @@ LoopShape analyzeLoop(const Loop *L, const Function *K) {
             S.ivBoundKnown = true;
             break;
         }
+        // A literal bound is just as host-knowable as a formal, and it
+        // is the common shape for a fixed-size halo or a small fan-out.
+        // Treating it as unrecoverable made the trace synthesizer skip
+        // the op, which silently dropped the transfer.
+        if (auto *CB = dyn_cast<ConstantInt>(ivOnLeft ? r : l)) {
+            if (ivOnLeft || ivOnRight) {
+                S.boundIsConst = true;
+                S.constBound   = CB->getSExtValue();
+                S.ivBoundKnown = true;
+                break;
+            }
+        }
     }
 
     // We accept "ivBoundKnown=false" paths (e.g. constant trip count)
@@ -411,36 +430,37 @@ LoopShape analyzeLoop(const Loop *L, const Function *K) {
 // intrinsics — those are address arithmetic / dispatch glue, not the
 // "FLOPs" the ML decider cares about. `stopAt`, if non-null, makes the
 // scan stop just before that instruction (used for the call's own BB).
+bool isArith(const Instruction &I) {
+    if (isa<BinaryOperator>(&I)) return true;
+    if (const auto *II = dyn_cast<IntrinsicInst>(&I)) {
+        switch (II->getIntrinsicID()) {
+            case Intrinsic::fmuladd:
+            case Intrinsic::fma:
+            case Intrinsic::sqrt:
+            case Intrinsic::sin:
+            case Intrinsic::cos:
+            case Intrinsic::pow:
+            case Intrinsic::exp:
+            case Intrinsic::exp2:
+            case Intrinsic::log:
+            case Intrinsic::log2:
+            case Intrinsic::log10:
+            case Intrinsic::fabs:
+            case Intrinsic::minnum:
+            case Intrinsic::maxnum:
+                return true;
+            default:
+                return false;
+        }
+    }
+    return false;
+}
+
 int countArithInBB(const BasicBlock &BB, const Instruction *stopAt) {
     int n = 0;
     for (const Instruction &I : BB) {
         if (stopAt && &I == stopAt) break;
-        if (isa<BinaryOperator>(&I)) {
-            ++n;
-            continue;
-        }
-        if (const auto *II = dyn_cast<IntrinsicInst>(&I)) {
-            switch (II->getIntrinsicID()) {
-                case Intrinsic::fmuladd:
-                case Intrinsic::fma:
-                case Intrinsic::sqrt:
-                case Intrinsic::sin:
-                case Intrinsic::cos:
-                case Intrinsic::pow:
-                case Intrinsic::exp:
-                case Intrinsic::exp2:
-                case Intrinsic::log:
-                case Intrinsic::log2:
-                case Intrinsic::log10:
-                case Intrinsic::fabs:
-                case Intrinsic::minnum:
-                case Intrinsic::maxnum:
-                    ++n;
-                    break;
-                default:
-                    break;
-            }
-        }
+        if (isArith(I)) ++n;
     }
     return n;
 }
@@ -465,11 +485,104 @@ int computeBeforeFor(const CallInst *CI, const Function *K,
     return total;
 }
 
+// Sum of arithmetic ops that execute AFTER this call and before the
+// kernel's completion point.
+//
+// Dominance is the wrong relation here: a call inside a loop body does
+// not dominate the code after the loop, so a dominance walk reports
+// almost nothing. What we want is "reachable from the call and not
+// already behind it", bounded by the completion point.
+//
+// Arithmetic inside a loop is weighted by that loop's trip count when
+// ScalarEvolution can prove one, so a short loop body that runs many
+// times counts as the work it actually is. Loops with runtime bounds
+// stay unweighted, which makes this an under-estimate for exactly the
+// kernels whose extent is a formal -- the decider is told as much by
+// `distance_exact`.
+int computeAfterFor(const CallInst *CI, const CallInst *stop,
+                    const Function *K, const DominatorTree *DT,
+                    LoopInfo *LI, ScalarEvolution *SE, bool *exact) {
+    if (!CI || !K || !DT) return -1;
+    const BasicBlock *parent = CI->getParent();
+    if (!parent) return -1;
+    const BasicBlock *stopBB = stop ? stop->getParent() : nullptr;
+    if (exact) *exact = true;
+
+    // Per-BB multiplier: the trip count of the innermost enclosing loop
+    // with a provable constant one.
+    auto weightOf = [&](const BasicBlock &BB) -> long long {
+        if (!LI || !SE) return 1;
+        const Loop *L = LI->getLoopFor(&BB);
+        if (!L) return 1;
+        unsigned tc = SE->getSmallConstantTripCount(const_cast<Loop *>(L));
+        if (!tc) { if (exact) *exact = false; return 1; }
+        return static_cast<long long>(tc);
+    };
+
+    // Forward reachability from the call's block, stopping at the block
+    // that holds the completion point.
+    SmallPtrSet<const BasicBlock *, 32> seen;
+    SmallVector<const BasicBlock *, 32> work;
+    for (const BasicBlock *succ : successors(parent))
+        if (seen.insert(succ).second) work.push_back(succ);
+
+    long long total = 0;
+    // Suffix of the call's own block.
+    {
+        bool counting = false;
+        for (const Instruction &I : *parent) {
+            if (&I == CI) { counting = true; continue; }
+            if (&I == stop) break;
+            if (counting && isArith(I)) total += weightOf(*parent);
+        }
+    }
+    while (!work.empty()) {
+        const BasicBlock *BB = work.pop_back_val();
+        if (BB == stopBB) {
+            total += (long long)countArithInBB(*BB, stop) * weightOf(*BB);
+            continue;   // nothing past the completion point can hide anything
+        }
+        total += (long long)countArithInBB(*BB, nullptr) * weightOf(*BB);
+        for (const BasicBlock *succ : successors(BB))
+            if (seen.insert(succ).second) work.push_back(succ);
+    }
+    // Saturate rather than overflow the int field.
+    if (total > (long long)INT32_MAX) total = INT32_MAX;
+    return static_cast<int>(total);
+}
+
+// Compile-time trip count of the loop containing `CI`, when
+// ScalarEvolution can prove a constant one. This is the per-phase op
+// count K, which the proxy-vs-trigger decision is strongly sensitive to
+// (issue cost is per-op on both paths, with different constants).
+// Returns -1 when the bound is a runtime value, which is the common case
+// for kernels whose extent is a formal.
+long long tripCountFor(const CallInst *CI, LoopInfo *LI, ScalarEvolution *SE) {
+    if (!CI || !LI || !SE) return -1;
+    const Loop *L = LI->getLoopFor(CI->getParent());
+    if (!L) return -1;
+    // What we want is how many times THIS CALL runs, which is not
+    // LLVM's "trip count": that counts header executions, i.e. one more
+    // than the body for a loop the pass sees before rotation (measured:
+    // a source bound of N reported N+1). The backedge-taken count is the
+    // number of body executions; only a call in the header itself runs
+    // the extra time.
+    const SCEV *BTC = SE->getBackedgeTakenCount(const_cast<Loop *>(L));
+    if (!BTC) return -1;
+    const auto *C = dyn_cast<SCEVConstant>(BTC);
+    if (!C) return -1;
+    const uint64_t btc = C->getAPInt().getZExtValue();
+    const bool inHeader = (CI->getParent() == L->getHeader());
+    const uint64_t n = inHeader ? btc + 1 : btc;
+    return n ? static_cast<long long>(n) : -1;
+}
+
 }  // namespace
 
 KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
                                    LoopInfo *LI,
-                                   DominatorTree *DT) {
+                                   DominatorTree *DT,
+                                   ScalarEvolution *SE) {
     KernelTemplate t;
     t.mangledName = info.mangledName;
     t.simpleName  = info.simpleName;
@@ -490,11 +603,26 @@ KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
         }
     }
 
+    // The kernel's completion point bounds "work that can hide a
+    // transfer": the first quiet/flush in the kernel, if it has one.
+    const CallInst *completionSite = nullptr;
+    for (const auto &site : info.sites) {
+        if (site.kind == GICCOpKind::Quiet || site.kind == GICCOpKind::Flush) {
+            completionSite = site.CI;
+            break;
+        }
+    }
+
     for (const auto &site : info.sites) {
         OpTemplate op;
         op.siteId = site.siteId;
         op.kind   = opKindName(site.kind);
         op.compute_before = computeBeforeFor(site.CI, info.kernel, DT);
+        bool distExact = true;
+        op.compute_after = computeAfterFor(site.CI, completionSite, info.kernel,
+                                           DT, LI, SE, &distExact);
+        op.distance_exact = distExact;
+        op.trip_count     = tripCountFor(site.CI, LI, SE);
 
         // Loop analysis runs first so we have the canonical iv PHI
         // before deriving guard / arg ArgRefs (so iv references become
@@ -507,8 +635,10 @@ KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
                 LoopShape s = analyzeLoop(L, info.kernel);
                 op.loop.inLoop = true;
                 if (s.valid) {
-                    op.loop.ivBoundKnown = true;
-                    op.loop.ivParamIdx   = s.ivParamIdx;
+                    op.loop.ivBoundKnown   = true;
+                    op.loop.ivBoundIsConst = s.boundIsConst;
+                    op.loop.ivBoundConst   = s.constBound;
+                    op.loop.ivParamIdx     = s.ivParamIdx;
                     op.loop.ivStart      = s.start;
                     op.loop.ivStep       = s.step;
                     ivPhi                = s.iv;

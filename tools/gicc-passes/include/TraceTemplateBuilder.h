@@ -3,7 +3,7 @@
 #include "KernelInventory.h"
 #include "MetadataIO.h"
 
-namespace llvm { class LoopInfo; class DominatorTree; }
+namespace llvm { class LoopInfo; class DominatorTree; class ScalarEvolution; }
 
 namespace gicc::pass {
 
@@ -21,9 +21,15 @@ namespace gicc::pass {
 //
 // `DT` (optional): if provided, populates `OpTemplate::compute_before`
 // with the count of arithmetic / FP instructions in BBs dominating the
-// call site. Without DT the field stays at its -1 sentinel.
-KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
-                                   llvm::LoopInfo       *LI = nullptr,
-                                   llvm::DominatorTree  *DT = nullptr);
+// call site, and `OpTemplate::compute_after` with the count between the
+// call and the kernel's completion point (its static issue-to-first-use
+// distance). Without DT both stay at their -1 sentinel.
+//
+// `SE` (optional): if provided, populates `OpTemplate::trip_count` with
+// the enclosing loop's compile-time trip count when one can be proven.
+KernelTemplate buildKernelTemplate(const GICCKernelInfo  &info,
+                                   llvm::LoopInfo        *LI = nullptr,
+                                   llvm::DominatorTree   *DT = nullptr,
+                                   llvm::ScalarEvolution *SE = nullptr);
 
 }  // namespace gicc::pass

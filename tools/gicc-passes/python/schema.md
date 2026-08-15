@@ -45,10 +45,28 @@ A JSON array of per-(launch site × op) records.
     "fan_out":            2,                 // distinct param-keyed peers
     "compute_before_flops": 17,              // arith ops in BBs dominating the call;
                                              //   null if not measured
+    "flops_to_first_use": 205,               // arith ops between the call and the
+                                             //   kernel's completion point: the static
+                                             //   issue-to-first-use distance. null if
+                                             //   not measured.
+    "distance_exact":     false,             // false => flops_to_first_use skipped a
+                                             //   loop with a runtime bound, so it is a
+                                             //   LOWER BOUND on hideable work
+    "trip_count":         64,                // ops per phase, from ScalarEvolution;
+                                             //   null when the bound is a runtime value
     "iter_estimate":      null               // numeric when const-bound (none today)
   }
 ]
 ```
+
+Schema v2 → v3 changes:
+- `flops_to_first_use`, `distance_exact`, `trip_count` added. Together with
+  `size_log2` these are what the shipped decider weighs: both dispatch
+  paths pay a fixed per-phase cost plus a per-op issue cost, and only the
+  work between the issue and the first use can hide the wire time.
+- `trip_count` is the number of times the CALL runs, i.e. the loop's
+  backedge-taken count, not LLVM's "trip count" (which counts header
+  executions and is one larger for a loop seen before rotation).
 
 Schema v1 → v2 changes:
 - `in_loop` now reflects the real LoopInfo result (was hardcoded false).

@@ -7,6 +7,7 @@
 
 #include "llvm/Analysis/LoopAnalysisManager.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
@@ -46,9 +47,12 @@ PreservedAnalyses GICCDeviceDiscoveryPass::run(Module &M, ModuleAnalysisManager 
             // arguments to ArgRef::LoopIv. DominatorTree lets it count
             // arithmetic instructions in BBs dominating each call site
             // (the compute_before feature).
-            LoopInfo      &LI = FAM.getResult<LoopAnalysis>(F);
-            DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
-            KernelTemplate t = buildKernelTemplate(info, &LI, &DT);
+            LoopInfo        &LI = FAM.getResult<LoopAnalysis>(F);
+            DominatorTree   &DT = FAM.getResult<DominatorTreeAnalysis>(F);
+            // ScalarEvolution gives compile-time trip counts, which is the
+            // per-phase op count the dispatch decision hinges on.
+            ScalarEvolution &SE = FAM.getResult<ScalarEvolutionAnalysis>(F);
+            KernelTemplate t = buildKernelTemplate(info, &LI, &DT, &SE);
             if (!writeKernelTemplate(cfg.metaDir, t)) {
                 errs() << "[discovery] WARN: failed to write template for "
                        << info.mangledName << " under " << cfg.metaDir << "\n";

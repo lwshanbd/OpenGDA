@@ -204,7 +204,11 @@ json::Value loopToJSON(const OpLoopInfo &L) {
     o["in_loop"]  = L.inLoop;
     if (L.inLoop) {
         if (L.ivBoundKnown) {
-            o["iv_param"] = static_cast<int64_t>(L.ivParamIdx);
+            if (L.ivBoundIsConst) {
+                o["iv_bound_const"] = static_cast<int64_t>(L.ivBoundConst);
+            } else {
+                o["iv_param"] = static_cast<int64_t>(L.ivParamIdx);
+            }
         }
         o["iv_start"] = L.ivStart;
         o["iv_step"]  = L.ivStep;
@@ -222,6 +226,11 @@ bool loopFromJSON(const json::Value &v, OpLoopInfo &out) {
     if (auto p = o->getInteger("iv_param")) {
         out.ivParamIdx   = static_cast<unsigned>(*p);
         out.ivBoundKnown = true;
+    }
+    if (auto c = o->getInteger("iv_bound_const")) {
+        out.ivBoundConst   = static_cast<int64_t>(*c);
+        out.ivBoundIsConst = true;
+        out.ivBoundKnown   = true;
     }
     if (auto s = o->getInteger("iv_start")) out.ivStart = *s;
     if (auto s = o->getInteger("iv_step"))  out.ivStep  = *s;
@@ -267,6 +276,11 @@ json::Value templateToJSON(const KernelTemplate &t) {
         // fixtures byte-stable.
         if (op.compute_before >= 0)
             o["compute_before"] = static_cast<int64_t>(op.compute_before);
+        if (op.compute_after >= 0)
+            o["compute_after"] = static_cast<int64_t>(op.compute_after);
+        if (op.trip_count >= 0)
+            o["trip_count"] = static_cast<int64_t>(op.trip_count);
+        o["distance_exact"] = op.distance_exact;
 
         json::Object args;
         for (const auto &kv : op.args) {
@@ -329,6 +343,16 @@ bool templateFromJSON(const json::Value &v, KernelTemplate &out) {
                 op.hk_fail_reason = r->str();
             // -1 sentinel = field absent (older fixtures or DT-less
             // build). Clamp to >=0 when present.
+            if (auto c = oo->getInteger("compute_after"))
+                op.compute_after = static_cast<int>(*c);
+            else
+                op.compute_after = -1;
+            if (auto b = oo->getBoolean("distance_exact"))
+                op.distance_exact = *b;
+            if (auto c = oo->getInteger("trip_count"))
+                op.trip_count = static_cast<long long>(*c);
+            else
+                op.trip_count = -1;
             if (auto c = oo->getInteger("compute_before"))
                 op.compute_before = static_cast<int>(*c);
             else

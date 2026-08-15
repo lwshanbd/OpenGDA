@@ -69,7 +69,9 @@ struct GuardSpec {
 struct OpLoopInfo {
     bool      inLoop      = false;  // false → op runs once unconditionally
     unsigned  ivParamIdx  = 0;      // kernel formal that bounds the loop
-    bool      ivBoundKnown = false; // true if ivParamIdx is meaningful
+    bool      ivBoundKnown = false; // true if the bound is recoverable
+    bool      ivBoundIsConst = false; // bound is a literal, not a formal
+    int64_t   ivBoundConst = 0;     // the literal, when ivBoundIsConst
     int64_t   ivStart     = 0;
     int64_t   ivStep      = 1;
     bool      degraded    = false;  // recognized as loop but iv/bound not
@@ -102,6 +104,20 @@ struct OpTemplate {
     // for the ML decider. Computed at device-discovery time via the
     // DominatorTree; -1 means "not computed" (older JSON / DT absent).
     int                          compute_before = -1;
+    // Arithmetic executed BETWEEN this op and the kernel's completion
+    // point (its quiet/flush, or the kernel exit). This is the static
+    // proxy for issue-to-first-use distance: compute_before says how
+    // much work preceded the communication, compute_after says how much
+    // is available to hide it behind. -1 when not measured.
+    int                          compute_after  = -1;
+    // Compile-time trip count of the enclosing loop when ScalarEvolution
+    // can prove one, else -1. This is the op count per communication
+    // phase, which the dispatch decision is highly sensitive to.
+    long long                    trip_count     = -1;
+    // False when compute_after had to skip a loop whose trip count is a
+    // runtime value, i.e. the distance is a lower bound rather than an
+    // estimate. The decider refuses to lean on an inexact distance.
+    bool                         distance_exact = true;
 };
 
 struct ParamInfo {

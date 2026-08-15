@@ -143,6 +143,25 @@ json::Value toRecord(const std::string &siteId,
     else
         r["compute_before_flops"] = nullptr;
 
+    // flops_to_first_use: the same currency as compute_before_flops, but
+    // counted BETWEEN this op and the kernel's completion point. This is
+    // the static form of issue-to-first-use distance, which decides
+    // whether the transfer can hide behind compute — measurements show
+    // the best dispatch flips on it at fixed message size and trip count.
+    if (op.compute_after >= 0)
+        r["flops_to_first_use"] = static_cast<int64_t>(op.compute_after);
+    else
+        r["flops_to_first_use"] = nullptr;
+
+    // trip_count: ops issued per communication phase, when ScalarEvolution
+    // can prove it. Both dispatch paths pay a per-op issue cost with
+    // different constants, so this scales the decision.
+    if (op.trip_count >= 0)
+        r["trip_count"] = static_cast<int64_t>(op.trip_count);
+    else
+        r["trip_count"] = nullptr;
+    r["distance_exact"] = op.distance_exact;
+
     if (auto est = iterEstimate(op.loop))
         r["iter_estimate"] = *est;
     else
