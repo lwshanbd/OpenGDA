@@ -202,10 +202,12 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
         // Fallback: if no hint.json is supplied we keep the legacy JSON
         // read so existing build flows (where a prior compile or
         // external decider wrote proxy_aware) continue to work.
-        bool proxyAware = false;
+        bool     proxyAware = false;
+        bool     haveHint   = false;
+        HintFile hint;
         if (!cfgRef.hintIn.empty()) {
-            HintFile hint;
             if (readHintFile(cfgRef.hintIn, hint)) {
+                haveHint   = true;
                 proxyAware = kernelHasProxySite(info.sites, hint);
             } else {
                 // Loud failure: silently falling back to JSON would
@@ -228,22 +230,31 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
         for (const auto &s : info.sites) {
             switch (s.kind) {
                 case GICCOpKind::PutNoDb:
-                case GICCOpKind::GetNoDb:
-                    // Preserve on device when this kernel routes some
-                    // site to the CPU proxy; the device-side body
-                    // pushes the TransferCmd into the proxy ring.
-                    // Otherwise erase — host trace owns the work.
-                    putGetCalls.emplace_back(s.CI, proxyAware);
+                case GICCOpKind::GetNoDb: {
+                    // Preservation is PER SITE, not per kernel. One
+                    // kernel can legitimately mix a proxy-routed site
+                    // (its descriptor is not host-knowable, so the
+                    // device body must push the TransferCmd) with a
+                    // trigger-routed site (the host trace owns it, so
+                    // the device body must be erased). Deciding this
+                    // per kernel means one proxy site drags every other
+                    // site in the kernel onto the ring, and the routing
+                    // the decider chose is silently not what runs.
+                    bool preserve = proxyAware;   // legacy per-kernel path
+                    if (haveHint) {
+                        preserve = hintFor(hint, s.siteId).dispatch
+                                   == DispatchKind::CpuProxyEnqueue;
+                    }
+                    putGetCalls.emplace_back(s.CI, preserve);
                     break;
+                }
                 case GICCOpKind::Flush:
                     flushCalls.push_back(s.CI);
                     break;
                 case GICCOpKind::Quiet:
-                    // Quiet has no host-side IPC counterpart; v1 erases
-                    // it like put_no_db. Preserved on the device when
-                    // proxy is in play so the device body (future:
-                    // MMIO drain or membar) keeps running. NVPTX path
-                    // lowers it to a membar in Phase 4.
+                    // Quiet stays a per-KERNEL decision: it drains the
+                    // ring, so it is preserved iff some site in this
+                    // kernel actually uses the ring.
                     putGetCalls.emplace_back(s.CI, proxyAware);
                     break;
             }

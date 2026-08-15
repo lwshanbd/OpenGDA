@@ -361,11 +361,16 @@ void emitOpInLoop(Module &M, IRBuilder<> &B, Function *traceFn,
     Type *i32Ty = Type::getInt32Ty(Ctx);
     Type *i64Ty = Type::getInt64Ty(Ctx);
 
-    // Materialize the bound (kernel formal `ivParamIdx`) as i64.
-    ArgRef boundRef;
-    boundRef.kind     = ArgRef::Kind::Param;
-    boundRef.paramIdx = op.loop.ivParamIdx;
-    Value *bound = evalArgRef(B, traceFn, boundRef, i64Ty, nullptr);
+    // Materialize the bound as i64: either a literal or a kernel formal.
+    Value *bound = nullptr;
+    if (op.loop.ivBoundIsConst) {
+        bound = ConstantInt::get(i64Ty, op.loop.ivBoundConst);
+    } else {
+        ArgRef boundRef;
+        boundRef.kind     = ArgRef::Kind::Param;
+        boundRef.paramIdx = op.loop.ivParamIdx;
+        bound = evalArgRef(B, traceFn, boundRef, i64Ty, nullptr);
+    }
 
     // Stack-allocate the per-arg arrays in the SAME BB as `bound` was
     // computed so they dominate the loop. Sizes are i64 to match
@@ -491,6 +496,14 @@ void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,
     // the whole loop or N copies of the same offset) would silently
     // corrupt data; skip the op entirely instead.
     if (op.loop.inLoop && op.loop.degraded) {
+        // Skipping means this call site's data is never sent. That is a
+        // correctness cliff, not a missed optimization, so say so: a
+        // silent skip presents as missing data at run time with nothing
+        // in the build log to explain it.
+        errs() << "[trace-synthesis] WARNING: site " << op.siteId
+               << " is in a loop whose induction variable or bound could "
+                  "not be recovered; its transfer will NOT be emitted. "
+                  "Route it to CPU_PROXY_ENQUEUE or simplify the loop.\n";
         B.CreateBr(contBB);
         return;
     }
