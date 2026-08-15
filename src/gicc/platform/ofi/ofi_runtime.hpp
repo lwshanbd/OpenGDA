@@ -90,6 +90,7 @@ public:
     Runtime()
         : comm_(nullptr),
           h_dev_ctx_(nullptr), d_dev_ctx_(nullptr),
+          h_dev_ctx_pool_(nullptr), d_dev_ctx_pool_(nullptr),
           d_slot_pool_(nullptr), mr_slot_pool_(nullptr),
           d_operand_pool_(nullptr), mr_operand_pool_(nullptr),
           my_n_ops_(0), my_n_remote_ops_(0),
@@ -197,10 +198,24 @@ public:
         }
         (void)gpuDeviceSynchronize();
 
-        (void)gpuHostMalloc(&h_dev_ctx_, sizeof(DeviceCtx), gpuHostMallocMapped);
-        (void)gpuHostGetDevicePointer((void**)&d_dev_ctx_, h_dev_ctx_, 0);
-        h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
-        h_dev_ctx_->trigger_val_  = 0;
+        // Pool of device contexts rather than one. prepare() publishes the
+        // trigger value into a context the kernel reads asynchronously, so
+        // two call sites that arm a trigger in the same timestep would race:
+        // the second prepare() overwrites trigger_val_ before the first
+        // flush kernel has read it, the first descriptor never fires, and
+        // reset() waits forever. Slot 0 is the legacy single context; a
+        // caller that arms several call sites concurrently gives each one
+        // its own slot. See prepare_slot().
+        (void)gpuHostMalloc(&h_dev_ctx_pool_, kCtxSlots * sizeof(DeviceCtx),
+                            gpuHostMallocMapped);
+        (void)gpuHostGetDevicePointer((void**)&d_dev_ctx_pool_, h_dev_ctx_pool_, 0);
+        std::memset(h_dev_ctx_pool_, 0, kCtxSlots * sizeof(DeviceCtx));
+        for (int i = 0; i < kCtxSlots; ++i) {
+            h_dev_ctx_pool_[i].trigger_addr_ = comm_->get_trigger_addr();
+            h_dev_ctx_pool_[i].trigger_val_  = 0;
+        }
+        h_dev_ctx_ = h_dev_ctx_pool_;
+        d_dev_ctx_ = d_dev_ctx_pool_;
     }
 
     ~Runtime() {
@@ -228,7 +243,7 @@ public:
         delete mr_operand_pool_;
         if (d_slot_pool_)    (void)gpuFree(d_slot_pool_);
         if (d_operand_pool_) (void)gpuFree(d_operand_pool_);
-        if (h_dev_ctx_)      (void)gpuHostFree(h_dev_ctx_);
+        if (h_dev_ctx_pool_) (void)gpuHostFree(h_dev_ctx_pool_);
 
         // Close IPC mapped pointers (one per local peer × buffer).
         for (auto& per_rank : peer_mapped_ptrs_) {
@@ -931,6 +946,31 @@ public:
     // times, or the trigger counter and mono_last_triggered_ drift apart
     // and the next prepare() computes a wrong delta.
     //--------------------------------------------------------------------------
+    //--------------------------------------------------------------------------
+    // prepare_slot — prepare() / prepare_delta() into an independent device
+    // context, so several call sites can be armed before any of their kernels
+    // has run. Slot 0 is the context prepare() itself uses.
+    //
+    // per_flush == 0 means "whatever prepare() would have computed"; a
+    // non-zero value behaves like prepare_delta(per_flush, n_flushes).
+    //
+    // Caller contract: a slot must not be re-armed until the kernel holding
+    // it has completed, which is the same race prepare() has with itself.
+    //--------------------------------------------------------------------------
+    DeviceCtx* prepare_slot(int slot, uint64_t per_flush = 0,
+                            uint64_t n_flushes = 1) {
+        if (slot < 0 || slot >= kCtxSlots) slot = 0;
+        DeviceCtx* saved_h = h_dev_ctx_;
+        DeviceCtx* saved_d = d_dev_ctx_;
+        h_dev_ctx_ = &h_dev_ctx_pool_[slot];
+        d_dev_ctx_ = &d_dev_ctx_pool_[slot];
+        DeviceCtx* r = per_flush ? prepare_delta(per_flush, n_flushes)
+                                 : prepare();
+        h_dev_ctx_ = saved_h;
+        d_dev_ctx_ = saved_d;
+        return r;
+    }
+
     DeviceCtx* prepare_delta(uint64_t per_flush, uint64_t n_flushes = 1) {
         const uint64_t prev = mono_last_triggered_;
         DeviceCtx* ctx = prepare();
@@ -1237,7 +1277,10 @@ private:
 
     gicc::Bootstrap               boot_;
     Fabric*                      comm_;
-    DeviceCtx*                    h_dev_ctx_;
+    static constexpr int kCtxSlots = 8;
+    DeviceCtx*                         h_dev_ctx_pool_;
+    DeviceCtx*                         d_dev_ctx_pool_;
+    DeviceCtx*                         h_dev_ctx_;
     DeviceCtx*                    d_dev_ctx_;
 
     Slot                          slots_[POOL_SIZE];

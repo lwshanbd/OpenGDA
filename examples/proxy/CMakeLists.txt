@@ -537,3 +537,43 @@ elseif(GICC_GPU_API STREQUAL "hip")
         pthread)
 endif()
 _proxy_example_setup(mixed_callsite)
+
+# ---------------------------------------------------------------------------
+# jacobi3d - 3D Jacobi stencil whose contiguous and strided halo faces are two
+# call sites with naturally different trip counts; enumerates their path
+# assignments and checks every one is bit-identical.
+# ---------------------------------------------------------------------------
+if(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(jacobi3d.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(jacobi3d
+        jacobi3d.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(jacobi3d PRIVATE
+        CUDA::cudart
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+elseif(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(jacobi3d.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+                                ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp
+        PROPERTIES LANGUAGE HIP)
+    add_executable(jacobi3d
+        jacobi3d.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC}
+        ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp)
+    target_link_libraries(jacobi3d PRIVATE
+        hip::device
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+endif()
+_proxy_example_setup(jacobi3d)
