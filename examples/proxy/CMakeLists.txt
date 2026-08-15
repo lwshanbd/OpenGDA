@@ -497,3 +497,43 @@ elseif(GICC_GPU_API STREQUAL "hip")
         pthread)
 endif()
 _proxy_example_setup(ctx_bench)
+
+# ---------------------------------------------------------------------------
+# mixed_callsite - one program, four call sites with different compiler-visible
+# context; enumerates legal per-call-site path assignments. Uses both dispatch
+# paths in a single process via Runtime::enable_mixed_dispatch().
+# ---------------------------------------------------------------------------
+if(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(mixed_callsite.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(mixed_callsite
+        mixed_callsite.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(mixed_callsite PRIVATE
+        CUDA::cudart
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+elseif(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(mixed_callsite.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+                                ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp
+        PROPERTIES LANGUAGE HIP)
+    add_executable(mixed_callsite
+        mixed_callsite.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC}
+        ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp)
+    target_link_libraries(mixed_callsite PRIVATE
+        hip::device
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+endif()
+_proxy_example_setup(mixed_callsite)
