@@ -44,6 +44,12 @@
 #include "gicc/platform/ofi/ofi_runtime.hpp"
 
 static constexpr size_t kBufBytes = 32 * 1024 * 1024;
+// Send and receive halves of the registered window. In the ring every rank
+// both sends and receives, so they must not overlap: if a rank sourced from
+// the same bytes its predecessor is writing, the payload would race and the
+// verification would compare a pattern against itself.
+static constexpr size_t kSendBase = 0;
+static constexpr size_t kRecvBase = 16 * 1024 * 1024;
 
 enum Path { PROXY = 0, TRIGGER = 1 };
 
@@ -88,11 +94,12 @@ __device__ __forceinline__ void spin_ticks(long long ticks) {
 // Proxy issue: K pushes at affine offsets, then the independent compute.
 __global__ void k_proxy_site(gicc::DeviceCtx* ctx, int peer, int buf,
                              size_t bytes, int ops, size_t base_off,
+                             size_t send_base, size_t recv_base,
                              long long ticks) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     for (int i = 0; i < ops; ++i) {
         size_t off = base_off + (size_t)i * bytes;
-        gicc::put(ctx, peer, buf, off, buf, off, bytes);
+        gicc::put(ctx, peer, buf, recv_base + off, buf, send_base + off, bytes);
     }
     spin_ticks(ticks);
 }
@@ -101,12 +108,13 @@ __global__ void k_proxy_site(gicc::DeviceCtx* ctx, int peer, int buf,
 // kernel, so the host cannot know the descriptor at launch time and the
 // trigger path cannot pre-stage it.
 __global__ void k_proxy_site_dynamic(gicc::DeviceCtx* ctx, int peer, int buf,
-                                     size_t bytes, int ops,
-                                     const size_t* d_off, long long ticks) {
+                                     size_t bytes, int ops, const size_t* d_off,
+                                     size_t send_base, size_t recv_base,
+                                     long long ticks) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     for (int i = 0; i < ops; ++i) {
         size_t off = d_off[i];
-        gicc::put(ctx, peer, buf, off, buf, off, bytes);
+        gicc::put(ctx, peer, buf, recv_base + off, buf, send_base + off, bytes);
     }
     spin_ticks(ticks);
 }
@@ -147,13 +155,14 @@ static Stats summarize(std::vector<double> v) {
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
 
-    int samples = 21, warmup = 10, steps = 10;
+    int samples = 21, warmup = 10, steps = 10, ring_stride = 1;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if      (a.rfind("--samples=",0)==0) samples = std::atoi(a.c_str()+10);
         else if (a.rfind("--warmup=", 0)==0) warmup  = std::atoi(a.c_str()+9);
         else if (a.rfind("--steps=",  0)==0) steps   = std::atoi(a.c_str()+8);
         else if (a == "--twins") { kSites = kTwinSites; kNumSites = 2; }
+        else if (a.rfind("--stride=",0)==0) ring_stride = std::atoi(a.c_str()+9);
         else { fprintf(stderr, "mixed_callsite: unknown arg '%s'\n", a.c_str()); return 2; }
     }
 
@@ -161,11 +170,18 @@ int main(int argc, char** argv) {
     rt.enable_host_wait_mode();     // DWQ / trigger path
     rt.enable_mixed_dispatch();     // ...without killing the proxy rings
     int rank = rt.rank(), nranks = rt.size();
-    if (nranks != 2) {
-        if (rank==0) fprintf(stderr, "mixed_callsite: need 2 ranks (got %d)\n", nranks);
+    if (nranks < 2) {
+        if (rank==0) fprintf(stderr, "mixed_callsite: need >= 2 ranks (got %d)\n", nranks);
         return 1;
     }
-    int peer = 1 - rank;
+    // Ring: every rank issues to its successor and verifies what its
+    // predecessor sent. At 2 ranks this degenerates to the pair case.
+    // --stride keeps every ring edge cross-node when several ranks share a
+    // node: with R ranks per node, stride=R sends to the same slot one node
+    // over instead of to a neighbour on the same node (which would take the
+    // same-node IPC path and measure something else entirely).
+    const int peer = (rank + ring_stride) % nranks;
+    const int pred = (rank - ring_stride + nranks * 2) % nranks;
 
     void* d_buf = nullptr;
     if (hipMalloc(&d_buf, kBufBytes) != hipSuccess) return 3;
@@ -219,7 +235,8 @@ int main(int argc, char** argv) {
                                     cs.ops * sizeof(size_t), hipMemcpyDeviceToHost);
                     for (int i = 0; i < cs.ops; ++i)
                         rt.put(bh, peer, bh.index, cs.bytes,
-                               h_off_scratch[i], h_off_scratch[i]);
+                               kSendBase + h_off_scratch[i],
+                               kRecvBase + h_off_scratch[i]);
                     ctx = rt.prepare();
                     hipLaunchKernelGGL(k_trigger_site, dim3(1), dim3(1), 0, 0,
                                        ctx, ticks);
@@ -229,7 +246,8 @@ int main(int argc, char** argv) {
                 }
                 for (int i = 0; i < cs.ops; ++i) {
                     size_t off = cs.base_off + (size_t)i * cs.bytes;
-                    rt.put(bh, peer, bh.index, cs.bytes, off, off);
+                    rt.put(bh, peer, bh.index, cs.bytes,
+                           kSendBase + off, kRecvBase + off);
                 }
                 ctx = rt.prepare();      // delta == cs.ops; one flush fires all
                 hipLaunchKernelGGL(k_trigger_site, dim3(1), dim3(1), 0, 0,
@@ -239,11 +257,11 @@ int main(int argc, char** argv) {
                 if (cs.host_knowable) {
                     hipLaunchKernelGGL(k_proxy_site, dim3(1), dim3(1), 0, 0,
                                        ctx, peer, bh.index, cs.bytes, cs.ops,
-                                       cs.base_off, ticks);
+                                       cs.base_off, kSendBase, kRecvBase, ticks);
                 } else {
                     hipLaunchKernelGGL(k_proxy_site_dynamic, dim3(1), dim3(1),
                                        0, 0, ctx, peer, bh.index, cs.bytes,
-                                       cs.ops, d_off, ticks);
+                                       cs.ops, d_off, kSendBase, kRecvBase, ticks);
                 }
             }
             (void)hipDeviceSynchronize();
@@ -257,21 +275,24 @@ int main(int argc, char** argv) {
         for (int s = 0; s < kNumSites; ++s)
             total = std::max(total, kSites[s].base_off +
                                     (size_t)kSites[s].ops * kSites[s].bytes);
-        const uint8_t pat = 0xC3;
-        if (rank == 0)
-            hipLaunchKernelGGL(k_fill, dim3(64), dim3(256), 0, 0,
-                               (uint8_t*)d_buf, total, pat);
-        else
-            hipLaunchKernelGGL(k_fill, dim3(64), dim3(256), 0, 0,
-                               (uint8_t*)d_buf, total, (uint8_t)0);
+        // Rank-distinct patterns: each rank stamps its send half with its
+        // own byte and wipes its receive half, so finding the PREDECESSOR's
+        // byte is proof the transfer happened rather than proof of a memset.
+        const uint8_t my_pat   = (uint8_t)(0xC0 + (rank % 32));
+        const uint8_t want_pat = (uint8_t)(0xC0 + (pred % 32));
+        hipLaunchKernelGGL(k_fill, dim3(64), dim3(256), 0, 0,
+                           (uint8_t*)d_buf + kSendBase, total, my_pat);
+        hipLaunchKernelGGL(k_fill, dim3(64), dim3(256), 0, 0,
+                           (uint8_t*)d_buf + kRecvBase, total, (uint8_t)0);
         (void)hipDeviceSynchronize();
         rt.barrier();
-        if (rank == 0) timestep(path);
+        timestep(path);
         rt.barrier();
         int ok = 1;
-        if (rank == 1) {
+        {
             std::vector<uint8_t> h(total);
-            (void)hipMemcpy(h.data(), d_buf, total, hipMemcpyDeviceToHost);
+            (void)hipMemcpy(h.data(), (uint8_t*)d_buf + kRecvBase, total,
+                            hipMemcpyDeviceToHost);
             for (int s = 0; s < kNumSites && ok; ++s) {
                 const CallSite& cs = kSites[s];
                 for (int i = 0; i < cs.ops && ok; ++i) {
@@ -279,38 +300,41 @@ int main(int argc, char** argv) {
                     // in its region is still covered exactly once.
                     size_t off = cs.base_off + (size_t)i * cs.bytes;
                     for (size_t b = 0; b < cs.bytes; b += 512) {
-                        if (h[off+b] != pat) {
-                            printf("[verify] FAIL site=%s op=%d off=%zu got=0x%02x\n",
-                                   cs.name, i, off+b, h[off+b]);
+                        if (h[off+b] != want_pat) {
+                            printf("[verify] rank %d FAIL site=%s op=%d off=%zu "
+                                   "got=0x%02x want=0x%02x\n",
+                                   rank, cs.name, i, off+b, h[off+b], want_pat);
                             ok = 0; break;
                         }
                     }
                 }
             }
         }
-        MPI_Bcast(&ok, 1, MPI_INT, 1, MPI_COMM_WORLD);
-        return ok != 0;
+        int all_ok = 0;
+        MPI_Allreduce(&ok, &all_ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+        return all_ok != 0;
     };
 
     auto measure = [&](const int* path) {
         for (int w = 0; w < warmup; ++w) {
-            rt.barrier(); if (rank==0) timestep(path); rt.barrier();
+            rt.barrier(); timestep(path); rt.barrier();
         }
         std::vector<double> v;
         for (int s = 0; s < samples; ++s) {
             rt.barrier();
             double t0 = MPI_Wtime();
-            if (rank == 0) for (int t = 0; t < steps; ++t) timestep(path);
+            for (int t = 0; t < steps; ++t) timestep(path);
             double t1 = MPI_Wtime();
             rt.barrier();
-            if (rank==0) v.push_back((t1-t0)*1e6/steps);
+            v.push_back((t1-t0)*1e6/steps);
         }
         return summarize(std::move(v));
     };
 
     if (rank == 0) {
-        printf("=== mixed_callsite: %d call sites, %d steps/sample, %d samples ===\n",
-               kNumSites, steps, samples);
+        printf("=== mixed_callsite: %d call sites, %d ranks (ring stride %d), "
+               "%d steps/sample, %d samples ===\n",
+               kNumSites, nranks, ring_stride, steps, samples);
         for (int s = 0; s < kNumSites; ++s) {
             const CallSite& c = kSites[s];
             printf("  site %s: %d x %zuB, gap=%dus, descriptor %s\n",

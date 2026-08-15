@@ -382,6 +382,52 @@ static void run_reuse(gicc::Runtime& rt, int rank, int peer,
 }
 
 //----------------------------------------------------------------------------
+// Phase decomposition — where does a staged trigger phase actually spend
+// its time, and which component carries the run-to-run variance?
+//   stage  N x rt.put()          host descriptor enqueue (fi_control)
+//   fire   prepare + launch + device sync
+//   wait   rt.reset()            completion counter + builder recycle
+//----------------------------------------------------------------------------
+static void run_decompose(gicc::Runtime& rt, int rank, int peer,
+                          const gicc::Buffer& bh, const std::vector<size_t>& sizes,
+                          const std::vector<int>& Ns, bool is_proxy,
+                          int samples, int warmup, double max_stage_bytes) {
+    if (is_proxy) return;   // staging is a host-side concept
+    for (size_t bytes : sizes) {
+        for (int N : Ns) {
+            if (max_stage_bytes > 0 && (double)bytes * N > max_stage_bytes) continue;
+            std::vector<double> st, fi, wa, tot;
+            for (int s = 0; s < samples + warmup; ++s) {
+                rt.barrier();
+                double t0 = MPI_Wtime();
+                if (rank == 0) {
+                    for (int i = 0; i < N; ++i)
+                        rt.put(bh, peer, bh.index, bytes, 0, 0);
+                }
+                double t1 = MPI_Wtime();
+                if (rank == 0) {
+                    gicc::DeviceCtx* ctx = rt.prepare_delta(N, 1);
+                    hipLaunchKernelGGL(k_flush_n, dim3(1), dim3(1), 0, 0, ctx, 1);
+                    (void)hipDeviceSynchronize();
+                }
+                double t2 = MPI_Wtime();
+                if (rank == 0) rt.reset();
+                double t3 = MPI_Wtime();
+                rt.barrier();
+                if (rank == 0 && s >= warmup) {
+                    st.push_back((t1-t0)*1e6); fi.push_back((t2-t1)*1e6);
+                    wa.push_back((t3-t2)*1e6); tot.push_back((t3-t0)*1e6);
+                }
+            }
+            emit("decompose", "trigger", "stage", bytes, N, N, summarize(st));
+            emit("decompose", "trigger", "fire",  bytes, N, N, summarize(fi));
+            emit("decompose", "trigger", "wait",  bytes, N, N, summarize(wa));
+            emit("decompose", "trigger", "total", bytes, N, N, summarize(tot));
+        }
+    }
+}
+
+//----------------------------------------------------------------------------
 // O2 — batching (ops per trigger)
 //----------------------------------------------------------------------------
 static void run_batch(gicc::Runtime& rt, int rank, int peer,
@@ -429,15 +475,19 @@ static void run_batch(gicc::Runtime& rt, int rank, int peer,
 static void run_distance(gicc::Runtime& rt, int rank, int peer,
                          const gicc::Buffer& bh, const std::vector<size_t>& sizes,
                          const std::vector<int>& Ds, double ticks_per_us,
-                         int ops, bool is_proxy, int samples, int warmup) {
+                         const std::vector<int>& Ks, bool is_proxy,
+                         int samples, int warmup) {
     const char* path = is_proxy ? "proxy" : "trigger";
 
+    for (int ops : Ks) {
     for (int D : Ds) {
         const long long ticks = (long long)(D * ticks_per_us);
 
         // No-communication baseline for this D. Same kernel structure, so
         // exposed comm cost = (comm config) - (this).
-        emit("distance", path, "spin-only", 0, D, 1,
+        char spin_cfg[48];
+        snprintf(spin_cfg, sizeof(spin_cfg), "spin-only-k%d", ops);
+        emit("distance", path, spin_cfg, 0, D, 1,
              time_config(rt, rank, samples, warmup, [&] {
                  hipLaunchKernelGGL(k_spin, dim3(1), dim3(1), 0, 0, ticks);
                  (void)hipDeviceSynchronize();
@@ -445,7 +495,9 @@ static void run_distance(gicc::Runtime& rt, int rank, int peer,
 
         for (size_t bytes : sizes) {
             if (is_proxy) {
-                emit("distance", path, "proxy", bytes, D, 1,
+                char cfg[48];
+                snprintf(cfg, sizeof(cfg), "proxy-k%d", ops);
+                emit("distance", path, cfg, bytes, D, 1,
                      time_config(rt, rank, samples, warmup, [&] {
                          gicc::DeviceCtx* ctx = rt.prepare();
                          hipLaunchKernelGGL(k_proxy_put_spin_quiet, dim3(1),
@@ -455,7 +507,9 @@ static void run_distance(gicc::Runtime& rt, int rank, int peer,
                          rt.reset();
                      }));
             } else {
-                emit("distance", path, "trigger", bytes, D, 1,
+                char cfg[48];
+                snprintf(cfg, sizeof(cfg), "trigger-k%d", ops);
+                emit("distance", path, cfg, bytes, D, 1,
                      time_config(rt, rank, samples, warmup, [&] {
                          for (int i = 0; i < ops; ++i)
                              rt.put(bh, peer, bh.index, bytes, 0, 0);
@@ -467,6 +521,7 @@ static void run_distance(gicc::Runtime& rt, int rank, int peer,
                      }));
             }
         }
+    }
     }
 }
 
@@ -497,7 +552,7 @@ int main(int argc, char** argv) {
     std::string exp  = "reuse";
     int samples = 21, warmup = 10, total_ops = 64;
     double max_stage_bytes = 256.0 * 1024 * 1024;
-    int ops_per_issue = 1;
+    std::vector<int> Ks;
     std::vector<size_t> sizes;
     std::vector<int> Ns, Bs, Ds;
 
@@ -508,7 +563,7 @@ int main(int argc, char** argv) {
         else if (a.rfind("--samples=", 0) == 0) samples = std::atoi(a.c_str() + 10);
         else if (a.rfind("--warmup=",  0) == 0) warmup  = std::atoi(a.c_str() + 9);
         else if (a.rfind("--total-ops=", 0) == 0) total_ops = std::atoi(a.c_str() + 12);
-        else if (a.rfind("--ops=", 0) == 0) ops_per_issue = std::atoi(a.c_str() + 6);
+        else if (a.rfind("--ops=", 0) == 0) Ks = parse_ints(a.substr(6));
         else if (a.rfind("--max-stage-mb=", 0) == 0)
             max_stage_bytes = std::atof(a.c_str() + 15) * 1024 * 1024;
         else if (a.rfind("--sizes=",   0) == 0) sizes = parse_sizes(a.substr(8));
@@ -530,6 +585,7 @@ int main(int argc, char** argv) {
     if (Ns.empty())    Ns    = {1, 2, 4, 8, 16, 32, 64, 128, 256};
     if (Bs.empty())    Bs    = {1, 2, 4, 8, 16, 32, 64};
     if (Ds.empty())    Ds    = {0, 5, 10, 20, 50, 100, 200, 500, 1000};
+    if (Ks.empty())    Ks    = {1};
 
     gicc::Runtime rt;
     if (!is_proxy) rt.enable_host_wait_mode();
@@ -594,8 +650,11 @@ int main(int argc, char** argv) {
                   max_stage_bytes);
     if (exp == "batch" || exp == "all")
         run_batch(rt, rank, peer, bh, sizes, Bs, total_ops, is_proxy, samples, warmup);
+    if (exp == "decompose" || exp == "all")
+        run_decompose(rt, rank, peer, bh, sizes, Ns, is_proxy, samples, warmup,
+                      max_stage_bytes);
     if (exp == "distance" || exp == "all")
-        run_distance(rt, rank, peer, bh, sizes, Ds, ticks_per_us, ops_per_issue,
+        run_distance(rt, rank, peer, bh, sizes, Ds, ticks_per_us, Ks,
                      is_proxy, samples, warmup);
 
     rt.barrier();
