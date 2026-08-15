@@ -889,6 +889,54 @@ public:
     }
 
     //--------------------------------------------------------------------------
+    // staged_ops — total DWQ descriptors staged so far (monotonic across
+    // batches, host-wait mode only). The i-th staged op carries trigger
+    // threshold i, so a caller that pre-stages a whole loop's worth of
+    // descriptors can fire them one at a time and wait on absolute
+    // thresholds returned by this counter.
+    //--------------------------------------------------------------------------
+    uint64_t staged_ops() const { return mono_total_ops_; }
+
+    //--------------------------------------------------------------------------
+    // prepare_delta — prepare() with an explicit trigger step.
+    //
+    // prepare() arms flush() to add "everything staged since the last
+    // prepare" in one shot, which fires a whole staged batch on the first
+    // flush. prepare_delta arms flush() to add `per_flush` instead, and
+    // records that the kernel will call flush() `n_flushes` times. That
+    // lets a kernel walk a pre-staged descriptor sequence incrementally —
+    // one flush per loop iteration — which is what hoisting the descriptor
+    // staging out of a communication loop requires.
+    //
+    // Caller contract: the kernel must call flush() exactly `n_flushes`
+    // times, or the trigger counter and mono_last_triggered_ drift apart
+    // and the next prepare() computes a wrong delta.
+    //--------------------------------------------------------------------------
+    DeviceCtx* prepare_delta(uint64_t per_flush, uint64_t n_flushes = 1) {
+        const uint64_t prev = mono_last_triggered_;
+        DeviceCtx* ctx = prepare();
+        if (host_wait_mode_) {
+            mono_last_triggered_      = prev + per_flush * n_flushes;
+            h_dev_ctx_->trigger_val_  = per_flush;
+        }
+        return ctx;
+    }
+
+    //--------------------------------------------------------------------------
+    // wait_until — poll the shared completion counter to an absolute
+    // threshold (a value previously returned by staged_ops()). Partial-batch
+    // analogue of reset()'s wait: it does NOT recycle DwqWorkBuilders or
+    // drain the proxy ring, so a loop can wait for iteration i's op while
+    // later iterations' descriptors are still armed.
+    //--------------------------------------------------------------------------
+    void wait_until(uint64_t threshold) {
+        if (!host_wait_mode_ || threshold == 0) return;
+        while (fi_cntr_read(shared_completion_cntr_) < threshold) {
+            fi_cq_read(comm_->fabric->cq, NULL, 0);
+        }
+    }
+
+    //--------------------------------------------------------------------------
     // Host-side wait for a specific token.
     //--------------------------------------------------------------------------
     void wait(Token tok) {
