@@ -520,6 +520,25 @@ public:
         proxy_dispatch_disabled_ = true;
     }
 
+    //--------------------------------------------------------------------------
+    // enable_mixed_dispatch — keep the CPU-proxy rings live under host-wait
+    // (DWQ) mode, so different call sites in ONE program can use different
+    // dispatch paths. Call after enable_host_wait_mode().
+    //
+    // enable_host_wait_mode() disables proxy dispatch because a kernel that
+    // calls gicc::put would otherwise send the same payload twice — once via
+    // the ring and once via the MMIO-triggered DWQ descriptor. That argument
+    // holds per transfer, not per program: a call site that stages on the
+    // host and flushes, and a call site whose kernel calls gicc::put, send
+    // different payloads and can coexist.
+    //
+    // Caller contract: a given transfer uses exactly one path. Do not host-
+    // stage a put AND call gicc::put for it in the triggering kernel.
+    // reset() already waits on both the shared completion counter and the
+    // proxy ring, so completion is correct for either path.
+    //--------------------------------------------------------------------------
+    void enable_mixed_dispatch() { proxy_dispatch_disabled_ = false; }
+
 
 private:
     // Fetch a recycled DwqWorkBuilder from the pool, or allocate a new one.
