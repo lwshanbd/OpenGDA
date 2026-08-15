@@ -25,13 +25,20 @@ libfabric:   /opt/cray/libfabric/2.1/
 Cray MPI:    /opt/cray/pe/mpich/9.0.1/ofi/cray/20.0/
 ```
 
-Always use `srun -p pci -t 2` (the default debug queue is congested). For 32-rank minimod runs, also export `PMI_MAX_KVS_ENTRIES=512` and `FI_MR_CACHE_MAX_COUNT=0`.
+Always use `srun -p pci -t 2` (the default debug queue is congested). For 32-rank minimod runs, also export `PMI_MAX_KVS_ENTRIES=512`.
 
 ```bash
-PMI_MAX_KVS_ENTRIES=512 FI_MR_CACHE_MAX_COUNT=0 \
+PMI_MAX_KVS_ENTRIES=512 \
     srun -p pci -N 4 -n 32 --ntasks-per-node=8 -t 2 ./run.sh \
     ./main_hip_gicc_hipcc_gicc --ngpus 32 --grid 1000 --nsteps 100
 ```
+
+**Do NOT set `FI_MR_CACHE_MAX_COUNT=0`** (older recipes did). The system
+libfabric is now 2.6.0 (`/lib64/libfabric.so.1`) and rejects it, so every
+MPI-bootstrapped binary aborts in `PMPI_Init` with
+`MPIDI_OFI_mpi_init_hook(618): OFI fi_open domain failed ... Invalid argument`.
+Likewise, only set `MPICH_GPU_SUPPORT_ENABLED=1` for binaries that link the
+Cray GTL — otherwise MPI aborts with "GTL library is not linked".
 
 ### MAPLE (NVIDIA + IB)
 
