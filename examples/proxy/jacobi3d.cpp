@@ -51,6 +51,13 @@
 
 enum Path { PROXY = 0, TRIGGER = 1 };
 
+// Absolute reference point: the same two halo faces exchanged with
+// GPU-aware MPI. The strided face is sent as N row messages rather than
+// packed, so the comparison matches what the GICC path does op for op --
+// a packing kernel would change the algorithm, not just the transport.
+// Requires MPICH_GPU_SUPPORT_ENABLED=1 and a GTL-linked binary.
+static bool g_mpi_mode = false;
+
 // 7-point Jacobi over the interior of an (N+2)^3 field.
 //   part 0  every interior point
 //   part 1  only points that do NOT touch the halo (safe to compute while
@@ -144,6 +151,7 @@ int main(int argc, char** argv) {
         else if (a.rfind("--warmup=", 0)==0) warmup  = std::atoi(a.c_str()+9);
         else if (a.rfind("--steps=",  0)==0) steps   = std::atoi(a.c_str()+8);
         else if (a == "--overlap") overlap = true;
+        else if (a == "--mpi") g_mpi_mode = true;
         else if (a == "--extra-barrier") extra_barrier = true;
         else if (a == "--selftest") selftest = true;
         else { fprintf(stderr, "jacobi3d: unknown arg '%s'\n", a.c_str()); return 2; }
@@ -174,8 +182,10 @@ int main(int argc, char** argv) {
     (void)hipMalloc((void**)&d_sum, sizeof(unsigned long long));
 
     if (rank == 0) {
-        printf("=== jacobi3d: %d ranks, %d steps/sample, %d samples, overlap=%s ===\n",
-               nranks, steps, samples, overlap ? "on" : "off");
+        printf("=== jacobi3d: %d ranks, %d steps/sample, %d samples, "
+               "overlap=%s, transport=%s ===\n",
+               nranks, steps, samples, overlap ? "on" : "off",
+               g_mpi_mode ? "GPU-aware MPI" : "GICC");
         printf("    window %zu MB registered once for max N=%d\n",
                bufBytes >> 20, maxN);
         printf("%-6s %-10s %10s %10s %10s %10s %9s %9s\n",
@@ -240,7 +250,49 @@ int main(int argc, char** argv) {
             }
         };
 
+        // MPI reference: same faces, same message counts, two-sided.
+        auto mpi_exchange = [&]() {
+            const size_t fo = (size_t)cur * felems * sizeof(float);
+            char* base = (char*)d_buf;
+            std::vector<MPI_Request> reqs;
+            reqs.reserve(2 * (rows + 1));
+            const int pred = (rank - 1 + nranks) % nranks;
+            MPI_Request r;
+            MPI_Irecv(base + fo + contig_dst, contig_bytes, MPI_BYTE, pred,
+                      100, MPI_COMM_WORLD, &r); reqs.push_back(r);
+            MPI_Isend(base + fo + contig_src, contig_bytes, MPI_BYTE, peer,
+                      100, MPI_COMM_WORLD, &r); reqs.push_back(r);
+            for (int i = 0; i < rows; ++i) {
+                MPI_Irecv(base + fo + strided_dst + (size_t)i * row_stride,
+                          row_bytes, MPI_BYTE, pred, 200 + i,
+                          MPI_COMM_WORLD, &r); reqs.push_back(r);
+                MPI_Isend(base + fo + strided_src + (size_t)i * row_stride,
+                          row_bytes, MPI_BYTE, peer, 200 + i,
+                          MPI_COMM_WORLD, &r); reqs.push_back(r);
+            }
+            return reqs;
+        };
+
         auto timestep = [&](const int* path) {
+            if (g_mpi_mode) {
+                auto reqs = mpi_exchange();
+                if (overlap) {
+                    hipLaunchKernelGGL(k_jacobi, dim3(blk), dim3(thr), 0, 0,
+                                       u0, u1, N, 1);
+                    (void)hipDeviceSynchronize();
+                    MPI_Waitall((int)reqs.size(), reqs.data(), MPI_STATUSES_IGNORE);
+                    hipLaunchKernelGGL(k_jacobi, dim3(blk), dim3(thr), 0, 0,
+                                       u0, u1, N, 2);
+                } else {
+                    MPI_Waitall((int)reqs.size(), reqs.data(), MPI_STATUSES_IGNORE);
+                    hipLaunchKernelGGL(k_jacobi, dim3(blk), dim3(thr), 0, 0,
+                                       u0, u1, N, 0);
+                }
+                (void)hipDeviceSynchronize();
+                std::swap(u0, u1);
+                cur ^= 1;
+                return;
+            }
             issue(path);
             if (overlap) {
                 // The points that do not touch the halo are updated while the
@@ -312,7 +364,8 @@ int main(int argc, char** argv) {
         }
         bool ref_set = false; bool all_ok = true;
         double times[4];
-        for (int mask = 0; mask < 4; ++mask) {
+        const int nmask = g_mpi_mode ? 1 : 4;
+        for (int mask = 0; mask < nmask; ++mask) {
             int path[2] = { (mask >> 0) & 1, (mask >> 1) & 1 };
 
             // correctness: same field after the same number of steps
@@ -337,6 +390,7 @@ int main(int argc, char** argv) {
             }
             times[mask] = summarize(std::move(v)).median;
         }
+        if (g_mpi_mode) times[1] = times[2] = times[3] = times[0];
 
         // Cost of the interior kernel alone: the distance the overlap mode buys.
         double comp_us = 0;

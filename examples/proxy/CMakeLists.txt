@@ -455,6 +455,13 @@ elseif(GICC_GPU_API STREQUAL "hip")
         ${PROXY_EX_HWLOC_LIBRARY}
         ${PROXY_EX_BOOTSTRAP_LIBS}
         pthread)
+    # Cray MPICH needs the HSA GTL to accept device pointers. Without it
+    # --mode=mpi aborts under MPICH_GPU_SUPPORT_ENABLED=1, so there was no
+    # GPU-aware MPI reference point to compare the GICC paths against.
+    if(EXISTS "/opt/cray/pe/lib64/libmpi_gtl_hsa.so")
+        target_link_libraries(bench_pingpong PRIVATE
+            "/opt/cray/pe/lib64/libmpi_gtl_hsa.so")
+    endif()
 endif()
 _proxy_example_setup(bench_pingpong)
 
@@ -575,5 +582,11 @@ elseif(GICC_GPU_API STREQUAL "hip")
         ${PROXY_EX_HWLOC_LIBRARY}
         ${PROXY_EX_BOOTSTRAP_LIBS}
         pthread)
+    # --mpi mode sends device pointers through Cray MPICH, which needs the
+    # HSA GTL linked in.
+    if(EXISTS "/opt/cray/pe/lib64/libmpi_gtl_hsa.so")
+        target_link_libraries(jacobi3d PRIVATE
+            "/opt/cray/pe/lib64/libmpi_gtl_hsa.so")
+    endif()
 endif()
 _proxy_example_setup(jacobi3d)
