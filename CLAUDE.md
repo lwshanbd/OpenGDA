@@ -223,6 +223,40 @@ cd /p/lustre2/shan4/opengda
 ./tools/gicc-passes/tests/run_perf.sh
 ```
 
+## Benchmarks
+
+`examples/proxy/bench_pingpong` is the benchmark to use on this branch. Build it
+with `-DGICC_ENABLE_CPU_PROXY=ON`; cross-node run is 2 nodes / 1 rank each:
+
+```bash
+# CPU proxy path
+GICC_SKIP_DWQ_INIT=1 GICC_PROXY_ENABLED=1 \
+    srun -p pci -N 2 -n 2 --ntasks-per-node=1 -c 8 --gpu-bind=none -t 3 \
+    ./build_ofi/examples/proxy/bench_pingpong --mode=proxy
+# DWQ path — same binary, and do NOT set GICC_SKIP_DWQ_INIT (the trigger BAR
+# has to map). --mode=mpi needs a GTL-linked build.
+```
+
+Give it `-c 8`: on the default `--cpus-per-task=1` the whole proxy fleet is
+time-sliced onto one core and reads as a regression. Reference numbers (2 Tioga
+nodes): small messages 3.35 us proxy / 1.7 us DWQ, 16 MB 692 us on both paths
+(= 24.2 GB/s, the single-CXI-NIC ceiling).
+
+`examples/ofi/benchmark` (32-stream DWQ micro-benchmark) has two caveats here:
+
+- It does **not link** under `-DGICC_ENABLE_CPU_PROXY=ON` — `examples/ofi/`
+  never compiles `proxy/proxy_thread.cpp` + `proxy_libfabric.cpp`, but
+  `ofi_runtime.hpp` uses `ProxyThread` unconditionally under `GICC_CPU_PROXY`.
+  Configure a separate build tree with `GICC_ENABLE_CPU_PROXY=OFF` to run it.
+- Its reported times are **meaningless on the CPU-proxy branch**: device
+  `quiet()` is a deliberate no-op without `GICC_CPU_PROXY` (completion moved to
+  the host `rt.reset()`), but the benchmark times only `hipDeviceSynchronize()`
+  and calls `reset()` outside the timing window. Data still lands — `reset()`
+  waits — only the measurement is stale.
+
+Its `size=512 iter=0` verification failure reproduces identically on
+`origin/GICC`, so it is an upstream bug, not a CPU-proxy regression.
+
 ## User Conventions (from project memory)
 
 - **Granular commits**: split work per file or per logical step. Don't bundle.
