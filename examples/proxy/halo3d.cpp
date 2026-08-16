@@ -266,13 +266,38 @@ int main(int argc, char** argv) {
 
     // One timestep: bulk faces, then the ordered arrival flags, then the
     // receiver waits on the flags and computes.
-    bool fused = false;
+    bool fused = false, chained = false;
     auto timestep = [&](const int* path) {
         ++epoch;
         hipLaunchKernelGGL(k_set_epoch, dim3(1), dim3(64), 0, 0,
                            d_flags, faces, epoch);
 
-        if (fused) {
+        if (chained) {
+            // Both phases staged before a single trigger: the payload waits
+            // on the MMIO counter, the flags wait on the payload's
+            // COMPLETION counter, so the NIC releases them itself and the
+            // host never round-trips between the two.
+            for (int f = 0; f < faces; ++f)
+                rt.put(bh, h_peers[f], bh.index, bytes,
+                       kSendBase + (size_t)f*bytes,
+                       kRecvBase + (size_t)f*bytes);
+            const uint64_t after_data = rt.staged_ops();
+            for (int f = 0; f < faces; ++f)
+                rt.put_after(bh, h_peers[f], bh.index, sizeof(uint64_t),
+                             kFlagBase + (size_t)(kMaxFaces+f)*sizeof(uint64_t),
+                             kFlagBase + (size_t)h_slot[f]*sizeof(uint64_t),
+                             after_data);
+            gicc::DeviceCtx* c = rt.prepare_slot(0);
+            hipLaunchKernelGGL(k_flush, dim3(1), dim3(1), 0, 0, c);
+            // No device sync: nothing was pushed to the proxy ring, and the
+            // completion counter cannot advance until the kernel fired the
+            // trigger, so the wait below already subsumes it.
+            rt.reset_dwq();
+            if (!fused_poll)
+                hipLaunchKernelGGL(k_poll_flags, dim3(1), dim3(1), 0, 0,
+                                   (volatile uint64_t*)d_flags, faces, epoch,
+                                   poll_timeout_ticks, d_stuck);
+        } else if (fused) {
             gicc::DeviceCtx* c = rt.prepare_slot(0);
             hipLaunchKernelGGL(k_px_fused, dim3(1), dim3(1), 0, 0,
                                c, d_peers, d_slots, faces, bh.index, bytes);
@@ -427,41 +452,45 @@ int main(int argc, char** argv) {
         printf("%-16s %14s %10s\n", "data,flag", "us/timestep", "verify");
     }
 
-    double t[5]; bool okall = true;
-    const int nmask = mpi_mode ? 1 : 5;
+    double t[6]; bool okall = true;
+    const int nmask = mpi_mode ? 1 : 6;
     for (int mask = 0; mask < nmask; ++mask) {
-        // mask 4 is the fused proxy structure, which has no two-phase
-        // host round trip; the four below are (data path, flag path).
-        fused = (mask == 4);
+        // mask 4 is the fused proxy structure and mask 5 is the chained
+        // trigger, both of which avoid the two-phase host round trip; the
+        // four below are (data path, flag path).
+        fused   = (mask == 4);
+        chained = (mask == 5);
         int path[2] = { mask & 1, (mask >> 1) & 1 };
         bool ok = verify(path);
         okall &= ok;
         t[mask] = measure(path).median;
         if (rank == 0) {
             char lbl[32];
-            if (fused) snprintf(lbl, sizeof(lbl), "prox,prox (fused)");
+            if (chained) snprintf(lbl, sizeof(lbl), "trig chained");
+            else if (fused) snprintf(lbl, sizeof(lbl), "prox,prox (fused)");
             else snprintf(lbl, sizeof(lbl), "%s,%s",
                           path[0]?"trig":"prox", path[1]?"trig":"prox");
             printf("%-16s %14.2f %10s\n", mpi_mode ? "mpi" : lbl, t[mask],
                    ok ? "pass" : "FAIL");
         }
     }
-    if (mpi_mode) { t[1]=t[2]=t[3]=t[4]=t[0]; }
+    if (mpi_mode) { t[1]=t[2]=t[3]=t[4]=t[5]=t[0]; }
 
     if (rank == 0) {
         int best = 0;
-        for (int m = 1; m < 5; ++m) if (t[m] < t[best]) best = m;
+        for (int m = 1; m < 6; ++m) if (t[m] < t[best]) best = m;
         // A single global policy may also use the fused proxy structure,
         // so it is a candidate for "best global" too.
-        double glob = std::min(std::min(t[0], t[3]), t[4]);
+        double glob = std::min(std::min(std::min(t[0], t[3]), t[4]), t[5]);
         printf("\n  best global (one path everywhere): %8.2f us\n", glob);
         printf("  best overall                     : %8.2f us  (%s)\n",
-               t[best], best == 4 ? "prox,prox fused"
-                                  : ((best&1)?"trig,":"prox,"));
+               t[best], best == 5 ? "trigger, NIC-chained flags"
+                        : best == 4 ? "prox,prox fused"
+                                    : ((best&1)?"trig,":"prox,"));
         printf("  per-call-site gain               : %8.3fx (%.1f%%)\n",
                glob/t[best], (glob/t[best]-1)*100);
-        printf("CSV,halo3d,%d,%zu,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d\n",
-               faces, bytes, compute_us, t[0], t[1], t[2], t[3], t[4],
+        printf("CSV,halo3d,%d,%zu,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d\n",
+               faces, bytes, compute_us, t[0], t[1], t[2], t[3], t[4], t[5],
                mpi_mode?1:0, okall?1:0);
     }
 
