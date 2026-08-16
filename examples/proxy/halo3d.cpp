@@ -148,6 +148,26 @@ __global__ void k_compute(float* p, size_t n, long long ticks) {
         p[i] = p[i] * 1.0000001f + 1e-8f;
 }
 
+// The same compute, but the arrival wait is FUSED into it via
+// gicc::wait_signal instead of running as its own kernel. Saves one
+// launch per timestep on the critical path, and the block starts
+// computing the moment its data lands.
+__global__ void k_wait_compute(volatile const unsigned long long* signals,
+                               int n, unsigned long long epoch,
+                               long long timeout_ticks,
+                               int* timed_out,
+                               volatile unsigned long long* release,
+                               float* p, size_t elems, long long ticks) {
+    if (!gicc::wait_signal(signals, n, epoch, timeout_ticks, release)) {
+        if (threadIdx.x == 0 && blockIdx.x == 0) *timed_out = 1;
+        return;
+    }
+    if (threadIdx.x == 0 && blockIdx.x == 0) spin_ticks(ticks);
+    for (size_t i = threadIdx.x + (size_t)blockIdx.x * blockDim.x; i < elems;
+         i += (size_t)blockDim.x * gridDim.x)
+        p[i] = p[i] * 1.0000001f + 1e-8f;
+}
+
 __global__ void k_fill(uint8_t* p, size_t n, uint8_t v) {
     for (size_t i = threadIdx.x + (size_t)blockIdx.x * blockDim.x; i < n;
          i += (size_t)blockDim.x * gridDim.x)
@@ -170,7 +190,8 @@ int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     int faces = 6, samples = 11, warmup = 5, steps = 20, compute_us = 0;
     size_t bytes = 65536;
-    bool mpi_mode = false;
+    bool mpi_mode = false, fused_poll = false;
+    int cblocks = 64;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if      (a.rfind("--faces=",0)==0)   faces = atoi(a.c_str()+8);
@@ -180,6 +201,8 @@ int main(int argc, char** argv) {
         else if (a.rfind("--steps=",0)==0)   steps = atoi(a.c_str()+8);
         else if (a.rfind("--compute=",0)==0) compute_us = atoi(a.c_str()+10);
         else if (a == "--mpi") mpi_mode = true;
+        else if (a == "--fused-poll") fused_poll = true;
+        else if (a.rfind("--blocks=",0)==0) cblocks = atoi(a.c_str()+9);
         else { fprintf(stderr,"halo3d: unknown arg '%s'\n",a.c_str()); return 2; }
     }
     if (faces < 1 || faces > kMaxFaces) { fprintf(stderr,"halo3d: faces 1..26\n"); return 2; }
@@ -232,6 +255,9 @@ int main(int argc, char** argv) {
         (long long)((wall_khz > 0 ? wall_khz/1000.0 : 25.0) * 2e6);  // ~2 s
     int* d_stuck = nullptr;
     (void)hipMalloc((void**)&d_stuck, sizeof(int));
+    unsigned long long* d_release = nullptr;
+    (void)hipMalloc((void**)&d_release, sizeof(unsigned long long));
+    (void)hipMemset(d_release, 0, sizeof(unsigned long long));
     (void)hipMemset(d_stuck, 0xFF, sizeof(int));
 
     (void)rt.prepare(); rt.reset(); rt.barrier();
@@ -302,12 +328,21 @@ int main(int argc, char** argv) {
             rt.reset();
 
             // ---- receiver waits in band, then computes ----
-            hipLaunchKernelGGL(k_poll_flags, dim3(1), dim3(1), 0, 0,
-                               (volatile uint64_t*)d_flags, faces, epoch,
-                               poll_timeout_ticks, d_stuck);
+            if (!fused_poll)
+                hipLaunchKernelGGL(k_poll_flags, dim3(1), dim3(1), 0, 0,
+                                   (volatile uint64_t*)d_flags, faces, epoch,
+                                   poll_timeout_ticks, d_stuck);
         }
-        hipLaunchKernelGGL(k_compute, dim3(64), dim3(256), 0, 0,
-                           d_work, work_elems, ticks);
+        if (fused_poll && !mpi_mode) {
+            hipLaunchKernelGGL(k_wait_compute, dim3(cblocks), dim3(256), 0, 0,
+                               (volatile const unsigned long long*)d_flags,
+                               faces, (unsigned long long)epoch,
+                               poll_timeout_ticks, d_stuck, d_release,
+                               d_work, work_elems, ticks);
+        } else {
+            hipLaunchKernelGGL(k_compute, dim3(cblocks), dim3(256), 0, 0,
+                               d_work, work_elems, ticks);
+        }
         (void)hipDeviceSynchronize();
     };
 
@@ -320,6 +355,7 @@ int main(int argc, char** argv) {
                            (uint8_t*)d_buf + kRecvBase,
                            (size_t)faces*bytes, (uint8_t)0);
         hipLaunchKernelGGL(k_zero64, dim3(1), dim3(64), 0, 0, d_flags, 2*kMaxFaces);
+        (void)hipMemset(d_release, 0, sizeof(unsigned long long));
         (void)hipDeviceSynchronize();
         rt.barrier();
     };
@@ -337,8 +373,11 @@ int main(int argc, char** argv) {
         int stuck = -1;
         (void)hipMemcpy(&stuck, d_stuck, sizeof(int), hipMemcpyDeviceToHost);
         if (stuck >= 0) {
-            printf("[verify] rank %d: flag for face %d never arrived\n",
-                   rank, stuck);
+            if (fused_poll)
+                printf("[verify] rank %d: fused wait timed out\n", rank);
+            else
+                printf("[verify] rank %d: flag for face %d never arrived\n",
+                       rank, stuck);
             ok = 0;
         }
         std::vector<uint8_t> h(bytes);
@@ -382,7 +421,9 @@ int main(int argc, char** argv) {
         printf("=== halo3d: %d ranks, %d faces x %zuB + %d flags x 8B, "
                "compute=%dus, transport=%s ===\n",
                nranks, faces, bytes, faces, compute_us,
-               mpi_mode ? "GPU-aware MPI" : "GICC");
+               mpi_mode ? "GPU-aware MPI"
+                        : (fused_poll ? "GICC (wait fused into compute)"
+                                      : "GICC (separate poll kernel)"));
         printf("%-16s %14s %10s\n", "data,flag", "us/timestep", "verify");
     }
 
@@ -425,6 +466,6 @@ int main(int argc, char** argv) {
     }
 
     rt.barrier();
-    (void)hipFree(d_buf); (void)hipFree(d_peers); (void)hipFree(d_slots); (void)hipFree(d_stuck); (void)hipFree(d_work);
+    (void)hipFree(d_buf); (void)hipFree(d_peers); (void)hipFree(d_slots); (void)hipFree(d_stuck); (void)hipFree(d_work); (void)hipFree(d_release);
     return 0;
 }

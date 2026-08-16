@@ -268,6 +268,97 @@ void quiet(DeviceCtx* ctx, int lane = 0) {
 }
 
 //==============================================================================
+// wait_signal — RECEIVER-side arrival fence.
+//
+// quiet() answers "have the transfers I issued completed". It says nothing
+// about transfers somebody else issued to me, and one-sided RDMA needs
+// both: the receiver has to know when the payload has landed before it
+// reads it. Until now only the sender side had a primitive, so every user
+// wrote its own polling kernel — ASF's gicc_poll_completion_kernel,
+// halo3d's k_poll_flags — and each of those costs a kernel launch on the
+// critical path of every timestep.
+//
+// Spins until each of `n` signal words has reached `epoch`, then issues a
+// system-scope fence so subsequent reads of the payload observe the NIC's
+// writes rather than stale cache. Monotonic epochs (rather than a boolean)
+// let the same slots be reused every timestep with no reset.
+//
+// Being an ordinary device function, this belongs at the TOP OF THE
+// COMPUTE KERNEL: the wait then costs no launch of its own, and the
+// receiver starts computing the instant its data arrives.
+//
+// `timeout_ticks` (0 = wait forever) bounds the spin against a lost
+// signal; returns false on timeout so a caller can report rather than
+// wedge. Ticks are wall_clock64 units, a constant-rate counter.
+//
+// Caller contract: `signals` must be device-visible memory the peers
+// write via put()/atomic_add_u32(), and the sender must order the signal
+// AFTER the payload (put; quiet; put(signal)).
+//==============================================================================
+__device__ inline
+bool wait_signal(volatile const unsigned long long* signals, int n,
+                 unsigned long long epoch, long long timeout_ticks = 0,
+                 volatile unsigned long long* release = nullptr) {
+    if (!signals) return true;
+    // Wide grids: without `release`, thread 0 of EVERY block polls all n
+    // signals, and that contention costs more than the kernel launch the
+    // fusion was meant to save (measured +3.8 us at 1 block but +34.7 us
+    // at 64). With `release`, block 0 does the polling and publishes one
+    // word that the other blocks watch instead, so the traffic is one
+    // line rather than n per block.
+    //
+    // Caller contract for `release`: a device word initialized below
+    // `epoch`, and a grid that fits on the device, so block 0 is resident
+    // and cannot be starved by the blocks waiting on it.
+    const bool lead_thread = (threadIdx.x == 0 && threadIdx.y == 0
+                              && threadIdx.z == 0);
+    const bool lead_block  = (blockIdx.x == 0 && blockIdx.y == 0
+                              && blockIdx.z == 0);
+    if (release && !lead_block) {
+        if (lead_thread) {
+            long long t0 = wall_clock64();
+            while (*release < epoch) {
+                if (timeout_ticks > 0 && (wall_clock64() - t0) > timeout_ticks)
+                    return false;
+#if defined(__CUDA_ARCH__)
+                __nanosleep(64);
+#elif defined(__HIP_DEVICE_COMPILE__)
+                __builtin_amdgcn_s_sleep(1);
+#endif
+            }
+        }
+        __syncthreads();
+        __threadfence_system();
+        return true;
+    }
+    if (lead_thread) {
+        for (int i = 0; i < n; ++i) {
+#if defined(__HIP_DEVICE_COMPILE__) || defined(__CUDA_ARCH__)
+            long long t0 = wall_clock64();
+#endif
+            while (signals[i] < epoch) {
+#if defined(__HIP_DEVICE_COMPILE__) || defined(__CUDA_ARCH__)
+                if (timeout_ticks > 0 && (wall_clock64() - t0) > timeout_ticks)
+                    return false;
+#endif
+#if defined(__CUDA_ARCH__)
+                __nanosleep(64);
+#elif defined(__HIP_DEVICE_COMPILE__)
+                __builtin_amdgcn_s_sleep(1);
+#endif
+            }
+        }
+        if (release) {
+            __threadfence_system();   // payload before the release store
+            *release = epoch;
+        }
+    }
+    __syncthreads();          // the whole block waits on thread 0's result
+    __threadfence_system();   // payload writes are visible after this
+    return true;
+}
+
+//==============================================================================
 // atomic_add_u32 — non-fetching FI_SUM / FI_UINT32 remote atomic add.
 //
 // The local 4-byte source value lives at (src_buf, src_offset); the proxy
