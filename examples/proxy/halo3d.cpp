@@ -266,13 +266,45 @@ int main(int argc, char** argv) {
 
     // One timestep: bulk faces, then the ordered arrival flags, then the
     // receiver waits on the flags and computes.
-    bool fused = false, chained = false;
+    bool fused = false, chained = false, pipelined = false;
+    uint64_t pending_threshold = 0;
+    // Stage one timestep's payload plus its NIC-released flags, and record
+    // the completion threshold that marks that step done.
+    auto stage_chained = [&]() {
+        for (int f = 0; f < faces; ++f)
+            rt.put(bh, h_peers[f], bh.index, bytes,
+                   kSendBase + (size_t)f*bytes,
+                   kRecvBase + (size_t)f*bytes);
+        const uint64_t after_data = rt.staged_ops();
+        for (int f = 0; f < faces; ++f)
+            rt.put_after(bh, h_peers[f], bh.index, sizeof(uint64_t),
+                         kFlagBase + (size_t)(kMaxFaces+f)*sizeof(uint64_t),
+                         kFlagBase + (size_t)h_slot[f]*sizeof(uint64_t),
+                         after_data);
+        pending_threshold = rt.staged_ops();
+    };
     auto timestep = [&](const int* path) {
         ++epoch;
         hipLaunchKernelGGL(k_set_epoch, dim3(1), dim3(64), 0, 0,
                            d_flags, faces, epoch);
 
-        if (chained) {
+        if (pipelined) {
+            // Descriptors record addresses, not data: the NIC reads the
+            // buffer when the trigger fires. So the next step's staging
+            // can be issued while this step is still on the wire, which
+            // hides the host's ~1us-per-descriptor cost behind it.
+            // wait_until() waits for THIS step's ops only, so the
+            // already-staged next step does not extend the wait.
+            gicc::DeviceCtx* c = rt.prepare_slot(0);
+            hipLaunchKernelGGL(k_flush, dim3(1), dim3(1), 0, 0, c);
+            const uint64_t due = pending_threshold;
+            stage_chained();                 // overlapped with the wire
+            rt.wait_until(due);
+            if (!fused_poll)
+                hipLaunchKernelGGL(k_poll_flags, dim3(1), dim3(1), 0, 0,
+                                   (volatile uint64_t*)d_flags, faces, epoch,
+                                   poll_timeout_ticks, d_stuck);
+        } else if (chained) {
             // Both phases staged before a single trigger: the payload waits
             // on the MMIO counter, the flags wait on the payload's
             // COMPLETION counter, so the NIC releases them itself and the
@@ -392,7 +424,17 @@ int main(int argc, char** argv) {
         // earlier one's failure.
         (void)hipMemset(d_stuck, 0xFF, sizeof(int));
         reset_state();
+        if (pipelined) stage_chained();
         for (int t = 0; t < 3; ++t) timestep(path);
+        if (pipelined) {
+            // The pipeline always leaves one batch staged but untriggered.
+            // reset() waits for every staged op, so fire it first or the
+            // drain never completes.
+            gicc::DeviceCtx* c = rt.prepare_slot(0);
+            hipLaunchKernelGGL(k_flush, dim3(1), dim3(1), 0, 0, c);
+            (void)hipDeviceSynchronize();
+            rt.reset();
+        }
         rt.barrier();
         int ok = 1;
         int stuck = -1;
@@ -430,6 +472,7 @@ int main(int argc, char** argv) {
 
     auto measure = [&](const int* path) {
         reset_state();
+        if (pipelined) stage_chained();
         for (int w = 0; w < warmup; ++w) timestep(path);
         std::vector<double> v;
         for (int s = 0; s < samples; ++s) {
@@ -438,6 +481,15 @@ int main(int argc, char** argv) {
             for (int t = 0; t < steps; ++t) timestep(path);
             double t1 = MPI_Wtime();
             v.push_back((t1-t0)*1e6/steps);
+        }
+        if (pipelined) {
+            // The pipeline always leaves one batch staged but untriggered.
+            // reset() waits for every staged op, so fire it first or the
+            // drain never completes.
+            gicc::DeviceCtx* c = rt.prepare_slot(0);
+            hipLaunchKernelGGL(k_flush, dim3(1), dim3(1), 0, 0, c);
+            (void)hipDeviceSynchronize();
+            rt.reset();
         }
         return summarize(std::move(v));
     };
@@ -452,21 +504,23 @@ int main(int argc, char** argv) {
         printf("%-16s %14s %10s\n", "data,flag", "us/timestep", "verify");
     }
 
-    double t[6]; bool okall = true;
-    const int nmask = mpi_mode ? 1 : 6;
+    double t[7]; bool okall = true;
+    const int nmask = mpi_mode ? 1 : 7;
     for (int mask = 0; mask < nmask; ++mask) {
         // mask 4 is the fused proxy structure and mask 5 is the chained
         // trigger, both of which avoid the two-phase host round trip; the
         // four below are (data path, flag path).
-        fused   = (mask == 4);
-        chained = (mask == 5);
+        fused     = (mask == 4);
+        chained   = (mask == 5);
+        pipelined = (mask == 6);
         int path[2] = { mask & 1, (mask >> 1) & 1 };
         bool ok = verify(path);
         okall &= ok;
         t[mask] = measure(path).median;
         if (rank == 0) {
             char lbl[32];
-            if (chained) snprintf(lbl, sizeof(lbl), "trig chained");
+            if (pipelined) snprintf(lbl, sizeof(lbl), "trig chained+pipe");
+            else if (chained) snprintf(lbl, sizeof(lbl), "trig chained");
             else if (fused) snprintf(lbl, sizeof(lbl), "prox,prox (fused)");
             else snprintf(lbl, sizeof(lbl), "%s,%s",
                           path[0]?"trig":"prox", path[1]?"trig":"prox");
@@ -474,24 +528,26 @@ int main(int argc, char** argv) {
                    ok ? "pass" : "FAIL");
         }
     }
-    if (mpi_mode) { t[1]=t[2]=t[3]=t[4]=t[5]=t[0]; }
+    if (mpi_mode) { t[1]=t[2]=t[3]=t[4]=t[5]=t[6]=t[0]; }
 
     if (rank == 0) {
         int best = 0;
-        for (int m = 1; m < 6; ++m) if (t[m] < t[best]) best = m;
+        for (int m = 1; m < 7; ++m) if (t[m] < t[best]) best = m;
         // A single global policy may also use the fused proxy structure,
         // so it is a candidate for "best global" too.
-        double glob = std::min(std::min(std::min(t[0], t[3]), t[4]), t[5]);
+        double glob = std::min(std::min(std::min(t[0], t[3]),
+                                        std::min(t[4], t[5])), t[6]);
         printf("\n  best global (one path everywhere): %8.2f us\n", glob);
         printf("  best overall                     : %8.2f us  (%s)\n",
-               t[best], best == 5 ? "trigger, NIC-chained flags"
+               t[best], best == 6 ? "trigger, NIC-chained, pipelined staging"
+                        : best == 5 ? "trigger, NIC-chained flags"
                         : best == 4 ? "prox,prox fused"
                                     : ((best&1)?"trig,":"prox,"));
         printf("  per-call-site gain               : %8.3fx (%.1f%%)\n",
                glob/t[best], (glob/t[best]-1)*100);
-        printf("CSV,halo3d,%d,%zu,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d\n",
+        printf("CSV,halo3d,%d,%zu,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d\n",
                faces, bytes, compute_us, t[0], t[1], t[2], t[3], t[4], t[5],
-               mpi_mode?1:0, okall?1:0);
+               t[6], mpi_mode?1:0, okall?1:0);
     }
 
     rt.barrier();
