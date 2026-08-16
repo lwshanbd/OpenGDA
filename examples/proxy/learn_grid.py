@@ -250,7 +250,8 @@ def transfer(srcA, srcB, fixed_L=4):
     avA, avB = restrict(ptsA), restrict(ptsB)
     common = sorted(set(avA) & set(avB))
     print(f"\n=== C. carrying a decider to a regime it was not fitted on ===")
-    print(f"    regime A = 1 rank pair, regime B = 2 contending pairs")
+    print(f"    A = {srcA}")
+    print(f"    B = {srcB}")
     print(f"    fleet size held at L={fixed_L} in both, so only the per-site "
           f"knobs vary")
     print(f"    {len(avA)} points in A, {len(avB)} in B, {len(common)} shared\n")
