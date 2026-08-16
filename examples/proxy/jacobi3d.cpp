@@ -57,6 +57,11 @@ enum Path { PROXY = 0, TRIGGER = 1 };
 // a packing kernel would change the algorithm, not just the transport.
 // Requires MPICH_GPU_SUPPORT_ENABLED=1 and a GTL-linked binary.
 static bool g_mpi_mode = false;
+// MPI one-sided reference. Two-sided Isend/Irecv gets arrival detection for
+// free from message matching, which a one-sided path has to build itself --
+// so the like-for-like baseline for GICC's put is MPI_Put over an RMA
+// window, where MPI also has to say separately when the data has landed.
+static bool g_mpi_rma = false;
 
 // 7-point Jacobi over the interior of an (N+2)^3 field.
 //   part 0  every interior point
@@ -152,6 +157,7 @@ int main(int argc, char** argv) {
         else if (a.rfind("--steps=",  0)==0) steps   = std::atoi(a.c_str()+8);
         else if (a == "--overlap") overlap = true;
         else if (a == "--mpi") g_mpi_mode = true;
+        else if (a == "--mpi-rma") { g_mpi_mode = true; g_mpi_rma = true; }
         else if (a == "--extra-barrier") extra_barrier = true;
         else if (a == "--selftest") selftest = true;
         else { fprintf(stderr, "jacobi3d: unknown arg '%s'\n", a.c_str()); return 2; }
@@ -178,6 +184,19 @@ int main(int argc, char** argv) {
     }
     auto bh = rt.register_buffer(d_buf, bufBytes, /*is_device=*/true);
     rt.exchange();
+
+    MPI_Win win = MPI_WIN_NULL;
+    if (g_mpi_rma) {
+        int err = MPI_Win_create(d_buf, (MPI_Aint)bufBytes, 1,
+                                 MPI_INFO_NULL, MPI_COMM_WORLD, &win);
+        if (err != MPI_SUCCESS) {
+            if (!rank) fprintf(stderr,
+                "jacobi3d: MPI_Win_create on device memory failed (%d); "
+                "this MPI may not support GPU-buffer RMA\n", err);
+            return 4;
+        }
+        MPI_Win_lock_all(MPI_MODE_NOCHECK, win);
+    }
     unsigned long long* d_sum = nullptr;
     (void)hipMalloc((void**)&d_sum, sizeof(unsigned long long));
 
@@ -185,7 +204,8 @@ int main(int argc, char** argv) {
         printf("=== jacobi3d: %d ranks, %d steps/sample, %d samples, "
                "overlap=%s, transport=%s ===\n",
                nranks, steps, samples, overlap ? "on" : "off",
-               g_mpi_mode ? "GPU-aware MPI" : "GICC");
+               g_mpi_rma ? "MPI one-sided (MPI_Put + flush)"
+                         : (g_mpi_mode ? "GPU-aware MPI (Isend/Irecv)" : "GICC"));
         printf("    window %zu MB registered once for max N=%d\n",
                bufBytes >> 20, maxN);
         printf("%-6s %-10s %10s %10s %10s %10s %9s %9s\n",
@@ -250,6 +270,23 @@ int main(int argc, char** argv) {
             }
         };
 
+        // MPI one-sided: the same faces as MPI_Puts into the peer's window,
+        // completed with a flush. Arrival is then a separate problem, the
+        // same one GICC has, so the barrier below stands in for it exactly
+        // as it does on the GICC path.
+        auto mpi_rma_exchange = [&]() {
+            const size_t fo = (size_t)cur * felems * sizeof(float);
+            char* base = (char*)d_buf;
+            MPI_Put(base + fo + contig_src, (int)contig_bytes, MPI_BYTE, peer,
+                    (MPI_Aint)(fo + contig_dst), (int)contig_bytes, MPI_BYTE, win);
+            for (int i = 0; i < rows; ++i)
+                MPI_Put(base + fo + strided_src + (size_t)i * row_stride,
+                        (int)row_bytes, MPI_BYTE, peer,
+                        (MPI_Aint)(fo + strided_dst + (size_t)i * row_stride),
+                        (int)row_bytes, MPI_BYTE, win);
+            MPI_Win_flush_all(win);
+        };
+
         // MPI reference: same faces, same message counts, two-sided.
         auto mpi_exchange = [&]() {
             const size_t fo = (size_t)cur * felems * sizeof(float);
@@ -274,6 +311,25 @@ int main(int argc, char** argv) {
         };
 
         auto timestep = [&](const int* path) {
+            if (g_mpi_rma) {
+                mpi_rma_exchange();
+                if (overlap) {
+                    hipLaunchKernelGGL(k_jacobi, dim3(blk), dim3(thr), 0, 0,
+                                       u0, u1, N, 1);
+                    (void)hipDeviceSynchronize();
+                    rt.barrier();
+                    hipLaunchKernelGGL(k_jacobi, dim3(blk), dim3(thr), 0, 0,
+                                       u0, u1, N, 2);
+                } else {
+                    rt.barrier();
+                    hipLaunchKernelGGL(k_jacobi, dim3(blk), dim3(thr), 0, 0,
+                                       u0, u1, N, 0);
+                }
+                (void)hipDeviceSynchronize();
+                std::swap(u0, u1);
+                cur ^= 1;
+                return;
+            }
             if (g_mpi_mode) {
                 auto reqs = mpi_exchange();
                 if (overlap) {
@@ -420,13 +476,15 @@ int main(int argc, char** argv) {
             printf("%-6d %-10s %10.1f %10.1f %10.1f %10.1f %9s %8.2fx%s\n",
                    N, faces, times[0], times[1], times[2], times[3],
                    bs, glob / times[best], all_ok ? "" : "  (CHECKSUM FAIL)");
-            printf("CSV,jacobi,%d,%d,%zu,%d,%zu,%.3f,%.3f,%.3f,%.3f,%.3f,%d\n",
+            printf("CSV,jacobi,%d,%d,%zu,%d,%zu,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%llu\n",
                    N, overlap ? 1 : 0, contig_bytes, rows, row_bytes,
-                   times[0], times[1], times[2], times[3], comp_us, all_ok ? 1 : 0);
+                   times[0], times[1], times[2], times[3], comp_us, all_ok ? 1 : 0,
+                   (unsigned long long)ref_cs);
         }
 
     }
 
+    if (win != MPI_WIN_NULL) { MPI_Win_unlock_all(win); MPI_Win_free(&win); }
     rt.barrier();
     (void)hipFree(d_sum);
     (void)hipFree(d_buf);
