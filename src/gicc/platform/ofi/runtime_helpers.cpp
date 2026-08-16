@@ -53,6 +53,10 @@ void gicc_runtime_dwq_enqueue(gicc::Runtime *rt,
         : (ri.rma_addr - ri.base_addr) + dst_off;
 
     ++rt->mono_total_ops_;
+    // Waits on the MMIO trigger counter, so its threshold comes from the
+    // MMIO-triggered subsequence rather than the total (which also counts
+    // completion-triggered ops staged by put_after).
+    ++rt->mono_mmio_ops_;
     ++rt->my_n_remote_ops_;
     auto *dwq = rt->dwq_get_();
     dwq->queue_rma_write(
@@ -61,7 +65,7 @@ void gicc_runtime_dwq_enqueue(gicc::Runtime *rt,
         rt->comm_->av_addrs[peer], remote_addr, ri.rma_key,
         rt->comm_->fabric->trigger_cntr,
         rt->shared_completion_cntr_,
-        /*threshold=*/rt->mono_total_ops_);
+        /*threshold=*/rt->mono_mmio_ops_);
     rt->my_pending_.push_back(dwq);
 }
 
@@ -82,8 +86,14 @@ void gicc_runtime_dwq_enqueue_batched(gicc::Runtime    *rt,
                                        const std::size_t *sizes) {
     if (!rt || n_ops <= 0) return;
     rt->mono_total_ops_   += static_cast<std::uint64_t>(n_ops);
+    // These descriptors wait on the MMIO trigger counter, so they belong to
+    // the MMIO-triggered subsequence that prepare() derives the trigger
+    // delta from. Counting them only in mono_total_ops_ would make the
+    // kernel's single store fall short of their thresholds and the batch
+    // would never fire.
+    rt->mono_mmio_ops_    += static_cast<std::uint64_t>(n_ops);
     rt->my_n_remote_ops_  += static_cast<std::uint64_t>(n_ops);
-    const std::uint64_t batch_top = rt->mono_total_ops_;
+    const std::uint64_t batch_top = rt->mono_mmio_ops_;
     for (int i = 0; i < n_ops; ++i) {
         auto &ob = rt->local_bufs_[src_bufs[i]];
         auto &ri = rt->remote_info_cache_[

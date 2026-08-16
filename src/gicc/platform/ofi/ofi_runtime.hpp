@@ -99,6 +99,7 @@ public:
           proxy_dispatch_disabled_(false),
           shared_completion_cntr_(nullptr),
           mono_total_ops_(0),
+          mono_mmio_ops_(0),
           mono_last_triggered_(0)
     {
         // Read W from env var; hint.json override is applied later when
@@ -669,6 +670,7 @@ public:
         // ---------- Host-wait fast path (GDA-compatible) ----------
         if (host_wait_mode_) {
             ++mono_total_ops_;
+            ++mono_mmio_ops_;
             ++my_n_remote_ops_;
             DwqWorkBuilder* dwq = dwq_get_();
             dwq->queue_rma_write(
@@ -677,7 +679,7 @@ public:
                 comm_->av_addrs[dest_rank], remote_addr, ri.rma_key,
                 comm_->fabric->trigger_cntr,
                 shared_completion_cntr_,
-                /*threshold=*/mono_total_ops_);
+                /*threshold=*/mono_mmio_ops_);
             // NO atomic_signal queued — saves 1 NIC op per put.
             my_pending_.push_back(dwq);
             return Token{ (int)mono_total_ops_, /*is_local=*/false };
@@ -720,6 +722,65 @@ public:
         my_pending_.push_back(dwq);
         atomic_signals_queued_ = true;
         return Token{ slot_idx, /*is_local=*/false };
+    }
+
+    //--------------------------------------------------------------------------
+    // put_after — stage a put that the NIC fires once `threshold` transfers
+    // have COMPLETED, instead of when the kernel writes the MMIO trigger.
+    //
+    // A one-sided protocol has to say "signal the peer once the payload has
+    // landed". Expressing that with put() costs a full host round trip
+    // between the two: launch, device-sync, reset (wait for the data), then
+    // stage and fire the signal. That round trip measured as the dominant
+    // per-timestep cost of a halo with in-band arrival flags.
+    //
+    // The deferred work queue can wait on any counter, so the ordering can
+    // be handed to the NIC instead: stage the payload, note staged_ops(),
+    // stage the signal with that as its threshold, and one trigger fires
+    // the payload while the NIC itself releases the signal afterwards. No
+    // host and no device involvement in between. The same mechanism already
+    // backs the chained atomic_signal in the legacy path, so the provider is
+    // known to honour it.
+    //
+    // `threshold` is an ABSOLUTE value of the shared completion counter,
+    // i.e. what staged_ops() returned after the payload was staged.
+    //
+    // Caller contract: host-wait mode only, and the payload it waits on must
+    // already be staged, or the NIC releases the signal early.
+    //--------------------------------------------------------------------------
+    Token put_after(const Buffer& src, int dest_rank, int dest_buf_index,
+                    size_t size, size_t src_offset, size_t dst_offset,
+                    uint64_t threshold)
+    {
+        if (!host_wait_mode_) {
+            fprintf(stderr, "gicc::Runtime::put_after: host-wait mode only "
+                            "(call enable_host_wait_mode() first)\n");
+            std::abort();
+        }
+        const OfiBuffer& ob = local_bufs_.at(src.index);
+        const RemoteInfo& ri = remote_info_cache_[
+            (size_t)dest_rank * (size_t)n_bufs_ + (size_t)dest_buf_index];
+        if (ri.rma_key == 0 && ri.rma_addr == 0) {
+            fprintf(stderr, "gicc::Runtime::put_after: remote info not set for "
+                    "rank %d buf %d (call exchange() first)\n",
+                    dest_rank, dest_buf_index);
+            std::abort();
+        }
+        const uint64_t remote_addr = comm_->is_virt_addr_mode()
+            ? (ri.rma_addr + dst_offset)
+            : (ri.rma_addr - ri.base_addr) + dst_offset;
+
+        ++mono_total_ops_;      // reset() must still wait for this one
+        DwqWorkBuilder* dwq = dwq_get_();
+        dwq->queue_rma_write(
+            comm_->fabric->domain, comm_->fabric->ep,
+            (char*)ob.ptr + src_offset, ob.desc_, size,
+            comm_->av_addrs[dest_rank], remote_addr, ri.rma_key,
+            /*triggering=*/shared_completion_cntr_,
+            /*completion=*/shared_completion_cntr_,
+            /*threshold=*/threshold);
+        my_pending_.push_back(dwq);
+        return Token{ (int)mono_total_ops_, /*is_local=*/false };
     }
 
     // get_no_db — queue an RMA READ. Same slot-pool accounting as put_no_db.
@@ -781,6 +842,7 @@ public:
                 : (ri.rma_addr - ri.base_addr) + remote_offset;
 
             ++mono_total_ops_;
+            ++mono_mmio_ops_;
             ++my_n_remote_ops_;
             DwqWorkBuilder* dwq = dwq_get_();
             dwq->queue_rma_read(
@@ -789,7 +851,7 @@ public:
                 comm_->av_addrs[src_rank], remote_addr, ri.rma_key,
                 comm_->fabric->trigger_cntr,
                 shared_completion_cntr_,
-                /*threshold=*/mono_total_ops_);
+                /*threshold=*/mono_mmio_ops_);
             // NO atomic_signal queued — same saving as host-wait PUT.
             my_pending_.push_back(dwq);
             return Token{ (int)mono_total_ops_, /*is_local=*/false };
@@ -875,9 +937,9 @@ public:
         // mono_total_ops_ (the highest queued threshold).
         h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
         if (host_wait_mode_) {
-            const uint64_t delta = mono_total_ops_ - mono_last_triggered_;
+            const uint64_t delta = mono_mmio_ops_ - mono_last_triggered_;
             h_dev_ctx_->trigger_val_  = delta;
-            mono_last_triggered_ = mono_total_ops_;
+            mono_last_triggered_ = mono_mmio_ops_;
         } else {
             h_dev_ctx_->trigger_val_ = my_n_remote_ops_;
         }
@@ -1031,6 +1093,38 @@ public:
             return;
         }
         while (fi_cntr_read(slots_[tok.slot_idx].completion_cntr) < 1) {}
+    }
+
+    //--------------------------------------------------------------------------
+    // reset_dwq — completion wait for a batch that used ONLY the DWQ path,
+    // without requiring the caller to device-synchronize first.
+    //
+    // reset() documents that the caller must device-sync before calling it,
+    // because the proxy-ring drain snapshots the producer head and would
+    // miss pushes a still-running kernel has yet to publish. A batch with
+    // no proxy pushes has nothing to miss, and the completion counter
+    // cannot advance until the kernel has written the MMIO trigger, so
+    // polling it already subsumes waiting for the kernel. The device sync
+    // is then pure overhead -- a blocking sync after a trivial trigger
+    // kernel costs on the order of 10 us.
+    //
+    // Caller contract: no gicc::put/get/quiet ran on the device in this
+    // batch (i.e. every site was DWQ-routed). It does NOT guarantee the
+    // kernel has finished, only that every staged transfer has completed,
+    // so do not reuse the kernel's other outputs without a separate sync.
+    //--------------------------------------------------------------------------
+    void reset_dwq() {
+        if (!host_wait_mode_) { reset(); return; }
+        if (mono_total_ops_ > 0) {
+            while (fi_cntr_read(shared_completion_cntr_) < mono_total_ops_) {
+                fi_cq_read(comm_->fabric->cq, NULL, 0);
+            }
+        }
+        dwq_release_all_pending_to_pool_();
+        my_n_remote_ops_ = 0;
+        for (auto s : ipc_streams_) {
+            if (s) (void)gpuStreamSynchronize(s);
+        }
     }
 
     //--------------------------------------------------------------------------
@@ -1369,6 +1463,12 @@ private:
     std::unordered_map<const void*, const void*> host_mirrors_;
     struct fid_cntr*                   shared_completion_cntr_;
     uint64_t                           mono_total_ops_;          // monotonic across batches
+    // Ops whose deferred work waits on the MMIO trigger counter. put_after()
+    // stages ops that wait on a COMPLETION counter instead, and those must
+    // not be counted in the trigger delta or the kernel's single MMIO store
+    // would try to fire descriptors the NIC is holding for a different
+    // reason.
+    uint64_t                           mono_mmio_ops_;
     uint64_t                           mono_last_triggered_;     // last value the kernel's MMIO write added (for delta calc)
     std::vector<DwqWorkBuilder*>       dwq_pool_;                // recycled builders
 
