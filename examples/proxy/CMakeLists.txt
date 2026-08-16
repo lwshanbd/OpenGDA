@@ -590,3 +590,49 @@ elseif(GICC_GPU_API STREQUAL "hip")
     endif()
 endif()
 _proxy_example_setup(jacobi3d)
+
+# ---------------------------------------------------------------------------
+# halo3d - one-sided halo with in-band arrival flags (the structure a
+# production GPU-initiated stencil uses): bulk face data and 8-byte flags
+# are two call sites with opposite cost structure.
+# ---------------------------------------------------------------------------
+if(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(halo3d.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(halo3d
+        halo3d.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(halo3d PRIVATE
+        CUDA::cudart
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+elseif(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(halo3d.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+                                ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp
+        PROPERTIES LANGUAGE HIP)
+    add_executable(halo3d
+        halo3d.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC}
+        ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp)
+    target_link_libraries(halo3d PRIVATE
+        hip::device
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+    # --mpi mode sends device pointers through Cray MPICH, which needs the
+    # HSA GTL linked in.
+    if(EXISTS "/opt/cray/pe/lib64/libmpi_gtl_hsa.so")
+        target_link_libraries(halo3d PRIVATE
+            "/opt/cray/pe/lib64/libmpi_gtl_hsa.so")
+    endif()
+endif()
+_proxy_example_setup(halo3d)
