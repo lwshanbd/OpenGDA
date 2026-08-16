@@ -30,6 +30,26 @@
  *                   same D. Issue-to-first-use distance is invisible to the
  *                   runtime at the moment the put is issued.
  *
+ *   --exp=grid      The JOINT configuration space, for offline decider work.
+ *                   A workload point is (bytes, K, D): K puts of `bytes`
+ *                   issued in one phase, then D us of independent device
+ *                   compute, then the phase's completion point.
+ *
+ *                   The configuration space is CONDITIONAL on the path --
+ *                   the two paths do not expose the same knobs, so this is
+ *                   not a product space:
+ *
+ *                     trigger:  B = descriptors released per MMIO trigger
+ *                               (K/B triggers, one terminal completion wait)
+ *                     proxy:    P = concurrent pushing blocks in the kernel
+ *                               L = proxy worker lanes, i.e.
+ *                                   GICC_NUM_PROXY_THREADS. Process-wide, so
+ *                                   L needs one binary run per value.
+ *
+ *                   Emits one GRID row per (point, config) cell plus a
+ *                   no-communication spin baseline per D, so an offline
+ *                   decider can be scored against the per-point oracle.
+ *
  * The proxy path and the DWQ/trigger path cannot coexist in one process
  * (enable_host_wait_mode() disables proxy dispatch), so pick one with
  * --path and run the binary twice:
@@ -126,6 +146,33 @@ __global__ void k_flush_spin(gicc::DeviceCtx* ctx, long long ticks) {
     spin_ticks(ticks);
 }
 
+// Grid experiment.
+//
+// Trigger side: `groups` triggers, each releasing B pre-staged descriptors,
+// then the phase's independent compute. Completion is waited for on the host.
+__global__ void k_flush_groups_spin(gicc::DeviceCtx* ctx, int groups,
+                                    long long ticks) {
+    for (int g = 0; g < groups; ++g) gicc::flush(ctx);
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    spin_ticks(ticks);
+}
+
+// Proxy side: gridDim.x blocks share the K pushes, block b using lane b
+// (lane_to_ring takes it modulo the fleet size, so P > L round-robins).
+// Every block runs the phase's compute, then drains its own lane.
+__global__ void k_proxy_blocks_spin(gicc::DeviceCtx* ctx, int peer, int buf,
+                                    size_t bytes, int ops, long long ticks) {
+    if (threadIdx.x != 0) return;
+    const int lane  = blockIdx.x;
+    const int base  = ops / gridDim.x;
+    const int extra = ops % gridDim.x;
+    const int mine  = base + ((int)blockIdx.x < extra ? 1 : 0);
+    for (int i = 0; i < mine; ++i)
+        gicc::put(ctx, peer, buf, /*dst_off=*/0, buf, /*src_off=*/0, bytes, lane);
+    spin_ticks(ticks);
+    gicc::quiet(ctx, lane);
+}
+
 //----------------------------------------------------------------------------
 // Stats
 //----------------------------------------------------------------------------
@@ -156,14 +203,25 @@ static const char* fmt_size(size_t s, char* buf) {
     return buf;
 }
 
+// Rank pairing. With 2N ranks laid out N per node, rank r pairs with
+// r + N, so every pair crosses the node boundary; the first half send and
+// the second half receive. N pairs push concurrently, which is what puts
+// the NIC under contention -- a different regime from a lone pair, and the
+// point of running more than one.
+static int g_half = 1;
+static inline bool is_sender(int rank) { return rank < g_half; }
+static inline int  peer_of(int rank, int nranks) { return (rank + g_half) % nranks; }
+
 // One timed configuration: warmup, then `samples` barrier-delimited runs of
-// `body` on rank 0. Both ranks enter every barrier.
+// `body` on every sending rank, timed on rank 0. All ranks enter every
+// barrier, so the senders stay in step and the measured window contains the
+// concurrent phase rather than one rank's private one.
 template <typename F>
 static Stats time_config(gicc::Runtime& rt, int rank, int samples, int warmup,
                          F&& body) {
     for (int w = 0; w < warmup; ++w) {
         rt.barrier();
-        if (rank == 0) body();
+        if (is_sender(rank)) body();
         rt.barrier();
     }
     std::vector<double> v;
@@ -171,7 +229,7 @@ static Stats time_config(gicc::Runtime& rt, int rank, int samples, int warmup,
     for (int s = 0; s < samples; ++s) {
         rt.barrier();
         double t0 = MPI_Wtime();
-        if (rank == 0) body();
+        if (is_sender(rank)) body();
         double t1 = MPI_Wtime();
         rt.barrier();
         if (rank == 0) v.push_back((t1 - t0) * 1e6);
@@ -201,12 +259,12 @@ static bool verify_path(gicc::Runtime& rt, int rank, int peer,
                         const gicc::Buffer& bh, void* d_buf, size_t bytes,
                         bool is_proxy, uint8_t pat) {
     size_t chk = std::min<size_t>(bytes, 4096);
-    if (rank == 0) (void)hipMemset(d_buf, pat, std::max<size_t>(bytes, 64));
-    else           (void)hipMemset(d_buf, 0x00, std::max<size_t>(bytes, 64));
+    if (is_sender(rank)) (void)hipMemset(d_buf, pat, std::max<size_t>(bytes, 64));
+    else                 (void)hipMemset(d_buf, 0x00, std::max<size_t>(bytes, 64));
     (void)hipDeviceSynchronize();
     rt.barrier();
 
-    if (rank == 0) {
+    if (is_sender(rank)) {
         gicc::DeviceCtx* ctx;
         if (is_proxy) {
             ctx = rt.prepare();
@@ -223,15 +281,51 @@ static bool verify_path(gicc::Runtime& rt, int rank, int peer,
     rt.barrier();
 
     int ok = 1;
-    if (rank == 1) {
+    if (!is_sender(rank)) {
         std::vector<uint8_t> h(chk);
         (void)hipMemcpy(h.data(), d_buf, chk, hipMemcpyDeviceToHost);
         for (size_t i = 0; i < chk; ++i) {
             if (h[i] != pat) { ok = 0; break; }
         }
     }
-    MPI_Bcast(&ok, 1, MPI_INT, 1, MPI_COMM_WORLD);
-    return ok != 0;
+    int all_ok = 0;
+    MPI_Allreduce(&ok, &all_ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    return all_ok != 0;
+}
+
+// The grid's proxy configurations push from several blocks at once, each
+// against its own lane. That is a different device code path from the
+// single-block kernel above (concurrent atomic_push, per-lane quiet), so it
+// gets its own delivery check before any of it is timed.
+static bool verify_multiblock(gicc::Runtime& rt, int rank, int peer,
+                              const gicc::Buffer& bh, void* d_buf,
+                              int blocks, int ops, uint8_t pat) {
+    const size_t bytes = 4096;
+    if (is_sender(rank)) (void)hipMemset(d_buf, pat, bytes);
+    else                 (void)hipMemset(d_buf, 0x00, bytes);
+    (void)hipDeviceSynchronize();
+    rt.barrier();
+
+    if (is_sender(rank)) {
+        gicc::DeviceCtx* ctx = rt.prepare();
+        hipLaunchKernelGGL(k_proxy_blocks_spin, dim3(blocks), dim3(1), 0, 0,
+                           ctx, peer, bh.index, bytes, ops, /*ticks=*/0);
+        (void)hipDeviceSynchronize();
+        rt.reset();
+    }
+    rt.barrier();
+
+    int ok = 1;
+    if (!is_sender(rank)) {
+        std::vector<uint8_t> h(bytes);
+        (void)hipMemcpy(h.data(), d_buf, bytes, hipMemcpyDeviceToHost);
+        for (size_t i = 0; i < bytes; ++i) {
+            if (h[i] != pat) { ok = 0; break; }
+        }
+    }
+    int all_ok = 0;
+    MPI_Allreduce(&ok, &all_ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    return all_ok != 0;
 }
 
 //----------------------------------------------------------------------------
@@ -526,6 +620,101 @@ static void run_distance(gicc::Runtime& rt, int rank, int peer,
 }
 
 //----------------------------------------------------------------------------
+// Joint configuration space — one row per (workload point, configuration).
+//----------------------------------------------------------------------------
+
+static void emit_grid(const char* path, const char* config, size_t bytes,
+                      int K, int D, int B, int P, int L, const Stats& st) {
+    if (st.n == 0) return;
+    // `pairs` is appended last so CSVs collected before it existed still
+    // parse; a reader that finds the field missing should assume one pair.
+    printf("GRID,%s,%s,%zu,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%d\n",
+           path, config, bytes, K, D, B, P, L,
+           st.n, st.median, st.min, st.max, st.p25, st.p75, g_half);
+    char sb[32];
+    fmt_size(bytes, sb);
+    printf("    %-16s %8s K=%-3d D=%-4d  median=%9.2f us  [%.2f .. %.2f]\n",
+           config, sb, K, D, st.median, st.min, st.max);
+    fflush(stdout);
+}
+
+static void run_grid(gicc::Runtime& rt, int rank, int peer,
+                     const gicc::Buffer& bh, const std::vector<size_t>& sizes,
+                     const std::vector<int>& Ks, const std::vector<int>& Ds,
+                     const std::vector<int>& Bs, const std::vector<int>& Ps,
+                     int lanes, double ticks_per_us, bool is_proxy,
+                     int samples, int warmup, double max_stage_bytes) {
+    const char* path = is_proxy ? "proxy" : "trigger";
+
+    for (int D : Ds) {
+        const long long ticks = (long long)(D * ticks_per_us);
+
+        // No-communication baseline for this D, same launch structure.
+        // Exposed communication cost = (cell median) - (this).
+        emit_grid(path, "spin-only", 0, 0, D, 0, 1, lanes,
+                  time_config(rt, rank, samples, warmup, [&] {
+                      hipLaunchKernelGGL(k_spin, dim3(1), dim3(1), 0, 0, ticks);
+                      (void)hipDeviceSynchronize();
+                  }));
+
+        for (size_t bytes : sizes) {
+            for (int K : Ks) {
+                if (max_stage_bytes > 0 && (double)bytes * K > max_stage_bytes) {
+                    if (rank == 0)
+                        printf("    (skip bytes=%zu K=%d: %.0f MB in flight "
+                               "exceeds the pre-stage budget)\n",
+                               bytes, K, (double)bytes * K / (1024 * 1024));
+                    continue;
+                }
+
+                if (is_proxy) {
+                    // Knob: how many blocks push concurrently. Splitting K
+                    // across blocks spreads the ring CAS contention and, when
+                    // P <= L, spreads the work over distinct proxy workers.
+                    for (int P : Ps) {
+                        if (P > K) continue;
+                        char cfg[32];
+                        snprintf(cfg, sizeof(cfg), "proxy-P%d-L%d", P, lanes);
+                        emit_grid(path, cfg, bytes, K, D, 0, P, lanes,
+                                  time_config(rt, rank, samples, warmup, [&] {
+                                      gicc::DeviceCtx* ctx = rt.prepare();
+                                      hipLaunchKernelGGL(k_proxy_blocks_spin,
+                                                         dim3(P), dim3(1), 0, 0,
+                                                         ctx, peer, bh.index,
+                                                         bytes, K, ticks);
+                                      (void)hipDeviceSynchronize();
+                                      rt.reset();
+                                  }));
+                    }
+                } else {
+                    // Knob: descriptors released per MMIO trigger. Only
+                    // divisors of K are measured, because prepare_delta()
+                    // fires a uniform number of descriptors per trigger.
+                    for (int B : Bs) {
+                        if (B > K || (K % B) != 0) continue;
+                        const int groups = K / B;
+                        char cfg[32];
+                        snprintf(cfg, sizeof(cfg), "trig-B%d", B);
+                        emit_grid(path, cfg, bytes, K, D, B, 1, 0,
+                                  time_config(rt, rank, samples, warmup, [&] {
+                                      for (int i = 0; i < K; ++i)
+                                          rt.put(bh, peer, bh.index, bytes, 0, 0);
+                                      gicc::DeviceCtx* ctx =
+                                          rt.prepare_delta(B, groups);
+                                      hipLaunchKernelGGL(k_flush_groups_spin,
+                                                         dim3(1), dim3(1), 0, 0,
+                                                         ctx, groups, ticks);
+                                      (void)hipDeviceSynchronize();
+                                      rt.reset();
+                                  }));
+                    }
+                }
+            }
+        }
+    }
+}
+
+//----------------------------------------------------------------------------
 
 static std::vector<int> parse_ints(const std::string& csv) {
     std::vector<int> out;
@@ -554,7 +743,7 @@ int main(int argc, char** argv) {
     double max_stage_bytes = 256.0 * 1024 * 1024;
     std::vector<int> Ks;
     std::vector<size_t> sizes;
-    std::vector<int> Ns, Bs, Ds;
+    std::vector<int> Ns, Bs, Ds, Ps;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -570,6 +759,7 @@ int main(int argc, char** argv) {
         else if (a.rfind("--reuse=",   0) == 0) Ns = parse_ints(a.substr(8));
         else if (a.rfind("--batches=", 0) == 0) Bs = parse_ints(a.substr(10));
         else if (a.rfind("--dists=",   0) == 0) Ds = parse_ints(a.substr(8));
+        else if (a.rfind("--blocks=",  0) == 0) Ps = parse_ints(a.substr(9));
         else {
             fprintf(stderr, "ctx_bench: unknown argument '%s'\n", a.c_str());
             return 2;
@@ -581,20 +771,28 @@ int main(int argc, char** argv) {
     }
     const bool is_proxy = (path == "proxy");
 
-    if (sizes.empty()) sizes = {8, 256, 4096, 65536, 1048576};
+    const bool is_grid = (exp == "grid");
+    if (sizes.empty()) sizes = is_grid ? std::vector<size_t>{256, 4096, 65536, 1048576}
+                                       : std::vector<size_t>{8, 256, 4096, 65536, 1048576};
     if (Ns.empty())    Ns    = {1, 2, 4, 8, 16, 32, 64, 128, 256};
     if (Bs.empty())    Bs    = {1, 2, 4, 8, 16, 32, 64};
-    if (Ds.empty())    Ds    = {0, 5, 10, 20, 50, 100, 200, 500, 1000};
-    if (Ks.empty())    Ks    = {1};
+    if (Ds.empty())    Ds    = is_grid ? std::vector<int>{0, 50, 200}
+                                       : std::vector<int>{0, 5, 10, 20, 50, 100, 200, 500, 1000};
+    if (Ks.empty())    Ks    = is_grid ? std::vector<int>{4, 16, 64}
+                                       : std::vector<int>{1};
+    if (Ps.empty())    Ps    = {1, 2, 4, 8};
 
     gicc::Runtime rt;
     if (!is_proxy) rt.enable_host_wait_mode();
     int rank = rt.rank(), nranks = rt.size();
-    if (nranks != 2) {
-        if (rank == 0) fprintf(stderr, "ctx_bench: need exactly 2 ranks (got %d)\n", nranks);
+    if (nranks < 2 || (nranks % 2) != 0) {
+        if (rank == 0)
+            fprintf(stderr, "ctx_bench: need an even rank count >= 2 (got %d)\n",
+                    nranks);
         return 1;
     }
-    int peer = 1 - rank;
+    g_half = nranks / 2;
+    int peer = peer_of(rank, nranks);
 
     void* d_buf = nullptr;
     if (hipMalloc(&d_buf, kBufBytes) != hipSuccess) {
@@ -633,8 +831,9 @@ int main(int argc, char** argv) {
 
     bool ok = verify_path(rt, rank, peer, bh, d_buf, 4096, is_proxy, 0x5A);
     if (rank == 0) {
-        printf("=== ctx_bench path=%s exp=%s samples=%d warmup=%d ===\n",
-               path.c_str(), exp.c_str(), samples, warmup);
+        printf("=== ctx_bench path=%s exp=%s samples=%d warmup=%d "
+               "pairs=%d ===\n",
+               path.c_str(), exp.c_str(), samples, warmup, g_half);
         printf("[verify] 4KB transfer through the %s path: %s\n",
                path.c_str(), ok ? "PASS" : "FAIL");
         printf("CSV,exp,path,config,bytes,param,samples,median_us,per_op_us,"
@@ -656,6 +855,30 @@ int main(int argc, char** argv) {
     if (exp == "distance" || exp == "all")
         run_distance(rt, rank, peer, bh, sizes, Ds, ticks_per_us, Ks,
                      is_proxy, samples, warmup);
+    if (exp == "grid") {
+        int lanes = 1;
+        if (const char* e = std::getenv("GICC_NUM_PROXY_THREADS")) {
+            int v = std::atoi(e);
+            if (v >= 1 && v <= 32) lanes = v;
+        }
+        if (is_proxy) {
+            bool mok = verify_multiblock(rt, rank, peer, bh, d_buf,
+                                         /*blocks=*/8, /*ops=*/24, 0x3C);
+            if (rank == 0)
+                printf("[verify] 8-block / 24-op concurrent push: %s\n",
+                       mok ? "PASS" : "FAIL");
+            if (!mok) {
+                if (rank == 0)
+                    fprintf(stderr, "ctx_bench: multi-block delivery failed\n");
+                return 4;
+            }
+        }
+        if (rank == 0)
+            printf("GRID,path,config,bytes,K,D,B,P,L,samples,median_us,"
+                   "min_us,max_us,p25_us,p75_us,pairs\n");
+        run_grid(rt, rank, peer, bh, sizes, Ks, Ds, Bs, Ps, lanes,
+                 ticks_per_us, is_proxy, samples, warmup, max_stage_bytes);
+    }
 
     rt.barrier();
     if (rank == 0) printf("=== done ===\n");
