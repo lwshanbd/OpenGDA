@@ -190,7 +190,8 @@ int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     int faces = 6, samples = 11, warmup = 5, steps = 20, compute_us = 0;
     size_t bytes = 65536;
-    bool mpi_mode = false, fused_poll = false;
+    bool mpi_mode = false, fused_poll = false, no_flags_opt = false;
+    bool coalesce_flags = false;
     int cblocks = 64;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -202,6 +203,8 @@ int main(int argc, char** argv) {
         else if (a.rfind("--compute=",0)==0) compute_us = atoi(a.c_str()+10);
         else if (a == "--mpi") mpi_mode = true;
         else if (a == "--fused-poll") fused_poll = true;
+        else if (a == "--no-flags") no_flags_opt = true;
+        else if (a == "--coalesce-flags") coalesce_flags = true;
         else if (a.rfind("--blocks=",0)==0) cblocks = atoi(a.c_str()+9);
         else { fprintf(stderr,"halo3d: unknown arg '%s'\n",a.c_str()); return 2; }
     }
@@ -267,6 +270,26 @@ int main(int argc, char** argv) {
     // One timestep: bulk faces, then the ordered arrival flags, then the
     // receiver waits on the flags and computes.
     bool fused = false, chained = false, pipelined = false;
+    bool no_flags = false;
+    // Which signals actually get sent: one per face, or one per distinct
+    // peer when --coalesce-flags is set.
+    std::vector<int> flag_peer, flag_src, flag_dst;
+    {
+        std::vector<char> seen(nranks, 0);
+        for (int f = 0; f < faces; ++f) {
+            if (coalesce_flags) {
+                if (seen[h_peers[f]]) continue;
+                seen[h_peers[f]] = 1;
+            }
+            flag_peer.push_back(h_peers[f]);
+            flag_src.push_back(f);
+            flag_dst.push_back(h_slot[f]);
+        }
+    }
+    const int n_flags = (int)flag_peer.size();
+    // A coalesced signal announces every face from that peer, so the
+    // receiver watches one slot per sending peer rather than one per face.
+    const int n_poll = coalesce_flags ? 1 : faces;
     uint64_t pending_threshold = 0;
     // Stage one timestep's payload plus its NIC-released flags, and record
     // the completion threshold that marks that step done.
@@ -276,10 +299,10 @@ int main(int argc, char** argv) {
                    kSendBase + (size_t)f*bytes,
                    kRecvBase + (size_t)f*bytes);
         const uint64_t after_data = rt.staged_ops();
-        for (int f = 0; f < faces; ++f)
-            rt.put_after(bh, h_peers[f], bh.index, sizeof(uint64_t),
-                         kFlagBase + (size_t)(kMaxFaces+f)*sizeof(uint64_t),
-                         kFlagBase + (size_t)h_slot[f]*sizeof(uint64_t),
+        for (size_t k = 0; k < flag_src.size(); ++k)
+            rt.put_after(bh, flag_peer[k], bh.index, sizeof(uint64_t),
+                         kFlagBase + (size_t)(kMaxFaces+flag_src[k])*sizeof(uint64_t),
+                         kFlagBase + (size_t)flag_dst[k]*sizeof(uint64_t),
                          after_data);
         pending_threshold = rt.staged_ops();
     };
@@ -288,7 +311,16 @@ int main(int argc, char** argv) {
         hipLaunchKernelGGL(k_set_epoch, dim3(1), dim3(64), 0, 0,
                            d_flags, faces, epoch);
 
-        if (pipelined) {
+        if (no_flags) {
+            for (int f = 0; f < faces; ++f)
+                rt.put(bh, h_peers[f], bh.index, bytes,
+                       kSendBase + (size_t)f*bytes,
+                       kRecvBase + (size_t)f*bytes);
+            gicc::DeviceCtx* c = rt.prepare_slot(0);
+            hipLaunchKernelGGL(k_flush, dim3(1), dim3(1), 0, 0, c);
+            rt.reset_dwq();
+            rt.barrier();          // arrival, the way jacobi3d does it
+        } else if (pipelined) {
             // Descriptors record addresses, not data: the NIC reads the
             // buffer when the trigger fires. So the next step's staging
             // can be issued while this step is still on the wire, which
@@ -302,7 +334,7 @@ int main(int argc, char** argv) {
             rt.wait_until(due);
             if (!fused_poll)
                 hipLaunchKernelGGL(k_poll_flags, dim3(1), dim3(1), 0, 0,
-                                   (volatile uint64_t*)d_flags, faces, epoch,
+                                   (volatile uint64_t*)d_flags, n_poll, epoch,
                                    poll_timeout_ticks, d_stuck);
         } else if (chained) {
             // Both phases staged before a single trigger: the payload waits
@@ -327,7 +359,7 @@ int main(int argc, char** argv) {
             rt.reset_dwq();
             if (!fused_poll)
                 hipLaunchKernelGGL(k_poll_flags, dim3(1), dim3(1), 0, 0,
-                                   (volatile uint64_t*)d_flags, faces, epoch,
+                                   (volatile uint64_t*)d_flags, n_poll, epoch,
                                    poll_timeout_ticks, d_stuck);
         } else if (fused) {
             gicc::DeviceCtx* c = rt.prepare_slot(0);
@@ -387,7 +419,7 @@ int main(int argc, char** argv) {
             // ---- receiver waits in band, then computes ----
             if (!fused_poll)
                 hipLaunchKernelGGL(k_poll_flags, dim3(1), dim3(1), 0, 0,
-                                   (volatile uint64_t*)d_flags, faces, epoch,
+                                   (volatile uint64_t*)d_flags, n_poll, epoch,
                                    poll_timeout_ticks, d_stuck);
         }
         if (fused_poll && !mpi_mode) {
@@ -426,7 +458,16 @@ int main(int argc, char** argv) {
         reset_state();
         if (pipelined) stage_chained();
         for (int t = 0; t < 3; ++t) timestep(path);
-        if (pipelined) {
+        if (no_flags) {
+            for (int f = 0; f < faces; ++f)
+                rt.put(bh, h_peers[f], bh.index, bytes,
+                       kSendBase + (size_t)f*bytes,
+                       kRecvBase + (size_t)f*bytes);
+            gicc::DeviceCtx* c = rt.prepare_slot(0);
+            hipLaunchKernelGGL(k_flush, dim3(1), dim3(1), 0, 0, c);
+            rt.reset_dwq();
+            rt.barrier();          // arrival, the way jacobi3d does it
+        } else if (pipelined) {
             // The pipeline always leaves one batch staged but untriggered.
             // reset() waits for every staged op, so fire it first or the
             // drain never completes.
@@ -438,7 +479,8 @@ int main(int argc, char** argv) {
         rt.barrier();
         int ok = 1;
         int stuck = -1;
-        (void)hipMemcpy(&stuck, d_stuck, sizeof(int), hipMemcpyDeviceToHost);
+        if (!no_flags)
+            (void)hipMemcpy(&stuck, d_stuck, sizeof(int), hipMemcpyDeviceToHost);
         if (stuck >= 0) {
             if (fused_poll)
                 printf("[verify] rank %d: fused wait timed out\n", rank);
@@ -452,7 +494,7 @@ int main(int argc, char** argv) {
         (void)hipMemcpy(hf.data(), d_flags, kMaxFaces*sizeof(uint64_t),
                         hipMemcpyDeviceToHost);
         for (int f = 0; f < faces && ok; ++f) {
-            if (!mpi_mode && hf[f] != epoch) {
+            if (!mpi_mode && !no_flags && f < n_poll && hf[f] != epoch) {
                 printf("[verify] rank %d face %d flag=%llu want=%llu\n", rank, f,
                        (unsigned long long)hf[f], (unsigned long long)epoch);
                 ok = 0; break;
@@ -482,7 +524,16 @@ int main(int argc, char** argv) {
             double t1 = MPI_Wtime();
             v.push_back((t1-t0)*1e6/steps);
         }
-        if (pipelined) {
+        if (no_flags) {
+            for (int f = 0; f < faces; ++f)
+                rt.put(bh, h_peers[f], bh.index, bytes,
+                       kSendBase + (size_t)f*bytes,
+                       kRecvBase + (size_t)f*bytes);
+            gicc::DeviceCtx* c = rt.prepare_slot(0);
+            hipLaunchKernelGGL(k_flush, dim3(1), dim3(1), 0, 0, c);
+            rt.reset_dwq();
+            rt.barrier();          // arrival, the way jacobi3d does it
+        } else if (pipelined) {
             // The pipeline always leaves one batch staged but untriggered.
             // reset() waits for every staged op, so fire it first or the
             // drain never completes.
@@ -497,7 +548,7 @@ int main(int argc, char** argv) {
     if (rank == 0) {
         printf("=== halo3d: %d ranks, %d faces x %zuB + %d flags x 8B, "
                "compute=%dus, transport=%s ===\n",
-               nranks, faces, bytes, faces, compute_us,
+               nranks, faces, bytes, n_flags, compute_us,
                mpi_mode ? "GPU-aware MPI"
                         : (fused_poll ? "GICC (wait fused into compute)"
                                       : "GICC (separate poll kernel)"));
@@ -505,7 +556,7 @@ int main(int argc, char** argv) {
     }
 
     double t[7]; bool okall = true;
-    const int nmask = mpi_mode ? 1 : 7;
+    const int nmask = (mpi_mode || no_flags_opt) ? 1 : 7;
     for (int mask = 0; mask < nmask; ++mask) {
         // mask 4 is the fused proxy structure and mask 5 is the chained
         // trigger, both of which avoid the two-phase host round trip; the
@@ -513,13 +564,15 @@ int main(int argc, char** argv) {
         fused     = (mask == 4);
         chained   = (mask == 5);
         pipelined = (mask == 6);
+        no_flags  = no_flags_opt;
         int path[2] = { mask & 1, (mask >> 1) & 1 };
         bool ok = verify(path);
         okall &= ok;
         t[mask] = measure(path).median;
         if (rank == 0) {
             char lbl[32];
-            if (pipelined) snprintf(lbl, sizeof(lbl), "trig chained+pipe");
+            if (no_flags) snprintf(lbl, sizeof(lbl), "trig, no flags");
+            else if (pipelined) snprintf(lbl, sizeof(lbl), "trig chained+pipe");
             else if (chained) snprintf(lbl, sizeof(lbl), "trig chained");
             else if (fused) snprintf(lbl, sizeof(lbl), "prox,prox (fused)");
             else snprintf(lbl, sizeof(lbl), "%s,%s",
@@ -528,7 +581,7 @@ int main(int argc, char** argv) {
                    ok ? "pass" : "FAIL");
         }
     }
-    if (mpi_mode) { t[1]=t[2]=t[3]=t[4]=t[5]=t[6]=t[0]; }
+    if (mpi_mode || no_flags_opt) { t[1]=t[2]=t[3]=t[4]=t[5]=t[6]=t[0]; }
 
     if (rank == 0) {
         int best = 0;
