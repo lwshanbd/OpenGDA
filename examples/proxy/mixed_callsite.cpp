@@ -82,6 +82,22 @@ static CallSite kTwinSites[] = {
     {"F", 65536, 64, 400, 8 * 1024 * 1024, true },
 };
 
+// Eight sites drawn from the measured decision surface: four whose
+// result is used far enough away that the trigger path wins, three
+// bandwidth-dominated with no gap where the proxy wins, and one whose
+// offsets are device-computed so only the proxy is legal. Used to ask
+// whether the per-call-site advantage grows with the number of sites.
+static CallSite kScaleSites[] = {
+    {"A", 4096,  64, 100, 0,                       true },
+    {"B", 4096,  16, 200, 1u<<20,                  true },
+    {"C", 4096,  64, 400, 2u<<20,                  true },
+    {"D", 65536, 16, 200, 3u<<20,                  true },
+    {"E", 65536, 64,   0, 5u<<20,                  true },
+    {"F", 65536, 32,   0, 9u<<20,                  true },
+    {"G", 16384, 32,   0, 12u<<20,                 true },
+    {"H", 16384,  8,   0, 14u<<20,                 false},
+};
+
 static CallSite* kSites   = kMixedSites;
 static int       kNumSites = 4;
 
@@ -156,12 +172,21 @@ int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
 
     int samples = 21, warmup = 10, steps = 10, ring_stride = 1;
+    // Exhaustive enumeration is 2^N; past a handful of sites that is not
+    // affordable. --flips measures all-proxy, all-trigger and the N
+    // single-site flips instead, reconstructs each site's preference from
+    // those, and then MEASURES the assignment it predicts so the
+    // additivity that reconstruction assumes is checked rather than
+    // asserted. Twins showed per-site deltas isolating to +-0.1 us.
+    bool flips = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if      (a.rfind("--samples=",0)==0) samples = std::atoi(a.c_str()+10);
         else if (a.rfind("--warmup=", 0)==0) warmup  = std::atoi(a.c_str()+9);
         else if (a.rfind("--steps=",  0)==0) steps   = std::atoi(a.c_str()+8);
         else if (a == "--twins") { kSites = kTwinSites; kNumSites = 2; }
+        else if (a == "--scale") { kSites = kScaleSites; kNumSites = 8; flips = true; }
+        else if (a == "--flips") flips = true;
         else if (a.rfind("--stride=",0)==0) ring_stride = std::atoi(a.c_str()+9);
         else { fprintf(stderr, "mixed_callsite: unknown arg '%s'\n", a.c_str()); return 2; }
     }
@@ -356,8 +381,21 @@ int main(int argc, char** argv) {
     // it is pinned to proxy and A/B/C are free -> 8 configurations.
     struct Result { int mask; int path[8]; Stats st; };
     std::vector<Result> results;
+    std::vector<int> masks;
+    if (flips) {
+        masks.push_back(0);                       // all proxy
+        for (int i = 0; i < kNumSites; ++i)
+            if (kSites[i].host_knowable) masks.push_back(1 << i);
+        int full = 0;
+        for (int i = 0; i < kNumSites; ++i)
+            if (kSites[i].host_knowable) full |= 1 << i;
+        masks.push_back(full);                    // all trigger (where legal)
+    } else {
+        for (int m = 0; m < (1 << kNumSites); ++m) masks.push_back(m);
+    }
     const int nmask = 1 << kNumSites;
-    for (int mask = 0; mask < nmask; ++mask) {
+    (void)nmask;
+    for (int mask : masks) {
         Result r; r.mask = mask;
         for (int s = 0; s < kNumSites; ++s) r.path[s] = (mask >> s) & 1;
         if (!verify(r.path)) {
@@ -381,6 +419,42 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Reconstruct each site's preference from its single-site flip, then
+    // MEASURE the assignment that implies. If per-site effects compose,
+    // the measurement lands on the additive prediction; if they do not,
+    // this is where it shows.
+    double pred_total = 0.0; int pred_mask = 0; double pred_measured = -1.0;
+    if (flips && !results.empty()) {
+        double base = -1.0;
+        for (auto &r : results) if (r.mask == 0) base = r.st.median;
+        if (base > 0) {
+            pred_total = base;
+            for (int i = 0; i < kNumSites; ++i) {
+                if (!kSites[i].host_knowable) continue;
+                for (auto &r : results) {
+                    if (r.mask != (1 << i)) continue;
+                    double delta = r.st.median - base;
+                    if (delta < 0) { pred_mask |= 1 << i; pred_total += delta; }
+                }
+            }
+            bool already = false;
+            for (auto &r : results) if (r.mask == pred_mask) already = true;
+            if (!already) {
+                Result r; r.mask = pred_mask;
+                for (int i = 0; i < kNumSites; ++i)
+                    r.path[i] = (pred_mask >> i) & 1;
+                if (verify(r.path)) {
+                    r.st = measure(r.path);
+                    pred_measured = r.st.median;
+                    results.push_back(r);
+                }
+            } else {
+                for (auto &r : results)
+                    if (r.mask == pred_mask) pred_measured = r.st.median;
+            }
+        }
+    }
+
     if (rank == 0 && !results.empty()) {
         double best = 1e30; int besti = -1;
         for (size_t i = 0; i < results.size(); ++i)
@@ -390,8 +464,11 @@ int main(int argc, char** argv) {
         double best_native = 1e30; int best_native_i = -1;
         for (size_t i = 0; i < results.size(); ++i) {
             auto& r = results[i];
-            if (r.mask == 0)          all_proxy   = r.st.median;
-            if (r.mask == nmask - 1)  all_trigger = r.st.median;
+            int full_legal = 0;
+            for (int i = 0; i < kNumSites; ++i)
+                if (kSites[i].host_knowable) full_legal |= 1 << i;
+            if (r.mask == 0)           all_proxy   = r.st.median;
+            if (r.mask == full_legal)  all_trigger = r.st.median;
             if (r.st.median < best_native) {
                 best_native = r.st.median; best_native_i = (int)i;
             }
@@ -416,6 +493,13 @@ int main(int argc, char** argv) {
                best_global/best, (best_global/best - 1)*100);
         printf("    per-call-site vs all-proxy   : %.2fx\n", all_proxy/best);
         printf("    per-call-site vs all-trigger : %.2fx\n", all_trigger/best);
+        if (flips && pred_measured > 0) {
+            printf("\n    additivity check (reconstructed from single-site flips):\n");
+            printf("      predicted assignment mask %d, predicted %.2f us, "
+                   "measured %.2f us  (%.1f%% off)\n",
+                   pred_mask, pred_total, pred_measured,
+                   (pred_measured/pred_total - 1)*100);
+        }
         for (auto& r : results) {
             char q[64]; q[0]=0;
             for (int s = 0; s < kNumSites; ++s)
