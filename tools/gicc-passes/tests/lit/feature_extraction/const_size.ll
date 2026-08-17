@@ -38,7 +38,7 @@ define void @main(ptr %rt) {
 
 ; STDERR: [feature-extract] wrote {{.*}}features.json
 
-; JSON-DAG: "schema_version": 2
+; JSON-DAG: "schema_version": 4
 ; JSON-DAG: "kernel": "k_const_sz"
 ; JSON-DAG: "op_kind": "put_no_db"
 ; JSON-DAG: "size_kind": "const"
@@ -52,3 +52,17 @@ define void @main(ptr %rt) {
 ; JSON-DAG: "iter_estimate": null
 ; peer_locality is still null until the runtime topology side-band lands.
 ; JSON-DAG: "peer_locality": null
+;
+; Every descriptor field is a literal, so the buffers cannot vary --
+; but the site is not in a loop, so there is no repetition to amortise
+; and descriptor reuse is not claimed.
+; JSON-DAG: "descriptor_reusable": false
+; JSON-DAG: "buffer_reusable": true
+; The fixture predates batch_size, so it must read as unmeasured.
+; JSON-DAG: "batch_size": null
+; hk_capable and no degraded loop, so the host can stage: all paths legal.
+; JSON-DAG: "legal_paths": [
+; JSON-DAG: "proxy"
+; JSON-DAG: "trigger"
+; JSON-DAG: "ipc"
+

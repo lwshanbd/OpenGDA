@@ -21,6 +21,7 @@
         "iv_step":  1
       },
       "compute_before": 7,
+      "batch_size": 3,
       "args": {
         "target_rank": { "kind": "param",     "param": 1 },
         "dst_buf":     { "kind": "param",     "param": 2 },

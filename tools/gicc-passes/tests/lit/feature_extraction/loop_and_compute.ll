@@ -38,7 +38,7 @@ define void @main(ptr %rt) {
 
 ; STDERR: [feature-extract] wrote {{.*}}features.json
 
-; JSON-DAG: "schema_version": 2
+; JSON-DAG: "schema_version": 4
 ; JSON-DAG: "kernel": "k_loop_with_comp"
 ; JSON-DAG: "in_loop": true
 ; JSON-DAG: "iv_start": 0
@@ -46,3 +46,14 @@ define void @main(ptr %rt) {
 ; JSON-DAG: "bound_known": true
 ; JSON-DAG: "bound_param_idx": 3
 ; JSON-DAG: "compute_before_flops": 7
+;
+; The loop body issues the same descriptor every iteration: peer, buffers,
+; offsets and size are all kernel formals or literals, none of them the
+; induction variable. That is the case the host can stage once and trigger
+; trip_count times, and it is invisible to a runtime looking at one call.
+; JSON-DAG: "descriptor_reusable": true
+; JSON-DAG: "buffer_reusable": true
+; batch_size is carried in the kernel JSON rather than derived, because
+; grouping transfers by completion point needs the CFG.
+; JSON-DAG: "batch_size": 3
+
