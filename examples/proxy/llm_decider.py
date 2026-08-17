@@ -185,6 +185,62 @@ def score(src, answer_path):
               f" {avail[pt][o]:8.1f}us   {r:.2f}x")
 
 
+def dist(src, answer_paths):
+    """Several independent answers to the identical prompt.
+
+    A single run of a sampled model is one draw, and reporting it as though
+    it were the model's performance overstates whatever it happens to say.
+    The controls are deterministic given the split, so only the model row
+    needs a spread.
+    """
+    pts, knobs = load(src)
+    L = pick_global_L(pts, knobs)
+    avail = {pt: {c: v for c, v in cfgs.items()
+                  if knobs[c][0] == "trigger" or knobs[c][3] == L}
+             for pt, cfgs in pts.items()}
+    train, test = splits(pts, GROUP_BY, SPLIT_SEED)
+
+    rs, agree = [], defaultdict(set)
+    for path in answer_paths:
+        raw = open(path).read().strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+        reply = json.loads(raw)
+        picks = {}
+        for pt in test:
+            c = reply.get(f"b{pt[0]}_k{pt[1]}_d{pt[2]}")
+            if c is None:
+                c = min(avail[pt], key=avail[pt].get)
+            elif c not in avail[pt]:
+                c = max(avail[pt], key=avail[pt].get)
+            picks[pt] = c
+            agree[pt].add(c)
+        rs.append(regret(pts, test, picks))
+
+    import numpy as np
+    m_all = _cost_model(train, avail, knobs, "all")
+    rng = np.random.default_rng(0)
+    print(f"{len(answer_paths)} independent answers to the identical prompt, "
+          f"{len(test)} held-out call sites\n")
+    print(f"{'decider':<40} {'gmean regret':>13}  {'spread':>16}")
+    print(f"{'per-point oracle':<40} {1.0:>12.3f}x")
+    print(f"{'LLM one-shot, compiler facts only':<40} {np.mean(rs):>12.3f}x"
+          f"  [{min(rs):.3f} .. {max(rs):.3f}]")
+    print(f"{'GBT cost model (same facts, trained)':<40} "
+          f"{regret(pts, test, pol_gbt(train, test, pts, avail, knobs, 'all', m_all)):>12.3f}x")
+    print(f"{'hand rule: P = min(K, 8)':<40} "
+          f"{regret(pts, test, pol_hand(None, test, pts, avail, knobs, lambda b, K, D: min(K, 8))):>12.3f}x")
+    print(f"{'random search, 8 measurements':<40} "
+          f"{regret(pts, test, pol_random_search(train, test, pts, avail, knobs, 8, rng)):>12.3f}x")
+    print(f"{'best global config from train':<40} "
+          f"{regret(pts, test, pol_best_global(train, test, pts, avail, knobs)):>12.3f}x")
+
+    split = sum(1 for pt in test if len(agree[pt]) > 1)
+    print(f"\nthe runs disagreed at {split} of {len(test)} sites; "
+          f"agreement alone would not mean the answer is right, but "
+          f"disagreement bounds how much of the score is luck")
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print(__doc__)
@@ -193,6 +249,8 @@ if __name__ == "__main__":
         emit(sys.argv[2])
     elif sys.argv[1] == "score":
         score(sys.argv[2], sys.argv[3])
+    elif sys.argv[1] == "dist":
+        dist(sys.argv[2], sys.argv[3:])
     else:
         print(__doc__)
         sys.exit(2)

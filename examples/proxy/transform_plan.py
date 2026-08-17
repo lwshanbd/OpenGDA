@@ -248,12 +248,70 @@ def score(path, plan_path):
               f"{cost[s][k] / cost[s][o]:.2f}x")
 
 
+def sensitivity(path):
+    """How much the choice matters at each site.
+
+    A site whose actions all cost about the same cannot separate one
+    decider from another, so a headline averaged over such sites mostly
+    reports how many of them there were. Reported next to the results so
+    a flat test set is visible rather than inferred.
+    """
+    facts, cost = load(path)
+    print(f"{'site':<6} {'split':<6} {'coal':<5} {'shape':<20} "
+          f"{'best':>8} {'median legal':>13} {'sensitivity':>12}")
+    for s in sorted(facts):
+        f = facts[s]
+        legal = legal_actions(f, cost[s])
+        vals = sorted(cost[s][k] for k in legal)
+        best, med = vals[0], vals[len(vals) // 2]
+        shape = (f"{f['message_bytes']}B x{f['trip_count']}"
+                 f" d={f['flops_to_first_use_us']}")
+        print(f"{s:<6} {'TEST' if is_test(s) else 'train':<6} "
+              f"{'yes' if f['coalescable'] else 'NO':<5} {shape:<20} "
+              f"{best:>8.1f} {med:>13.1f} {med / best:>11.2f}x")
+
+
+def dist(path, plan_paths):
+    """Several independent plans for the identical prompt."""
+    facts, cost = load(path)
+    test = [s for s in facts if is_test(s)]
+    rs, agree = [], defaultdict(set)
+    import numpy as np
+    for p in plan_paths:
+        raw = open(p).read().strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+        plan = json.loads(raw)
+        tot = []
+        for s in test:
+            legal = legal_actions(facts[s], cost[s])
+            a = plan.get(s, "")
+            try:
+                k = (int(a.split("_")[0][5:]), int(a.split("_")[1][6:]))
+            except Exception:
+                k = None
+            if k not in legal:
+                k = max(legal, key=lambda x: cost[s][x])
+            agree[s].add(k)
+            tot.append(cost[s][k] / min(cost[s][x] for x in legal))
+        rs.append(gmean(tot))
+    print(f"{len(plan_paths)} independent plans, {len(test)} held-out sites")
+    print(f"  LLM plan: mean {np.mean(rs):.3f}x  "
+          f"[{min(rs):.3f} .. {max(rs):.3f}]")
+    split = sum(1 for s in test if len(agree[s]) > 1)
+    print(f"  the plans disagreed at {split} of {len(test)} sites")
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print(__doc__)
         sys.exit(2)
     if sys.argv[1] == "emit":
         emit(sys.argv[2])
+    elif sys.argv[1] == "sensitivity":
+        sensitivity(sys.argv[2])
+    elif sys.argv[1] == "dist":
+        dist(sys.argv[2], sys.argv[3:])
     elif sys.argv[1] == "score":
         score(sys.argv[2], sys.argv[3])
     else:

@@ -175,23 +175,47 @@ speedup.
 
 ## 5. Per-site transformation planning
 
-`run_transform_sites.sh` measures every legal action at six call sites
-chosen to disagree with each other.
+`run_transform_sites.sh` measures every legal action at sixteen call sites
+spanning message size, trip count, adjacency and available overlap. The
+train/test split is mechanical -- every third site -- and is declared in
+the script before anything is measured.
 
-| site | shape | coalescable | best action | best | default | headroom |
-| --- | --- | --- | --- | --- | --- | --- |
-| A | 256B x 64 | yes | merge64/blocks1 | 20.6 | 215.4 | 10.44x |
-| B | 256B x 64, gaps | no | merge1/blocks4 | 105.8 | 218.3 | 2.06x |
-| C | 4KB x 64 | yes | merge32/blocks1 | 30.8 | 218.8 | 7.10x |
-| D | 64KB x 32 | yes | merge8/blocks2 | 107.3 | 121.2 | 1.13x |
-| E | 256B x 64, d=400us | yes | merge64/blocks1 | 419.8 | 615.8 | 1.47x |
-| F | 4KB x 32, gaps | no | merge1/blocks4 | 67.5 | 118.1 | 1.75x |
+| site | shape | coalescable | best action | best | default | headroom | sensitivity |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| S01 | 256B x 64 | yes | merge64/blocks1 | 21.9 | 213.3 | 9.75x | 2.02x |
+| S03 *(test)* | 1KB x 64 | yes | merge64/blocks1 | 23.3 | 218.3 | 9.36x | 1.88x |
+| S04 | 4KB x 64 | yes | merge64/blocks1 | 30.7 | 217.1 | 7.07x | 1.51x |
+| S06 *(test)* | 16KB x 32 | yes | merge32/blocks1 | 41.5 | 118.4 | 2.85x | 1.12x |
+| S08 | 64KB x 32 | yes | **merge4**/blocks1 | 107.2 | 123.3 | 1.15x | 1.01x |
+| S09 *(test)* | 64KB x 16, d=100us | yes | merge16/blocks1 | 118.8 | 169.5 | 1.43x | 1.09x |
+| S10 | 256KB x 16 | yes | **merge4**/blocks1 | 192.5 | 194.5 | 1.01x | 1.00x |
+| S12 *(test)* | 1KB x 64, gaps | no | merge1/blocks4 | 103.1 | 216.5 | 2.10x | 1.16x |
+| S15 *(test)* | 16KB x 32, gaps | no | merge1/blocks4 | 69.8 | 119.9 | 1.72x | 1.11x |
 
-The best **single global action must be legal at every site**, and one
-site that is not provably adjacent forces the whole program to `merge=1`.
-Scored on the held-out sites that is 1.087x, against 1.425x for the
-context-free lowering and 1.000x for per-site choice. This is the argument
-for per-site specialization as a measurement rather than an assertion.
+(S02, S05, S07, S11, S13, S14, S16 omitted for space; all are training
+sites. "Sensitivity" is the median legal action divided by the best, i.e.
+how much the choice actually matters there.)
+
+Note S08 and S10: the best merge factor is **interior**, not maximal. Once
+a site is bandwidth-bound, further merging only lengthens the last
+message's un-overlappable tail. So "merge as much as is legal" is wrong,
+which is what makes this a decision rather than a rewrite rule.
+
+Scored on the five held-out sites:
+
+| decider | gmean regret |
+| --- | --- |
+| per-site oracle | 1.000x |
+| hand rule (two constants, fitted on train) | 1.000x |
+| LLM plan, 3 independent runs | 1.001x |
+| random search, 4 measurements | 1.007x |
+| **best single global action, legal everywhere** | **1.550x** |
+| **context-free lowering (`merge1/blocks1`)** | **2.677x** |
+
+The best **single global action must be legal at every site**, and one site
+that is not provably adjacent forces the whole program to `merge=1`. That
+is the argument for per-site specialization stated as a measurement:
+**1.550x**, against **2.677x** for what is emitted today.
 
 ---
 
@@ -235,13 +259,28 @@ This negative is load-bearing rather than embarrassing. It means any later
 advantage on the transformation space can be attributed to the action
 space rather than to the model being generically stronger.
 
-**The transformation-space comparison is not yet discriminating.** The LLM
-produced a legal plan matching the oracle at all three held-out sites
-(1.000x) — but so did random search at 4 measurements (1.001x) and the
-hand rule (1.002x). The test set is too easy: three sites, and at two of
-them the top six actions are within 0.6% of each other. The sites with
-real headroom (A at 10.44x, C at 7.10x) landed in the training split. Do
-not re-split after the fact; add sites and fix the split up front.
+**The transformation space is rule-shaped too.** This was the space that
+was supposed to separate them, since merging is an action no fixed-arity
+model can express. With sixteen sites and the split fixed in advance,
+three independent language-model runs produced *identical* plans scoring
+1.001x — and a two-constant hand rule scored 1.000x. Random search reaches
+1.007x with four measurements.
+
+So the second attempt to find a decision this project can pose where a
+learned or prompted decider beats a written rule has also come back
+negative. Both attempts had large compiler-side effects (1.550x and 2.677x
+here) and a decider choice that barely mattered. The honest reading is
+that **the value measured so far is in the analysis — what is legal and
+what is reachable — and not in the sophistication of whatever picks among
+the legal options.**
+
+What has not been tried: a transformation whose legality criterion is
+*orthogonal* to size and count. Both spaces tested so far are decided by
+the same two quantities, which is exactly the situation a threshold rule
+handles. If an orthogonal criterion is added and one line still suffices,
+this decision problem is rule-shaped and the paper should say so — the
+plan anticipated that outcome and keeps compiler-guided autotuning as the
+main line with the model layer demoted.
 
 ---
 
