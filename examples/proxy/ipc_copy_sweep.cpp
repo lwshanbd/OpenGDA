@@ -217,6 +217,57 @@ int main(int argc, char** argv) {
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
+    // GICC_CP_SWEEP=1: walk the whole knob space inside one process. The
+    // per-run cost of this benchmark is dominated by job launch, not by
+    // measurement, so sweeping 200+ configurations as 200+ srun
+    // invocations spends an hour on scheduling to collect a few seconds of
+    // data. Sweeping internally also holds the allocation, the node and
+    // the IPC mapping fixed across the whole grid, which is what makes
+    // configurations comparable to each other in the first place.
+    if (env_int("GICC_CP_SWEEP", 0)) {
+        const int    vecs[]  = {1, 4, 8, 16};
+        const int    nts[]   = {0, 1};
+        const int    unrs[]  = {1, 2, 4};
+        const int    blks[]  = {64, 256, 1024};
+        const int    nstrs[] = {1, 2, 4};
+        if (rank == 0)
+            printf("vec,nt,unroll,block,nstream,bytes,us,GBps\n");
+        for (int v : vecs) for (int n : nts) for (int u : unrs)
+        for (int bl : blks) for (int ns : nstrs) {
+            CopyCfg c = cfg;
+            c.vec = v; c.nt = n; c.unroll = u; c.block = bl; c.nstream = ns;
+            c.grid = 0; c.mech = "kernel";
+            for (int si = 0; si < kNSizes; ++si) {
+                size_t bytes = kSizes[si];
+                MPI_Barrier(MPI_COMM_WORLD);
+                if (rank == 0) {
+                    for (int it = 0; it < kWarmup; ++it)
+                        launch_copy(c, peer_dst, d_src, bytes, stream, streams);
+                    (void)gpuStreamSynchronize(stream);
+                    for (int k = 0; k < c.nstream; ++k)
+                        (void)gpuStreamSynchronize(streams[k]);
+                    double t0 = MPI_Wtime();
+                    for (int it = 0; it < kIters; ++it)
+                        launch_copy(c, peer_dst, d_src, bytes, stream, streams);
+                    (void)gpuStreamSynchronize(stream);
+                    for (int k = 0; k < c.nstream; ++k)
+                        (void)gpuStreamSynchronize(streams[k]);
+                    double t1 = MPI_Wtime();
+                    double us = (t1 - t0) * 1e6 / kIters;
+                    printf("%d,%d,%d,%d,%d,%zu,%.3f,%.2f\n", v, n, u, bl, ns,
+                           bytes, us, bytes / (us * 1e3));
+                    fflush(stdout);
+                }
+                MPI_Barrier(MPI_COMM_WORLD);
+            }
+        }
+        rt.reset();
+        MPI_Barrier(MPI_COMM_WORLD);
+        (void)gpuFree(d_src); (void)gpuFree(d_dst);
+        MPI_Finalize();
+        return 0;
+    }
+
     if (rank == 0) {
         printf("# cfg vec=%d block=%d grid=%d unroll=%d nt=%d nstream=%d mech=%s iters=%d\n",
                cfg.vec, cfg.block, cfg.grid, cfg.unroll, cfg.nt, cfg.nstream,
