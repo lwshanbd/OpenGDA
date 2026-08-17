@@ -118,7 +118,62 @@ struct OpTemplate {
     // runtime value, i.e. the distance is a lower bound rather than an
     // estimate. The decider refuses to lean on an inexact distance.
     bool                         distance_exact = true;
+    // How many transfers reach the wire on the same completion point as
+    // this one, counting a loop body trip_count times. The compiler sees
+    // this whole group before the first transfer is issued; a runtime
+    // sees its members one at a time and cannot know how many follow.
+    // Needs the CFG to compute, so unlike the reuse predicates below it
+    // is carried rather than derived. -1 when not computed.
+    long long                    batch_size          = -1;
 };
+
+// Is this descriptor expression the same on every iteration of the
+// enclosing loop?
+//
+// Conservative by construction: only a kernel formal or a literal counts
+// as invariant. A Derived leaf means the builder could not model the
+// value at all, so claiming invariance would be a guess — and these
+// predicates gate hoisting the descriptor out of the loop, where a wrong
+// answer silently sends stale bytes.
+inline bool isLoopInvariant(const ArgRef &a) {
+    switch (a.kind) {
+        case ArgRef::Kind::LoopIv:   return false;
+        case ArgRef::Kind::Derived:  return false;
+        case ArgRef::Kind::Param:
+        case ArgRef::Kind::ConstI64: return true;
+        // A field load is invariant exactly when its index is: the host
+        // mirror itself does not change during a launch.
+        case ArgRef::Kind::BinOp:
+        case ArgRef::Kind::Cast:
+        case ArgRef::Kind::FieldLoad: break;
+    }
+    for (const auto &c : a.children)
+        if (!isLoopInvariant(c)) return false;
+    return true;
+}
+
+inline bool argInvariant(const OpTemplate &op, const char *name) {
+    auto it = op.args.find(name);
+    return it != op.args.end() && isLoopInvariant(it->second);
+}
+
+// The registered buffers this op names do not vary, so registration and
+// address resolution can be hoisted even when the OFFSETS vary per
+// iteration — the ordinary stencil shape, and the reason this is a
+// separate predicate rather than implied by descriptorReusable.
+inline bool bufferReusable(const OpTemplate &op) {
+    if (op.kind != "put_no_db" && op.kind != "get_no_db") return false;
+    return argInvariant(op, "dst_buf") && argInvariant(op, "src_buf");
+}
+
+// Every field of the descriptor repeats, so the host can stage it ONCE
+// and trigger it trip_count times instead of restaging per iteration.
+// Requires a loop worth amortising over, and one the pass understood.
+inline bool descriptorReusable(const OpTemplate &op) {
+    return bufferReusable(op) && op.loop.inLoop && !op.loop.degraded &&
+           argInvariant(op, "target_rank") && argInvariant(op, "dst_off") &&
+           argInvariant(op, "src_off") && argInvariant(op, "size");
+}
 
 struct ParamInfo {
     std::string name;        // formal name as it appears in IR (may be empty)
