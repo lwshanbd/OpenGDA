@@ -282,6 +282,63 @@ this decision problem is rule-shaped and the paper should say so — the
 plan anticipated that outcome and keeps compiler-guided autotuning as the
 main line with the model layer demoted.
 
+## 6. Cross-site merging — a headroom check, run before any decider
+
+Merging two *different* call sites whose destinations are adjacent. The
+structure looked like the one that had been missing: the more profitable
+form carries the stricter legality requirement, and the criterion is
+dependence rather than size.
+
+  * `hoist-B` — pull the later transfer up to the earlier one. Merged
+    message and full overlap, but needs B's payload final that early.
+  * `sink-A` — push the earlier one down. Merged message, gives up A's
+    overlap, needs only that A's payload may be delayed.
+  * `separate` — leave both where they are.
+
+Measured over 20 points of (message size x gap), before involving a
+decider, because a decider scoring well on a space with one dominant
+answer reports the absence of a problem rather than solving one:
+
+| | result |
+| --- | --- |
+| hoisting legal | `hoist-B` wins **20 of 20**; always-hoist *is* the oracle |
+| hoisting illegal | `sink-A` 12, `separate` 8, flipping with message size — 1.18x for sink at 1KB, 1.23x for separate at 512KB — but **1.026x in aggregate** |
+
+The acceptance bar was fixed before the run: build the decider experiment
+only if the oracle clearly beats both fixed strategies. It does not, so it
+was not built.
+
+What the run did measure is worth more than what it went looking for:
+
+| | value |
+| --- | --- |
+| proving the hoist legal (analysis) | **1.055x** mean, **1.33x** at best |
+| choosing well among legal options (decision) | 1.026x |
+
+## The result that keeps reappearing
+
+Four transformation families, measured independently:
+
+| family | analysis is worth | choosing among legal options is worth |
+| --- | --- | --- |
+| configuration space (`path`/`B`/`P`/`L`) | **1.56x** | ~0% (hand rule ties GBT and LLM) |
+| parameter availability (O5) | **1.53x** | — (legality only) |
+| in-loop coalescing | **1.55x** | 0.1% |
+| cross-site merging | 1.06x (max 1.33x) | 2.6% |
+
+**The compiler's legality and reachability analysis is worth 1.3-2.7x.
+Choosing among whatever it leaves legal is worth 0-6%, and a rule with two
+constants captures it.** This is not one space that happened to be easy;
+it is four, chosen to be different from each other, and the fourth was
+specifically constructed to have an orthogonal legality criterion.
+
+The honest reading is that the contribution this project can demonstrate
+is the analysis, not the decider. That is the plan's own Gate 3 fallback:
+keep compiler-guided communication optimization as the main line and demote
+the model layer. The negative results in the section above are what make
+that framing credible rather than a retreat — a paper claiming the analysis
+matters and the decider does not is stronger when it has measured both.
+
 ---
 
 ## Compiler analysis available to the decider
@@ -358,15 +415,28 @@ transfer rather than emit wrong code.
 
 ## Next
 
-1. Extend the transformation site set (~16), fixing the train/test split
-   before measuring, and report per-site choice sensitivity so flat sites
-   do not dilute the result.
-2. Add a transformation whose legality criterion is *orthogonal* to the
-   present ones — fence scope is the candidate: it is decided by which
-   consumer reads the data and in which address space, and is currently
-   hardcoded to `__threadfence_system`. Measured at 8.81 us vs 2.57 us for
-   a 1MB intra-node copy (3.4x). If a one-line rule still suffices once an
-   orthogonal criterion is present, this decision problem is rule-shaped
-   and should be reported as such.
-3. Repeat both language-model experiments enough times to report a
-   distribution.
+Items 1-3 of the previous list are done: sixteen sites with the split
+fixed in advance, an orthogonal legality criterion (cross-site dependence
+rather than size), and four runs of each model experiment.
+
+The question that remains open is not which decider to use — four families
+now agree that it barely matters — but how far the *analysis* side goes:
+
+1. **Fence scope.** Still the largest single unexploited effect measured
+   anywhere in this project: 8.81 us vs 2.57 us for a 1MB intra-node copy,
+   **3.4x**, and currently hardcoded to `__threadfence_system` at every
+   site. Its criterion is pure dependence — which consumer reads the data
+   and in which address space — so it belongs with the analysis results
+   rather than the decider ones.
+2. **Real applications.** Everything above is microbenchmarks. ASF and
+   Minimod are on disk and already GICC-integrated. Whether the analysis
+   proves anything useful on code nobody wrote for it is untested, and it
+   is the question a reviewer will ask first.
+3. **A second platform**, for the portability claim (the plan's H3).
+
+If the model layer is to be revisited, the honest place is not another
+selection task. It is one where the *action cannot be enumerated at all* —
+proposing a transformation from IR rather than picking from a legality-
+masked list. That experiment has not been run, and this log should not be
+read as having ruled it out; what has been ruled out is that a decider
+helps on any selection problem this project has been able to construct.
