@@ -177,6 +177,11 @@ json::Value toRecord(const std::string &siteId,
     // loop it sits in nor the group it belongs to.
     r["descriptor_reusable"] = descriptorReusable(op);
     r["buffer_reusable"]     = bufferReusable(op);
+    // Consecutive iterations land exactly `size` apart at both ends, so any
+    // run of this loop's transfers may be issued as one larger transfer.
+    // A runtime cannot establish this: when it sees transfer i it does not
+    // know where i+1 will go, and by then i has already been issued.
+    r["coalescable"]         = transfersAreAdjacent(op);
     if (op.batch_size >= 0)
         r["batch_size"] = static_cast<int64_t>(op.batch_size);
     else

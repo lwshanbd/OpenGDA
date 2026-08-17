@@ -175,6 +175,117 @@ inline bool descriptorReusable(const OpTemplate &op) {
            argInvariant(op, "src_off") && argInvariant(op, "size");
 }
 
+// Structural equality of two descriptor expressions. Deliberately syntactic:
+// two different spellings of the same value compare unequal, which costs an
+// optimisation but never authorises a wrong one.
+inline bool sameExpr(const ArgRef &a, const ArgRef &b) {
+    if (a.kind != b.kind) return false;
+    switch (a.kind) {
+        case ArgRef::Kind::ConstI64:  return a.constVal == b.constVal;
+        case ArgRef::Kind::Param:     return a.paramIdx == b.paramIdx;
+        case ArgRef::Kind::LoopIv:    return true;
+        case ArgRef::Kind::Derived:   return false;   // unknown != unknown
+        case ArgRef::Kind::FieldLoad:
+            if (a.paramIdx != b.paramIdx ||
+                a.fieldByteOffset != b.fieldByteOffset ||
+                a.structElemSize != b.structElemSize) return false;
+            break;
+        case ArgRef::Kind::BinOp:
+        case ArgRef::Kind::Cast:
+            if (a.opStr != b.opStr) return false;
+            break;
+    }
+    if (a.children.size() != b.children.size()) return false;
+    for (size_t i = 0; i < a.children.size(); ++i)
+        if (!sameExpr(a.children[i], b.children[i])) return false;
+    return true;
+}
+
+// Coefficient of the induction variable in an affine expression, returned
+// as an expression rather than a number because the stride is usually a
+// kernel formal. `hasIv` distinguishes "loop-invariant" (coefficient zero)
+// from "not affine at all", which must not be conflated: the first is
+// mergeable-with-itself, the second is unanalysable.
+inline bool ivCoefficient(const ArgRef &a, ArgRef &coef, bool &hasIv) {
+    auto oneOf = [](int64_t v) {
+        ArgRef r; r.kind = ArgRef::Kind::ConstI64; r.constVal = v; return r;
+    };
+    switch (a.kind) {
+        case ArgRef::Kind::ConstI64:
+        case ArgRef::Kind::Param:
+        case ArgRef::Kind::FieldLoad:
+            hasIv = false; coef = oneOf(0); return true;
+        case ArgRef::Kind::LoopIv:
+            hasIv = true;  coef = oneOf(1); return true;
+        case ArgRef::Kind::Derived:
+            return false;
+        case ArgRef::Kind::Cast:
+            return a.children.size() == 1 &&
+                   ivCoefficient(a.children[0], coef, hasIv);
+        case ArgRef::Kind::BinOp:
+            break;
+    }
+    if (a.children.size() != 2) return false;
+    ArgRef ca, cb; bool ia = false, ib = false;
+    if (!ivCoefficient(a.children[0], ca, ia)) return false;
+    if (!ivCoefficient(a.children[1], cb, ib)) return false;
+
+    if (a.opStr == "add" || a.opStr == "sub") {
+        hasIv = ia || ib;
+        if (ia && ib) return false;          // iv on both sides: give up
+        coef = ia ? ca : cb;
+        // (invariant - iv*c) would need a negated coefficient; refuse
+        // rather than emit one with the wrong sign.
+        if (a.opStr == "sub" && ib) return false;
+        return true;
+    }
+    if (a.opStr == "mul" || a.opStr == "shl") {
+        if (ia && ib) return false;          // iv*iv is not affine
+        if (!ia && !ib) { hasIv = false; coef = oneOf(0); return true; }
+        // The iv-free side is the stride. For shl the iv must be on the
+        // left, and the stride is 1 << c.
+        const ArgRef &other = ia ? a.children[1] : a.children[0];
+        if (a.opStr == "shl") {
+            if (!ia || other.kind != ArgRef::Kind::ConstI64 ||
+                other.constVal < 0 || other.constVal > 62) return false;
+            hasIv = true; coef = oneOf(int64_t(1) << other.constVal);
+            return true;
+        }
+        // Only a unit iv coefficient is handled; i*a*b would need the
+        // product of two expressions, which there is no ArgRef for.
+        const ArgRef &ivSideCoef = ia ? ca : cb;
+        if (!(ivSideCoef.kind == ArgRef::Kind::ConstI64 &&
+              ivSideCoef.constVal == 1)) return false;
+        hasIv = true; coef = other; return true;
+    }
+    return false;
+}
+
+// Do consecutive iterations of this transfer land exactly `size` apart at
+// BOTH ends? If so the loop's transfers are one contiguous region and any
+// run of them may be issued as a single larger transfer.
+//
+// This is the property a runtime provably cannot establish: when it sees
+// transfer i it does not know where i+1 will go, and by the time it does,
+// i has already been issued. Merging is also the reason a decision like
+// this cannot be expressed as picking from a fixed menu — which runs to
+// merge depends on the program's address pattern, so the action's arity
+// follows the program rather than the model.
+inline bool transfersAreAdjacent(const OpTemplate &op) {
+    if (op.kind != "put_no_db" && op.kind != "get_no_db") return false;
+    if (!op.loop.inLoop || op.loop.degraded) return false;
+    auto sz = op.args.find("size");
+    if (sz == op.args.end() || !isLoopInvariant(sz->second)) return false;
+    for (const char *f : {"dst_off", "src_off"}) {
+        auto it = op.args.find(f);
+        if (it == op.args.end()) return false;
+        ArgRef coef; bool hasIv = false;
+        if (!ivCoefficient(it->second, coef, hasIv)) return false;
+        if (!hasIv || !sameExpr(coef, sz->second)) return false;
+    }
+    return true;
+}
+
 struct ParamInfo {
     std::string name;        // formal name as it appears in IR (may be empty)
     std::string typeStr;     // "i32" / "i64" / "ptr" / ...

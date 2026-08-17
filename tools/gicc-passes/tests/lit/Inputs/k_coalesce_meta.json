@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "kernel_mangled": "_Z10k_coalescePN4gicc9DeviceCtxEiiill",
+  "kernel_simple":  "k_coalesce",
+  "params": [
+    { "idx": 0, "name": "ctx",    "type": "ptr" },
+    { "idx": 1, "name": "peer",   "type": "i32" },
+    { "idx": 2, "name": "buf",    "type": "i32" },
+    { "idx": 3, "name": "n",      "type": "i32" },
+    { "idx": 4, "name": "bytes",  "type": "i64" },
+    { "idx": 5, "name": "stride", "type": "i64" }
+  ],
+  "ops": [
+    {
+      "site_id": "t.cpp:5:k_coalesce::0",
+      "kind":    "put_no_db",
+      "guard":   { "kind": "always" },
+      "loop":    { "in_loop": true, "iv_param": 3, "iv_start": 0, "iv_step": 1 },
+      "comment": "off = i*bytes, size = bytes -> contiguous",
+      "args": {
+        "target_rank": { "kind": "param", "param": 1 },
+        "dst_buf":     { "kind": "param", "param": 2 },
+        "src_buf":     { "kind": "param", "param": 2 },
+        "size":        { "kind": "param", "param": 4 },
+        "dst_off": {
+          "kind": "binop", "op": "mul",
+          "children": [ { "kind": "loop_iv" }, { "kind": "param", "param": 4 } ]
+        },
+        "src_off": {
+          "kind": "binop", "op": "mul",
+          "children": [ { "kind": "loop_iv" }, { "kind": "param", "param": 4 } ]
+        }
+      }
+    },
+    {
+      "site_id": "t.cpp:6:k_coalesce::1",
+      "kind":    "put_no_db",
+      "guard":   { "kind": "always" },
+      "loop":    { "in_loop": true, "iv_param": 3, "iv_start": 0, "iv_step": 1 },
+      "comment": "off = i*stride, size = bytes -> gaps, must refuse",
+      "args": {
+        "target_rank": { "kind": "param", "param": 1 },
+        "dst_buf":     { "kind": "param", "param": 2 },
+        "src_buf":     { "kind": "param", "param": 2 },
+        "size":        { "kind": "param", "param": 4 },
+        "dst_off": {
+          "kind": "binop", "op": "mul",
+          "children": [ { "kind": "loop_iv" }, { "kind": "param", "param": 5 } ]
+        },
+        "src_off": {
+          "kind": "binop", "op": "mul",
+          "children": [ { "kind": "loop_iv" }, { "kind": "param", "param": 5 } ]
+        }
+      }
+    },
+    {
+      "site_id": "t.cpp:7:k_coalesce::2",
+      "kind":    "put_no_db",
+      "guard":   { "kind": "always" },
+      "loop":    { "in_loop": true, "iv_param": 3, "iv_start": 0, "iv_step": 1 },
+      "comment": "dst contiguous but src is not -- one end is not enough",
+      "args": {
+        "target_rank": { "kind": "param", "param": 1 },
+        "dst_buf":     { "kind": "param", "param": 2 },
+        "src_buf":     { "kind": "param", "param": 2 },
+        "size":        { "kind": "param", "param": 4 },
+        "dst_off": {
+          "kind": "binop", "op": "mul",
+          "children": [ { "kind": "loop_iv" }, { "kind": "param", "param": 4 } ]
+        },
+        "src_off": {
+          "kind": "binop", "op": "mul",
+          "children": [ { "kind": "loop_iv" }, { "kind": "param", "param": 5 } ]
+        }
+      }
+    }
+  ]
+}
