@@ -619,6 +619,35 @@ endif()
 _proxy_example_setup(crosssite_merge)
 
 # ---------------------------------------------------------------------------
+# fence_effect - what the completion fence costs where it actually sits: a
+# kernel that dirties a region, transfers, and quiets. The copy microbench
+# measured the fence in isolation; this measures whether the scope is worth
+# a compile-time decision inside a real kernel.
+# ---------------------------------------------------------------------------
+if(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(fence_effect.cpp
+                                ${PROXY_LIBFABRIC_SRC} ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(fence_effect
+        fence_effect.cpp ${PROXY_LIBFABRIC_SRC} ${PROXY_THREAD_SRC})
+    target_link_libraries(fence_effect PRIVATE
+        CUDA::cudart ${PROXY_EX_LIBFABRIC_LIBRARY} ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS} pthread)
+elseif(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(fence_effect.cpp
+                                ${PROXY_LIBFABRIC_SRC} ${PROXY_THREAD_SRC}
+                                ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp
+        PROPERTIES LANGUAGE HIP)
+    add_executable(fence_effect
+        fence_effect.cpp ${PROXY_LIBFABRIC_SRC} ${PROXY_THREAD_SRC}
+        ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp)
+    target_link_libraries(fence_effect PRIVATE
+        hip::device ${PROXY_EX_LIBFABRIC_LIBRARY} ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS} pthread)
+endif()
+_proxy_example_setup(fence_effect)
+
+# ---------------------------------------------------------------------------
 # mixed_callsite - one program, four call sites with different compiler-visible
 # context; enumerates legal per-call-site path assignments. Uses both dispatch
 # paths in a single process via Runtime::enable_mixed_dispatch().
