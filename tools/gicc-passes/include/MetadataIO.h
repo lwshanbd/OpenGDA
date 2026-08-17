@@ -125,6 +125,12 @@ struct OpTemplate {
     // Needs the CFG to compute, so unlike the reuse predicates below it
     // is carried rather than derived. -1 when not computed.
     long long                    batch_size          = -1;
+    // For a flush/quiet: the weakest memory fence scope that is still
+    // sound here (0 none, 1 block, 2 device, 3 system). Needs forward
+    // reachability, so it is carried rather than derived. Defaults to the
+    // strongest, which is what every site emitted before the pass could
+    // choose, so an unset value can only be conservative.
+    int                          fence_scope         = 3;
 };
 
 // Is this descriptor expression the same on every iteration of the

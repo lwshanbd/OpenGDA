@@ -580,6 +580,57 @@ long long tripCountFor(const CallInst *CI, LoopInfo *LI, ScalarEvolution *SE) {
     return n ? static_cast<long long>(n) : -1;
 }
 
+// What fence scope does this completion point actually need?
+//
+// The fence after a quiet exists so that reads issued AFTER it observe
+// what the NIC or the proxy wrote. If nothing on the device reads
+// anything after this point, the kernel ends and the host's stream sync
+// supplies the ordering, so the fence is doing no work -- and it is not
+// free, because a system fence writes back what the kernel just wrote.
+//
+// Deliberately coarse: any load, atomic, or call that might read counts,
+// because without alias analysis there is no way to tell a read of the
+// landed payload from any other read. Coarse in the SAFE direction --
+// the answer is "keep the strongest fence" whenever anything at all could
+// read, and a wrong answer in the weak direction gives stale data with
+// nothing at runtime to catch it.
+int fenceScopeFor(const CallInst *CI, const Function *K) {
+    if (!CI || !K) return 3;                       // FENCE_SYSTEM
+
+    auto mightRead = [](const Instruction &I) {
+        if (isa<LoadInst>(&I) || isa<AtomicRMWInst>(&I) ||
+            isa<AtomicCmpXchgInst>(&I))
+            return true;
+        if (const auto *C = dyn_cast<CallInst>(&I)) {
+            const Function *F = C->getCalledFunction();
+            // An indirect call, or one whose body is not here, could read
+            // anything. Intrinsics that only write are the exception worth
+            // making, since fences and stores are common right after.
+            if (!F) return true;
+            return !F->onlyWritesMemory() && !F->doesNotAccessMemory();
+        }
+        return false;
+    };
+
+    // Rest of the quiet's own block, then everything reachable forward.
+    bool seen = false;
+    for (const Instruction &I : *CI->getParent()) {
+        if (&I == CI) { seen = true; continue; }
+        if (seen && mightRead(I)) return 3;
+    }
+    SmallPtrSet<const BasicBlock *, 32> visited;
+    SmallVector<const BasicBlock *, 32> work(succ_begin(CI->getParent()),
+                                             succ_end(CI->getParent()));
+    while (!work.empty()) {
+        const BasicBlock *BB = work.pop_back_val();
+        if (!visited.insert(BB).second) continue;
+        for (const Instruction &I : *BB)
+            if (mightRead(I)) return 3;
+        work.append(succ_begin(BB), succ_end(BB));
+    }
+    return 0;                                      // FENCE_NONE
+}
+
 // How many transfers share a completion point.
 //
 // A flush or quiet is what actually releases staged work, so a transfer
@@ -697,6 +748,8 @@ KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
                                            DT, LI, SE, &distExact);
         op.distance_exact = distExact;
         op.trip_count     = tripCountFor(site.CI, LI, SE);
+        if (site.kind == GICCOpKind::Quiet || site.kind == GICCOpKind::Flush)
+            op.fence_scope = fenceScopeFor(site.CI, info.kernel);
 
         // Loop analysis runs first so we have the canonical iv PHI
         // before deriving guard / arg ArgRefs (so iv references become

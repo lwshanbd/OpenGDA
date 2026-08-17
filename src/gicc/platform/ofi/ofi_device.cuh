@@ -240,12 +240,42 @@ void get(DeviceCtx* ctx,
 // CPU proxy world (GICC_CPU_PROXY): pushes a QUIET cmd into ring `lane`
 // and spins until the host-published tail moves past our slot. Use after
 // a sequence of put(..., lane) / get(..., lane) with the same `lane` to
-// wait for completion of just that channel. __threadfence_system() after
-// the spin guarantees that subsequent device reads observe the proxy's
-// writes.
+// wait for completion of just that channel.
+//
+// `fence` is the scope of the memory fence issued after the spin, and it
+// exists so the LTO pass can set it per call site rather than every site
+// paying for the strongest one:
+//
+//   FENCE_SYSTEM  the landed data is read on the device after this quiet.
+//                 The writer was the NIC or the proxy, so making its
+//                 writes visible needs system scope. This is the default
+//                 and is what every site got before the pass could choose.
+//   FENCE_DEVICE  the subsequent reader is another block on this GPU.
+//   FENCE_BLOCK   the subsequent reader is in this block.
+//   FENCE_NONE    nothing on the device reads the landed data after this
+//                 quiet: the kernel ends and the host's stream sync
+//                 provides the ordering, so the fence is dead weight.
+//
+// It is not free at any scope. A system fence writes back what the kernel
+// just wrote, so its cost scales with the transferred bytes rather than
+// being one instruction: measured 8.81 us against 2.57 us for a 1 MB
+// intra-node copy, a factor of 3.4.
+//
+// Choosing it is a dependence question -- who reads the data next, and
+// from which address space -- which is why it is decided in the compiler
+// and not from a runtime knob. Getting it WRONG in the weak direction
+// yields stale reads with nothing to catch them, so the analysis must
+// default to FENCE_SYSTEM whenever it cannot prove otherwise.
 //==============================================================================
+enum : int {
+    FENCE_NONE   = 0,
+    FENCE_BLOCK  = 1,
+    FENCE_DEVICE = 2,
+    FENCE_SYSTEM = 3,
+};
+
 __device__ inline
-void quiet(DeviceCtx* ctx, int lane = 0) {
+void quiet(DeviceCtx* ctx, int lane = 0, int fence = FENCE_SYSTEM) {
 #ifdef GICC_CPU_PROXY
     if (!ctx) return;
     auto* ring = detail::lane_to_ring(ctx, lane);
@@ -261,9 +291,11 @@ void quiet(DeviceCtx* ctx, int lane = 0) {
         __builtin_amdgcn_s_sleep(1);
 #endif
     }
-    __threadfence_system();
+    if      (fence == FENCE_SYSTEM) __threadfence_system();
+    else if (fence == FENCE_DEVICE) __threadfence();
+    else if (fence == FENCE_BLOCK)  __threadfence_block();
 #else
-    (void)ctx; (void)lane;
+    (void)ctx; (void)lane; (void)fence;
 #endif
 }
 

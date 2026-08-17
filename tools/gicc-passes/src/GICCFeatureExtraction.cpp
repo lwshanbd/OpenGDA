@@ -182,6 +182,11 @@ json::Value toRecord(const std::string &siteId,
     // A runtime cannot establish this: when it sees transfer i it does not
     // know where i+1 will go, and by then i has already been issued.
     r["coalescable"]         = transfersAreAdjacent(op);
+    // For a completion point: the weakest sound fence scope. 3 (system) is
+    // what every site emitted before this existed, so it is also what the
+    // analysis reports whenever it cannot prove something weaker.
+    if (op.kind == "quiet" || op.kind == "flush")
+        r["fence_scope"] = static_cast<int64_t>(op.fence_scope);
     if (op.batch_size >= 0)
         r["batch_size"] = static_cast<int64_t>(op.batch_size);
     else

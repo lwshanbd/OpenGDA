@@ -286,6 +286,7 @@ json::Value templateToJSON(const KernelTemplate &t) {
         // `args` on read, so they are deliberately not stored.
         if (op.batch_size >= 0)
             o["batch_size"] = static_cast<int64_t>(op.batch_size);
+        if (op.fence_scope != 3) o["fence_scope"] = op.fence_scope;
 
         json::Object args;
         for (const auto &kv : op.args) {
@@ -354,6 +355,8 @@ bool templateFromJSON(const json::Value &v, KernelTemplate &out) {
                 op.compute_after = -1;
             if (auto b = oo->getBoolean("distance_exact"))
                 op.distance_exact = *b;
+            if (auto c = oo->getInteger("fence_scope"))
+                op.fence_scope = static_cast<int>(*c);
             if (auto c = oo->getInteger("batch_size"))
                 op.batch_size = static_cast<long long>(*c);
             else

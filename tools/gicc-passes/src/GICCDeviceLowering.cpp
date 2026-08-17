@@ -174,6 +174,7 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
     // this kernel — keep the device-side call so the put_no_db body in
     // ofi_device.cuh runs and pushes a TransferCmd into the proxy ring.
     SmallVector<std::pair<CallInst *, bool>, 16> putGetCalls;
+    bool changed = false;
     const auto &cfgRef = cfg;  // capture for the inner switch.
 
     for (Function &F : M) {
@@ -227,6 +228,38 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
                 proxyAware = kt.proxy_aware;
         }
 
+        // Fence scope, per completion point. The device header defaults the
+        // argument to FENCE_SYSTEM, so a site the analysis says nothing
+        // about keeps exactly the behaviour it had before this existed;
+        // only a proven-weaker scope is written back. Weakening a fence
+        // that was needed yields stale reads with nothing at runtime to
+        // catch it, so this only ever moves in the direction the analysis
+        // proved.
+        KernelTemplate ktFence;
+        const bool haveFence =
+            !cfgRef.metaDir.empty() &&
+            readKernelTemplate(cfgRef.metaDir, info.mangledName, ktFence);
+        if (haveFence) {
+            for (const auto &s : info.sites) {
+                if (s.kind != GICCOpKind::Quiet) continue;
+                auto it = std::find_if(
+                    ktFence.ops.begin(), ktFence.ops.end(),
+                    [&](const OpTemplate &o) { return o.siteId == s.siteId; });
+                if (it == ktFence.ops.end() || it->fence_scope == 3) continue;
+                // quiet(ctx, lane, fence): the fence is the last operand.
+                const unsigned idx = s.CI->arg_size() - 1;
+                if (idx < 2) continue;   // older signature, nothing to set
+                Type *ty = s.CI->getArgOperand(idx)->getType();
+                if (!ty->isIntegerTy()) continue;
+                s.CI->setArgOperand(
+                    idx, ConstantInt::get(ty, it->fence_scope));
+                errs() << "[device-lowering] " << s.siteId
+                       << ": fence scope " << it->fence_scope
+                       << " (was 3=system)\n";
+                changed = true;
+            }
+        }
+
         for (const auto &s : info.sites) {
             switch (s.kind) {
                 case GICCOpKind::PutNoDb:
@@ -261,7 +294,6 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
         }
     }
 
-    bool changed = false;
     for (auto &pr : putGetCalls) {
         if (pr.second) {
             // Proxy-aware kernel: keep the device body, but gate it to a
