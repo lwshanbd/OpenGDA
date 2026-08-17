@@ -131,6 +131,13 @@ struct OpTemplate {
     // strongest, which is what every site emitted before the pass could
     // choose, so an unset value can only be conservative.
     int                          fence_scope         = 3;
+    // Which block issues this transfer, when the sites released by one
+    // completion point are spread across blocks so their pushes overlap.
+    // -1 means "not spread": everything on block 0, which is what was
+    // emitted before this existed. On a completion point it instead holds
+    // how many slots its group used, so the drain covers every ring that
+    // was pushed to.
+    int                          block_slot          = -1;
 };
 
 // Is this descriptor expression the same on every iteration of the

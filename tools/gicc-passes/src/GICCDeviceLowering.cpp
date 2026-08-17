@@ -128,11 +128,42 @@ void lowerFlushAMDGCN(CallInst *CI) {
 // lowerFlushAMDGCN's own lead-thread gating so users don't have to hand-guard
 // every comm kernel; the op's arguments are computed before the split point
 // and therefore still dominate the moved call.
-void wrapPreservedOpLeadThreadAMDGCN(CallInst *CI) {
+// `slot` selects WHICH block runs this op, and how the ring lane is set.
+//
+//   slot < 0   every op on block 0, one ring. What was emitted before this
+//              existed, and still the answer when there is nothing to
+//              spread: one site, or a grid of one block.
+//   slot >= 0  this op belongs to block `slot`, pushing on ring `slot`.
+//              Independent sites released by the same completion point can
+//              then push at the same time instead of queueing behind one
+//              another on one thread.
+//
+// Taken modulo gridDim.x, which is not cosmetic: the pass cannot see the
+// launch geometry, and a site assigned to a block that the launch does not
+// have would never push at all -- silent data loss rather than a slow
+// program. Modulo means every site is executed by exactly one block that
+// exists, for any grid, degrading to the old behaviour at gridDim.x == 1.
+//
+// Spreading is only worth it when the completion waits are CONCURRENT.
+// Measured: one thread draining N lanes in sequence costs about 5 us per
+// lane and gains nothing, because the drain was never the bottleneck. N
+// blocks draining their own lane pay that once, in parallel, which is why
+// the win comes from the pushes overlapping and not from the extra rings.
+// slot >= 0 : only block `slot` runs this op, pushing on ring `slot`.
+// slot == kAllBlocks : every block below `nslots` runs it, each on its own
+//   ring. That is what a completion point must do once the pushes have been
+//   spread -- draining only ring 0 would let the kernel's quiet return with
+//   the other rings still in flight, and an in-kernel read after it would
+//   see nothing. rt.reset() would still drain them before the host went on,
+//   so the program would look correct while the in-kernel ordering
+//   guarantee was quietly gone.
+static constexpr int kAllBlocks = -2;
+
+void wrapPreservedOpBlockAMDGCN(CallInst *CI, int slot, int laneArgIdx,
+                                int nslots = 0) {
     Module *M = CI->getModule();
     BasicBlock *parent = CI->getParent();
 
-    // doBB := [CI, ...follow...]; cont := [...follow...]; doBB := [CI, br cont].
     BasicBlock *doBB   = parent->splitBasicBlock(CI, "gicc.dev.do");
     BasicBlock *contBB = doBB->splitBasicBlock(CI->getNextNode(), "gicc.dev.cont");
 
@@ -143,14 +174,55 @@ void wrapPreservedOpLeadThreadAMDGCN(CallInst *CI) {
     auto bidFn = M->getOrInsertFunction(
         "llvm.amdgcn.workgroup.id.x",
         FunctionType::get(B.getInt32Ty(), {}, false));
-    Value *tid  = B.CreateCall(tidFn);
-    Value *bid  = B.CreateCall(bidFn);
-    Value *lead = B.CreateAnd(B.CreateICmpEQ(tid, B.getInt32(0)),
-                              B.CreateICmpEQ(bid, B.getInt32(0)));
+    Value *tid = B.CreateCall(tidFn);
+    Value *bid = B.CreateCall(bidFn);
+    Value *want = B.getInt32(0);
+    Value *cond = nullptr;
+    if (slot == kAllBlocks) {
+        cond = B.CreateAnd(B.CreateICmpEQ(tid, B.getInt32(0)),
+                           B.CreateICmpULT(bid, B.getInt32(nslots)));
+    } else if (slot > 0) {
+        auto ngFn = M->getOrInsertFunction(
+            "llvm.amdgcn.grid.size.x",
+            FunctionType::get(B.getInt32Ty(), {}, false));
+        auto wsFn = M->getOrInsertFunction(
+            "llvm.amdgcn.workgroup.size.x",
+            FunctionType::get(B.getInt32Ty(), {}, false));
+        // gridDim.x = grid.size.x / workgroup.size.x on AMDGCN, where
+        // grid.size is in work items.
+        Value *nblocks = B.CreateUDiv(B.CreateCall(ngFn), B.CreateCall(wsFn));
+        Value *safe = B.CreateSelect(
+            B.CreateICmpEQ(nblocks, B.getInt32(0)), B.getInt32(1), nblocks);
+        want = B.CreateURem(B.getInt32(slot), safe);
+    }
+    Value *lead = cond ? cond
+                       : B.CreateAnd(B.CreateICmpEQ(tid, B.getInt32(0)),
+                                     B.CreateICmpEQ(bid, want));
 
-    Instruction *oldTerm = parent->getTerminator();   // the br doBB from split
+    Instruction *oldTerm = parent->getTerminator();
     BranchInst::Create(doBB, contBB, lead, oldTerm);
     oldTerm->eraseFromParent();
+
+    // Push on (or drain) the ring belonging to the block that runs this op,
+    // so sites that now run concurrently do not contend on one ring.
+    const bool haveLane = laneArgIdx >= 0 &&
+                          laneArgIdx < (int)CI->arg_size() &&
+                          CI->getArgOperand(laneArgIdx)->getType()->isIntegerTy();
+    if (haveLane && slot > 0) {
+        CI->setArgOperand(laneArgIdx,
+                          ConstantInt::get(
+                              CI->getArgOperand(laneArgIdx)->getType(), slot));
+    } else if (haveLane && slot == kAllBlocks) {
+        Type *lt = CI->getArgOperand(laneArgIdx)->getType();
+        IRBuilder<> LB(CI);
+        CI->setArgOperand(laneArgIdx,
+                          lt == bid->getType() ? bid
+                                               : LB.CreateZExtOrTrunc(bid, lt));
+    }
+}
+
+void wrapPreservedOpLeadThreadAMDGCN(CallInst *CI) {
+    wrapPreservedOpBlockAMDGCN(CI, /*slot=*/-1, /*laneArgIdx=*/-1);
 }
 
 }  // namespace
@@ -174,6 +246,9 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
     // this kernel — keep the device-side call so the put_no_db body in
     // ofi_device.cuh runs and pushes a TransferCmd into the proxy ring.
     SmallVector<std::pair<CallInst *, bool>, 16> putGetCalls;
+    // Which block issues each preserved op, and for a completion point how
+    // many rings it has to drain.
+    DenseMap<CallInst *, int> slotOf, nslotOf;
     bool changed = false;
     const auto &cfgRef = cfg;  // capture for the inner switch.
 
@@ -261,6 +336,13 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
         }
 
         for (const auto &s : info.sites) {
+            int slot = -1;
+            if (haveFence) {
+                auto it = std::find_if(
+                    ktFence.ops.begin(), ktFence.ops.end(),
+                    [&](const OpTemplate &o) { return o.siteId == s.siteId; });
+                if (it != ktFence.ops.end()) slot = it->block_slot;
+            }
             switch (s.kind) {
                 case GICCOpKind::PutNoDb:
                 case GICCOpKind::GetNoDb: {
@@ -279,6 +361,7 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
                                    == DispatchKind::CpuProxyEnqueue;
                     }
                     putGetCalls.emplace_back(s.CI, preserve);
+                    if (preserve) slotOf[s.CI] = slot;
                     break;
                 }
                 case GICCOpKind::Flush:
@@ -287,8 +370,12 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
                 case GICCOpKind::Quiet:
                     // Quiet stays a per-KERNEL decision: it drains the
                     // ring, so it is preserved iff some site in this
-                    // kernel actually uses the ring.
+                    // kernel actually uses the ring. Its slot is the
+                    // number of rings its group pushed to, so the drain
+                    // covers all of them rather than only the first.
                     putGetCalls.emplace_back(s.CI, proxyAware);
+                    if (proxyAware && slot >= 2) slotOf[s.CI] = -2;   // kAllBlocks
+                    if (proxyAware && slot >= 2) nslotOf[s.CI] = slot;
                     break;
             }
         }
@@ -302,7 +389,19 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
             // NVPTX preservation stays unguarded until the Phase 4 backend
             // lands its own intrinsic lowering.
             if (isAMDGCN) {
-                wrapPreservedOpLeadThreadAMDGCN(pr.first);
+                const int slot = slotOf.count(pr.first) ? slotOf[pr.first] : -1;
+                // put/get take the lane last; so does quiet, whose last
+                // argument is the fence and whose lane is the one before.
+                int laneIdx = -1;
+                const unsigned n = pr.first->arg_size();
+                if (n >= 8)      laneIdx = (int)n - 1;   // put/get(..., lane)
+                else if (n == 3) laneIdx = 1;            // quiet(ctx, lane, fence)
+                wrapPreservedOpBlockAMDGCN(
+                    pr.first, slot, laneIdx,
+                    nslotOf.count(pr.first) ? nslotOf[pr.first] : 0);
+                if (slot >= 0 || slot == -2)
+                    errs() << "[device-lowering] issue spread: slot " << slot
+                           << "\n";
                 changed = true;
             }
             continue;

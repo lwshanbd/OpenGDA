@@ -700,6 +700,28 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t) {
     }
     for (unsigned i = 0; i < t.ops.size(); ++i)
         if (owner[i] != kNotATransfer) t.ops[i].batch_size = total[owner[i]];
+
+    // Spread the transfers of a group across blocks so their pushes
+    // overlap. Only worth doing when a group has more than one transfer;
+    // a single site has nothing to overlap with and keeps block 0, which
+    // is what was emitted before this existed.
+    //
+    // The completion point of a group records how many slots the group
+    // used, because it has to drain every ring that was pushed to and not
+    // just the first.
+    std::map<int, int> next;
+    for (unsigned i = 0; i < t.ops.size(); ++i) {
+        if (owner[i] == kNotATransfer) continue;
+        int members = 0;
+        for (unsigned j = 0; j < t.ops.size(); ++j)
+            if (owner[j] == owner[i]) ++members;
+        if (members < 2) continue;
+        t.ops[i].block_slot = next[owner[i]]++;
+    }
+    for (const auto &kv : next) {
+        if (kv.first < 0 || kv.second < 2) continue;   // no completion point
+        t.ops[kv.first].block_slot = kv.second;        // slots used by the group
+    }
 }
 
 }  // namespace
