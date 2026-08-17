@@ -506,6 +506,48 @@ endif()
 _proxy_example_setup(ctx_bench)
 
 # ---------------------------------------------------------------------------
+# param_availability - O5. Three call sites a runtime cannot tell apart,
+# differing only in where the descriptor's offsets come from, and therefore
+# in which lowerings are LEGAL. Includes the same kernel body with and
+# without GICC_KERNEL_HOST_MIRROR, which is the analysis moving that
+# boundary rather than choosing within it.
+# ---------------------------------------------------------------------------
+if(GICC_GPU_API STREQUAL "cuda")
+    set_source_files_properties(param_availability.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+        PROPERTIES LANGUAGE CUDA)
+    add_executable(param_availability
+        param_availability.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC})
+    target_link_libraries(param_availability PRIVATE
+        CUDA::cudart
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+elseif(GICC_GPU_API STREQUAL "hip")
+    set_source_files_properties(param_availability.cpp
+                                ${PROXY_LIBFABRIC_SRC}
+                                ${PROXY_THREAD_SRC}
+                                ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp
+        PROPERTIES LANGUAGE HIP)
+    add_executable(param_availability
+        param_availability.cpp
+        ${PROXY_LIBFABRIC_SRC}
+        ${PROXY_THREAD_SRC}
+        ${CMAKE_SOURCE_DIR}/src/gicc/platform/ofi/runtime_helpers.cpp)
+    target_link_libraries(param_availability PRIVATE
+        hip::device
+        ${PROXY_EX_LIBFABRIC_LIBRARY}
+        ${PROXY_EX_HWLOC_LIBRARY}
+        ${PROXY_EX_BOOTSTRAP_LIBS}
+        pthread)
+endif()
+_proxy_example_setup(param_availability)
+
+# ---------------------------------------------------------------------------
 # mixed_callsite - one program, four call sites with different compiler-visible
 # context; enumerates legal per-call-site path assignments. Uses both dispatch
 # paths in a single process via Runtime::enable_mixed_dispatch().
