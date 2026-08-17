@@ -3,6 +3,9 @@
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/PostOrderIterator.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "HKAnalysis.h"
 #include "HostMirrorAnnotation.h"
@@ -577,6 +580,77 @@ long long tripCountFor(const CallInst *CI, LoopInfo *LI, ScalarEvolution *SE) {
     return n ? static_cast<long long>(n) : -1;
 }
 
+// How many transfers share a completion point.
+//
+// A flush or quiet is what actually releases staged work, so a transfer
+// belongs to the group of the first completion point REACHABLE from it.
+// Reachability, not a linear block order: any depth-first numbering of a
+// CFG containing a loop can rank the loop's exit block ahead of its body
+// (the body finishes last in post-order), which would put the loop's own
+// transfers in the group after the flush that actually releases them.
+//
+// Transfers with no completion point downstream still form a group — the
+// host's reset() drains them.
+void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t) {
+    if (!info.kernel) return;
+
+    // Position within a block, so two sites in the same block can be
+    // ordered against each other.
+    DenseMap<const Instruction *, unsigned> slot;
+    for (const BasicBlock &BB : *info.kernel) {
+        unsigned n = 0;
+        for (const Instruction &I : BB) slot[&I] = n++;
+    }
+
+    SmallVector<unsigned, 4> completions;
+    for (unsigned i = 0; i < t.ops.size(); ++i)
+        if (t.ops[i].kind == "flush" || t.ops[i].kind == "quiet")
+            completions.push_back(i);
+
+    // Earliest completion point inside `BB` that is strictly after
+    // `after` (pass null to accept any position in the block).
+    auto inBlock = [&](const BasicBlock *BB, const Instruction *after) -> int {
+        int      best     = -1;
+        unsigned bestSlot = ~0u;
+        for (unsigned c : completions) {
+            const Instruction *ci = info.sites[c].CI;
+            if (ci->getParent() != BB) continue;
+            unsigned s = slot.lookup(ci);
+            if (after && s <= slot.lookup(after)) continue;
+            if (s < bestSlot) { best = static_cast<int>(c); bestSlot = s; }
+        }
+        return best;
+    };
+
+    auto releasedBy = [&](const Instruction *from) -> int {
+        if (int c = inBlock(from->getParent(), from); c >= 0) return c;
+        SmallPtrSet<const BasicBlock *, 16>  seen;
+        SmallVector<const BasicBlock *, 16>  work(succ_begin(from->getParent()),
+                                                 succ_end(from->getParent()));
+        while (!work.empty()) {
+            const BasicBlock *BB = work.pop_back_val();
+            if (!seen.insert(BB).second) continue;
+            if (int c = inBlock(BB, nullptr); c >= 0) return c;
+            work.append(succ_begin(BB), succ_end(BB));
+        }
+        return -1;   // nothing downstream; the host drain closes this group
+    };
+
+    constexpr int kNotATransfer = -2;
+    std::vector<int>          owner(t.ops.size(), kNotATransfer);
+    std::map<int, long long>  total;
+    for (unsigned i = 0; i < t.ops.size(); ++i) {
+        if (t.ops[i].kind != "put_no_db" && t.ops[i].kind != "get_no_db")
+            continue;
+        owner[i] = releasedBy(info.sites[i].CI);
+        // A transfer inside a loop reaches the wire once per iteration.
+        // Without a provable trip count the best honest answer is one.
+        total[owner[i]] += t.ops[i].trip_count > 0 ? t.ops[i].trip_count : 1;
+    }
+    for (unsigned i = 0; i < t.ops.size(); ++i)
+        if (owner[i] != kNotATransfer) t.ops[i].batch_size = total[owner[i]];
+}
+
 }  // namespace
 
 KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
@@ -652,6 +726,7 @@ KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
         fillArgs(site.CI, site.kind, op, info.kernel, ivPhi, &hostMirrored);
         t.ops.push_back(std::move(op));
     }
+    assignBatchSizes(info, t);
     return t;
 }
 
