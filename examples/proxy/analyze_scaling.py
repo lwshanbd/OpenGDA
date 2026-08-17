@@ -30,10 +30,21 @@ import math
 import sys
 from itertools import combinations
 
+MAX_SUBSETS = 20
+
 import numpy as np
 from sklearn.ensemble import GradientBoostingRegressor
 
-AXES = ["vec", "nt", "unroll", "block", "nstream"]
+# Read from the CSV header so the same script handles the 5- and 8-axis
+# grids. Everything before `bytes` is an axis.
+def axes_of(path):
+    import csv as _csv
+    with open(path) as f:
+        head = next(_csv.reader(f))
+    return head[:head.index("bytes")]
+
+
+AXES = []
 
 
 def load(path):
@@ -76,8 +87,14 @@ def evaluate(sub, free):
     res = {"oracle": [], "separable": [], "gbt": [], "global": []}
 
     def feats(b, k):
-        return [math.log2(b)] + [math.log2(k[i]) if k[i] > 0 else 0.0
-                                 for i in free]
+        # Raw ordinal values for the knobs. An earlier version log-scaled
+        # them, which silently collapsed every BINARY axis: log2(1) and the
+        # 0-guard both gave 0.0, so `nt` and `pull` were invisible to the
+        # model while the separable baseline still saw them. That inverted
+        # the comparison. Trees split on thresholds and do not need scaling;
+        # only `bytes` gets a log, and only because it spans five orders of
+        # magnitude.
+        return [math.log2(b)] + [float(k[i]) for i in free]
 
     for held in sizes:
         train = [s for s in sizes if s != held]
@@ -114,6 +131,8 @@ def evaluate(sub, free):
 
 
 def main(path):
+    global AXES
+    AXES = axes_of(path)
     cost = load(path)
     sizes = sorted(cost)
     pin = global_best(cost)
@@ -126,7 +145,12 @@ def main(path):
           f"{'best global':>12}   {'rules lose by':>13}")
     for k in range(1, len(AXES) + 1):
         rows = []
-        for free in combinations(range(len(AXES)), k):
+        subsets = list(combinations(range(len(AXES)), k))
+        capped = len(subsets) > MAX_SUBSETS
+        if capped:
+            step = len(subsets) / MAX_SUBSETS
+            subsets = [subsets[int(i * step)] for i in range(MAX_SUBSETS)]
+        for free in subsets:
             sub = restrict(cost, set(free), pin)
             if not sub or len(next(iter(sub.values()))) < 2:
                 continue
@@ -136,8 +160,13 @@ def main(path):
         sep = gmean([r["separable"] for r in rows])
         gbt = gmean([r["gbt"] for r in rows])
         glo = gmean([r["global"] for r in rows])
-        print(f"{k:>4} {len(rows):>8} {sep:>10.3f}x {gbt:>8.3f}x "
+        mark = "*" if capped else " "
+        print(f"{k:>4} {len(rows):>7}{mark} {sep:>10.3f}x {gbt:>8.3f}x "
               f"{glo:>11.3f}x   {sep / gbt:>12.3f}x")
+    print()
+    print(f"* = evenly spaced sample of at most {MAX_SUBSETS} subsets; the rest")
+    print("  are enumerated in full. Sampling is stated rather than silent so")
+    print("  a capped row is not read as complete coverage.")
     print()
     print("'rules lose by' is separable / GBT: what independent per-axis")
     print("thresholds give up to a model that sees the joint space. If it")

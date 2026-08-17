@@ -64,9 +64,14 @@ __device__ __forceinline__ void copy_elem<uint8_t, 1>(uint8_t* d,
 // NT=1 uses non-temporal (streaming) stores: bypass L2 write-allocate.
 // Classic size-inverting knob — helps large no-reuse streaming, hurts small.
 template <typename VecT, int UNROLL, int NT>
+// `fence` is the post-copy memory fence the lead thread issues:
+//   0 none, 1 block, 2 device (__threadfence), 3 system (what GICC emits
+// today at every site). Its correct value is a dependence question -- who
+// reads the data next, and from which address space -- so it is decided by
+// a different analysis from every other knob here.
 __global__ void copy_vec_kernel(void* __restrict__ dst,
                                 const void* __restrict__ src,
-                                size_t bytes) {
+                                size_t bytes, int fence) {
     auto* d = reinterpret_cast<VecT*>(dst);
     auto* s = reinterpret_cast<const VecT*>(src);
     size_t n = bytes / sizeof(VecT);
@@ -86,6 +91,12 @@ __global__ void copy_vec_kernel(void* __restrict__ dst,
     auto* db = reinterpret_cast<char*>(dst);
     auto* sb = reinterpret_cast<const char*>(src);
     for (size_t b = done + tid; b < bytes; b += stride) db[b] = sb[b];
+
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        if      (fence == 3) __threadfence_system();
+        else if (fence == 2) __threadfence();
+        else if (fence == 1) __threadfence_block();
+    }
 }
 
 // Dispatch by runtime knobs.
@@ -96,6 +107,8 @@ struct CopyCfg {
     int unroll = 1;
     int nt = 0;        // non-temporal stores
     int nstream = 1;   // split copy across K streams (overlap)
+    int fence = 3;     // post-copy fence scope; 3 = what GICC emits today
+    int pull = 0;      // 0 = push (write into peer), 1 = pull (read from peer)
     std::string mech = "kernel";
 };
 
@@ -119,15 +132,15 @@ static void launch_one(const CopyCfg& c, char* dst, const char* src,
 #define DISPATCH(VEC, T) \
     if (c.vec == VEC) { \
         if (c.nt) switch (c.unroll) { \
-            case 8: copy_vec_kernel<T,8,1><<<g,b,0,stream>>>(dst,src,len); break; \
-            case 4: copy_vec_kernel<T,4,1><<<g,b,0,stream>>>(dst,src,len); break; \
-            case 2: copy_vec_kernel<T,2,1><<<g,b,0,stream>>>(dst,src,len); break; \
-            default: copy_vec_kernel<T,1,1><<<g,b,0,stream>>>(dst,src,len); break; \
+            case 8: copy_vec_kernel<T,8,1><<<g,b,0,stream>>>(dst,src,len,c.fence); break; \
+            case 4: copy_vec_kernel<T,4,1><<<g,b,0,stream>>>(dst,src,len,c.fence); break; \
+            case 2: copy_vec_kernel<T,2,1><<<g,b,0,stream>>>(dst,src,len,c.fence); break; \
+            default: copy_vec_kernel<T,1,1><<<g,b,0,stream>>>(dst,src,len,c.fence); break; \
         } else switch (c.unroll) { \
-            case 8: copy_vec_kernel<T,8,0><<<g,b,0,stream>>>(dst,src,len); break; \
-            case 4: copy_vec_kernel<T,4,0><<<g,b,0,stream>>>(dst,src,len); break; \
-            case 2: copy_vec_kernel<T,2,0><<<g,b,0,stream>>>(dst,src,len); break; \
-            default: copy_vec_kernel<T,1,0><<<g,b,0,stream>>>(dst,src,len); break; \
+            case 8: copy_vec_kernel<T,8,0><<<g,b,0,stream>>>(dst,src,len,c.fence); break; \
+            case 4: copy_vec_kernel<T,4,0><<<g,b,0,stream>>>(dst,src,len,c.fence); break; \
+            case 2: copy_vec_kernel<T,2,0><<<g,b,0,stream>>>(dst,src,len,c.fence); break; \
+            default: copy_vec_kernel<T,1,0><<<g,b,0,stream>>>(dst,src,len,c.fence); break; \
         } return; \
     }
     DISPATCH(16, uint4)
@@ -135,7 +148,7 @@ static void launch_one(const CopyCfg& c, char* dst, const char* src,
     DISPATCH(4,  uint32_t)
     DISPATCH(1,  uint8_t)
 #undef DISPATCH
-    copy_vec_kernel<uint4,1,0><<<g,b,0,stream>>>(dst, src, len);
+    copy_vec_kernel<uint4,1,0><<<g,b,0,stream>>>(dst, src, len, c.fence);
 }
 
 static void launch_copy(const CopyCfg& c, void* dst, const void* src,
@@ -225,37 +238,50 @@ int main(int argc, char** argv) {
     // the IPC mapping fixed across the whole grid, which is what makes
     // configurations comparable to each other in the first place.
     if (env_int("GICC_CP_SWEEP", 0)) {
-        const int    vecs[]  = {1, 4, 8, 16};
-        const int    nts[]   = {0, 1};
-        const int    unrs[]  = {1, 2, 4};
-        const int    blks[]  = {64, 256, 1024};
-        const int    nstrs[] = {1, 2, 4};
+        // Pull reads from the peer's buffer instead of writing into it, so
+        // it needs the peer's SOURCE mapping as well.
+        void* peer_src = gicc_runtime_peer_ipc_base(&rt, peer, bufSrc.index);
+
+        const int vecs[]  = {1, 4, 8, 16};
+        const int nts[]   = {0, 1};
+        const int unrs[]  = {1, 2, 4};
+        const int blks[]  = {64, 256, 1024};
+        const int nstrs[] = {1, 4};
+        const int grids[] = {0, 64, 512};      // 0 = size-derived
+        const int fences[] = {0, 2, 3};        // none, device, system
+        const int pulls[] = {0, 1};
+
         if (rank == 0)
-            printf("vec,nt,unroll,block,nstream,bytes,us,GBps\n");
+            printf("vec,nt,unroll,block,nstream,grid,fence,pull,bytes,us,GBps\n");
         for (int v : vecs) for (int n : nts) for (int u : unrs)
-        for (int bl : blks) for (int ns : nstrs) {
+        for (int bl : blks) for (int ns : nstrs) for (int gr : grids)
+        for (int fe : fences) for (int pu : pulls) {
+            if (pu && peer_src == nullptr) continue;
             CopyCfg c = cfg;
             c.vec = v; c.nt = n; c.unroll = u; c.block = bl; c.nstream = ns;
-            c.grid = 0; c.mech = "kernel";
+            c.grid = gr; c.fence = fe; c.pull = pu; c.mech = "kernel";
+            void* dst = pu ? d_dst    : peer_dst;
+            const void* src = pu ? peer_src : d_src;
             for (int si = 0; si < kNSizes; ++si) {
                 size_t bytes = kSizes[si];
                 MPI_Barrier(MPI_COMM_WORLD);
                 if (rank == 0) {
                     for (int it = 0; it < kWarmup; ++it)
-                        launch_copy(c, peer_dst, d_src, bytes, stream, streams);
+                        launch_copy(c, dst, src, bytes, stream, streams);
                     (void)gpuStreamSynchronize(stream);
                     for (int k = 0; k < c.nstream; ++k)
                         (void)gpuStreamSynchronize(streams[k]);
                     double t0 = MPI_Wtime();
                     for (int it = 0; it < kIters; ++it)
-                        launch_copy(c, peer_dst, d_src, bytes, stream, streams);
+                        launch_copy(c, dst, src, bytes, stream, streams);
                     (void)gpuStreamSynchronize(stream);
                     for (int k = 0; k < c.nstream; ++k)
                         (void)gpuStreamSynchronize(streams[k]);
                     double t1 = MPI_Wtime();
                     double us = (t1 - t0) * 1e6 / kIters;
-                    printf("%d,%d,%d,%d,%d,%zu,%.3f,%.2f\n", v, n, u, bl, ns,
-                           bytes, us, bytes / (us * 1e3));
+                    printf("%d,%d,%d,%d,%d,%d,%d,%d,%zu,%.3f,%.2f\n",
+                           v, n, u, bl, ns, gr, fe, pu, bytes, us,
+                           bytes / (us * 1e3));
                     fflush(stdout);
                 }
                 MPI_Barrier(MPI_COMM_WORLD);
