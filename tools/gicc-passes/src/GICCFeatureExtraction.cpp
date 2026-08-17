@@ -92,11 +92,16 @@ json::Value toRecord(const std::string &siteId,
                      const OpTemplate  &op,
                      int                fanOut) {
     json::Object r;
-    // Bumped from 1 → 2 with this change: in_loop now reflects reality,
-    // compute_before_flops is populated when the device pass had DT
-    // available, and a structured `loop` sub-object accompanies in_loop
-    // when the site is inside a canonical loop.
-    r["schema_version"] = 2;
+    // v4 adds descriptor_reusable, buffer_reusable, batch_size and
+    // legal_paths — the reuse and batching properties a runtime cannot
+    // establish from one call, plus legality stated as a set rather than
+    // left implicit in hk_capable.
+    //
+    // Jumps 2 → 4 on purpose: the emitter had been left at 2 while the
+    // schema doc already described a v3 (flops_to_first_use, trip_count,
+    // distance_exact), so anything claiming 2 may or may not carry those.
+    // Skipping the number keeps "3" from meaning two different things.
+    r["schema_version"] = 4;
     r["site_id"]        = siteId;
     r["kernel"]         = simpleKernel;
     r["op_kind"]        = op.kind;
@@ -166,6 +171,33 @@ json::Value toRecord(const std::string &siteId,
         r["iter_estimate"] = *est;
     else
         r["iter_estimate"] = nullptr;
+
+    // Reuse and batching. These are the properties a runtime cannot
+    // establish at the moment of the call: it sees one transfer, not the
+    // loop it sits in nor the group it belongs to.
+    r["descriptor_reusable"] = descriptorReusable(op);
+    r["buffer_reusable"]     = bufferReusable(op);
+    if (op.batch_size >= 0)
+        r["batch_size"] = static_cast<int64_t>(op.batch_size);
+    else
+        r["batch_size"] = nullptr;
+
+    // Legality, not preference. The proxy path is always available: the
+    // device pushes a command and the worker reads the descriptor at
+    // submit time, so nothing has to be knowable in advance. The trigger
+    // and IPC paths need the host to reconstruct the descriptor before
+    // the kernel launches, which is exactly what HK analysis proves —
+    // and a loop the pass failed to model means trace synthesis would
+    // drop the transfer, so that disqualifies them too.
+    const bool hostCanStage =
+        op.hk_capable && !(op.loop.inLoop && op.loop.degraded);
+    json::Array legal;
+    legal.push_back("proxy");
+    if (hostCanStage) {
+        legal.push_back("trigger");
+        legal.push_back("ipc");
+    }
+    r["legal_paths"] = json::Value(std::move(legal));
     return json::Value(std::move(r));
 }
 

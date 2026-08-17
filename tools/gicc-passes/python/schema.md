@@ -54,10 +54,54 @@ A JSON array of per-(launch site × op) records.
                                              //   LOWER BOUND on hideable work
     "trip_count":         64,                // ops per phase, from ScalarEvolution;
                                              //   null when the bound is a runtime value
-    "iter_estimate":      null               // numeric when const-bound (none today)
+    "iter_estimate":      null,              // numeric when const-bound (none today)
+
+    "descriptor_reusable": true,             // every descriptor field repeats
+                                             //   across the enclosing loop, so the
+                                             //   host can stage ONCE and trigger
+                                             //   trip_count times. false outside a
+                                             //   loop: nothing to amortise.
+    "buffer_reusable":     true,             // the BUFFERS do not vary even if the
+                                             //   offsets do -- the ordinary stencil
+                                             //   shape, where registration hoists
+                                             //   but the descriptor does not.
+    "batch_size":          8,                // transfers released by the same
+                                             //   completion point, a looped one
+                                             //   counted trip_count times. null when
+                                             //   not measured.
+    "legal_paths":        ["proxy", "trigger", "ipc"]
+                                             // LEGALITY, not preference. See below.
   }
 ]
 ```
+
+`legal_paths` is what the decider must not step outside of. The proxy path
+is always present: the device pushes a command and the worker reads the
+descriptor at submit time, so nothing has to be knowable in advance. The
+trigger and IPC paths need the host to reconstruct the descriptor before
+the kernel launches, which is what `hk_capable` proves -- and a loop the
+pass recognised but could not model (`loop.degraded`) disqualifies them
+too, because trace synthesis would drop the transfer rather than emit
+wrong code.
+
+`descriptor_reusable` and `buffer_reusable` are DERIVED from the `args`
+expressions on read, not stored in the per-kernel JSON, so there is one
+definition of them rather than two that can drift. `batch_size` is stored,
+because grouping transfers by completion point needs the CFG: it is the
+first completion point REACHABLE from the transfer, not the next one in
+any linear block order -- a depth-first numbering ranks a loop's exit
+block ahead of its body, which would group the loop's own transfers with
+whatever follows the flush that actually releases them.
+
+Schema v3 → v4 changes:
+- NOTE: no producer ever emitted `schema_version: 3`. The emitter was left
+  at 2 while this document already described v3, so a file claiming 2 may
+  or may not carry the v3 fields; check for their presence rather than
+  trusting the number. v4 onwards the two agree.
+- `descriptor_reusable`, `buffer_reusable`, `batch_size`, `legal_paths`
+  added. These are the reuse and batching properties a runtime cannot
+  establish at the moment of the call: it sees one transfer, not the loop
+  it sits in nor the group it belongs to.
 
 Schema v2 → v3 changes:
 - `flops_to_first_use`, `distance_exact`, `trip_count` added. Together with
