@@ -337,24 +337,32 @@ each other's optimum:
 One boolean moves the optimal vector width by a factor of sixteen.
 
 **And the cost of ignoring that grows with how many knobs are exposed.**
-Every subset of the five axes, scored leave-one-size-out with the unused
-axes pinned at their globally best value:
+Eight axes now — vec, nt, unroll, block, nstream, grid, post-copy fence
+scope, direction — giving 2592 configurations x 9 sizes. Every subset of
+the axes is scored leave-one-size-out with the unused axes pinned at their
+globally best value, which is what a compiler exposing only those knobs,
+the rest hardcoded, would face.
 
 | knobs exposed | separable rules | GBT | best global | rules lose by |
 | --- | --- | --- | --- | --- |
-| 1 | 1.023x | 1.017x | 1.023x | **1.006x** |
-| 2 | 1.092x | 1.031x | 1.050x | 1.059x |
-| 3 | 1.119x | 1.036x | 1.078x | 1.080x |
-| 4 | 1.193x | 1.045x | 1.107x | 1.142x |
-| 5 | **1.198x** | **1.050x** | 1.137x | **1.141x** |
+| 1 | 1.020x | 1.028x | 1.020x | 0.992x |
+| 2 | 1.043x | 1.056x | 1.040x | 0.988x |
+| **3** | 1.074x | 1.074x | 1.067x | **1.000x** |
+| 4 | 1.089x | 1.055x | 1.088x | 1.033x |
+| 5 | 1.139x | 1.063x | 1.123x | 1.071x |
+| 6 | 1.198x | 1.079x | 1.190x | 1.110x |
+| 7 | 1.247x | 1.139x | 1.259x | 1.094x |
+| 8 | **1.337x** | **1.207x** | 1.361x | **1.108x** |
 
-Independent per-axis thresholds go from 2.3% to 19.8% off the oracle; a
-model over the joint space stays between 1.7% and 5.0%. The gap is
-monotone: **0.6% at one knob, 14.1% at five.**
+**There is a crossover at about three interacting knobs.** Below it a model
+is no better than independent thresholds and sometimes slightly worse;
+above it the model wins and the margin grows. Separable rules go from 2.0%
+to 33.7% off the oracle, the model from 2.8% to 20.7%. Neither is good at
+eight knobs — the model is less bad.
 
 **This subsumes the four negatives below rather than contradicting them.**
-Those spaces were effectively one or two interacting knobs, and at one knob
-this measurement puts rules and model 0.6% apart — so a hand rule matching
+Those spaces were effectively one or two interacting knobs, which is exactly
+the regime where this curve says a rule should win — so a hand rule matching
 every learned decider was the *correct* outcome there, not a failure to
 find the right decider. Whether a rule suffices is a property of how many
 interacting knobs the compiler exposes, not of the domain.
@@ -369,8 +377,10 @@ worst-stride face and slightly *harmful* on the contiguous one; face
 orientation spans **24.5x**; the face/row thread mapping is flat, a dead
 knob recorded so nobody measures it twice.
 
-Caveats: one platform, one access pattern, and the five-axis row averages
-over a single subset because only one exists. The `separable` control is
+Caveats: one platform, one access pattern, and the eight-axis row averages
+over a single subset because only one exists; rows for 2-6 axes sample at
+most 20 subsets and are marked as sampled in the tool output. The `separable`
+control is
 the separable model *class*, not "any rule a human could write" — a person
 can condition one axis on another, but that is a table whose size grows
 with the number of interacting axes, which is precisely what is being
@@ -483,12 +493,14 @@ rather than size), and four runs of each model experiment.
 The question that remains open is not which decider to use — four families
 now agree that it barely matters — but how far the *analysis* side goes:
 
-1. **Fence scope.** Still the largest single unexploited effect measured
-   anywhere in this project: 8.81 us vs 2.57 us for a 1MB intra-node copy,
-   **3.4x**, and currently hardcoded to `__threadfence_system` at every
-   site. Its criterion is pure dependence — which consumer reads the data
-   and in which address space — so it belongs with the analysis results
-   rather than the decider ones.
+1. **Wire the knobs to the compiler.** They are environment variables
+   today, so what has been measured is autotuning, not compiler-guided
+   anything. The pass has to emit different copy code per call site, keyed
+   on the layout and dependence facts it already computes — otherwise the
+   scaling curve is a statement about a benchmark rather than about a
+   compiler. Fence scope is the natural first one: 3.4x, hardcoded to
+   `__threadfence_system` at every site today, and decided purely by which
+   consumer reads the data and from where.
 2. **Real applications.** Everything above is microbenchmarks. ASF and
    Minimod are on disk and already GICC-integrated. Whether the analysis
    proves anything useful on code nobody wrote for it is untested, and it
