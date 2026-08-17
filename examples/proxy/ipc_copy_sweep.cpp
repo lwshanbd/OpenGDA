@@ -117,6 +117,14 @@ static int env_int(const char* k, int dflt) {
     return dflt;
 }
 
+// Same, but 0 is a legal value. `fence` and `pull` both have a meaningful
+// zero (no fence / push direction), so env_int would silently substitute the
+// default for exactly the setting being asked for.
+static int env_int0(const char* k, int dflt) {
+    if (const char* v = std::getenv(k)) return atoi(v);
+    return dflt;
+}
+
 // Launch one kernel covering [off, off+len) of the buffers.
 static void launch_one(const CopyCfg& c, char* dst, const char* src,
                        size_t len, GpuStream_t stream) {
@@ -189,6 +197,8 @@ int main(int argc, char** argv) {
     cfg.unroll= env_int("GICC_CP_UNROLL", 1);
     cfg.nt    = env_int("GICC_CP_NT", 0);
     cfg.nstream = env_int("GICC_CP_NSTREAM", 1);
+    cfg.fence = env_int0("GICC_CP_FENCE", 3);
+    cfg.pull  = env_int0("GICC_CP_PULL", 0);
     if (const char* m = std::getenv("GICC_CP_MECH")) cfg.mech = m;
 
     const size_t kSizes[] = {
@@ -294,10 +304,26 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // Direction, same as the sweep: push writes into the peer, pull reads
+    // out of it. Resolved here rather than at the launch so a missing IPC
+    // mapping is reported once instead of per size.
+    void* one_dst       = cfg.pull ? d_dst : peer_dst;
+    const void* one_src = d_src;
+    if (cfg.pull) {
+        void* peer_src = gicc_runtime_peer_ipc_base(&rt, peer, bufSrc.index);
+        if (peer_src == nullptr) {
+            if (rank == 0) printf("[ERROR] GICC_CP_PULL=1 needs a peer IPC "
+                                  "mapping for the source buffer\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        one_src = peer_src;
+    }
+
     if (rank == 0) {
-        printf("# cfg vec=%d block=%d grid=%d unroll=%d nt=%d nstream=%d mech=%s iters=%d\n",
+        printf("# cfg vec=%d block=%d grid=%d unroll=%d nt=%d nstream=%d "
+               "fence=%d pull=%d mech=%s iters=%d\n",
                cfg.vec, cfg.block, cfg.grid, cfg.unroll, cfg.nt, cfg.nstream,
-               cfg.mech.c_str(), kIters);
+               cfg.fence, cfg.pull, cfg.mech.c_str(), kIters);
         printf("# size_bytes,us_per_op,GBps\n");
     }
 
@@ -307,14 +333,14 @@ int main(int argc, char** argv) {
         if (rank == 0) {
             // Warmup.
             for (int it = 0; it < kWarmup; ++it)
-                launch_copy(cfg, peer_dst, d_src, bytes, stream, streams);
+                launch_copy(cfg, one_dst, one_src, bytes, stream, streams);
             (void)gpuStreamSynchronize(stream);
             for (int k = 0; k < cfg.nstream; ++k)
                 (void)gpuStreamSynchronize(streams[k]);
 
             double t0 = MPI_Wtime();
             for (int it = 0; it < kIters; ++it)
-                launch_copy(cfg, peer_dst, d_src, bytes, stream, streams);
+                launch_copy(cfg, one_dst, one_src, bytes, stream, streams);
             (void)gpuStreamSynchronize(stream);
             for (int k = 0; k < cfg.nstream; ++k)
                 (void)gpuStreamSynchronize(streams[k]);
