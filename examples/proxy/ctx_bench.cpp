@@ -173,6 +173,28 @@ __global__ void k_proxy_blocks_spin(gicc::DeviceCtx* ctx, int peer, int buf,
     gicc::quiet(ctx, lane);
 }
 
+// ONE thread pushing, spread round-robin over `lanes` rings.
+//
+// The multi-block kernel above conflates two things: more blocks pushing
+// AND more rings being drained. This separates them. It is also the shape
+// the pass can actually emit today without any new API -- `lane` is
+// already a defaulted argument of put/quiet, so assigning it per call site
+// is a constant rewrite, whereas widening the issue guard to several
+// blocks is a change to the code the pass generates.
+//
+// If the bottleneck is the push itself, spreading one thread's pushes over
+// more rings buys nothing. If it is the drain, it should.
+__global__ void k_proxy_lanes_spin(gicc::DeviceCtx* ctx, int peer, int buf,
+                                   size_t bytes, int ops, int lanes,
+                                   long long ticks) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    for (int i = 0; i < ops; ++i)
+        gicc::put(ctx, peer, buf, /*dst_off=*/0, buf, /*src_off=*/0, bytes,
+                  i % lanes);
+    spin_ticks(ticks);
+    for (int l = 0; l < lanes; ++l) gicc::quiet(ctx, l);
+}
+
 //----------------------------------------------------------------------------
 // Stats
 //----------------------------------------------------------------------------
@@ -855,6 +877,33 @@ int main(int argc, char** argv) {
     if (exp == "distance" || exp == "all")
         run_distance(rt, rank, peer, bh, sizes, Ds, ticks_per_us, Ks,
                      is_proxy, samples, warmup);
+    if (exp == "lanes") {
+        int fleet = 1;
+        if (const char* e = std::getenv("GICC_NUM_PROXY_THREADS")) {
+            int v = std::atoi(e);
+            if (v >= 1 && v <= 32) fleet = v;
+        }
+        if (rank == 0)
+            printf("LANES,bytes,ops,lanes,fleet,median_us,min_us\n");
+        for (size_t bytes : sizes) {
+            for (int ops : Ks) {
+                for (int L : Ps) {
+                    if (L > ops) continue;
+                    Stats st = time_config(rt, rank, samples, warmup, [&] {
+                        gicc::DeviceCtx* c = rt.prepare();
+                        hipLaunchKernelGGL(k_proxy_lanes_spin, dim3(1), dim3(1),
+                                           0, 0, c, peer, bh.index, bytes, ops,
+                                           L, (long long)0);
+                        (void)hipDeviceSynchronize();
+                        rt.reset();
+                    });
+                    if (rank == 0 && st.n)
+                        printf("LANES,%zu,%d,%d,%d,%.3f,%.3f\n",
+                               bytes, ops, L, fleet, st.median, st.min);
+                }
+            }
+        }
+    }
     if (exp == "grid") {
         int lanes = 1;
         if (const char* e = std::getenv("GICC_NUM_PROXY_THREADS")) {
