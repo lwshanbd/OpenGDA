@@ -226,13 +226,21 @@ int main(int argc, char** argv) {
     void* peer_dst = gicc_runtime_peer_ipc_base(&rt, peer, bufDst.index);
     GpuStream_t stream = gicc_runtime_ipc_stream(&rt);
 
-    // Multi-stream pool for GICC_CP_NSTREAM > 1. Allocate up to 8 own
-    // streams (don't reuse the runtime's single ipc_stream for splits).
+    // Multi-stream pool for nstream > 1. Allocate up to 8 own streams
+    // (don't reuse the runtime's single ipc_stream for splits).
+    //
+    // Create ALL of them, not `cfg.nstream` of them. The sweep varies
+    // nstream per configuration while `cfg.nstream` keeps the env value,
+    // so sizing the pool by cfg left streams[1..3] as uninitialized stack
+    // handles for every nstream=4 configuration: three quarters of each
+    // copy was launched onto garbage, the errors were cast to void, and
+    // the row came out ~3x faster because it had done a quarter of the
+    // work. Every nstream=4 row measured before this is invalid.
     const int kMaxStreams = 8;
     if (cfg.nstream > kMaxStreams) cfg.nstream = kMaxStreams;
     if (cfg.nstream < 1) cfg.nstream = 1;
     GpuStream_t streams[kMaxStreams];
-    for (int k = 0; k < cfg.nstream; ++k)
+    for (int k = 0; k < kMaxStreams; ++k)
         (void)hipStreamCreateWithFlags(&streams[k], hipStreamNonBlocking);
 
     if (rank == 0 && peer_dst == nullptr) {
@@ -262,7 +270,7 @@ int main(int argc, char** argv) {
         const int pulls[] = {0, 1};
 
         if (rank == 0)
-            printf("vec,nt,unroll,block,nstream,grid,fence,pull,bytes,us,GBps\n");
+            printf("vec,nt,unroll,block,nstream,grid,fence,pull,bytes,us,GBps,landed\n");
         for (int v : vecs) for (int n : nts) for (int u : unrs)
         for (int bl : blks) for (int ns : nstrs) for (int gr : grids)
         for (int fe : fences) for (int pu : pulls) {
@@ -281,6 +289,12 @@ int main(int argc, char** argv) {
                     (void)gpuStreamSynchronize(stream);
                     for (int k = 0; k < c.nstream; ++k)
                         (void)gpuStreamSynchronize(streams[k]);
+                    // Clear the destination so the check after the timed
+                    // loop tests THIS configuration. Without it the first
+                    // configuration to run leaves 0xAB behind and every
+                    // later one inherits a pass. Outside the timed region.
+                    (void)gpuMemset(dst, 0x00, bytes);
+                    (void)gpuDeviceSynchronize();
                     double t0 = MPI_Wtime();
                     for (int it = 0; it < kIters; ++it)
                         launch_copy(c, dst, src, bytes, stream, streams);
@@ -289,9 +303,23 @@ int main(int argc, char** argv) {
                         (void)gpuStreamSynchronize(streams[k]);
                     double t1 = MPI_Wtime();
                     double us = (t1 - t0) * 1e6 / kIters;
-                    printf("%d,%d,%d,%d,%d,%d,%d,%d,%zu,%.3f,%.2f\n",
+                    // Did the copy actually land? A configuration that
+                    // skips part of the transfer is fast and wrong, and
+                    // nothing else here would notice: the nstream=4 rows
+                    // were timed for a long time while three quarters of
+                    // each copy went to an invalid stream. Sample the head
+                    // and the tail -- a dropped chunk shows up as the
+                    // 0xAB source pattern missing from the destination.
+                    unsigned char probe[2] = {0, 0};
+                    (void)gpuMemcpy(&probe[0], (char*)dst, 1,
+                                    gpuMemcpyDeviceToHost);
+                    (void)gpuMemcpy(&probe[1], (char*)dst + bytes - 1, 1,
+                                    gpuMemcpyDeviceToHost);
+                    const int landed =
+                        (probe[0] == 0xAB && probe[1] == 0xAB) ? 1 : 0;
+                    printf("%d,%d,%d,%d,%d,%d,%d,%d,%zu,%.3f,%.2f,%d\n",
                            v, n, u, bl, ns, gr, fe, pu, bytes, us,
-                           bytes / (us * 1e3));
+                           bytes / (us * 1e3), landed);
                     fflush(stdout);
                 }
                 MPI_Barrier(MPI_COMM_WORLD);
