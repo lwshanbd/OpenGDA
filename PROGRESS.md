@@ -315,6 +315,67 @@ What the run did measure is worth more than what it went looking for:
 | proving the hoist legal (analysis) | **1.055x** mean, **1.33x** at best |
 | choosing well among legal options (decision) | 1.026x |
 
+## 7. Where hand-derivation stops scaling — the ML result
+
+Everything above lives on the cross-node proxy path, where one NIC caps
+the outcome at 24 GB/s and every knob is really about issue overhead. That
+was a scoping accident, not a choice. The intra-node copy path has knobs an
+order of magnitude larger, and unlike the cross-node ones **they interact**.
+
+`ipc_copy_sweep --sweep`, 216 configurations x 9 transfer sizes measured in
+a single allocation (which also holds node and IPC mapping fixed, so the
+configurations are comparable to each other).
+
+**The axes interact.** All six ordered pairs among (vec, nt, unroll) move
+each other's optimum:
+
+```
+1024B   nt=0 -> best vec=1        nt=1 -> best vec=16
+4096B   unroll=1 -> vec=1   unroll=2 -> vec=4   unroll=4 -> vec=16
+```
+
+One boolean moves the optimal vector width by a factor of sixteen.
+
+**And the cost of ignoring that grows with how many knobs are exposed.**
+Every subset of the five axes, scored leave-one-size-out with the unused
+axes pinned at their globally best value:
+
+| knobs exposed | separable rules | GBT | best global | rules lose by |
+| --- | --- | --- | --- | --- |
+| 1 | 1.023x | 1.017x | 1.023x | **1.006x** |
+| 2 | 1.092x | 1.031x | 1.050x | 1.059x |
+| 3 | 1.119x | 1.036x | 1.078x | 1.080x |
+| 4 | 1.193x | 1.045x | 1.107x | 1.142x |
+| 5 | **1.198x** | **1.050x** | 1.137x | **1.141x** |
+
+Independent per-axis thresholds go from 2.3% to 19.8% off the oracle; a
+model over the joint space stays between 1.7% and 5.0%. The gap is
+monotone: **0.6% at one knob, 14.1% at five.**
+
+**This subsumes the four negatives below rather than contradicting them.**
+Those spaces were effectively one or two interacting knobs, and at one knob
+this measurement puts rules and model 0.6% apart — so a hand rule matching
+every learned decider was the *correct* outcome there, not a failure to
+find the right decider. Whether a rule suffices is a property of how many
+interacting knobs the compiler exposes, not of the domain.
+
+The legality criterion in this space is layout, provable by the same stride
+analysis as `coalescable`, and getting it wrong is not a slowdown:
+`vec > 4` on a strided face is a **GPU memory fault**, in every
+orientation, and staging through a contiguous gather buffer does not rescue
+it because the fault is in the gather kernel's own strided read. Related
+measurements on the same path: `gather` is worth **6.46x** on the
+worst-stride face and slightly *harmful* on the contiguous one; face
+orientation spans **24.5x**; the face/row thread mapping is flat, a dead
+knob recorded so nobody measures it twice.
+
+Caveats: one platform, one access pattern, and the five-axis row averages
+over a single subset because only one exists. The `separable` control is
+the separable model *class*, not "any rule a human could write" — a person
+can condition one axis on another, but that is a table whose size grows
+with the number of interacting axes, which is precisely what is being
+measured.
+
 ## The result that keeps reappearing
 
 Four transformation families, measured independently:
