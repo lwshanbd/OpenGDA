@@ -99,6 +99,7 @@ int main(int argc, char** argv) {
     int    ops = 64, dist_us = 0, samples = 11, warmup = 4;
     int    stride_mult = 1;          // 1 => contiguous, >1 => gaps
     bool   force_illegal = false;
+    std::string site = "S";
     std::vector<int> merges = {1, 2, 4, 8, 16, 32, 64};
     std::vector<int> blocks = {1, 2, 4, 8};
 
@@ -122,6 +123,7 @@ int main(int argc, char** argv) {
         else if (a.rfind("--blocks=",  0) == 0) blocks = parse_ints(a.substr(9));
         else if (a.rfind("--samples=", 0) == 0) samples = atoi(a.c_str() + 10);
         else if (a.rfind("--warmup=",  0) == 0) warmup = atoi(a.c_str() + 9);
+        else if (a.rfind("--site=", 0) == 0) site = a.substr(7);
         else if (a == "--force-illegal") force_illegal = true;
         else { fprintf(stderr, "unknown arg '%s'\n", a.c_str()); return 2; }
     }
@@ -192,10 +194,12 @@ int main(int argc, char** argv) {
     };
 
     if (rank == 0) {
+        printf("[site %s] ", site.c_str());
         printf("=== coalesce_bench bytes=%zu ops=%d stride=%zu (%s) dist=%dus%s ===\n",
                bytes, ops, stride, contiguous ? "contiguous" : "gaps", dist_us,
                force_illegal ? "  [--force-illegal]" : "");
-        printf("CSV,merge,blocks,msg_bytes,msgs,median_us,min_us,max_us,verdict\n");
+        printf("CSV,site,bytes,ops,stride_mult,dist_us,coalescable,"
+               "merge,blocks,msg_bytes,msgs,median_us,min_us,max_us,verdict\n");
     }
 
     for (int m : merges) {
@@ -205,7 +209,9 @@ int main(int argc, char** argv) {
         // features.json); here it is the stride that decides.
         if (m > 1 && !contiguous && !force_illegal) {
             if (rank == 0)
-                printf("CSV,%d,-,-,-,,,,SKIPPED-ILLEGAL\n", m);
+                printf("CSV,%s,%zu,%d,%d,%d,%d,%d,-,-,-,,,,SKIPPED-ILLEGAL\n",
+                       site.c_str(), bytes, ops, stride_mult, dist_us,
+                       contiguous ? 1 : 0, m);
             continue;
         }
         for (int P : blocks) {
@@ -240,8 +246,11 @@ int main(int argc, char** argv) {
                 const char* verdict = bad == 0 ? "OK"
                                     : bad == 1 ? "WRONG-payload"
                                                : "WRONG-overwrote-gap";
-                printf("CSV,%d,%d,%zu,%d,%.3f,%.3f,%.3f,%s\n",
-                       m, P, msg_bytes, msgs, st.median, st.min, st.max, verdict);
+                printf("CSV,%s,%zu,%d,%d,%d,%d,%d,%d,%zu,%d,"
+                       "%.3f,%.3f,%.3f,%s\n",
+                       site.c_str(), bytes, ops, stride_mult, dist_us,
+                       contiguous ? 1 : 0, m, P, msg_bytes, msgs,
+                       st.median, st.min, st.max, verdict);
                 printf("  merge=%-3d blocks=%-2d  %6zuB x %-4d  median=%9.2f us  %s\n",
                        m, P, msg_bytes, msgs, st.median, verdict);
             }
