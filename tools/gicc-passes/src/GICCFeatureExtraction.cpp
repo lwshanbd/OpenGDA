@@ -182,6 +182,10 @@ json::Value toRecord(const std::string &siteId,
     // A runtime cannot establish this: when it sees transfer i it does not
     // know where i+1 will go, and by then i has already been issued.
     r["coalescable"]         = transfersAreAdjacent(op);
+    // Widest power-of-two element a copy of this transfer may legally use.
+    // Exceeding the contiguous run does not run slowly on a strided face,
+    // it faults, so this is a legality bound rather than a preference.
+    r["max_vector_bytes"]    = static_cast<int64_t>(maxVectorBytes(op));
     // For a completion point: the weakest sound fence scope. 3 (system) is
     // what every site emitted before this existed, so it is also what the
     // analysis reports whenever it cannot prove something weaker.

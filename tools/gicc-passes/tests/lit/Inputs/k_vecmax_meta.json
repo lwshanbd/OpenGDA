@@ -1,0 +1,339 @@
+{
+  "version": 1,
+  "kernel_mangled": "_Z8k_vecmaxPN4gicc9DeviceCtxEiiill",
+  "kernel_simple": "k_vecmax",
+  "params": [
+    {
+      "idx": 0,
+      "name": "ctx",
+      "type": "ptr"
+    },
+    {
+      "idx": 1,
+      "name": "peer",
+      "type": "i32"
+    },
+    {
+      "idx": 2,
+      "name": "buf",
+      "type": "i32"
+    },
+    {
+      "idx": 3,
+      "name": "n",
+      "type": "i32"
+    },
+    {
+      "idx": 4,
+      "name": "bytes",
+      "type": "i64"
+    },
+    {
+      "idx": 5,
+      "name": "stride",
+      "type": "i64"
+    }
+  ],
+  "ops": [
+    {
+      "site_id": "t.cpp:5:k_vecmax::0",
+      "kind": "put_no_db",
+      "guard": {
+        "kind": "always"
+      },
+      "loop": {
+        "in_loop": true,
+        "iv_param": 3,
+        "iv_start": 0,
+        "iv_step": 1
+      },
+      "comment": "off = i*bytes, size = bytes -> contiguous",
+      "args": {
+        "target_rank": {
+          "kind": "param",
+          "param": 1
+        },
+        "dst_buf": {
+          "kind": "param",
+          "param": 2
+        },
+        "src_buf": {
+          "kind": "param",
+          "param": 2
+        },
+        "size": {
+          "kind": "const_i64",
+          "value": 4096
+        },
+        "dst_off": {
+          "kind": "binop",
+          "op": "mul",
+          "children": [
+            {
+              "kind": "loop_iv"
+            },
+            {
+              "kind": "const_i64",
+              "value": 4096
+            }
+          ]
+        },
+        "src_off": {
+          "kind": "binop",
+          "op": "mul",
+          "children": [
+            {
+              "kind": "loop_iv"
+            },
+            {
+              "kind": "const_i64",
+              "value": 4096
+            }
+          ]
+        }
+      }
+    },
+    {
+      "site_id": "t.cpp:6:k_vecmax::1",
+      "kind": "put_no_db",
+      "guard": {
+        "kind": "always"
+      },
+      "loop": {
+        "in_loop": true,
+        "iv_param": 3,
+        "iv_start": 0,
+        "iv_step": 1
+      },
+      "comment": "off = i*bytes, size = bytes -> contiguous",
+      "args": {
+        "target_rank": {
+          "kind": "param",
+          "param": 1
+        },
+        "dst_buf": {
+          "kind": "param",
+          "param": 2
+        },
+        "src_buf": {
+          "kind": "param",
+          "param": 2
+        },
+        "size": {
+          "kind": "const_i64",
+          "value": 12
+        },
+        "dst_off": {
+          "kind": "binop",
+          "op": "mul",
+          "children": [
+            {
+              "kind": "loop_iv"
+            },
+            {
+              "kind": "const_i64",
+              "value": 12
+            }
+          ]
+        },
+        "src_off": {
+          "kind": "binop",
+          "op": "mul",
+          "children": [
+            {
+              "kind": "loop_iv"
+            },
+            {
+              "kind": "const_i64",
+              "value": 12
+            }
+          ]
+        }
+      }
+    },
+    {
+      "site_id": "t.cpp:7:k_vecmax::2",
+      "kind": "put_no_db",
+      "guard": {
+        "kind": "always"
+      },
+      "loop": {
+        "in_loop": true,
+        "iv_param": 3,
+        "iv_start": 0,
+        "iv_step": 1
+      },
+      "comment": "off = i*bytes, size = bytes -> contiguous",
+      "args": {
+        "target_rank": {
+          "kind": "param",
+          "param": 1
+        },
+        "dst_buf": {
+          "kind": "param",
+          "param": 2
+        },
+        "src_buf": {
+          "kind": "param",
+          "param": 2
+        },
+        "size": {
+          "kind": "const_i64",
+          "value": 4096
+        },
+        "dst_off": {
+          "kind": "binop",
+          "op": "add",
+          "children": [
+            {
+              "kind": "binop",
+              "op": "mul",
+              "children": [
+                {
+                  "kind": "loop_iv"
+                },
+                {
+                  "kind": "const_i64",
+                  "value": 4096
+                }
+              ]
+            },
+            {
+              "kind": "const_i64",
+              "value": 2
+            }
+          ]
+        },
+        "src_off": {
+          "kind": "binop",
+          "op": "mul",
+          "children": [
+            {
+              "kind": "loop_iv"
+            },
+            {
+              "kind": "const_i64",
+              "value": 4096
+            }
+          ]
+        }
+      }
+    },
+    {
+      "site_id": "t.cpp:8:k_vecmax::3",
+      "kind": "put_no_db",
+      "guard": {
+        "kind": "always"
+      },
+      "loop": {
+        "in_loop": true,
+        "iv_param": 3,
+        "iv_start": 0,
+        "iv_step": 1
+      },
+      "comment": "off = i*bytes, size = bytes -> contiguous",
+      "args": {
+        "target_rank": {
+          "kind": "param",
+          "param": 1
+        },
+        "dst_buf": {
+          "kind": "param",
+          "param": 2
+        },
+        "src_buf": {
+          "kind": "param",
+          "param": 2
+        },
+        "size": {
+          "kind": "param",
+          "param": 4
+        },
+        "dst_off": {
+          "kind": "binop",
+          "op": "mul",
+          "children": [
+            {
+              "kind": "loop_iv"
+            },
+            {
+              "kind": "const_i64",
+              "value": 4096
+            }
+          ]
+        },
+        "src_off": {
+          "kind": "binop",
+          "op": "mul",
+          "children": [
+            {
+              "kind": "loop_iv"
+            },
+            {
+              "kind": "const_i64",
+              "value": 4096
+            }
+          ]
+        }
+      }
+    },
+    {
+      "site_id": "t.cpp:9:k_vecmax::4",
+      "kind": "put_no_db",
+      "guard": {
+        "kind": "always"
+      },
+      "loop": {
+        "in_loop": true,
+        "iv_param": 3,
+        "iv_start": 0,
+        "iv_step": 1
+      },
+      "comment": "off = i*bytes, size = bytes -> contiguous",
+      "args": {
+        "target_rank": {
+          "kind": "param",
+          "param": 1
+        },
+        "dst_buf": {
+          "kind": "param",
+          "param": 2
+        },
+        "src_buf": {
+          "kind": "param",
+          "param": 2
+        },
+        "size": {
+          "kind": "const_i64",
+          "value": 64
+        },
+        "dst_off": {
+          "kind": "binop",
+          "op": "mul",
+          "children": [
+            {
+              "kind": "loop_iv"
+            },
+            {
+              "kind": "const_i64",
+              "value": 4096
+            }
+          ]
+        },
+        "src_off": {
+          "kind": "binop",
+          "op": "mul",
+          "children": [
+            {
+              "kind": "loop_iv"
+            },
+            {
+              "kind": "const_i64",
+              "value": 4096
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

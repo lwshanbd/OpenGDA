@@ -267,6 +267,114 @@ inline bool ivCoefficient(const ArgRef &a, ArgRef &coef, bool &hasIv) {
     return false;
 }
 
+// Fold an expression to a constant, when it is one. Only the operators the
+// builder actually emits for offsets; anything else is "not a constant",
+// which is the safe answer for every caller here.
+inline bool constOf(const ArgRef &a, int64_t &out) {
+    switch (a.kind) {
+        case ArgRef::Kind::ConstI64: out = a.constVal; return true;
+        case ArgRef::Kind::Cast:
+            return a.children.size() == 1 && constOf(a.children[0], out);
+        case ArgRef::Kind::BinOp: {
+            if (a.children.size() != 2) return false;
+            int64_t l, r;
+            if (!constOf(a.children[0], l) || !constOf(a.children[1], r))
+                return false;
+            if (a.opStr == "add") { out = l + r; return true; }
+            if (a.opStr == "sub") { out = l - r; return true; }
+            if (a.opStr == "mul") { out = l * r; return true; }
+            if (a.opStr == "shl") {
+                if (r < 0 || r > 62) return false;
+                out = l << r; return true;
+            }
+            return false;
+        }
+        default: return false;
+    }
+}
+
+// Fold an expression with the induction variable taken as zero -- the
+// constant part of an affine offset, i.e. where the run starts. Returns
+// false if anything else fails to fold, because an offset that is a kernel
+// formal has unknown alignment and nothing may be claimed from it.
+inline bool constAtIvZero(const ArgRef &a, int64_t &out) {
+    if (a.kind == ArgRef::Kind::LoopIv) { out = 0; return true; }
+    switch (a.kind) {
+        case ArgRef::Kind::ConstI64: out = a.constVal; return true;
+        case ArgRef::Kind::Cast:
+            return a.children.size() == 1 && constAtIvZero(a.children[0], out);
+        case ArgRef::Kind::BinOp: {
+            if (a.children.size() != 2) return false;
+            int64_t l, r;
+            if (!constAtIvZero(a.children[0], l) ||
+                !constAtIvZero(a.children[1], r))
+                return false;
+            if (a.opStr == "add") { out = l + r; return true; }
+            if (a.opStr == "sub") { out = l - r; return true; }
+            if (a.opStr == "mul") { out = l * r; return true; }
+            if (a.opStr == "shl") {
+                if (r < 0 || r > 62) return false;
+                out = l << r; return true;
+            }
+            return false;
+        }
+        default: return false;
+    }
+}
+
+// The widest power-of-two element a copy of this transfer could legally
+// use, in bytes.
+//
+// A wide vector load has to stay inside one contiguous run and start
+// aligned. Both bounds come from the descriptor: the transfer size, the
+// base offsets, and -- when the transfer sits in a loop -- the stride
+// between iterations, since a run ends where the next gap begins. The
+// answer is the largest power of two dividing all of them.
+//
+// This is the knob whose legality is worth proving: measured, a vector
+// width past the contiguous run does not run slowly on a strided face, it
+// FAULTS. So anything that cannot be folded to a constant yields 1, which
+// is always safe, and the cap is 16 because that is the widest load the
+// copy kernels have.
+inline int maxVectorBytes(const OpTemplate &op) {
+    if (op.kind != "put_no_db" && op.kind != "get_no_db") return 1;
+    auto sz = op.args.find("size");
+    int64_t bound = 0;
+    if (sz == op.args.end() || !constOf(sz->second, bound) || bound <= 0)
+        return 1;
+
+    auto accumulate = [&](int64_t v) {
+        if (v < 0) v = -v;
+        if (v == 0) return;                       // 0 constrains nothing
+        int64_t a = bound, b = v;                 // gcd
+        while (b) { int64_t t = a % b; a = b; b = t; }
+        bound = a;
+    };
+
+    for (const char *f : {"dst_off", "src_off"}) {
+        auto it = op.args.find(f);
+        if (it == op.args.end()) return 1;
+        // BOTH parts of an affine offset constrain the answer: the stride
+        // bounds the contiguous run, and the constant addend sets where it
+        // starts. Taking only the stride claims 16-byte alignment for
+        // `iv*4096 + 2`, which is wrong in the direction that faults.
+        int64_t addend = 0;
+        if (!constAtIvZero(it->second, addend)) return 1;   // base unknown
+        accumulate(addend);
+        ArgRef coef; bool hasIv = false;
+        if (!ivCoefficient(it->second, coef, hasIv)) return 1;
+        if (hasIv) {
+            int64_t stride = 0;
+            if (!constOf(coef, stride)) return 1;
+            accumulate(stride);
+        }
+    }
+
+    int v = 1;
+    while (v < 16 && (bound % (v * 2)) == 0) v *= 2;
+    return v;
+}
+
 // Do consecutive iterations of this transfer land exactly `size` apart at
 // BOTH ends? If so the loop's transfers are one contiguous region and any
 // run of them may be issued as a single larger transfer.
