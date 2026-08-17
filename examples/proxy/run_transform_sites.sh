@@ -36,16 +36,19 @@ E       256      64   1            400
 F       4096     32   2            0
 "
 
-echo "$SITES" | while read -r name bytes ops sm dist; do
+# srun reads stdin, so inside a `while read` loop it swallows the rest of
+# the site list and only the first one ever runs. Feed the loop on fd 3 and
+# give srun /dev/null.
+while read -r name bytes ops sm dist <&3; do
     [ -z "${name:-}" ] && continue
     echo "### site $name: bytes=$bytes ops=$ops stride_mult=$sm dist=${dist}us"
     GICC_SKIP_DWQ_INIT=1 GICC_PROXY_ENABLED=1 \
         timeout "$RUN_TIMEOUT" $SRUN "$BIN" \
             --site="$name" --bytes="$bytes" --ops="$ops" \
             --stride-mult="$sm" --dist="$dist" \
-            --samples="$SAMPLES" --warmup="$WARMUP" 2>&1 \
+            --samples="$SAMPLES" --warmup="$WARMUP" < /dev/null 2>&1 \
         | tee /dev/stderr | grep '^CSV,' | grep -v '^CSV,site,' >> "$OUT"
-done
+done 3<<< "$SITES"
 
 echo
 echo "wrote $(grep -c '^CSV,' "$OUT") rows to $OUT"
