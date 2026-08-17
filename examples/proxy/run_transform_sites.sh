@@ -2,16 +2,13 @@
 # run_transform_sites.sh - measure every legal transformation at every call
 # site, so a plan can be scored against a real per-site oracle.
 #
-# The sites are chosen to disagree with each other. If they all preferred
-# the same transformation there would be no decision to make and no reason
-# for anything to choose per site.
-#
-#   A  tiny messages, contiguous      merging should pay the most
-#   B  tiny messages, gaps            merging is ILLEGAL; only issue width
-#   C  mid messages, contiguous       merging pays, less
-#   D  large messages, contiguous     already near the bandwidth ceiling
-#   E  tiny messages, contiguous, far  the wait is hidden anyway
-#   F  mid messages, gaps             illegal again, different shape
+# THE TRAIN/TEST SPLIT IS DECLARED HERE, BEFORE ANY OF THIS IS MEASURED,
+# and it is mechanical: every third site is held out. The first version of
+# this experiment split by hand and the three sites with real headroom all
+# landed in training, which left the held-out set too flat to separate any
+# decider from any other. Re-splitting after seeing which sites are flat
+# would have produced a better-looking number and no information, so the
+# rule is fixed in the script instead of chosen later.
 #
 #   ./examples/proxy/run_transform_sites.sh [outfile]
 set -u
@@ -26,14 +23,30 @@ SRUN="srun -p pci -N 2 -n 2 --ntasks-per-node=1 -c 8 --gpu-bind=none -t 8"
 mkdir -p "$(dirname "$OUT")"
 : > "$OUT"
 
-# site  bytes    ops  stride_mult  dist_us
+# Sites span message size, trip count, adjacency and how much independent
+# work is available to hide the transfer behind. Roughly two thirds are
+# provably adjacent, since a program where nothing can be merged has no
+# transformation decision to make and one where everything can has no
+# legality decision.
+#
+# name  bytes    ops  stride_mult  dist_us      (stride_mult 1 = adjacent)
 SITES="
-A       256      64   1            0
-B       256      64   2            0
-C       4096     64   1            0
-D       65536    32   1            0
-E       256      64   1            400
-F       4096     32   2            0
+S01     256      64   1            0
+S02     256      64   1            400
+S03     1024     64   1            0
+S04     4096     64   1            0
+S05     4096     64   1            100
+S06     16384    32   1            0
+S07     16384    32   1            400
+S08     65536    32   1            0
+S09     65536    16   1            100
+S10     262144   16   1            0
+S11     256      64   2            0
+S12     1024     64   2            0
+S13     4096     32   2            0
+S14     4096     32   2            400
+S15     16384    32   2            0
+S16     65536    16   2            0
 "
 
 # srun reads stdin, so inside a `while read` loop it swallows the rest of
@@ -48,6 +61,7 @@ while read -r name bytes ops sm dist <&3; do
             --stride-mult="$sm" --dist="$dist" \
             --samples="$SAMPLES" --warmup="$WARMUP" < /dev/null 2>&1 \
         | tee /dev/stderr | grep '^CSV,' | grep -v '^CSV,site,' >> "$OUT"
+    echo "###   -> $(grep -c '^CSV,' "$OUT") rows so far"
 done 3<<< "$SITES"
 
 echo

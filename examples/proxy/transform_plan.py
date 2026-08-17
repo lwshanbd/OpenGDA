@@ -29,10 +29,16 @@ COLS = ["site", "bytes", "ops", "stride_mult", "dist_us", "coalescable",
         "merge", "blocks", "msg_bytes", "msgs", "median_us", "min_us",
         "max_us", "verdict"]
 
-# Sites the decider is allowed to learn from; the rest are held out. Split
-# by shape rather than at random so the held-out sites are not near-copies
-# of training ones.
-TRAIN_SITES = ["A", "B", "C"]
+# The split is mechanical and is declared in run_transform_sites.sh before
+# anything is measured: every third site is held out. Deriving it from the
+# name here rather than listing sites keeps the two files from drifting,
+# and keeps the split from being quietly adjusted once the results are in.
+HELD_OUT_EVERY = 3
+
+
+def is_test(site):
+    digits = "".join(c for c in site if c.isdigit())
+    return bool(digits) and int(digits) % HELD_OUT_EVERY == 0
 
 
 def load(path):
@@ -72,8 +78,8 @@ def gmean(xs):
 
 def emit(path):
     facts, cost = load(path)
-    train = [s for s in facts if s in TRAIN_SITES]
-    test = [s for s in facts if s not in TRAIN_SITES]
+    train = [s for s in facts if not is_test(s)]
+    test = [s for s in facts if is_test(s)]
 
     hist = []
     for s in train:
@@ -125,8 +131,8 @@ No prose, no code fences.""")
 
 def score(path, plan_path):
     facts, cost = load(path)
-    test = [s for s in facts if s not in TRAIN_SITES]
-    train = [s for s in facts if s in TRAIN_SITES]
+    test = [s for s in facts if is_test(s)]
+    train = [s for s in facts if not is_test(s)]
 
     raw = open(plan_path).read().strip()
     if raw.startswith("```"):
