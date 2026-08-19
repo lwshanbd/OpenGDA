@@ -236,3 +236,74 @@ builds inherit the same perf as single-pass builds.
 
 v2 will swap `decide_one()` for an ML model trained on per-rank
 profiling data. The pass-side schema will not change.
+
+
+## LLM decision bridge
+
+The LLM path uses the same pass-side `features.json -> hint.json` contract.
+It does not give source text to the model and it does not put a provider call
+inside the linker.  The two LTO invocations are separated by a replayable,
+content-addressed decision step:
+
+```text
+LTO feature extraction
+        |
+        v
+features.json + measured platform profile
+        |
+        v
+gicc-llm-dossier-v1 --external model--> gicc-llm-decision-v1
+        |
+        v  schema, dossier hash, site completeness, legal_actions
+gicc_llm_bridge.py accept
+        |
+        v
+gicc-hint-v1 --second LTO--> validated lowering
+```
+
+Create the provider-neutral artifacts with:
+
+```bash
+python3 tools/gicc-passes/python/gicc_llm_bridge.py emit \
+  --features build/features.json \
+  --platform tools/gicc-passes/python/profiles/tioga-mi250x-slingshot11.json \
+  --dossier build/llm-dossier.json \
+  --prompt build/llm-prompt.txt
+```
+
+The response must bind itself to the dossier hash and cover every decision
+site exactly once:
+
+```json
+{
+  "schema_version": "gicc-llm-decision-v1",
+  "dossier_id": "sha256:<digest>",
+  "decisions": {
+    "<site_id>": {
+      "action": "proxy",
+      "confidence": 0.93,
+      "rationale": "short compiler/platform-fact explanation"
+    }
+  }
+}
+```
+
+`action` must be one of that site's `legal_actions`.  `default` is an explicit
+abstention and leaves the pass's `IPC_OR_DWQ` baseline in place.  Forced `ipc`
+is withheld unless topology proves `peer_locality=same_node`; a proxy-only
+site cannot abstain because the hybrid host path is not legal there.
+
+Accept and translate with:
+
+```bash
+python3 tools/gicc-passes/python/gicc_llm_bridge.py accept \
+  --dossier build/llm-dossier.json \
+  --response build/llm-response.json \
+  --hint build/llm-hint.json
+```
+
+By default any malformed, stale, incomplete, or illegal response produces a
+deterministic fallback hint: host-capable sites inherit `IPC_OR_DWQ`, while
+compiler-proven proxy-only sites are pinned to `CPU_PROXY_ENQUEUE`.  No model
+choice is partially applied.  `--strict` instead rejects the sample without
+writing a hint.

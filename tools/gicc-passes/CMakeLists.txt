@@ -112,6 +112,16 @@ target_compile_options(gicc-passes PRIVATE -fno-rtti)
 # ---------------------------------------------------------------------------
 # Lit tests
 # ---------------------------------------------------------------------------
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_custom_target(check-gicc-llm-bridge
+        COMMAND ${Python3_EXECUTABLE} -m unittest discover
+                -s ${CMAKE_CURRENT_SOURCE_DIR}/tests/python
+                -p "test_*.py"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        USES_TERMINAL)
+endif()
+
 find_program(LIT_EXE lit HINTS ${LLVM_TOOLS_BINARY_DIR})
 if(LIT_EXE)
     if(GICC_PASSES_ANALYZE_ONLY)
@@ -128,6 +138,9 @@ if(LIT_EXE)
         DEPENDS gicc-passes
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         USES_TERMINAL)
+    if(TARGET check-gicc-llm-bridge)
+        add_dependencies(check-gicc-passes check-gicc-llm-bridge)
+    endif()
 else()
     message(STATUS "gicc-passes: lit not found; skipping check-gicc-passes target")
 endif()

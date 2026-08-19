@@ -106,5 +106,6 @@ held-out learned decision, the compiler emits a different legal cross-node
 communication path, and that executable repeatedly beats the no-hint
 default. It does **not** prove GBT beats the best hand rule; the broader
 negative results in `PROGRESS.md` still show rules matching learned selection
-over this enumerable action space. It is also not an LLM-agent result; the
-isolated source-agent experiment remains unexecuted.
+over this enumerable action space. It is also not yet an LLM result; the LLM
+arm must use the same compiler facts, validated hint boundary, unchanged
+source, and executable gates before it can be compared.

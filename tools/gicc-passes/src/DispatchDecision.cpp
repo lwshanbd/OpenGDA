@@ -45,21 +45,41 @@ bool readHintFile(const std::string &path, HintFile &out) {
     }
     const auto *root = parsed->getAsObject();
     if (!root) return false;
-    if (auto def = root->getString("default_dispatch"))
-        out.defaultDispatch = parseDispatch(*def);
+
+    // Treat the hint as an untrusted decision boundary.  In particular, do
+    // not let an unknown model-produced string become DispatchKind::Unknown
+    // and then silently lower as DWQ_TRIGGER.  Parse into a temporary object
+    // so a late error cannot leave `out` half populated.
+    auto version = root->getInteger("version");
+    auto schema  = root->getString("schema_version");
+    if (!version || *version != 1 || !schema || *schema != "gicc-hint-v1")
+        return false;
+
+    HintFile candidate;
+    if (auto def = root->getString("default_dispatch")) {
+        candidate.defaultDispatch = parseDispatch(*def);
+        if (candidate.defaultDispatch == DispatchKind::Unknown) return false;
+    }
     if (const auto *sites = root->getObject("sites")) {
         for (const auto &kv : *sites) {
             const auto *entry = kv.second.getAsObject();
-            if (!entry) continue;
+            if (!entry) return false;
             auto disp = entry->getString("dispatch");
-            if (!disp) continue;
+            if (!disp) return false;
             SiteHint sh;
             sh.dispatch = parseDispatch(*disp);
-            if (auto v = entry->getInteger("stream_index"))
+            if (sh.dispatch == DispatchKind::Unknown) return false;
+            if (auto v = entry->getInteger("stream_index")) {
+                if (*v < 0 || *v > 1024) return false;
                 sh.streamIndex = static_cast<int>(*v);
-            out.sites[kv.first.str()] = sh;
+            }
+            candidate.sites[kv.first.str()] = sh;
         }
+    } else if (root->get("sites")) {
+        return false;
     }
+
+    out = std::move(candidate);
     return true;
 }
 

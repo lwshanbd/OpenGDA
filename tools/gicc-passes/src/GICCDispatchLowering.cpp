@@ -341,7 +341,7 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
     if (!cfg.hintIn.empty()) {
         if (!readHintFile(cfg.hintIn, hints)) {
             errs() << "[dispatch-lowering] WARN: could not read hint "
-                   << cfg.hintIn << "; falling back to default DWQ_TRIGGER\n";
+                   << cfg.hintIn << "; falling back to default IPC_OR_DWQ\n";
         }
     }
 

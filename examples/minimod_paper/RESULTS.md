@@ -203,10 +203,10 @@ Source files were copied into an isolated build tree after exact hash checks;
 the external Minimod worktree was not edited.
 
 The measurements ran on Tioga MI250X nodes (eight visible GPU GCDs per node).
-They predate the branch-history cleanup that removed unrelated source-agent
-work; exact source, binary, model-input, and hint hashes below are the durable
-reproduction anchors.  The preserved compiler implementation is the learned
-LTO-lowering commit in this branch.  The build used HIP
+They predate the branch-history cleanup; exact source, binary, model-input,
+and hint hashes below are the durable reproduction anchors.  The preserved
+compiler implementation is the learned LTO-lowering commit in this branch.
+The build used HIP
 6.4.43482 / AMD clang 19.0.0git for `gfx90a`, Cray MPICH 9.0.1 headers and
 libraries, and Flux 0.87.0.
 

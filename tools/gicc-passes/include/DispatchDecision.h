@@ -66,9 +66,9 @@ struct HintFile {
     std::unordered_map<std::string, SiteHint> sites;
 };
 
-// Load a hint.json from disk into `out`. Returns false on I/O or
-// parse error; `out` is left in default state on failure (caller can
-// then treat sites as defaultDispatch).
+// Load and validate a gicc-hint-v1 file into `out`. Returns false on I/O,
+// schema, dispatch-name, site-entry, or stream-index error; `out` is left
+// unchanged on failure (caller can then treat sites as defaultDispatch).
 bool readHintFile(const std::string &path, HintFile &out);
 
 // Look up the SiteHint for `siteId`. Falls back to defaultDispatch

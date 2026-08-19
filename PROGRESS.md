@@ -641,29 +641,52 @@ rule (95% 1.00357-1.01063); cross-grid transfer remains 1.00466-1.00741x over
 that rule.  The learned advantage is therefore small and problem-size
 dependent, but supported by more than the synthetic proxy benchmark.
 
-The scope is narrower than the old source-agent narrative.  LTO materializes
-the transport choice.  Minimod's serial/overlap schedule is an already
-hand-written benchmark mode and is retained only as a measured cost/oracle
-axis; neither the compiler nor a model discovered or rewrote it.  O5 is the
-clean compiler-only result: host-mirror facts change the legal set and the
-pass emits different routes in one binary, although the newly legal trigger
-route is 1.08-1.6% slower at the two measured work points.
+The scope is deliberately narrow.  LTO materializes the transport choice.
+Minimod's serial/overlap schedule is an already hand-written benchmark mode
+and is retained only as a measured cost/oracle axis; neither the compiler nor
+a model discovered or rewrote it.  O5 is the clean compiler-only result:
+host-mirror facts change the legal set and the pass emits different routes in
+one binary, although the newly legal trigger route is 1.08-1.6% slower at the
+two measured work points.
+
+## 11. The LLM boundary is now compiler-fact -> decision -> LTO hint
+
+`tools/gicc-passes/python/gicc_llm_bridge.py` implements the provider-neutral
+part of the correct experiment.  It turns schema-v4 `features.json` plus a
+measured platform profile into a content-addressed
+`gicc-llm-dossier-v1`; no source text is accepted.  A model response must bind
+to that dossier hash, cover every compiler site exactly once, and choose only
+from the site's `legal_actions`.  Accepted choices become `gicc-hint-v1` for
+the second LTO invocation.
+
+The boundary fails closed.  A malformed, stale, incomplete, or illegal
+response applies no model choices: host-capable sites retain `IPC_OR_DWQ`,
+and compiler-proven proxy-only sites are pinned to `CPU_PROXY_ENQUEUE`.
+Forced IPC is withheld until topology proves the peer is same-node.  The
+existing 64-site end-to-end facts produce a deterministic dossier with only
+`proxy`, `trigger`, and `default` available.
+
+This is infrastructure, not a new performance result.  Nine bridge tests and
+all 39 pass tests pass, including pass-side rejection of an invented dispatch;
+no LLM trial is counted yet.
 
 ## Next
 
 The next model experiment stays entirely on the compiler path:
 
-1. Have LTO emit a versioned, compiler-derived dossier for each decision
-   group: operations, legality, reuse, completion grouping, topology, and
-   the measured platform profile. No source text is an input.
-2. Give that dossier to an external LLM and require a small, schema-checked
-   decision object. The model may choose only among pass-defined actions;
-   it never emits or edits program text.
-3. Feed the accepted decision back to a second LTO invocation. The pass
-   rechecks legality and materializes the selected lowering; invalid or
-   incomplete decisions fail closed to the deterministic baseline.
-4. Compare LLM, GBT, hand rule, compiler default, and oracle on unchanged
-   source, with route counters and end-to-end correctness gates.
+1. Wire the runtime topology side-band into feature extraction so the dossier
+   can distinguish proven same-node IPC from remote DWQ/proxy decisions.
+2. Freeze a heterogeneous, unchanged-source workload whose compiler-generated
+   sites differ in size, batch, reuse, distance, and locality.  The current
+   64-site path is a useful integration gate but all sites are identical, so
+   it cannot establish language-model reasoning value.
+3. Run repeated LLM decisions on the frozen dossier and compare LLM, GBT,
+   hand rule, compiler default, and oracle.  Then feed every accepted hint to
+   the second LTO build and retain route counters, hashes, wall time, model
+   version, prompt hash, and response hash.
+4. Only after that dispatch gate is clean, expose another pass-materialized
+   action family such as batching/coalescing.  The pass must generate and
+   prove the candidates; the model may rank them but may not write code.
 
 This two-phase compile keeps provider calls out of the linker, makes every
 decision cacheable and replayable, and preserves the intended research
