@@ -22,6 +22,11 @@ sites, `size_log2=12`, `batch_size=64`, exact
 for proxy. The held-out measured cell, used only for evaluation, is 98.471
 versus 87.179 us.
 
+Feature schema v5 also recovers `grid=(8,1,1)` and `block=(1,1,1)` directly
+from the host LTO launch callsite. Together with the hash-bound platform
+profile's eight-worker deployment, this exposes the concurrency fact needed by
+an LLM or another compiler decider without providing application source.
+
 Both arms use the same runtime, eight proxy workers, launch geometry, rank
 placement, warmup, and sample count. The receiver is cleared after warmup;
 each static site has a distinct byte pattern; every byte of the 256 KiB

@@ -6,20 +6,179 @@
 
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/Analysis/ValueTracking.h"
 
 #include <cstdint>
+#include <limits>
+#include <optional>
 
 using namespace llvm;
 
 namespace gicc::pass {
 
 namespace {
+
+struct Dim3Facts {
+    std::optional<uint32_t> x;
+    std::optional<uint32_t> y;
+    std::optional<uint32_t> z;
+};
+
+struct LaunchGeometry {
+    Dim3Facts grid;
+    Dim3Facts block;
+};
+
+bool isBeforeInBlock(const Instruction &candidate,
+                     const Instruction &limit) {
+    return candidate.getParent() == limit.getParent() &&
+           candidate.comesBefore(&limit);
+}
+
+// Before the regular optimizer has inlined dim3's constructor, clang lowers
+// a source-level dim3 temporary as:
+//
+//   call dim3::dim3(tmp, x, y, z)
+//   memcpy(abi.tmp, tmp, 12)
+//   packed.xy = load i64, abi.tmp
+//   launch(..., packed.xy, ...)
+//
+// Follow that IR def-use/memory chain conservatively.  This is needed because
+// the GICC discovery passes intentionally run before the general inliner, so
+// post-optimization ConstantInts are not always available yet.
+std::optional<Dim3Facts> decodeConstructedDim3(const CallBase &launch,
+                                               unsigned packedXYArg) {
+    if (launch.arg_size() <= packedXYArg) return std::nullopt;
+    const auto *packedLoad =
+        dyn_cast<LoadInst>(launch.getArgOperand(packedXYArg));
+    if (!packedLoad) return std::nullopt;
+
+    const Value *abiStorage = getUnderlyingObject(
+        packedLoad->getPointerOperand());
+    // SROA commonly removes the memcpy and leaves the ABI load directly on
+    // the dim3 alloca. Start with that form, then replace it if an explicit
+    // ABI copy is still present.
+    const Value *dimStorage = abiStorage;
+    const Instruction *copyPoint = &launch;
+    for (const Instruction &inst : *launch.getParent()) {
+        if (!isBeforeInBlock(inst, launch)) break;
+        const auto *copy = dyn_cast<MemCpyInst>(&inst);
+        if (!copy || getUnderlyingObject(copy->getDest()) != abiStorage)
+            continue;
+        dimStorage = getUnderlyingObject(copy->getSource());
+        copyPoint = copy;
+    }
+    const CallBase *constructor = nullptr;
+    for (const Instruction &inst : *launch.getParent()) {
+        if (!isBeforeInBlock(inst, *copyPoint)) break;
+        const auto *call = dyn_cast<CallBase>(&inst);
+        if (!call || call->arg_size() < 4) continue;
+        const Function *callee = call->getCalledFunction();
+        if (!callee || !callee->getName().contains("4dim3C")) continue;
+        if (getUnderlyingObject(call->getArgOperand(0)) != dimStorage)
+            continue;
+        constructor = call;
+    }
+    if (!constructor) return std::nullopt;
+
+    Dim3Facts result;
+    auto read32 = [&](unsigned arg) -> std::optional<uint32_t> {
+        const auto *constant =
+            dyn_cast<ConstantInt>(constructor->getArgOperand(arg));
+        if (!constant || constant->getBitWidth() > 32) return std::nullopt;
+        return static_cast<uint32_t>(constant->getZExtValue());
+    };
+    result.x = read32(1);
+    result.y = read32(2);
+    result.z = read32(3);
+    return result;
+}
+
+// On the x86-64 host ABI used by the LTO pipeline, HIP's 12-byte dim3 is
+// lowered to two call operands: an i64 containing x (low 32 bits) and y
+// (high 32 bits), followed by an i32 containing z.  Decode only literal
+// ConstantInts.  A dynamic operand stays unknown rather than becoming an
+// estimate; this is a compiler-fact interface, not a source heuristic.
+Dim3Facts decodeDim3(const CallBase &call, unsigned packedXYArg,
+                     unsigned zArg) {
+    Dim3Facts result;
+    if (call.arg_size() <= zArg) return result;
+
+    if (const auto *xy = dyn_cast<ConstantInt>(call.getArgOperand(packedXYArg))) {
+        if (xy->getBitWidth() <= 64) {
+            const uint64_t packed = xy->getZExtValue();
+            result.x = static_cast<uint32_t>(packed & 0xffffffffULL);
+            result.y = static_cast<uint32_t>(packed >> 32);
+        }
+    }
+    if (const auto *z = dyn_cast<ConstantInt>(call.getArgOperand(zArg))) {
+        if (z->getBitWidth() <= 32)
+            result.z = static_cast<uint32_t>(z->getZExtValue());
+    }
+    if ((!result.x || !result.y || !result.z)) {
+        if (auto constructed = decodeConstructedDim3(call, packedXYArg)) {
+            if (!result.x) result.x = constructed->x;
+            if (!result.y) result.y = constructed->y;
+            if (!result.z) result.z = constructed->z;
+        }
+    }
+    return result;
+}
+
+LaunchGeometry launchGeometry(const GICCLaunchSite &site) {
+    LaunchGeometry result;
+    if (!site.callsite) return result;
+
+    // The split i64/i32 representation below is the x86-64 SysV ABI shape.
+    // Other host targets must stay unknown until their ABI is implemented.
+    const Triple triple(site.callsite->getModule()->getTargetTriple());
+    if (triple.getArch() != Triple::x86_64 || site.callsite->arg_size() < 5)
+        return result;
+    const unsigned widths[] = {64, 32, 64, 32};
+    for (unsigned i = 0; i < 4; ++i) {
+        const Type *type = site.callsite->getArgOperand(i + 1)->getType();
+        if (!type->isIntegerTy(widths[i])) return result;
+    }
+
+    // arg 0 is Runtime&. Both launch overloads put grid and block next; the
+    // optional shmem/stream operands follow them and do not affect this ABI.
+    result.grid = decodeDim3(*site.callsite, 1, 2);
+    result.block = decodeDim3(*site.callsite, 3, 4);
+    return result;
+}
+
+json::Value dim3Record(const Dim3Facts &dim) {
+    json::Object record;
+    if (dim.x) record["x"] = static_cast<int64_t>(*dim.x);
+    else       record["x"] = nullptr;
+    if (dim.y) record["y"] = static_cast<int64_t>(*dim.y);
+    else       record["y"] = nullptr;
+    if (dim.z) record["z"] = static_cast<int64_t>(*dim.z);
+    else       record["z"] = nullptr;
+    return json::Value(std::move(record));
+}
+
+std::optional<int64_t> dim3Product(const Dim3Facts &dim) {
+    if (!dim.x || !dim.y || !dim.z) return std::nullopt;
+    uint64_t product = *dim.x;
+    for (uint32_t factor : {*dim.y, *dim.z}) {
+        if (factor != 0 &&
+            product > static_cast<uint64_t>(
+                          std::numeric_limits<int64_t>::max()) / factor)
+            return std::nullopt;
+        product *= factor;
+    }
+    return static_cast<int64_t>(product);
+}
 
 // Translate ArgRef::Kind to the JSON tag the decider consumes.
 const char *argKindTag(ArgRef::Kind k) {
@@ -90,18 +249,19 @@ json::Value loopDescriptor(const OpLoopInfo &L) {
 json::Value toRecord(const std::string &siteId,
                      const std::string &simpleKernel,
                      const OpTemplate  &op,
-                     int                fanOut) {
+                     int                fanOut,
+                     const LaunchGeometry &geometry) {
     json::Object r;
-    // v4 adds descriptor_reusable, buffer_reusable, batch_size and
-    // legal_paths — the reuse and batching properties a runtime cannot
-    // establish from one call, plus legality stated as a set rather than
-    // left implicit in hk_capable.
+    // v5 adds the launch geometry visible at the host LTO callsite. This
+    // matters for dispatch throughput (for example, how many proxy producers
+    // can issue concurrently) and cannot be recovered from per-kernel device
+    // metadata alone.
     //
     // Jumps 2 → 4 on purpose: the emitter had been left at 2 while the
     // schema doc already described a v3 (flops_to_first_use, trip_count,
     // distance_exact), so anything claiming 2 may or may not carry those.
     // Skipping the number keeps "3" from meaning two different things.
-    r["schema_version"] = 4;
+    r["schema_version"] = 5;
     r["site_id"]        = siteId;
     r["kernel"]         = simpleKernel;
     r["op_kind"]        = op.kind;
@@ -138,6 +298,17 @@ json::Value toRecord(const std::string &siteId,
 
     r["guard_density"] = guardDensity(op.guard);
     r["fan_out"]       = fanOut;
+
+    r["launch_grid"]  = dim3Record(geometry.grid);
+    r["launch_block"] = dim3Record(geometry.block);
+    if (auto blocks = dim3Product(geometry.grid))
+        r["grid_blocks"] = *blocks;
+    else
+        r["grid_blocks"] = nullptr;
+    if (auto threads = dim3Product(geometry.block))
+        r["threads_per_block"] = *threads;
+    else
+        r["threads_per_block"] = nullptr;
 
     // compute_before_flops: static count of arithmetic / FP ops in BBs
     // dominating the call site. -1 sentinel from the JSON means the
@@ -237,9 +408,11 @@ PreservedAnalyses GICCFeatureExtractionPass::run(Module &M,
     for (const auto &s : inv.sites) {
         if (!s.haveTemplate) continue;
         int fanOut = kernelFanOut(s.kernelTemplate);
+        const auto geometry = launchGeometry(s);
         for (const auto &op : s.kernelTemplate.ops) {
             records.push_back(
-                toRecord(op.siteId, s.kernelTemplate.simpleName, op, fanOut));
+                toRecord(op.siteId, s.kernelTemplate.simpleName, op, fanOut,
+                         geometry));
         }
     }
     if (records.empty()) return PreservedAnalyses::all();

@@ -27,18 +27,20 @@ target triple = "x86_64-unknown-linux-gnu"
      ptr null }],
    section "llvm.metadata"
 
-define linkonce_odr void @_ZN4gicc6launchITnDaXadL_Z9k_const_szPN4gicc9DeviceCtxEEEvRNS_7RuntimeE(ptr %rt) {
+define linkonce_odr void @_ZN4gicc6launchITnDaXadL_Z9k_const_szPN4gicc9DeviceCtxEEEvRNS_7RuntimeE(ptr %rt, i64 %grid.xy, i32 %grid.z, i64 %block.xy, i32 %block.z) {
   ret void
 }
 
 define void @main(ptr %rt) {
-  call void @_ZN4gicc6launchITnDaXadL_Z9k_const_szPN4gicc9DeviceCtxEEEvRNS_7RuntimeE(ptr %rt)
+  ; x/y are packed into the low/high halves of i64 by the x86-64 ABI.
+  ; 4294967304 = (1 << 32) + 8, so grid=(8,1,1).
+  call void @_ZN4gicc6launchITnDaXadL_Z9k_const_szPN4gicc9DeviceCtxEEEvRNS_7RuntimeE(ptr %rt, i64 4294967304, i32 1, i64 4294967297, i32 1)
   ret void
 }
 
 ; STDERR: [feature-extract] wrote {{.*}}features.json
 
-; JSON-DAG: "schema_version": 4
+; JSON-DAG: "schema_version": 5
 ; JSON-DAG: "kernel": "k_const_sz"
 ; JSON-DAG: "op_kind": "put_no_db"
 ; JSON-DAG: "size_kind": "const"
@@ -52,6 +54,15 @@ define void @main(ptr %rt) {
 ; JSON-DAG: "iter_estimate": null
 ; peer_locality is still null until the runtime topology side-band lands.
 ; JSON-DAG: "peer_locality": null
+; Launch geometry comes from the host LTO callsite, not source inspection.
+; JSON-DAG: "launch_grid": {
+; JSON-DAG: "x": 8
+; JSON-DAG: "y": 1
+; JSON-DAG: "z": 1
+; JSON-DAG: "launch_block": {
+; JSON-DAG: "x": 1
+; JSON-DAG: "grid_blocks": 8
+; JSON-DAG: "threads_per_block": 1
 ;
 ; Every descriptor field is a literal, so the buffers cannot vary --
 ; but the site is not in a loop, so there is no repetition to amortise
@@ -65,4 +76,3 @@ define void @main(ptr %rt) {
 ; JSON-DAG: "proxy"
 ; JSON-DAG: "trigger"
 ; JSON-DAG: "ipc"
-

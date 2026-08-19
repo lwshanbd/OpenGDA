@@ -14,7 +14,7 @@ import gicc_llm_bridge as bridge
 def feature(site_id, *, hk=True, locality=None):
     legal = ["proxy"] + (["trigger", "ipc"] if hk else [])
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "site_id": site_id,
         "kernel": "kernel_from_ir",
         "op_kind": "put_no_db",
@@ -26,6 +26,10 @@ def feature(site_id, *, hk=True, locality=None):
         "in_loop": False,
         "guard_density": 1.0,
         "fan_out": 1,
+        "launch_grid": {"x": 8, "y": 1, "z": 1},
+        "launch_block": {"x": 1, "y": 1, "z": 1},
+        "grid_blocks": 8,
+        "threads_per_block": 1,
         "compute_before_flops": 0,
         "flops_to_first_use": 0,
         "trip_count": 64,
@@ -53,7 +57,7 @@ class LlmBridgeTests(unittest.TestCase):
             feature("unit.cpp:10:kernel_from_ir::0"),
             feature("unit.cpp:11:kernel_from_ir::1", hk=False),
             {
-                "schema_version": 4,
+                "schema_version": 5,
                 "site_id": "unit.cpp:12:kernel_from_ir::2",
                 "op_kind": "quiet",
             },
@@ -86,6 +90,11 @@ class LlmBridgeTests(unittest.TestCase):
         prompt = bridge.render_prompt(self.dossier)
         self.assertNotIn("SECRET_SOURCE_SENTINEL", prompt)
         self.assertIn(self.dossier["dossier_id"], prompt)
+        self.assertEqual(8, self.dossier["sites"][0]["grid_blocks"])
+        self.assertEqual(
+            {"x": 8, "y": 1, "z": 1},
+            self.dossier["sites"][0]["launch_grid"],
+        )
 
     def test_unknown_locality_removes_forced_ipc_but_keeps_safe_default(self):
         site = self.dossier["sites"][0]

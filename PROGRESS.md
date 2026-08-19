@@ -444,7 +444,7 @@ matters and the decider does not is stronger when it has measured both.
 
 ## Compiler analysis available to the decider
 
-`features.json`, schema v4. Version jumps 2 to 4 on purpose: the emitter
+`features.json`, schema v5. Version jumps 2 to 4 on purpose: the emitter
 had been left at 2 while the schema doc already described a v3, so a file
 claiming 2 may or may not carry those fields.
 
@@ -458,6 +458,8 @@ claiming 2 may or may not carry those fields.
 | `buffer_reusable` | derived | buffers fixed even when offsets vary |
 | `batch_size` | stored | transfers released by the same completion point |
 | `coalescable` | derived | consecutive transfers are exactly adjacent |
+| `launch_grid`, `launch_block` | host LTO callsite | constant `dim3` geometry; dynamic dimensions stay null |
+| `grid_blocks`, `threads_per_block` | derived | products of proven launch dimensions |
 
 The reuse and legality predicates are derived from the argument
 expressions on read so there is a single definition. `batch_size` and
@@ -652,7 +654,7 @@ two measured work points.
 ## 11. The LLM boundary is now compiler-fact -> decision -> LTO hint
 
 `tools/gicc-passes/python/gicc_llm_bridge.py` implements the provider-neutral
-part of the correct experiment.  It turns schema-v4 `features.json` plus a
+part of the correct experiment.  It turns schema-v5 `features.json` plus a
 measured platform profile into a content-addressed
 `gicc-llm-dossier-v1`; no source text is accepted.  A model response must bind
 to that dossier hash, cover every compiler site exactly once, and choose only
@@ -664,22 +666,34 @@ response applies no model choices: host-capable sites retain `IPC_OR_DWQ`,
 and compiler-proven proxy-only sites are pinned to `CPU_PROXY_ENQUEUE`.
 Forced IPC is withheld until topology proves the peer is same-node.  The
 existing 64-site end-to-end facts produce a deterministic dossier with only
-`proxy`, `trigger`, and `default` available.
+`proxy`, `trigger`, and `default` available.  Schema v5 now also extracts
+`grid=(8,1,1)` and `block=(1,1,1)` from the real host LTO callsite, so a model
+can relate eight issuing blocks to the measured eight-worker proxy deployment
+without seeing application source.
+
+The unchanged `decider_e2e.cpp` also produces a two-site v5 dossier.  The FAR
+site carries compiler-proven `trip_count=64` and a 205-op lower bound on
+issue-to-first-use distance, with `proxy/trigger/default` legal.  The DYN
+site's offsets come from a device load, so `hk_capable=false` and its legal set
+is exactly `proxy`.  This validates heterogeneous compiler facts and legality
+in one dossier; it is not yet the larger frozen evaluation workload.
 
 This is infrastructure, not a new performance result.  Nine bridge tests and
-all 39 pass tests pass, including pass-side rejection of an invented dispatch;
+all 40 pass tests pass, including pass-side rejection of an invented dispatch;
 no LLM trial is counted yet.
 
 ## Next
 
 The next model experiment stays entirely on the compiler path:
 
-1. Wire the runtime topology side-band into feature extraction so the dossier
-   can distinguish proven same-node IPC from remote DWQ/proxy decisions.
-2. Freeze a heterogeneous, unchanged-source workload whose compiler-generated
+1. Freeze a heterogeneous, unchanged-source workload whose compiler-generated
    sites differ in size, batch, reuse, distance, and locality.  The current
    64-site path is a useful integration gate but all sites are identical, so
    it cannot establish language-model reasoning value.
+2. Add deployment topology as a separate, hash-bound dossier side-band so the
+   legalizer can distinguish proven same-node IPC from remote DWQ/proxy
+   decisions. Runtime rank placement is not generally knowable at LTO time and
+   must not be guessed into static compiler features.
 3. Run repeated LLM decisions on the frozen dossier and compare LLM, GBT,
    hand rule, compiler default, and oracle.  Then feed every accepted hint to
    the second LTO build and retain route counters, hashes, wall time, model

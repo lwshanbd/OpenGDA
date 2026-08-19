@@ -27,18 +27,18 @@ target triple = "x86_64-unknown-linux-gnu"
      ptr null }],
    section "llvm.metadata"
 
-define linkonce_odr void @_ZN4gicc6launchITnDaXadL_Z16k_loop_with_compPN4gicc9DeviceCtxEiiilEEEvRNS_7RuntimeE(ptr %rt) {
+define linkonce_odr void @_ZN4gicc6launchITnDaXadL_Z16k_loop_with_compPN4gicc9DeviceCtxEiiilEEEvRNS_7RuntimeE(ptr %rt, i64 %grid.xy, i32 %grid.z, i64 %block.xy, i32 %block.z) {
   ret void
 }
 
-define void @main(ptr %rt) {
-  call void @_ZN4gicc6launchITnDaXadL_Z16k_loop_with_compPN4gicc9DeviceCtxEiiilEEEvRNS_7RuntimeE(ptr %rt)
+define void @main(ptr %rt, i64 %dynamic.grid.xy) {
+  call void @_ZN4gicc6launchITnDaXadL_Z16k_loop_with_compPN4gicc9DeviceCtxEiiilEEEvRNS_7RuntimeE(ptr %rt, i64 %dynamic.grid.xy, i32 1, i64 4294967297, i32 1)
   ret void
 }
 
 ; STDERR: [feature-extract] wrote {{.*}}features.json
 
-; JSON-DAG: "schema_version": 4
+; JSON-DAG: "schema_version": 5
 ; JSON-DAG: "kernel": "k_loop_with_comp"
 ; JSON-DAG: "in_loop": true
 ; JSON-DAG: "iv_start": 0
@@ -46,6 +46,14 @@ define void @main(ptr %rt) {
 ; JSON-DAG: "bound_known": true
 ; JSON-DAG: "bound_param_idx": 3
 ; JSON-DAG: "compute_before_flops": 7
+; Dynamic grid x/y remain unknown rather than guessed; the constant block is
+; still recovered independently.
+; JSON-DAG: "launch_grid": {
+; JSON-DAG: "x": null
+; JSON-DAG: "y": null
+; JSON-DAG: "z": 1
+; JSON-DAG: "grid_blocks": null
+; JSON-DAG: "threads_per_block": 1
 ;
 ; The loop body issues the same descriptor every iteration: peer, buffers,
 ; offsets and size are all kernel formals or literals, none of them the
@@ -56,4 +64,3 @@ define void @main(ptr %rt) {
 ; batch_size is carried in the kernel JSON rather than derived, because
 ; grouping transfers by completion point needs the CFG.
 ; JSON-DAG: "batch_size": 3
-

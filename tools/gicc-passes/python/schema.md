@@ -24,7 +24,7 @@ A JSON array of per-(launch site × op) records.
 ```json
 [
   {
-    "schema_version": 2,
+    "schema_version": 5,
     "site_id":            "<TU>:<line>:<kernel>::<idx>",
     "kernel":             "halo_kernel",
     "op_kind":            "put_no_db",       // | get_no_db | flush | quiet
@@ -43,6 +43,15 @@ A JSON array of per-(launch site × op) records.
     },
     "guard_density":      0.5,               // 1.0 if Always else 0.5
     "fan_out":            2,                 // distinct param-keyed peers
+    "launch_grid": {                         // host LTO callsite constants;
+      "x":                 8,                 //   individual values null when
+      "y":                 1,                 //   not statically known
+      "z":                 1
+    },
+    "launch_block": {"x": 1, "y": 1, "z": 1},
+    "grid_blocks":        8,                 // x*y*z; null if any dimension
+                                             //   is dynamic or product overflows
+    "threads_per_block":  1,                 // same rule for launch_block
     "compute_before_flops": 17,              // arith ops in BBs dominating the call;
                                              //   null if not measured
     "flops_to_first_use": 205,               // arith ops between the call and the
@@ -102,6 +111,13 @@ Schema v3 → v4 changes:
   added. These are the reuse and batching properties a runtime cannot
   establish at the moment of the call: it sees one transfer, not the loop
   it sits in nor the group it belongs to.
+
+Schema v4 → v5 changes:
+- `launch_grid`, `launch_block`, `grid_blocks`, and `threads_per_block`
+  added. They are decoded conservatively from constant `dim3` operands on the
+  host-side `gicc::launch` call in LTO IR. Dynamic values remain `null`.
+  This gives a compiler-level decider the launch concurrency context without
+  exposing or modifying application source.
 
 Schema v2 → v3 changes:
 - `flops_to_first_use`, `distance_exact`, `trip_count` added. Together with

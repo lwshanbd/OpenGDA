@@ -2,6 +2,11 @@
   "schema_version": "gicc-platform-profile-v1",
   "platform_id": "tioga-mi250x-slingshot11",
   "scope": "one rank/GPU per node, one CXI NIC per rank pair",
+  "deployment_constraints": {
+    "proxy_worker_lanes": 8,
+    "rank_placement": "one rank per node",
+    "note": "proxy producer concurrency is bounded by min(grid_blocks, proxy_worker_lanes)"
+  },
   "measurements": {
     "link_bandwidth_GB_s": 24.0,
     "proxy_fixed_us": 5.37,
@@ -17,6 +22,7 @@
   "provenance": {
     "dataset": "docs/experiments/grid/grid_big.csv",
     "dataset_sha256": "c28e3cb69fb78aa4cf9223fb281cf71658a58abd1def661e29351caba0466836",
-    "calibration": "examples/proxy/ctx_bench --exp=distance"
+    "calibration": "examples/proxy/ctx_bench --exp=distance",
+    "deployment_script": "examples/proxy/submit_ml_path_e2e.sh (GICC_NUM_PROXY_THREADS=8)"
   }
 }
