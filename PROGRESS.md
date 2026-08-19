@@ -317,6 +317,34 @@ What the run did measure is worth more than what it went looking for:
 
 ## 7. Where hand-derivation stops scaling — the ML result
 
+> **RETRACTED. The crossover does not exist.** Half the rows behind this
+> section were timing copies that never ran: the sweep sized its stream
+> pool by the environment value rather than the per-configuration one, so
+> every `nstream=4` point launched three quarters of its copy onto
+> uninitialized stack handles and came out about three times faster for
+> having done a quarter of the work. Fixed in `44a4943`, which also makes
+> each point clear its destination and check that the data arrived.
+>
+> Re-measured clean (`joint8_fixed.csv`, 23,328 rows, **0 dropped**, 2,592
+> configurations at every size; 16 MB best 86.88 us against 87.03 us from
+> an independent single-configuration run):
+>
+> | axes | separable rules | GBT | rules lose by |
+> | --- | --- | --- | --- |
+> | 1 | 1.005x | 1.014x | 0.991x |
+> | 2 | 1.018x | 1.019x | 0.998x |
+> | 3 | 1.035x | 1.060x | 0.976x |
+> | 4 | 1.063x | 1.064x | 0.999x |
+> | 5 | 1.079x | 1.099x | 0.982x |
+> | 6 | 1.108x | 1.144x | 0.969x |
+> | 7 | 1.169x | 1.187x | 0.985x |
+> | **8** | **1.191x** | **1.404x** | **0.848x** |
+>
+> `rules lose by` is below 1.000 at every axis count. Separable rules
+> match or beat the model everywhere, with the widest margin where the
+> retracted table claimed the model won hardest. The old numbers below
+> remain only so the correction is auditable; do not quote them.
+
 Everything above lives on the cross-node proxy path, where one NIC caps
 the outcome at 24 GB/s and every knob is really about issue overhead. That
 was a scoping accident, not a choice. The intra-node copy path has knobs an
@@ -400,8 +428,10 @@ Four transformation families, measured independently:
 **The compiler's legality and reachability analysis is worth 1.3-2.7x.
 Choosing among whatever it leaves legal is worth 0-6%, and a rule with two
 constants captures it.** This is not one space that happened to be easy;
-it is four, chosen to be different from each other, and the fourth was
-specifically constructed to have an orthogonal legality criterion.
+with the corrected intra-node copy sweep it is six selection families, and
+the model does not win any of them. The defensible contribution is the
+compiler analysis that determines reachability and legality, plus an
+honest measurement of how little remains for a learned selector.
 
 The honest reading is that the contribution this project can demonstrate
 is the analysis, not the decider. That is the plan's own Gate 3 fallback:
@@ -484,32 +514,121 @@ transfer rather than emit wrong code.
   mature runtime tuner can already see, and therefore what does not count
   as novel.
 
+## 8. Does the ML foothold reach a real application? — feasibility check
+
+Everything in sections 1-6 lives on the cross-node proxy path and concludes
+that the decider does not matter. Section 7 is the single place where a
+model beats a rule, and it lives on the **intra-node copy** path. Those are
+two different paths, so as written this log has a compiler result and an ML
+result that are not about the same system. Wiring section 7's knobs into
+the pass is the obvious repair, but it is weeks of work, so the cheap
+questions come first. Minimod, because it is on disk and GICC-integrated.
+
+**(a) Minimod's halo shape, from the source.** `halo_size = 4 * (ny+2*ly) *
+(nz+2*lz) * sizeof(float)`, and the layout `IDX3_l_D` puts x slowest while
+the decomposition splits x, so the face is one **contiguous** slab. At grid
+1000 that is **15.5 MB, two transfers per timestep**, no `quiet` in the
+kernel (the host `reset()` does the waiting).
+
+Two consequences, both from reading rather than measuring:
+
+- The layout-legality argument does not fire here. `vec > 4` faulting on a
+  strided face is the strongest legality result on this path, and Minimod's
+  face is contiguous — it sits on the easy end of the 24.5x orientation
+  span, so the analysis has nothing to prove.
+- No batching or concurrency headroom, which an earlier sweep had already
+  found the hard way: two puts per step, every CPU-side runtime knob flat.
+
+**(b) The eight-knob sweep never measured what GICC actually runs.**
+`ipc_copy_sweep`'s sweep loop pins `c.mech = "kernel"` at
+`examples/proxy/ipc_copy_sweep.cpp:272`, so all 23,329 rows of
+`joint8.csv` are tuned copy *kernels*. GICC's same-node IPC path is a host
+`hipMemcpyAsync` on a dedicated stream, issued from the synthesized trace
+function before the kernel launch — grep for it in `ofi_runtime.hpp`. The
+two never met.
+
+So the section 7 crossover is a real effect *inside the kernel-copy
+family*, and whether that family is even worth reaching from
+`hipMemcpyAsync` is a question the data cannot answer. This is the control
+that should have been in the sweep from the start.
+
+**(c) The largest number in section 7 does not reproduce.** Scoring
+`joint8.csv` per size against the best single global configuration put 16 MB
+— Minimod's working point — at **2.989x**, the largest regret in the table,
+against 1.013x at 1 MB and 1.000x at 4 MB. A 3x discontinuity at the one
+size that matters for the application is worth re-measuring on its own, and
+it does not survive:
+
+| 16 MB | joint8.csv | re-measured |
+| --- | --- | --- |
+| oracle configuration (`nstream=4`) | 30.78 us | 87.03 us |
+| best-global configuration (`nstream=1`) | 92.00 us | 94.18 us |
+| **regret** | **2.989x** | **1.08x** |
+
+`nstream` was supposed to be the mechanism; measured on its own it is worth
+1.04x (87.03 against 90.94), not 3x. The 30.78 us row is in-process
+carryover across 2592 back-to-back configurations — the same noise already
+seen on O1. 16 MB anchors the high end of the size axis, so the eight-axis
+row of the scaling table is inflated by it; see below.
+
+**(d) What the control found instead.** The `memcpy` rows that had never
+been measured say GICC's production intra-node path is a long way off, and
+in a strongly size-dependent way (`run_minimod_point.sh`, median of 200):
+
+| transfer | GICC today (`hipMemcpyAsync`, push) | best copy kernel | gap |
+| --- | --- | --- | --- |
+| 64 KB | 11.24 us | 2.60 | **4.3x** |
+| 256 KB | 12.13 | 2.58 | **4.7x** |
+| 1 MB | 17.47 | 2.60 | **6.7x** |
+| 4 MB | 40.19 | 6.33 | **6.4x** |
+| **16 MB** | **129.16** | **87.03** | **1.48x** |
+
+Replacing the host `hipMemcpyAsync` with a copy kernel is worth 4-7x from
+64 KB to 4 MB. That is a much larger effect on the real path than anything
+the eight knobs choose between, and it was invisible for as long as the
+sweep compared tuned kernels only against each other.
+
+Direction matters for the mechanism too: `hipMemcpyAsync` push beats pull
+(129 against 332 us at 16 MB), while for the copy kernel pull beats push
+(87 against 119). GICC already pushes, so it is on the right side for the
+mechanism it uses and the wrong side for the one it would move to.
+
+**(e) Verdict for Minimod: this path does not reach it.** Three facts
+compose, and they all point the same way:
+
+| | |
+| --- | --- |
+| face size | 16 MB — exactly where the memcpy-to-kernel gain collapses, 1.48x not 6.7x |
+| face layout | contiguous — the strongest legality result (`vec > 4` faults on a strided face) never fires |
+| comm share | **7.4%** of runtime (comm 0.0359 s, comp 0.448 s, 8 ranks on 1 node, grid 800, 100 steps) |
+
+7.4% x (1 - 1/1.48) = **2.4% end to end**, and that overstates it, because
+the measured `comm` also contains the barrier and `reset()`, not only the
+copy. The eight-knob decision on top of that is worth 1.08x of a 2.4%
+slice.
+
+This is a clean negative and it is the answer the feasibility check was
+built to get: the intra-node copy space is not where this work should be
+anchored for Minimod, and finding that out cost one allocation instead of
+two weeks of wiring.
+
 ## Next
 
-Items 1-3 of the previous list are done: sixteen sites with the split
-fixed in advance, an orthogonal legality criterion (cross-site dependence
-rather than size), and four runs of each model experiment.
+The next model experiment stays entirely on the compiler path:
 
-The question that remains open is not which decider to use — four families
-now agree that it barely matters — but how far the *analysis* side goes:
+1. Have LTO emit a versioned, compiler-derived dossier for each decision
+   group: operations, legality, reuse, completion grouping, topology, and
+   the measured platform profile. No source text is an input.
+2. Give that dossier to an external LLM and require a small, schema-checked
+   decision object. The model may choose only among pass-defined actions;
+   it never emits or edits program text.
+3. Feed the accepted decision back to a second LTO invocation. The pass
+   rechecks legality and materializes the selected lowering; invalid or
+   incomplete decisions fail closed to the deterministic baseline.
+4. Compare LLM, GBT, hand rule, compiler default, and oracle on unchanged
+   source, with route counters and end-to-end correctness gates.
 
-1. **Wire the knobs to the compiler.** They are environment variables
-   today, so what has been measured is autotuning, not compiler-guided
-   anything. The pass has to emit different copy code per call site, keyed
-   on the layout and dependence facts it already computes — otherwise the
-   scaling curve is a statement about a benchmark rather than about a
-   compiler. Fence scope is the natural first one: 3.4x, hardcoded to
-   `__threadfence_system` at every site today, and decided purely by which
-   consumer reads the data and from where.
-2. **Real applications.** Everything above is microbenchmarks. ASF and
-   Minimod are on disk and already GICC-integrated. Whether the analysis
-   proves anything useful on code nobody wrote for it is untested, and it
-   is the question a reviewer will ask first.
-3. **A second platform**, for the portability claim (the plan's H3).
-
-If the model layer is to be revisited, the honest place is not another
-selection task. It is one where the *action cannot be enumerated at all* —
-proposing a transformation from IR rather than picking from a legality-
-masked list. That experiment has not been run, and this log should not be
-read as having ruled it out; what has been ruled out is that a decider
-helps on any selection problem this project has been able to construct.
+This two-phase compile keeps provider calls out of the linker, makes every
+decision cacheable and replayable, and preserves the intended research
+question: whether a language model can reason over compiler-level evidence
+well enough to improve the decisions made by an LTO pass.
