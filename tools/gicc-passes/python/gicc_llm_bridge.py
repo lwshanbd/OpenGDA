@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 
-FEATURE_SCHEMA = 5
+FEATURE_SCHEMA = 6
 DOSSIER_SCHEMA = "gicc-llm-dossier-v1"
 DECISION_SCHEMA = "gicc-llm-decision-v1"
 PLATFORM_SCHEMA = "gicc-platform-profile-v1"
@@ -62,6 +62,7 @@ FACT_FIELDS = (
     "op_kind",
     "hk_capable",
     "size_kind",
+    "size_bytes",
     "size_log2",
     "peer_kind",
     "peer_locality",
@@ -69,6 +70,8 @@ FACT_FIELDS = (
     "loop",
     "guard_density",
     "fan_out",
+    "static_launch_sites",
+    "launch_contexts",
     "launch_grid",
     "launch_block",
     "grid_blocks",

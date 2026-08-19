@@ -14,18 +14,31 @@ import gicc_llm_bridge as bridge
 def feature(site_id, *, hk=True, locality=None):
     legal = ["proxy"] + (["trigger", "ipc"] if hk else [])
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         "site_id": site_id,
         "kernel": "kernel_from_ir",
         "op_kind": "put_no_db",
         "hk_capable": hk,
         "size_kind": "const",
+        "size_bytes": 4096,
         "size_log2": 12,
         "peer_kind": "param",
         "peer_locality": locality,
         "in_loop": False,
         "guard_density": 1.0,
         "fan_out": 1,
+        "static_launch_sites": 1,
+        "launch_contexts": [
+            {
+                "static_callsite_count": 1,
+                "launch_grid": {"x": 8, "y": 1, "z": 1},
+                "launch_block": {"x": 1, "y": 1, "z": 1},
+                "grid_blocks": 8,
+                "threads_per_block": 1,
+                "size_bytes": 4096,
+                "trip_count": 64,
+            }
+        ],
         "launch_grid": {"x": 8, "y": 1, "z": 1},
         "launch_block": {"x": 1, "y": 1, "z": 1},
         "grid_blocks": 8,
@@ -57,7 +70,7 @@ class LlmBridgeTests(unittest.TestCase):
             feature("unit.cpp:10:kernel_from_ir::0"),
             feature("unit.cpp:11:kernel_from_ir::1", hk=False),
             {
-                "schema_version": 5,
+                "schema_version": 6,
                 "site_id": "unit.cpp:12:kernel_from_ir::2",
                 "op_kind": "quiet",
             },

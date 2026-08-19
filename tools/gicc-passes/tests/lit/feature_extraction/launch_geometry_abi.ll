@@ -49,7 +49,7 @@ define void @main(ptr %rt) {
   ret void
 }
 
-; JSON-DAG: "schema_version": 5
+; JSON-DAG: "schema_version": 6
 ; JSON-DAG: "launch_grid": {
 ; JSON-DAG: "x": 8
 ; JSON-DAG: "y": 1

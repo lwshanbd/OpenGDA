@@ -22,7 +22,7 @@ sites, `size_log2=12`, `batch_size=64`, exact
 for proxy. The held-out measured cell, used only for evaluation, is 98.471
 versus 87.179 us.
 
-Feature schema v5 also recovers `grid=(8,1,1)` and `block=(1,1,1)` directly
+Feature schema v6 also recovers `grid=(8,1,1)` and `block=(1,1,1)` directly
 from the host LTO launch callsite. Together with the hash-bound platform
 profile's eight-worker deployment, this exposes the concurrency fact needed by
 an LLM or another compiler decider without providing application source.

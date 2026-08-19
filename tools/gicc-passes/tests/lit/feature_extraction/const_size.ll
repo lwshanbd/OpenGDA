@@ -40,10 +40,11 @@ define void @main(ptr %rt) {
 
 ; STDERR: [feature-extract] wrote {{.*}}features.json
 
-; JSON-DAG: "schema_version": 5
+; JSON-DAG: "schema_version": 6
 ; JSON-DAG: "kernel": "k_const_sz"
 ; JSON-DAG: "op_kind": "put_no_db"
 ; JSON-DAG: "size_kind": "const"
+; JSON-DAG: "size_bytes": 4096
 ; JSON-DAG: "size_log2": 12
 ; JSON-DAG: "peer_kind": "const"
 ; The meta JSON fixture has no `loop` entry → in_loop must serialize as false.
@@ -63,6 +64,8 @@ define void @main(ptr %rt) {
 ; JSON-DAG: "x": 1
 ; JSON-DAG: "grid_blocks": 8
 ; JSON-DAG: "threads_per_block": 1
+; JSON-DAG: "static_launch_sites": 1
+; JSON-DAG: "static_callsite_count": 1
 ;
 ; Every descriptor field is a literal, so the buffers cannot vary --
 ; but the site is not in a loop, so there is no repetition to amortise

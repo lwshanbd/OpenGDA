@@ -27,18 +27,18 @@ target triple = "x86_64-unknown-linux-gnu"
      ptr null }],
    section "llvm.metadata"
 
-define linkonce_odr void @_ZN4gicc6launchITnDaXadL_Z16k_loop_with_compPN4gicc9DeviceCtxEiiilEEEvRNS_7RuntimeE(ptr %rt, i64 %grid.xy, i32 %grid.z, i64 %block.xy, i32 %block.z) {
+define linkonce_odr void @_ZN4gicc6launchITnDaXadL_Z16k_loop_with_compPN4gicc9DeviceCtxEiiilEEEvRNS_7RuntimeE(ptr %rt, i64 %grid.xy, i32 %grid.z, i64 %block.xy, i32 %block.z, i32 %peer, i32 %buf, i32 %n, i64 %bytes) {
   ret void
 }
 
 define void @main(ptr %rt, i64 %dynamic.grid.xy) {
-  call void @_ZN4gicc6launchITnDaXadL_Z16k_loop_with_compPN4gicc9DeviceCtxEiiilEEEvRNS_7RuntimeE(ptr %rt, i64 %dynamic.grid.xy, i32 1, i64 4294967297, i32 1)
+  call void @_ZN4gicc6launchITnDaXadL_Z16k_loop_with_compPN4gicc9DeviceCtxEiiilEEEvRNS_7RuntimeE(ptr %rt, i64 %dynamic.grid.xy, i32 1, i64 4294967297, i32 1, i32 1, i32 2, i32 64, i64 4096)
   ret void
 }
 
 ; STDERR: [feature-extract] wrote {{.*}}features.json
 
-; JSON-DAG: "schema_version": 5
+; JSON-DAG: "schema_version": 6
 ; JSON-DAG: "kernel": "k_loop_with_comp"
 ; JSON-DAG: "in_loop": true
 ; JSON-DAG: "iv_start": 0
@@ -54,6 +54,13 @@ define void @main(ptr %rt, i64 %dynamic.grid.xy) {
 ; JSON-DAG: "z": 1
 ; JSON-DAG: "grid_blocks": null
 ; JSON-DAG: "threads_per_block": 1
+; Device metadata says size and loop bound are formals. Host LTO binds both
+; to constants at this launch site without reading source.
+; JSON-DAG: "size_kind": "param"
+; JSON-DAG: "size_bytes": 4096
+; JSON-DAG: "size_log2": 12
+; JSON-DAG: "trip_count": 64
+; JSON-DAG: "iter_estimate": 64
 ;
 ; The loop body issues the same descriptor every iteration: peer, buffers,
 ; offsets and size are all kernel formals or literals, none of them the

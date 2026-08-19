@@ -19,18 +19,24 @@ fields and consumers MUST tolerate fields they don't recognize.
 
 ## features.json
 
-A JSON array of per-(launch site × op) records.
+A JSON array with one record per device communication op. If the kernel has
+multiple host launch sites, their contexts are aggregated because the current
+lowering hint names the shared device op and therefore selects one lowering
+for all of them.
 
 ```json
 [
   {
-    "schema_version": 5,
+    "schema_version": 6,
     "site_id":            "<TU>:<line>:<kernel>::<idx>",
     "kernel":             "halo_kernel",
     "op_kind":            "put_no_db",       // | get_no_db | flush | quiet
     "hk_capable":         true,              // false → MUST route to CPU_PROXY_ENQUEUE
     "size_kind":          "const",           // | param | binop | cast | derived
-    "size_log2":          12,                // null when size is non-const
+    "size_bytes":         4096,              // literal or host-LTO-resolved;
+                                             //   null when contexts differ/dynamic
+    "size_log2":          12,                // null without one common,
+                                             //   positive LTO-resolved size
     "peer_kind":          "param",           // | const | binop | cast | derived
     "peer_locality":      null,              // | same_node | cross_node
     "in_loop":            true,              // real value from device-side LoopInfo
@@ -43,6 +49,16 @@ A JSON array of per-(launch site × op) records.
     },
     "guard_density":      0.5,               // 1.0 if Always else 0.5
     "fan_out":            2,                 // distinct param-keyed peers
+    "static_launch_sites": 1,                // host callsites sharing this device op
+    "launch_contexts": [{                    // distinct host-LTO contexts
+      "static_callsite_count": 1,
+      "size_bytes":       4096,
+      "trip_count":       64,
+      "grid_blocks":      8,
+      "threads_per_block": 1,
+      "launch_grid":      {"x": 8, "y": 1, "z": 1},
+      "launch_block":     {"x": 1, "y": 1, "z": 1}
+    }],
     "launch_grid": {                         // host LTO callsite constants;
       "x":                 8,                 //   individual values null when
       "y":                 1,                 //   not statically known
@@ -61,9 +77,9 @@ A JSON array of per-(launch site × op) records.
     "distance_exact":     false,             // false => flops_to_first_use skipped a
                                              //   loop with a runtime bound, so it is a
                                              //   LOWER BOUND on hideable work
-    "trip_count":         64,                // ops per phase, from ScalarEvolution;
-                                             //   null when the bound is a runtime value
-    "iter_estimate":      null,              // numeric when const-bound (none today)
+    "trip_count":         64,                // ops per phase, from ScalarEvolution
+                                             //   or a constant host launch binding
+    "iter_estimate":      64,                // set when host LTO resolved the bound
 
     "descriptor_reusable": true,             // every descriptor field repeats
                                              //   across the enclosing loop, so the
@@ -102,6 +118,24 @@ any linear block order -- a depth-first numbering ranks a loop's exit
 block ahead of its body, which would group the loop's own transfers with
 whatever follows the flush that actually releases them.
 
+Schema v5 → v6 changes:
+- One record is emitted per device op rather than per `(launch site × op)`.
+  `launch_contexts` retains the distinct host contexts and
+  `static_callsite_count`/`static_launch_sites` record their multiplicity.
+  This matches the current hint granularity: without kernel cloning, one
+  device op cannot legally receive different lowerings at two launches.
+- `size_bytes`, per-context `size_bytes`, and per-context `trip_count` bind
+  constant host wrapper operands back to device kernel formals. Top-level
+  values are present only when every launch context agrees; disagreement or
+  dynamic operands remain `null`.
+
+Schema v4 → v5 changes:
+- `launch_grid`, `launch_block`, `grid_blocks`, and `threads_per_block`
+  added. They are decoded conservatively from constant `dim3` operands on the
+  host-side `gicc::launch` call in LTO IR. Dynamic values remain `null`.
+  This gives a compiler-level decider the launch concurrency context without
+  exposing or modifying application source.
+
 Schema v3 → v4 changes:
 - NOTE: no producer ever emitted `schema_version: 3`. The emitter was left
   at 2 while this document already described v3, so a file claiming 2 may
@@ -111,13 +145,6 @@ Schema v3 → v4 changes:
   added. These are the reuse and batching properties a runtime cannot
   establish at the moment of the call: it sees one transfer, not the loop
   it sits in nor the group it belongs to.
-
-Schema v4 → v5 changes:
-- `launch_grid`, `launch_block`, `grid_blocks`, and `threads_per_block`
-  added. They are decoded conservatively from constant `dim3` operands on the
-  host-side `gicc::launch` call in LTO IR. Dynamic values remain `null`.
-  This gives a compiler-level decider the launch concurrency context without
-  exposing or modifying application source.
 
 Schema v2 → v3 changes:
 - `flops_to_first_use`, `distance_exact`, `trip_count` added. Together with

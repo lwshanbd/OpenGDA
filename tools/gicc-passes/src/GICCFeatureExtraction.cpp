@@ -17,9 +17,13 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Analysis/ValueTracking.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <optional>
+#include <tuple>
+#include <vector>
 
 using namespace llvm;
 
@@ -36,6 +40,13 @@ struct Dim3Facts {
 struct LaunchGeometry {
     Dim3Facts grid;
     Dim3Facts block;
+};
+
+struct LaunchContextFacts {
+    LaunchGeometry geometry;
+    std::optional<int64_t> sizeBytes;
+    std::optional<int64_t> tripCount;
+    unsigned staticCallsites = 1;
 };
 
 bool isBeforeInBlock(const Instruction &candidate,
@@ -180,6 +191,188 @@ std::optional<int64_t> dim3Product(const Dim3Facts &dim) {
     return static_cast<int64_t>(product);
 }
 
+std::optional<unsigned> wrapperArgForKernelParam(
+        const GICCLaunchSite &site, unsigned paramIdx) {
+    if (!site.callsite || paramIdx == 0 ||
+        paramIdx >= site.kernelTemplate.params.size())
+        return std::nullopt;
+
+    // Kernel formal 0 is the DeviceCtx injected by gicc::launch. In the
+    // ordinary overload, formal 1 starts at wrapper operand 5 (after Runtime&
+    // and the four x86-64 dim3 ABI operands). The shmem/stream overload adds
+    // two operands. Only accept an exact scalar-argument count: aggregate
+    // kernel parameters need a target-specific ABI implementation.
+    const unsigned userParams = site.kernelTemplate.params.size() - 1;
+    if (site.callsite->arg_size() == 5 + userParams)
+        return 4 + paramIdx;
+    if (site.callsite->arg_size() == 7 + userParams)
+        return 6 + paramIdx;
+    return std::nullopt;
+}
+
+std::optional<int64_t> constantInteger(const Value *value) {
+    const auto *constant = dyn_cast_or_null<ConstantInt>(value);
+    if (!constant || constant->getBitWidth() > 64) return std::nullopt;
+    if (constant->getBitWidth() < 64)
+        return static_cast<int64_t>(constant->getZExtValue());
+    return constant->getSExtValue();
+}
+
+std::optional<int64_t> argConstantAtLaunch(const ArgRef &arg,
+                                           const GICCLaunchSite &site) {
+    switch (arg.kind) {
+        case ArgRef::Kind::ConstI64:
+            return arg.constVal;
+        case ArgRef::Kind::Param: {
+            auto wrapperArg = wrapperArgForKernelParam(site, arg.paramIdx);
+            if (!wrapperArg) return std::nullopt;
+            return constantInteger(site.callsite->getArgOperand(*wrapperArg));
+        }
+        case ArgRef::Kind::Cast:
+            if (arg.children.size() != 1) return std::nullopt;
+            return argConstantAtLaunch(arg.children[0], site);
+        case ArgRef::Kind::BinOp:
+            break;
+        case ArgRef::Kind::Derived:
+        case ArgRef::Kind::LoopIv:
+        case ArgRef::Kind::FieldLoad:
+            return std::nullopt;
+    }
+
+    if (arg.children.size() != 2) return std::nullopt;
+    auto left = argConstantAtLaunch(arg.children[0], site);
+    auto right = argConstantAtLaunch(arg.children[1], site);
+    if (!left || !right) return std::nullopt;
+
+    __int128 value = 0;
+    if (arg.opStr == "add") value = static_cast<__int128>(*left) + *right;
+    else if (arg.opStr == "sub") value = static_cast<__int128>(*left) - *right;
+    else if (arg.opStr == "mul") value = static_cast<__int128>(*left) * *right;
+    else if (arg.opStr == "shl") {
+        if (*right < 0 || *right > 62) return std::nullopt;
+        value = static_cast<__int128>(*left) << *right;
+    } else {
+        return std::nullopt;
+    }
+    if (value < std::numeric_limits<int64_t>::min() ||
+        value > std::numeric_limits<int64_t>::max())
+        return std::nullopt;
+    return static_cast<int64_t>(value);
+}
+
+std::optional<int64_t> tripCountForBound(const OpLoopInfo &loop,
+                                         int64_t bound) {
+    if (!loop.inLoop || loop.degraded || loop.ivStep <= 0 ||
+        bound < loop.ivStart)
+        return std::nullopt;
+    const __int128 distance =
+        static_cast<__int128>(bound) - loop.ivStart;
+    const __int128 trips =
+        (distance + loop.ivStep - 1) / loop.ivStep;
+    if (trips > std::numeric_limits<int64_t>::max()) return std::nullopt;
+    return static_cast<int64_t>(trips);
+}
+
+std::optional<int64_t> tripCountAtLaunch(const OpTemplate &op,
+                                         const GICCLaunchSite &site) {
+    if (op.trip_count >= 0) return op.trip_count;
+    if (!op.loop.inLoop || !op.loop.ivBoundKnown || op.loop.degraded)
+        return std::nullopt;
+    if (op.loop.ivBoundIsConst)
+        return tripCountForBound(op.loop, op.loop.ivBoundConst);
+
+    ArgRef bound;
+    bound.kind = ArgRef::Kind::Param;
+    bound.paramIdx = op.loop.ivParamIdx;
+    auto value = argConstantAtLaunch(bound, site);
+    if (!value) return std::nullopt;
+    return tripCountForBound(op.loop, *value);
+}
+
+LaunchContextFacts launchContext(const GICCLaunchSite &site,
+                                 const OpTemplate &op) {
+    LaunchContextFacts context;
+    context.geometry = launchGeometry(site);
+    if (auto size = op.args.find("size"); size != op.args.end())
+        context.sizeBytes = argConstantAtLaunch(size->second, site);
+    context.tripCount = tripCountAtLaunch(op, site);
+    return context;
+}
+
+auto contextKey(const LaunchContextFacts &context) {
+    return std::make_tuple(
+        context.geometry.grid.x, context.geometry.grid.y,
+        context.geometry.grid.z, context.geometry.block.x,
+        context.geometry.block.y, context.geometry.block.z,
+        context.sizeBytes, context.tripCount);
+}
+
+std::vector<LaunchContextFacts> coalesceContexts(
+        std::vector<LaunchContextFacts> contexts) {
+    std::sort(contexts.begin(), contexts.end(),
+              [](const auto &left, const auto &right) {
+                  return contextKey(left) < contextKey(right);
+              });
+    std::vector<LaunchContextFacts> result;
+    for (const auto &context : contexts) {
+        if (!result.empty() && contextKey(result.back()) == contextKey(context))
+            result.back().staticCallsites += context.staticCallsites;
+        else
+            result.push_back(context);
+    }
+    return result;
+}
+
+template <typename T, typename Getter>
+std::optional<T> commonKnownValue(
+        const std::vector<LaunchContextFacts> &contexts, Getter get) {
+    if (contexts.empty()) return std::nullopt;
+    std::optional<T> common = get(contexts.front());
+    if (!common) return std::nullopt;
+    for (const auto &context : contexts)
+        if (get(context) != common) return std::nullopt;
+    return common;
+}
+
+LaunchGeometry commonGeometry(
+        const std::vector<LaunchContextFacts> &contexts) {
+    LaunchGeometry common;
+    common.grid.x = commonKnownValue<uint32_t>(
+        contexts, [](const auto &c) { return c.geometry.grid.x; });
+    common.grid.y = commonKnownValue<uint32_t>(
+        contexts, [](const auto &c) { return c.geometry.grid.y; });
+    common.grid.z = commonKnownValue<uint32_t>(
+        contexts, [](const auto &c) { return c.geometry.grid.z; });
+    common.block.x = commonKnownValue<uint32_t>(
+        contexts, [](const auto &c) { return c.geometry.block.x; });
+    common.block.y = commonKnownValue<uint32_t>(
+        contexts, [](const auto &c) { return c.geometry.block.y; });
+    common.block.z = commonKnownValue<uint32_t>(
+        contexts, [](const auto &c) { return c.geometry.block.z; });
+    return common;
+}
+
+json::Value launchContextRecord(const LaunchContextFacts &context) {
+    json::Object record;
+    record["static_callsite_count"] =
+        static_cast<int64_t>(context.staticCallsites);
+    record["launch_grid"] = dim3Record(context.geometry.grid);
+    record["launch_block"] = dim3Record(context.geometry.block);
+    if (auto blocks = dim3Product(context.geometry.grid))
+        record["grid_blocks"] = *blocks;
+    else
+        record["grid_blocks"] = nullptr;
+    if (auto threads = dim3Product(context.geometry.block))
+        record["threads_per_block"] = *threads;
+    else
+        record["threads_per_block"] = nullptr;
+    if (context.sizeBytes) record["size_bytes"] = *context.sizeBytes;
+    else                   record["size_bytes"] = nullptr;
+    if (context.tripCount) record["trip_count"] = *context.tripCount;
+    else                   record["trip_count"] = nullptr;
+    return json::Value(std::move(record));
+}
+
 // Translate ArgRef::Kind to the JSON tag the decider consumes.
 const char *argKindTag(ArgRef::Kind k) {
     switch (k) {
@@ -194,11 +387,10 @@ const char *argKindTag(ArgRef::Kind k) {
     return "derived";
 }
 
-// log2 of a positive constant size; null for non-constant or non-positive.
-std::optional<int> sizeLog2(const ArgRef &size) {
-    if (size.kind != ArgRef::Kind::ConstI64) return std::nullopt;
-    if (size.constVal <= 0) return std::nullopt;
-    return 63 - __builtin_clzll(static_cast<uint64_t>(size.constVal));
+// log2 of a positive constant size; null for unknown or non-positive.
+std::optional<int> sizeLog2(const std::optional<int64_t> &size) {
+    if (!size || *size <= 0) return std::nullopt;
+    return 63 - __builtin_clzll(static_cast<uint64_t>(*size));
 }
 
 double guardDensity(const GuardSpec &g) {
@@ -220,18 +412,6 @@ int kernelFanOut(const KernelTemplate &t) {
     return static_cast<int>(peers.size());
 }
 
-// Compile-time estimate of the loop's trip count, when both bound and
-// start/step are integer constants. Today only the constant-step part
-// is recorded — bounds are typically kernel formals, so this returns
-// null and the decider has to fall back to runtime values. The hook
-// stays here so the schema is forward-compatible once analyzeLoop
-// learns to recognize const-bound loops.
-std::optional<int64_t> iterEstimate(const OpLoopInfo &L) {
-    if (!L.inLoop || !L.ivBoundKnown || L.degraded) return std::nullopt;
-    // bound is a kernel formal in v1 — no compile-time numeric estimate.
-    return std::nullopt;
-}
-
 // Structured loop descriptor for the ML decider. Only emitted when the
 // site is actually inside a loop. The decider can combine this with
 // runtime-side param values to reconstruct a trip-count estimate.
@@ -240,8 +420,12 @@ json::Value loopDescriptor(const OpLoopInfo &L) {
     o["iv_start"]    = L.ivStart;
     o["iv_step"]     = L.ivStep;
     o["bound_known"] = L.ivBoundKnown;
-    if (L.ivBoundKnown)
-        o["bound_param_idx"] = static_cast<int64_t>(L.ivParamIdx);
+    if (L.ivBoundKnown) {
+        if (L.ivBoundIsConst)
+            o["bound_const"] = L.ivBoundConst;
+        else
+            o["bound_param_idx"] = static_cast<int64_t>(L.ivParamIdx);
+    }
     if (L.degraded) o["degraded"] = true;
     return json::Value(std::move(o));
 }
@@ -250,18 +434,25 @@ json::Value toRecord(const std::string &siteId,
                      const std::string &simpleKernel,
                      const OpTemplate  &op,
                      int                fanOut,
-                     const LaunchGeometry &geometry) {
+                     std::vector<LaunchContextFacts> contexts) {
+    contexts = coalesceContexts(std::move(contexts));
+    const auto geometry = commonGeometry(contexts);
+    const auto sizeBytes = commonKnownValue<int64_t>(
+        contexts, [](const auto &c) { return c.sizeBytes; });
+    const auto launchTripCount = commonKnownValue<int64_t>(
+        contexts, [](const auto &c) { return c.tripCount; });
+
     json::Object r;
-    // v5 adds the launch geometry visible at the host LTO callsite. This
-    // matters for dispatch throughput (for example, how many proxy producers
-    // can issue concurrently) and cannot be recovered from per-kernel device
-    // metadata alone.
+    // v6 aggregates all host launch contexts for one device operation and
+    // binds constant wrapper arguments back to kernel formals. The hint key
+    // names device code, so emitting duplicate records for two calls of the
+    // same kernel would falsely imply the pass can choose two lowerings.
     //
     // Jumps 2 → 4 on purpose: the emitter had been left at 2 while the
     // schema doc already described a v3 (flops_to_first_use, trip_count,
     // distance_exact), so anything claiming 2 may or may not carry those.
     // Skipping the number keeps "3" from meaning two different things.
-    r["schema_version"] = 5;
+    r["schema_version"] = 6;
     r["site_id"]        = siteId;
     r["kernel"]         = simpleKernel;
     r["op_kind"]        = op.kind;
@@ -273,7 +464,7 @@ json::Value toRecord(const std::string &siteId,
 
     if (auto it = op.args.find("size"); it != op.args.end()) {
         r["size_kind"] = argKindTag(it->second.kind);
-        if (auto l = sizeLog2(it->second))
+        if (auto l = sizeLog2(sizeBytes))
             r["size_log2"] = *l;
         else
             r["size_log2"] = nullptr;
@@ -281,6 +472,8 @@ json::Value toRecord(const std::string &siteId,
         r["size_kind"] = nullptr;
         r["size_log2"] = nullptr;
     }
+    if (sizeBytes) r["size_bytes"] = *sizeBytes;
+    else           r["size_bytes"] = nullptr;
 
     if (auto it = op.args.find("target_rank"); it != op.args.end()) {
         r["peer_kind"] = argKindTag(it->second.kind);
@@ -298,6 +491,15 @@ json::Value toRecord(const std::string &siteId,
 
     r["guard_density"] = guardDensity(op.guard);
     r["fan_out"]       = fanOut;
+
+    unsigned staticLaunchSites = 0;
+    json::Array launchContexts;
+    for (const auto &context : contexts) {
+        staticLaunchSites += context.staticCallsites;
+        launchContexts.push_back(launchContextRecord(context));
+    }
+    r["static_launch_sites"] = static_cast<int64_t>(staticLaunchSites);
+    r["launch_contexts"] = std::move(launchContexts);
 
     r["launch_grid"]  = dim3Record(geometry.grid);
     r["launch_block"] = dim3Record(geometry.block);
@@ -332,14 +534,12 @@ json::Value toRecord(const std::string &siteId,
     // trip_count: ops issued per communication phase, when ScalarEvolution
     // can prove it. Both dispatch paths pay a per-op issue cost with
     // different constants, so this scales the decision.
-    if (op.trip_count >= 0)
-        r["trip_count"] = static_cast<int64_t>(op.trip_count);
-    else
-        r["trip_count"] = nullptr;
+    if (launchTripCount) r["trip_count"] = *launchTripCount;
+    else                 r["trip_count"] = nullptr;
     r["distance_exact"] = op.distance_exact;
 
-    if (auto est = iterEstimate(op.loop))
-        r["iter_estimate"] = *est;
+    if (op.trip_count < 0 && launchTripCount)
+        r["iter_estimate"] = *launchTripCount;
     else
         r["iter_estimate"] = nullptr;
 
@@ -404,17 +604,42 @@ PreservedAnalyses GICCFeatureExtractionPass::run(Module &M,
     auto inv = collectLaunchInventory(M, cfg.metaDir);
     if (inv.sites.empty()) return PreservedAnalyses::all();
 
-    json::Array records;
+    struct PendingRecord {
+        std::string kernel;
+        OpTemplate op;
+        int fanOut = 0;
+        bool initialized = false;
+        std::vector<LaunchContextFacts> contexts;
+    };
+    std::map<std::string, PendingRecord> pending;
+    bool collision = false;
     for (const auto &s : inv.sites) {
         if (!s.haveTemplate) continue;
         int fanOut = kernelFanOut(s.kernelTemplate);
-        const auto geometry = launchGeometry(s);
         for (const auto &op : s.kernelTemplate.ops) {
-            records.push_back(
-                toRecord(op.siteId, s.kernelTemplate.simpleName, op, fanOut,
-                         geometry));
+            auto &record = pending[op.siteId];
+            if (!record.initialized) {
+                record.kernel = s.kernelTemplate.simpleName;
+                record.op = op;
+                record.fanOut = fanOut;
+                record.initialized = true;
+            } else if (record.kernel != s.kernelTemplate.simpleName ||
+                       record.op.kind != op.kind) {
+                errs() << "[feature-extract] ERROR: site_id collision for "
+                       << op.siteId << "\n";
+                collision = true;
+                continue;
+            }
+            record.contexts.push_back(launchContext(s, op));
         }
     }
+    if (collision) return PreservedAnalyses::all();
+
+    json::Array records;
+    for (auto &[siteId, record] : pending)
+        records.push_back(toRecord(siteId, record.kernel, record.op,
+                                   record.fanOut,
+                                   std::move(record.contexts)));
     if (records.empty()) return PreservedAnalyses::all();
 
     std::string outPath = pickFeaturesPath(cfg);
