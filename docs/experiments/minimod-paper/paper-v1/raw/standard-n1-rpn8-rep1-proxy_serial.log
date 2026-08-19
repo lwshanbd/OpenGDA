@@ -1,0 +1,89 @@
+RUN kind=standard arm=proxy_serial nodes=1 rpn=8 ranks=8 rep=1 grid=800 steps=100 binary=/p/lustre2/shan4/new-gicc/build_ofi/minimod_paper/bin/minimod_proxy
+[minimod-unified] transport = CPU proxy
+[gicc] CPU proxy: 1 worker thread(s) per rank
+nsteps = 100
+nsteps = 100
+ndamp = 27 27 27
+nsteps = 100
+nsteps = 100
+nsteps = 100
+nsteps = 100
+ndamp = 27 27 27
+nsteps = 100
+ngpus = 8
+rank = 7, min_u = 0.000000, max_u = 0.000000
+ndamp = 27 27 27
+ndamp = 27 27 27
+ndamp = 27 27 27
+ndamp = 27 27 27
+rank = 2, min_u = 0.000000, max_u = 0.000000
+ndamp = 27 27 27
+nsteps = 100
+CHECKSUM rank 7 = 8a440eaebb2a3383
+rank = 6, min_u = 0.000000, max_u = 0.000000
+rank = 5, min_u = 0.000000, max_u = 0.000000
+rank = 4, min_u = -1151.019775, max_u = 743.350464
+rank = 3, min_u = -1143.143799, max_u = 733.619385
+CHECKSUM rank 2 = 8a440eaebb2a3383
+rank = 1, min_u = 0.000000, max_u = 0.000000
+ndamp = 27 27 27
+GICC_ROUTE rank 7 staged=0 pushed=100
+CHECKSUM rank 6 = 8a440eaebb2a3383
+CHECKSUM rank 5 = 8a440eaebb2a3383
+CHECKSUM rank 4 = 8d545d7541f69ea7
+CHECKSUM rank 3 = 3a6f072c18b1dfdd
+GICC_ROUTE rank 2 staged=0 pushed=200
+CHECKSUM rank 1 = 8a440eaebb2a3383
+grid = 800 800 800
+FINAL min_u,  max_u = 0.000000, 0.000000
+GICC_ROUTE rank 6 staged=0 pushed=200
+GICC_ROUTE rank 5 staged=0 pushed=200
+GICC_ROUTE rank 4 staged=0 pushed=200
+GICC_ROUTE rank 3 staged=0 pushed=200
+FINAL min_u,  max_u = 0.000000, 0.000000
+GICC_ROUTE rank 1 staged=0 pushed=200
+u_size = 2110056448
+I am rank 7 Time comm: 0.20381 s
+FINAL min_u,  max_u = 0.000000, 0.000000
+FINAL min_u,  max_u = 0.000000, 0.000000
+FINAL min_u,  max_u = -1151.019775, 743.350464
+FINAL min_u,  max_u = -1143.143799, 733.619385
+I am rank 2 Time comm: 0.203803 s
+FINAL min_u,  max_u = 0.000000, 0.000000
+HIP gicc target initialized: 8 GPUs, rank 0 handles x=[0,100)
+I am rank 7 Time comp: 0.447425 s
+I am rank 6 Time comm: 0.203801 s
+I am rank 5 Time comm: 0.203798 s
+I am rank 4 Time comm: 0.203804 s
+I am rank 3 Time comm: 0.203797 s
+I am rank 2 Time comp: 0.447432 s
+I am rank 1 Time comm: 0.203802 s
+Halo size: 10445824 bytes (2611456 floats)
+I am rank 7 Time kernel: 0.651244 s
+I am rank 6 Time comp: 0.447433 s
+I am rank 5 Time comp: 0.447436 s
+I am rank 4 Time comp: 0.446809 s
+I am rank 3 Time comp: 0.447438 s
+I am rank 2 Time kernel: 0.651244 s
+I am rank 1 Time comp: 0.447432 s
+time step 100 / 100
+I am rank 7 Time modeling: 0.651248 s
+I am rank 6 Time kernel: 0.651244 s
+I am rank 5 Time kernel: 0.651244 s
+I am rank 4 Time kernel: 0.650628 s
+I am rank 3 Time kernel: 0.651244 s
+I am rank 2 Time modeling: 0.65125 s
+I am rank 1 Time kernel: 0.651244 s
+rank = 0, min_u = 0.000000, max_u = 0.000000
+I am rank 6 Time modeling: 0.651249 s
+I am rank 5 Time modeling: 0.651249 s
+I am rank 4 Time modeling: 0.651252 s
+I am rank 3 Time modeling: 0.651249 s
+I am rank 1 Time modeling: 0.651248 s
+CHECKSUM rank 0 = 8a440eaebb2a3383
+GICC_ROUTE rank 0 staged=0 pushed=100
+FINAL min_u,  max_u = 0.000000, 0.000000
+I am rank 0 Time comm: 0.203805 s
+I am rank 0 Time comp: 0.44742 s
+I am rank 0 Time kernel: 0.651241 s
+I am rank 0 Time modeling: 0.651249 s

@@ -1,0 +1,48 @@
+RUN kind=standard arm=trigger_serial nodes=4 rpn=1 ranks=4 rep=1 grid=400 steps=100 binary=/p/lustre2/shan4/new-gicc/build_ofi/minimod_paper/bin/minimod_trigger
+[minimod-unified] transport = DWQ (GPU trigger)
+ngpus = 4
+nsteps = 100
+ndamp = 27 27 27
+grid = 400 400 400
+u_size = 271669248
+HIP gicc target initialized: 4 GPUs, rank 0 handles x=[0,100)
+Halo size: 2663424 bytes (665856 floats)
+time step 100 / 100
+rank = 0, min_u = 0.000000, max_u = 0.000000
+CHECKSUM rank 0 = 1435ab360f413383
+GICC_ROUTE rank 0 staged=100 pushed=0
+FINAL min_u,  max_u = 0.000000, 0.000000
+I am rank 0 Time comm: 0.039432 s
+I am rank 0 Time comp: 0.0847668 s
+I am rank 0 Time kernel: 0.124211 s
+I am rank 0 Time modeling: 0.124218 s
+nsteps = 100
+ndamp = 27 27 27
+nsteps = 100
+ndamp = 27 27 27
+rank = 1, min_u = -1143.143799, max_u = 733.619385
+CHECKSUM rank 1 = 367fa51c1d41b9dd
+rank = 3, min_u = 0.000000, max_u = 0.000000
+GICC_ROUTE rank 1 staged=200 pushed=0
+CHECKSUM rank 3 = 1435ab360f413383
+FINAL min_u,  max_u = -1143.143799, 733.619385
+GICC_ROUTE rank 3 staged=100 pushed=0
+I am rank 1 Time comm: 0.0394309 s
+FINAL min_u,  max_u = 0.000000, 0.000000
+I am rank 1 Time comp: 0.0847736 s
+I am rank 3 Time comm: 0.0393751 s
+I am rank 1 Time kernel: 0.124214 s
+nsteps = 100
+I am rank 1 Time modeling: 0.124219 s
+ndamp = 27 27 27
+I am rank 3 Time comp: 0.0848293 s
+I am rank 3 Time kernel: 0.124215 s
+rank = 2, min_u = -1151.019775, max_u = 743.350464
+I am rank 3 Time modeling: 0.124219 s
+CHECKSUM rank 2 = ab4e964283aa7aa7
+GICC_ROUTE rank 2 staged=200 pushed=0
+FINAL min_u,  max_u = -1151.019775, 743.350464
+I am rank 2 Time comm: 0.0392328 s
+I am rank 2 Time comp: 0.0843319 s
+I am rank 2 Time kernel: 0.123576 s
+I am rank 2 Time modeling: 0.124221 s

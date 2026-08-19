@@ -514,15 +514,14 @@ transfer rather than emit wrong code.
   mature runtime tuner can already see, and therefore what does not count
   as novel.
 
-## 8. Does the ML foothold reach a real application? — feasibility check
+## 8. Does the intra-node mechanism reach a real application? — feasibility check
 
 Everything in sections 1-6 lives on the cross-node proxy path and concludes
-that the decider does not matter. Section 7 is the single place where a
-model beats a rule, and it lives on the **intra-node copy** path. Those are
-two different paths, so as written this log has a compiler result and an ML
-result that are not about the same system. Wiring section 7's knobs into
-the pass is the obvious repair, but it is weeks of work, so the cheap
-questions come first. Minimod, because it is on disk and GICC-integrated.
+that the decider barely matters. Section 7 had appeared to supply an
+intra-node ML foothold, but the corrected measurements remove that result.
+The underlying mechanism gap is still real, so before wiring its knobs into
+the pass the cheap feasibility question comes first: does Minimod expose
+enough of that path for any selector to matter?
 
 **(a) Minimod's halo shape, from the source.** `halo_size = 4 * (ny+2*ly) *
 (nz+2*lz) * sizeof(float)`, and the layout `IDX3_l_D` puts x slowest while
@@ -611,6 +610,44 @@ This is a clean negative and it is the answer the feasibility check was
 built to get: the intra-node copy space is not where this work should be
 anchored for Minimod, and finding that out cost one allocation instead of
 two weeks of wiring.
+
+## 9. A learned decision reaches a real LTO lowering
+
+The offline tables did not prove that a learned decision survived the
+compiler.  `examples/proxy/ml_path_e2e.cpp` closes that engineering gap with
+unchanged source between arms.  LTO extracts 64 legal 4 KiB sites in one
+completion group; a deterministic GBT trained after excluding every 4 KiB
+row chooses the proxy path, emits `gicc-hint-v1`, and the lowering pass
+materializes it.
+
+Across three paired two-node runs, default DWQ-trigger medians are
+119.601/122.101/118.426 us and GBT-proxy medians are
+80.145/78.908/81.880 us: **1.4948x geometric-mean speedup**.  Route counters
+show exactly `6400 staged, 0 pushed` for every default arm and
+`0 staged, 7200 pushed` for every GBT arm; all full-buffer hashes are
+`f0399b4213db0383`.  This proves learned compiler-fact -> hint -> LTO
+materialization, not GBT superiority: a hand rule selects the same path.
+
+Raw logs and the complete gate are under
+`docs/experiments/compiler-ml-path/`; reproduction is in
+`examples/proxy/ML_PATH_E2E.md`.
+
+## 10. Real-application cost surface and legality evidence
+
+The retained Minimod matrix contains two grids, 1/2/4-node scaling, exact
+route counters, full-domain checksums, and O5 legality materialization.  At
+grid 800, leave-one-node-count-out GBT is 1.00688x over the preregistered hand
+rule (95% 1.00357-1.01063); cross-grid transfer remains 1.00466-1.00741x over
+that rule.  The learned advantage is therefore small and problem-size
+dependent, but supported by more than the synthetic proxy benchmark.
+
+The scope is narrower than the old source-agent narrative.  LTO materializes
+the transport choice.  Minimod's serial/overlap schedule is an already
+hand-written benchmark mode and is retained only as a measured cost/oracle
+axis; neither the compiler nor a model discovered or rewrote it.  O5 is the
+clean compiler-only result: host-mirror facts change the legal set and the
+pass emits different routes in one binary, although the newly legal trigger
+route is 1.08-1.6% slower at the two measured work points.
 
 ## Next
 

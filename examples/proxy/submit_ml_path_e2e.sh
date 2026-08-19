@@ -7,7 +7,7 @@ GICC_ROOT="${GICC_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 QUEUE="${GICC_ML_QUEUE:-pci}"
 LIMIT="${GICC_ML_TIME_LIMIT:-2m}"
 TAG="${1:-manual}"
-OUT="${GICC_ROOT}/docs/experiments/transform-agent"
+OUT="${GICC_ROOT}/docs/experiments/compiler-ml-path"
 HINT="${GICC_ROOT}/build_ofi/ml_path_e2e/gbt-hint.json"
 
 case "${LIMIT}" in

@@ -1,0 +1,6 @@
+ALLOC kind=o5 nodes=2 rpn=1 ranks=2 rep=2 grid=100 steps=1000 order=mirrored_serial,unmirrored_serial job=unknown
+BEGIN arm=mirrored_serial log=/p/lustre2/shan4/new-gicc/docs/experiments/minimod-paper/paper-v1-o5/raw/o5-n2-rpn1-rep2-mirrored_serial.log time=2026-08-18T00:08:56Z
+END arm=mirrored_serial time=2026-08-18T00:09:00Z
+BEGIN arm=unmirrored_serial log=/p/lustre2/shan4/new-gicc/docs/experiments/minimod-paper/paper-v1-o5/raw/o5-n2-rpn1-rep2-unmirrored_serial.log time=2026-08-18T00:09:00Z
+END arm=unmirrored_serial time=2026-08-18T00:09:02Z
+ALLOC_DONE kind=o5 nodes=2 rpn=1 rep=2

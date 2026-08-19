@@ -1,0 +1,9 @@
+job_id	kind	nodes	rpn	rep	grid	steps	order	queue
+f5qXY2HQCRfV	standard	4	1	3	800	100	proxy_overlap,default_overlap,default_serial,trigger_serial,trigger_overlap,proxy_serial	pci
+f5qXY2Yqewsm	standard	4	1	4	800	100	default_overlap,proxy_overlap,trigger_overlap,default_serial,trigger_serial,proxy_serial	pci
+f5qXY2hqWb59	standard	4	1	5	800	100	default_overlap,trigger_overlap,trigger_serial,default_serial,proxy_overlap,proxy_serial	pci
+f5qXY2tKMWcX	standard	4	8	1	800	100	trigger_serial,proxy_serial,trigger_overlap,default_serial,default_overlap,proxy_overlap	pci
+f5qXY36jsVa7	standard	4	8	2	800	100	default_overlap,proxy_overlap,proxy_serial,trigger_overlap,trigger_serial,default_serial	pci
+f5qXY3GDtu83	standard	4	8	3	800	100	trigger_overlap,default_serial,trigger_serial,default_overlap,proxy_serial,proxy_overlap	pci
+f5qXY3S1iA47	standard	4	8	4	800	100	proxy_overlap,proxy_serial,default_serial,trigger_serial,trigger_overlap,default_overlap	pci
+f5qXY3bRHbm1	standard	4	8	5	800	100	trigger_serial,proxy_overlap,proxy_serial,default_overlap,default_serial,trigger_overlap	pci

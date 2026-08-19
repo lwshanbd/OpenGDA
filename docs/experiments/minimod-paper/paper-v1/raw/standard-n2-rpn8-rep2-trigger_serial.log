@@ -1,0 +1,168 @@
+RUN kind=standard arm=trigger_serial nodes=2 rpn=8 ranks=16 rep=2 grid=800 steps=100 binary=/p/lustre2/shan4/new-gicc/build_ofi/minimod_paper/bin/minimod_trigger
+[minimod-unified] transport = DWQ (GPU trigger)
+ngpus = 16
+nsteps = 100
+ndamp = 27 27 27
+grid = 800 800 800
+u_size = 2110056448
+HIP gicc target initialized: 16 GPUs, rank 0 handles x=[0,50)
+Halo size: 10445824 bytes (2611456 floats)
+time step 100 / 100
+rank = 0, min_u = 0.000000, max_u = 0.000000
+CHECKSUM rank 0 = 1fd056d273039b83
+GICC_ROUTE rank 0 staged=100 pushed=0
+FINAL min_u,  max_u = 0.000000, 0.000000
+I am rank 0 Time comm: 0.347899 s
+I am rank 0 Time comp: 0.253389 s
+I am rank 0 Time kernel: 0.601306 s
+I am rank 0 Time modeling: 0.601313 s
+nsteps = 100
+ndamp = 27 27 27
+rank = 8, min_u = -1151.019775, max_u = 743.350464
+CHECKSUM rank 8 = b3031838a5729cbc
+GICC_ROUTE rank 8 staged=200 pushed=0
+FINAL min_u,  max_u = -1151.019775, 743.350464
+I am rank 8 Time comm: 0.347952 s
+I am rank 8 Time comp: 0.252571 s
+I am rank 8 Time kernel: 0.600541 s
+I am rank 8 Time modeling: 0.601321 s
+nsteps = 100
+nsteps = 100
+nsteps = 100
+nsteps = 100
+nsteps = 100
+nsteps = 100
+nsteps = 100
+ndamp = 27 27 27
+ndamp = 27 27 27
+ndamp = 27 27 27
+ndamp = 27 27 27
+ndamp = 27 27 27
+ndamp = 27 27 27
+ndamp = 27 27 27
+rank = 1, min_u = 0.000000, max_u = 0.000000
+rank = 7, min_u = -1143.143799, max_u = 733.619385
+rank = 6, min_u = -0.000000, max_u = 0.000000
+rank = 5, min_u = 0.000000, max_u = 0.000000
+rank = 4, min_u = 0.000000, max_u = 0.000000
+rank = 3, min_u = 0.000000, max_u = 0.000000
+rank = 2, min_u = 0.000000, max_u = 0.000000
+CHECKSUM rank 1 = 1fd056d273039b83
+CHECKSUM rank 7 = e59f9e350225b9d6
+CHECKSUM rank 6 = 4020316a30a91978
+CHECKSUM rank 5 = 1fd056d273039b83
+CHECKSUM rank 4 = 1fd056d273039b83
+CHECKSUM rank 3 = 1fd056d273039b83
+CHECKSUM rank 2 = 1fd056d273039b83
+GICC_ROUTE rank 1 staged=200 pushed=0
+GICC_ROUTE rank 7 staged=200 pushed=0
+GICC_ROUTE rank 6 staged=200 pushed=0
+GICC_ROUTE rank 5 staged=200 pushed=0
+GICC_ROUTE rank 4 staged=200 pushed=0
+GICC_ROUTE rank 3 staged=200 pushed=0
+GICC_ROUTE rank 2 staged=200 pushed=0
+FINAL min_u,  max_u = 0.000000, 0.000000
+FINAL min_u,  max_u = -1143.143799, 733.619385
+FINAL min_u,  max_u = -0.000000, 0.000000
+FINAL min_u,  max_u = 0.000000, 0.000000
+FINAL min_u,  max_u = 0.000000, 0.000000
+FINAL min_u,  max_u = 0.000000, 0.000000
+FINAL min_u,  max_u = 0.000000, 0.000000
+I am rank 1 Time comm: 0.347899 s
+I am rank 7 Time comm: 0.34789 s
+I am rank 6 Time comm: 0.347883 s
+I am rank 5 Time comm: 0.347894 s
+I am rank 4 Time comm: 0.347899 s
+I am rank 3 Time comm: 0.347899 s
+I am rank 2 Time comm: 0.347879 s
+I am rank 1 Time comp: 0.2534 s
+I am rank 7 Time comp: 0.253408 s
+I am rank 6 Time comp: 0.253414 s
+I am rank 5 Time comp: 0.253403 s
+I am rank 4 Time comp: 0.253396 s
+I am rank 3 Time comp: 0.253397 s
+I am rank 2 Time comp: 0.253417 s
+I am rank 1 Time kernel: 0.60131 s
+I am rank 7 Time kernel: 0.601309 s
+I am rank 6 Time kernel: 0.601308 s
+I am rank 5 Time kernel: 0.601309 s
+I am rank 4 Time kernel: 0.601309 s
+I am rank 3 Time kernel: 0.601309 s
+I am rank 2 Time kernel: 0.60131 s
+I am rank 1 Time modeling: 0.601315 s
+I am rank 7 Time modeling: 0.601314 s
+I am rank 6 Time modeling: 0.601314 s
+I am rank 5 Time modeling: 0.601314 s
+I am rank 4 Time modeling: 0.601315 s
+I am rank 3 Time modeling: 0.601315 s
+I am rank 2 Time modeling: 0.601315 s
+nsteps = 100
+nsteps = 100
+nsteps = 100
+nsteps = 100
+ndamp = 27 27 27
+nsteps = 100
+nsteps = 100
+ndamp = 27 27 27
+nsteps = 100
+ndamp = 27 27 27
+ndamp = 27 27 27
+rank = 15, min_u = 0.000000, max_u = 0.000000
+ndamp = 27 27 27
+ndamp = 27 27 27
+rank = 12, min_u = 0.000000, max_u = 0.000000
+ndamp = 27 27 27
+rank = 10, min_u = 0.000000, max_u = 0.000000
+rank = 9, min_u = -0.000000, max_u = 0.000000
+CHECKSUM rank 15 = 1fd056d273039b83
+rank = 14, min_u = 0.000000, max_u = 0.000000
+rank = 13, min_u = 0.000000, max_u = 0.000000
+CHECKSUM rank 12 = 1fd056d273039b83
+rank = 11, min_u = 0.000000, max_u = 0.000000
+CHECKSUM rank 10 = 1fd056d273039b83
+CHECKSUM rank 9 = 4569897b2b166214
+GICC_ROUTE rank 15 staged=100 pushed=0
+CHECKSUM rank 14 = 1fd056d273039b83
+CHECKSUM rank 13 = 1fd056d273039b83
+GICC_ROUTE rank 12 staged=200 pushed=0
+CHECKSUM rank 11 = 1fd056d273039b83
+GICC_ROUTE rank 10 staged=200 pushed=0
+GICC_ROUTE rank 9 staged=200 pushed=0
+FINAL min_u,  max_u = 0.000000, 0.000000
+GICC_ROUTE rank 14 staged=200 pushed=0
+GICC_ROUTE rank 13 staged=200 pushed=0
+FINAL min_u,  max_u = 0.000000, 0.000000
+GICC_ROUTE rank 11 staged=200 pushed=0
+FINAL min_u,  max_u = 0.000000, 0.000000
+FINAL min_u,  max_u = -0.000000, 0.000000
+I am rank 15 Time comm: 0.347948 s
+FINAL min_u,  max_u = 0.000000, 0.000000
+FINAL min_u,  max_u = 0.000000, 0.000000
+I am rank 12 Time comm: 0.347948 s
+FINAL min_u,  max_u = 0.000000, 0.000000
+I am rank 10 Time comm: 0.347959 s
+I am rank 9 Time comm: 0.347957 s
+I am rank 15 Time comp: 0.253353 s
+I am rank 14 Time comm: 0.347953 s
+I am rank 13 Time comm: 0.347952 s
+I am rank 12 Time comp: 0.253347 s
+I am rank 11 Time comm: 0.347949 s
+I am rank 10 Time comp: 0.25334 s
+I am rank 9 Time comp: 0.253342 s
+I am rank 15 Time kernel: 0.601312 s
+I am rank 14 Time comp: 0.253347 s
+I am rank 13 Time comp: 0.25335 s
+I am rank 12 Time kernel: 0.60131 s
+I am rank 11 Time comp: 0.25335 s
+I am rank 10 Time kernel: 0.601312 s
+I am rank 9 Time kernel: 0.601311 s
+I am rank 15 Time modeling: 0.601318 s
+I am rank 14 Time kernel: 0.601313 s
+I am rank 13 Time kernel: 0.601313 s
+I am rank 12 Time modeling: 0.601317 s
+I am rank 11 Time kernel: 0.601311 s
+I am rank 10 Time modeling: 0.601318 s
+I am rank 9 Time modeling: 0.601318 s
+I am rank 14 Time modeling: 0.601318 s
+I am rank 13 Time modeling: 0.601318 s
+I am rank 11 Time modeling: 0.601317 s

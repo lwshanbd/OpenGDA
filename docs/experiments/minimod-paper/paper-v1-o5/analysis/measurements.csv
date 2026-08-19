@@ -1,0 +1,11 @@
+kind,arm,nodes,rpn,ranks,rep,grid,steps,kernel_s,comm_s,comp_s,checksum_set,staged,pushed,path
+o5,mirrored_serial,2,1,2,1,100,1000,0.115746,0.0414066,0.0750825,0:cb8c08780cf6e9d7;1:9ea793e2d4cc5b9e,2000,0,docs/experiments/minimod-paper/paper-v1-o5/raw/o5-n2-rpn1-rep1-mirrored_serial.log
+o5,unmirrored_serial,2,1,2,1,100,1000,0.114602,0.0400397,0.0758514,0:cb8c08780cf6e9d7;1:9ea793e2d4cc5b9e,0,2000,docs/experiments/minimod-paper/paper-v1-o5/raw/o5-n2-rpn1-rep1-unmirrored_serial.log
+o5,mirrored_serial,2,1,2,2,100,1000,0.11577,0.0415052,0.0748762,0:cb8c08780cf6e9d7;1:9ea793e2d4cc5b9e,2000,0,docs/experiments/minimod-paper/paper-v1-o5/raw/o5-n2-rpn1-rep2-mirrored_serial.log
+o5,unmirrored_serial,2,1,2,2,100,1000,0.113097,0.0394707,0.0735519,0:cb8c08780cf6e9d7;1:9ea793e2d4cc5b9e,0,2000,docs/experiments/minimod-paper/paper-v1-o5/raw/o5-n2-rpn1-rep2-unmirrored_serial.log
+o5,mirrored_serial,2,1,2,3,100,1000,0.116296,0.0414036,0.0754973,0:cb8c08780cf6e9d7;1:9ea793e2d4cc5b9e,2000,0,docs/experiments/minimod-paper/paper-v1-o5/raw/o5-n2-rpn1-rep3-mirrored_serial.log
+o5,unmirrored_serial,2,1,2,3,100,1000,0.114191,0.0396854,0.0755198,0:cb8c08780cf6e9d7;1:9ea793e2d4cc5b9e,0,2000,docs/experiments/minimod-paper/paper-v1-o5/raw/o5-n2-rpn1-rep3-unmirrored_serial.log
+o5,mirrored_serial,2,1,2,4,100,1000,0.115242,0.041378,0.0737679,0:cb8c08780cf6e9d7;1:9ea793e2d4cc5b9e,2000,0,docs/experiments/minimod-paper/paper-v1-o5/raw/o5-n2-rpn1-rep4-mirrored_serial.log
+o5,unmirrored_serial,2,1,2,4,100,1000,0.114814,0.0402059,0.0758119,0:cb8c08780cf6e9d7;1:9ea793e2d4cc5b9e,0,2000,docs/experiments/minimod-paper/paper-v1-o5/raw/o5-n2-rpn1-rep4-unmirrored_serial.log
+o5,mirrored_serial,2,1,2,5,100,1000,0.11587,0.0414424,0.0749372,0:cb8c08780cf6e9d7;1:9ea793e2d4cc5b9e,2000,0,docs/experiments/minimod-paper/paper-v1-o5/raw/o5-n2-rpn1-rep5-mirrored_serial.log
+o5,unmirrored_serial,2,1,2,5,100,1000,0.113201,0.0394245,0.0736919,0:cb8c08780cf6e9d7;1:9ea793e2d4cc5b9e,0,2000,docs/experiments/minimod-paper/paper-v1-o5/raw/o5-n2-rpn1-rep5-unmirrored_serial.log

@@ -1,0 +1,11 @@
+job_id	kind	nodes	rpn	rep	grid	steps	order	queue
+f5qWk7BmjeUX	standard	8	1	1	800	100	trigger_overlap,trigger_serial,proxy_overlap,proxy_serial,default_serial,default_overlap	pdebug
+f5qWk7tSTwq9	standard	8	1	2	800	100	proxy_overlap,default_overlap,trigger_serial,default_serial,proxy_serial,trigger_overlap	pdebug
+f5qWk8S4NdRh	standard	8	1	3	800	100	default_overlap,trigger_serial,trigger_overlap,default_serial,proxy_overlap,proxy_serial	pdebug
+f5qWk8q97Su5	standard	8	1	4	800	100	proxy_serial,trigger_serial,default_overlap,proxy_overlap,default_serial,trigger_overlap	pdebug
+f5qWk9H5tsw5	standard	8	1	5	800	100	default_overlap,trigger_overlap,default_serial,trigger_serial,proxy_overlap,proxy_serial	pdebug
+f5qWk9q35QC7	standard	8	8	1	800	100	trigger_serial,default_serial,trigger_overlap,proxy_serial,proxy_overlap,default_overlap	pdebug
+f5qWkAjyRkpF	standard	8	8	2	800	100	trigger_serial,trigger_overlap,proxy_overlap,default_serial,default_overlap,proxy_serial	pdebug
+f5qWkBHcpRh9	standard	8	8	3	800	100	default_overlap,proxy_overlap,trigger_overlap,proxy_serial,default_serial,trigger_serial	pdebug
+f5qWkBenNB2f	standard	8	8	4	800	100	trigger_serial,trigger_overlap,default_overlap,default_serial,proxy_serial,proxy_overlap	pdebug
+f5qWkBrWrVNw	standard	8	8	5	800	100	trigger_serial,default_overlap,default_serial,trigger_overlap,proxy_serial,proxy_overlap	pdebug

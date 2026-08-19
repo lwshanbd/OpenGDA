@@ -63,17 +63,17 @@ The binaries and model inputs submitted to Flux were:
 | default binary | `06d594c05b58df29402f009b7a62161dddab9d2b4ed9207c44cff7ac486a1d3b` |
 | GBT binary | `2089d71ddab3210ac7fde5de6518b479a6ce25c64f964f6a66282938cc5d8afd` |
 
-Raw generated logs live under `docs/experiments/transform-agent/` (the
+Raw generated logs live under `docs/experiments/compiler-ml-path/` (the
 repository intentionally ignores `docs/`). Re-run their complete gate with:
 
 ```bash
 python3 examples/proxy/analyze_ml_path_e2e.py \
-  docs/experiments/transform-agent/ml-default-n2-stats.out \
-  docs/experiments/transform-agent/ml-gbt-n2-stats.out \
-  docs/experiments/transform-agent/ml-default-n2-reverse1.out \
-  docs/experiments/transform-agent/ml-gbt-n2-reverse1.out \
-  docs/experiments/transform-agent/ml-default-rep3.out \
-  docs/experiments/transform-agent/ml-gbt-rep3.out
+  docs/experiments/compiler-ml-path/ml-default-n2-stats.out \
+  docs/experiments/compiler-ml-path/ml-gbt-n2-stats.out \
+  docs/experiments/compiler-ml-path/ml-default-n2-reverse1.out \
+  docs/experiments/compiler-ml-path/ml-gbt-n2-reverse1.out \
+  docs/experiments/compiler-ml-path/ml-default-rep3.out \
+  docs/experiments/compiler-ml-path/ml-gbt-rep3.out
 ```
 
 Rebuild and submit another bounded pair with:

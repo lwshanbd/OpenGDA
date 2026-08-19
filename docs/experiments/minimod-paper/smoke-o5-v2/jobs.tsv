@@ -1,0 +1,2 @@
+job_id	kind	nodes	rpn	rep	grid	steps	order	queue
+f5qWh181Swcs	o5	2	1	0	100	10	unmirrored_serial,mirrored_serial	pci

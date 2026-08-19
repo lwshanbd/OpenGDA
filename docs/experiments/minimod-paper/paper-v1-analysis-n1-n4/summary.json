@@ -1,0 +1,217 @@
+{
+  "samples": 190,
+  "ignored_incomplete": [],
+  "standard_nodes": [
+    1,
+    2,
+    4
+  ],
+  "standard": {
+    "default": {
+      "oracle_regret_gmean": 1.1593039998217247,
+      "speedup_over_default_gmean": 1.0,
+      "speedup_bootstrap95": [
+        1.0,
+        1.0
+      ],
+      "picks": {
+        "n1-rpn8": "default_serial",
+        "n2-rpn1": "default_serial",
+        "n2-rpn8": "default_serial",
+        "n4-rpn1": "default_serial",
+        "n4-rpn8": "default_serial"
+      }
+    },
+    "best_fixed": {
+      "oracle_regret_gmean": 1.1199186690325271,
+      "speedup_over_default_gmean": 1.0358351918524367,
+      "speedup_bootstrap95": [
+        0.9688425100849046,
+        1.0966682470394238
+      ],
+      "picks": {
+        "n1-rpn8": "proxy_overlap",
+        "n2-rpn1": "proxy_overlap",
+        "n2-rpn8": "proxy_overlap",
+        "n4-rpn1": "proxy_overlap",
+        "n4-rpn8": "proxy_overlap"
+      },
+      "single_action": "proxy_overlap",
+      "candidate_regrets": {
+        "trigger_serial": 1.6676164077515672,
+        "trigger_overlap": 1.291588827295501,
+        "proxy_serial": 1.493261688450399,
+        "proxy_overlap": 1.1199186690325271
+      }
+    },
+    "best_global_all_actions": {
+      "oracle_regret_gmean": 1.007271983426274,
+      "speedup_over_default_gmean": 1.150674905716503,
+      "speedup_bootstrap95": [
+        1.1120849337283487,
+        1.1917097786441195
+      ],
+      "picks": {
+        "n1-rpn8": "default_overlap",
+        "n2-rpn1": "default_overlap",
+        "n2-rpn8": "default_overlap",
+        "n4-rpn1": "default_overlap",
+        "n4-rpn8": "default_overlap"
+      },
+      "single_action": "default_overlap"
+    },
+    "hand_rule": {
+      "oracle_regret_gmean": 1.0072961573053454,
+      "speedup_over_default_gmean": 1.15066430720357,
+      "speedup_bootstrap95": [
+        1.1121355296641464,
+        1.1916962942061258
+      ],
+      "picks": {
+        "n1-rpn8": "default_overlap",
+        "n2-rpn1": "trigger_overlap",
+        "n2-rpn8": "default_overlap",
+        "n4-rpn1": "trigger_overlap",
+        "n4-rpn8": "default_overlap"
+      }
+    },
+    "gbt_lono": {
+      "oracle_regret_gmean": 1.0004841297330662,
+      "speedup_over_default_gmean": 1.1585790728979992,
+      "speedup_bootstrap95": [
+        1.1208561368403194,
+        1.198703750312498
+      ],
+      "picks": {
+        "n1-rpn8": "default_overlap",
+        "n2-rpn1": "proxy_overlap",
+        "n2-rpn8": "default_overlap",
+        "n4-rpn1": "proxy_overlap",
+        "n4-rpn8": "default_overlap"
+      },
+      "predicted_seconds": {
+        "n1-rpn8": {
+          "default_serial": 0.3941806015271862,
+          "default_overlap": 0.2893178725009664,
+          "trigger_serial": 0.591769159186247,
+          "trigger_overlap": 0.4152628931993872,
+          "proxy_serial": 0.4868136147739316,
+          "proxy_overlap": 0.3342021760672741
+        },
+        "n2-rpn1": {
+          "default_serial": 0.9212146172526627,
+          "default_overlap": 0.8768643092946572,
+          "trigger_serial": 1.0413878666960885,
+          "trigger_overlap": 0.8679852259342863,
+          "proxy_serial": 1.0058707453709255,
+          "proxy_overlap": 0.8497680255015561
+        },
+        "n2-rpn8": {
+          "default_serial": 0.33010134946879677,
+          "default_overlap": 0.2717232378750834,
+          "trigger_serial": 0.5554175428020094,
+          "trigger_overlap": 0.40033846599531386,
+          "proxy_serial": 0.47940166604089635,
+          "proxy_overlap": 0.3502399285194506
+        },
+        "n4-rpn1": {
+          "default_serial": 1.2968230012838264,
+          "default_overlap": 1.38698301720501,
+          "trigger_serial": 1.5417615589774931,
+          "trigger_overlap": 1.368016963277535,
+          "proxy_serial": 1.5179392436798456,
+          "proxy_overlap": 1.296555396796785
+        },
+        "n4-rpn8": {
+          "default_serial": 0.32738858379653885,
+          "default_overlap": 0.2566266537961827,
+          "trigger_serial": 0.559945403925507,
+          "trigger_overlap": 0.3641394610165838,
+          "proxy_serial": 0.45568285805486997,
+          "proxy_overlap": 0.2852641335769792
+        }
+      }
+    },
+    "oracle": {
+      "oracle_regret_gmean": 1.0,
+      "speedup_over_default_gmean": 1.1591748979932275,
+      "speedup_bootstrap95": [
+        1.1215267127966086,
+        1.1991389175177443
+      ],
+      "picks": {
+        "n1-rpn8": "proxy_overlap",
+        "n2-rpn1": "proxy_overlap",
+        "n2-rpn8": "default_overlap",
+        "n4-rpn1": "proxy_overlap",
+        "n4-rpn8": "default_overlap"
+      }
+    },
+    "pairwise": {
+      "gbt_lono_over_best_fixed": {
+        "speedup_gmean": 1.1184975003852238,
+        "speedup_bootstrap95": [
+          1.0445695532222494,
+          1.2224782344806397
+        ]
+      },
+      "gbt_lono_over_best_global_all_actions": {
+        "speedup_gmean": 1.006869157519842,
+        "speedup_bootstrap95": [
+          1.0035842303476137,
+          1.0105928907014579
+        ]
+      },
+      "gbt_lono_over_hand_rule": {
+        "speedup_gmean": 1.0068784315676431,
+        "speedup_bootstrap95": [
+          1.0035678101766043,
+          1.0106316692512933
+        ]
+      },
+      "gbt_lono_over_oracle": {
+        "speedup_gmean": 0.9994859920653391,
+        "speedup_bootstrap95": [
+          0.9990204195295281,
+          0.9998704206968171
+        ]
+      }
+    },
+    "scope": {
+      "policy_cells": [
+        "n1-rpn8",
+        "n2-rpn1",
+        "n2-rpn8",
+        "n4-rpn1",
+        "n4-rpn8"
+      ],
+      "excluded_no_communication_control": "n1-rpn1"
+    }
+  },
+  "o5": {
+    "mirrored_serial": {
+      "median_s": 0.11577,
+      "q1_s": 0.115746,
+      "q3_s": 0.11587
+    },
+    "unmirrored_serial": {
+      "median_s": 0.114191,
+      "q1_s": 0.113201,
+      "q3_s": 0.114602
+    },
+    "unmirrored_over_mirrored": {
+      "gmean": 0.9844061871169653,
+      "range": [
+        0.9769111168696554,
+        0.9962860762569202
+      ],
+      "paired": [
+        0.9901162891158225,
+        0.9769111168696554,
+        0.9818996354130839,
+        0.9962860762569202,
+        0.9769655648571675
+      ]
+    }
+  }
+}

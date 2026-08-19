@@ -1,0 +1,2 @@
+ALLOC kind=standard nodes=2 rpn=1 ranks=2 rep=0 grid=100 steps=10 order=trigger_serial,default_serial,default_overlap,trigger_overlap,proxy_overlap,proxy_serial job=unknown
+BEGIN arm=trigger_serial log=/p/lustre2/shan4/new-gicc/docs/experiments/minimod-paper/smoke-standard-v2/raw/standard-n2-rpn1-rep0-trigger_serial.log time=2026-08-18T00:02:27Z

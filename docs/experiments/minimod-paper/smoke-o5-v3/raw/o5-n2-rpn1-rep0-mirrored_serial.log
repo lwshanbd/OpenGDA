@@ -1,0 +1,28 @@
+RUN kind=o5 arm=mirrored_serial nodes=2 rpn=1 ranks=2 rep=0 grid=100 steps=10 binary=/p/lustre2/shan4/new-gicc/build_ofi/minimod_paper/bin/minimod_o5
+[minimod-o5] mixed dispatch enabled
+[gicc] CPU proxy: 1 worker thread(s) per rank
+ngpus = 2
+nsteps = 10
+ndamp = 27 27 27
+grid = 100 100 100
+u_size = 5038848
+HIP gicc target initialized: 2 GPUs, rank 0 handles x=[0,50)
+Halo size: 186624 bytes (46656 floats)
+rank = 0, min_u = -1.023706, max_u = 177.570007
+CHECKSUM rank 0 = f7136b681519bec2
+GICC_ROUTE rank 0 staged=20 pushed=0
+FINAL min_u,  max_u = -1.023706, 177.570007
+I am rank 0 Time comm: 0.00125431 s
+I am rank 0 Time comp: 0.00173804 s
+I am rank 0 Time kernel: 0.00299396 s
+I am rank 0 Time modeling: 0.0029948 s
+nsteps = 10
+ndamp = 27 27 27
+rank = 1, min_u = -1.320585, max_u = 1276.698853
+CHECKSUM rank 1 = a8b9e99f18be2b35
+GICC_ROUTE rank 1 staged=20 pushed=0
+FINAL min_u,  max_u = -1.320585, 1276.698853
+I am rank 1 Time comm: 0.00125867 s
+I am rank 1 Time comp: 0.00139455 s
+I am rank 1 Time kernel: 0.00265476 s
+I am rank 1 Time modeling: 0.00300147 s

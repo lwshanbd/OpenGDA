@@ -1,0 +1,2 @@
+job_id	kind	nodes	rpn	rep	grid	steps	order	queue
+f5qWga4RZ75Z	standard	2	1	0	100	10	proxy_overlap,trigger_overlap,default_overlap,trigger_serial,proxy_serial,default_serial	pci

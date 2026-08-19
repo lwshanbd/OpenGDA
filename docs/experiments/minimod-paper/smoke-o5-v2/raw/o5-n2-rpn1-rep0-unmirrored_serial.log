@@ -1,0 +1,2 @@
+RUN kind=o5 arm=unmirrored_serial nodes=2 rpn=1 ranks=2 rep=0 grid=100 steps=10 binary=/p/lustre2/shan4/new-gicc/build_ofi/minimod_paper/bin/minimod_o5
+flux-run: ERROR: Per-resource options can't be used with per-task options. (See --help for details)

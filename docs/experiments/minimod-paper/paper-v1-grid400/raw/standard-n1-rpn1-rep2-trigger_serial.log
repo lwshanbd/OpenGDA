@@ -1,0 +1,18 @@
+RUN kind=standard arm=trigger_serial nodes=1 rpn=1 ranks=1 rep=2 grid=400 steps=100 binary=/p/lustre2/shan4/new-gicc/build_ofi/minimod_paper/bin/minimod_trigger
+[minimod-unified] transport = DWQ (GPU trigger)
+ngpus = 1
+nsteps = 100
+ndamp = 27 27 27
+grid = 400 400 400
+u_size = 271669248
+HIP gicc target initialized: 1 GPUs, rank 0 handles x=[0,400)
+Halo size: 2663424 bytes (665856 floats)
+time step 100 / 100
+rank = 0, min_u = -1178.403320, max_u = 757.766235
+CHECKSUM rank 0 = 3a710ca46ddaae52
+GICC_ROUTE rank 0 staged=0 pushed=0
+FINAL min_u,  max_u = -1178.403320, 757.766235
+I am rank 0 Time comm: 0.0349986 s
+I am rank 0 Time comp: 0.301874 s
+I am rank 0 Time kernel: 0.336882 s
+I am rank 0 Time modeling: 0.337477 s

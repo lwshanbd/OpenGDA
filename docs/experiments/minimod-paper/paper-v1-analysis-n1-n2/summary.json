@@ -1,0 +1,156 @@
+{
+  "samples": 130,
+  "ignored_incomplete": [],
+  "standard_nodes": [
+    1,
+    2
+  ],
+  "standard": {
+    "default": {
+      "oracle_regret_gmean": 1.1024092618635475,
+      "speedup_over_default_gmean": 1.0,
+      "speedup_bootstrap95": [
+        1.0,
+        1.0
+      ],
+      "picks": {
+        "n1-rpn8": "default_serial",
+        "n2-rpn1": "default_serial",
+        "n2-rpn8": "default_serial"
+      }
+    },
+    "best_fixed": {
+      "oracle_regret_gmean": 1.0041190135186364,
+      "speedup_over_default_gmean": 1.0981562039425357,
+      "speedup_bootstrap95": [
+        1.0705181910298085,
+        1.1279677546151063
+      ],
+      "picks": {
+        "n1-rpn8": "proxy_overlap",
+        "n2-rpn1": "proxy_overlap",
+        "n2-rpn8": "proxy_overlap"
+      },
+      "single_action": "proxy_overlap",
+      "candidate_regrets": {
+        "trigger_serial": 1.5186870447855776,
+        "trigger_overlap": 1.1332011257472758,
+        "proxy_serial": 1.393016406056972,
+        "proxy_overlap": 1.0041190135186364
+      }
+    },
+    "best_global_all_actions": {
+      "oracle_regret_gmean": 1.0041190135186364,
+      "speedup_over_default_gmean": 1.0981562039425357,
+      "speedup_bootstrap95": [
+        1.0705181910298085,
+        1.1279677546151063
+      ],
+      "picks": {
+        "n1-rpn8": "proxy_overlap",
+        "n2-rpn1": "proxy_overlap",
+        "n2-rpn8": "proxy_overlap"
+      },
+      "single_action": "proxy_overlap"
+    },
+    "hand_rule": {
+      "oracle_regret_gmean": 1.0044425786258633,
+      "speedup_over_default_gmean": 1.097283860484972,
+      "speedup_bootstrap95": [
+        1.0651943990237076,
+        1.1331607294996064
+      ],
+      "picks": {
+        "n1-rpn8": "default_overlap",
+        "n2-rpn1": "trigger_overlap",
+        "n2-rpn8": "default_overlap"
+      }
+    },
+    "gbt_lono": {
+      "oracle_regret_gmean": 1.0049293507099175,
+      "speedup_over_default_gmean": 1.0972155968020003,
+      "speedup_bootstrap95": [
+        1.0696482045125448,
+        1.1272971270671142
+      ],
+      "picks": {
+        "n1-rpn8": "default_overlap",
+        "n2-rpn1": "proxy_overlap",
+        "n2-rpn8": "proxy_overlap"
+      },
+      "predicted_seconds": {
+        "n1-rpn8": {
+          "default_serial": 0.3334676477921633,
+          "default_overlap": 0.24536898032443175,
+          "trigger_serial": 0.5667237462817672,
+          "trigger_overlap": 0.371443006319067,
+          "proxy_serial": 0.45287662715777166,
+          "proxy_overlap": 0.28228211911795736
+        },
+        "n2-rpn1": {
+          "default_serial": 0.49428458743524395,
+          "default_overlap": 0.45620234853341624,
+          "trigger_serial": 0.7039867556614698,
+          "trigger_overlap": 0.46190647153936626,
+          "proxy_serial": 0.6513903703872893,
+          "proxy_overlap": 0.4553522309486322
+        },
+        "n2-rpn8": {
+          "default_serial": 0.49428458743524395,
+          "default_overlap": 0.45620234853341624,
+          "trigger_serial": 0.7039867556614698,
+          "trigger_overlap": 0.46190647153936626,
+          "proxy_serial": 0.6513903703872893,
+          "proxy_overlap": 0.4553522309486322
+        }
+      }
+    },
+    "oracle": {
+      "oracle_regret_gmean": 1.0,
+      "speedup_over_default_gmean": 1.1022688534693332,
+      "speedup_bootstrap95": [
+        1.0724042182958495,
+        1.1360579163671711
+      ],
+      "picks": {
+        "n1-rpn8": "proxy_overlap",
+        "n2-rpn1": "proxy_overlap",
+        "n2-rpn8": "default_overlap"
+      }
+    },
+    "scope": {
+      "policy_cells": [
+        "n1-rpn8",
+        "n2-rpn1",
+        "n2-rpn8"
+      ],
+      "excluded_no_communication_control": "n1-rpn1"
+    }
+  },
+  "o5": {
+    "mirrored_serial": {
+      "median_s": 0.11577,
+      "q1_s": 0.115746,
+      "q3_s": 0.11587
+    },
+    "unmirrored_serial": {
+      "median_s": 0.114191,
+      "q1_s": 0.113201,
+      "q3_s": 0.114602
+    },
+    "unmirrored_over_mirrored": {
+      "gmean": 0.9844061871169653,
+      "range": [
+        0.9769111168696554,
+        0.9962860762569202
+      ],
+      "paired": [
+        0.9901162891158225,
+        0.9769111168696554,
+        0.9818996354130839,
+        0.9962860762569202,
+        0.9769655648571675
+      ]
+    }
+  }
+}

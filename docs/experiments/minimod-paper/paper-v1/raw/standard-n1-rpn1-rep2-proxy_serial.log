@@ -1,0 +1,19 @@
+RUN kind=standard arm=proxy_serial nodes=1 rpn=1 ranks=1 rep=2 grid=800 steps=100 binary=/p/lustre2/shan4/new-gicc/build_ofi/minimod_paper/bin/minimod_proxy
+[minimod-unified] transport = CPU proxy
+[gicc] CPU proxy: 1 worker thread(s) per rank
+ngpus = 1
+nsteps = 100
+ndamp = 27 27 27
+grid = 800 800 800
+u_size = 2110056448
+HIP gicc target initialized: 1 GPUs, rank 0 handles x=[0,800)
+Halo size: 10445824 bytes (2611456 floats)
+time step 100 / 100
+rank = 0, min_u = -1178.403320, max_u = 757.766235
+CHECKSUM rank 0 = 2176124d5c660ad2
+GICC_ROUTE rank 0 staged=0 pushed=0
+FINAL min_u,  max_u = -1178.403320, 757.766235
+I am rank 0 Time comm: 0.0360007 s
+I am rank 0 Time comp: 3.24008 s
+I am rank 0 Time kernel: 3.27611 s
+I am rank 0 Time modeling: 3.27681 s

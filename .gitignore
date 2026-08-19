@@ -4,6 +4,8 @@
 .vscode/
 .claude/
 ASF/
+__pycache__/
+*.pyc
 
 # Build directory
 build/

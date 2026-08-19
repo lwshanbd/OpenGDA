@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "grids": [
+    400,
+    800
+  ],
+  "transfers": {
+    "train-800-test-400": {
+      "train_grids": [
+        800
+      ],
+      "test_grid": 400,
+      "oracle_regret_gmean": 1.0,
+      "oracle_matches": 5,
+      "policy_cells": 5,
+      "best_global_action": "default_overlap",
+      "picks": {
+        "n1-rpn8": "default_overlap",
+        "n2-rpn1": "proxy_overlap",
+        "n2-rpn8": "default_overlap",
+        "n4-rpn1": "proxy_overlap",
+        "n4-rpn8": "default_overlap"
+      },
+      "oracle_picks": {
+        "n1-rpn8": "default_overlap",
+        "n2-rpn1": "proxy_overlap",
+        "n2-rpn8": "default_overlap",
+        "n4-rpn1": "proxy_overlap",
+        "n4-rpn8": "default_overlap"
+      },
+      "speedup_over_default": {
+        "gmean": 1.2057577019362946,
+        "bootstrap95": [
+          1.1643758552553622,
+          1.248211483744727
+        ]
+      },
+      "speedup_over_best_global": {
+        "gmean": 1.0072781273271336,
+        "bootstrap95": [
+          1.003660326401801,
+          1.0112413131240348
+        ]
+      },
+      "speedup_over_hand_rule": {
+        "gmean": 1.0074115820069853,
+        "bootstrap95": [
+          1.0036540922359576,
+          1.0115794167721304
+        ]
+      },
+      "predicted_seconds": {
+        "n1-rpn8": {
+          "default_serial": 0.43962064857439326,
+          "default_overlap": 0.3368651375314961,
+          "trigger_serial": 0.62035554122042,
+          "trigger_overlap": 0.43464156824682,
+          "proxy_serial": 0.5322861479531844,
+          "proxy_overlap": 0.37684649847124396
+        },
+        "n2-rpn1": {
+          "default_serial": 1.235043595667285,
+          "default_overlap": 1.1877397078395027,
+          "trigger_serial": 1.3240009108436679,
+          "trigger_overlap": 1.164232931898561,
+          "proxy_serial": 1.2792357432555277,
+          "proxy_overlap": 1.1366608665624622
+        },
+        "n2-rpn8": {
+          "default_serial": 0.28720741944949335,
+          "default_overlap": 0.21919559599839525,
+          "trigger_serial": 0.5332646156155557,
+          "trigger_overlap": 0.3721273109747936,
+          "proxy_serial": 0.417339067907052,
+          "proxy_overlap": 0.29428392911381807
+        },
+        "n4-rpn1": {
+          "default_serial": 0.883624512040227,
+          "default_overlap": 0.8016253402007292,
+          "trigger_serial": 0.9707209594475851,
+          "trigger_overlap": 0.8052128505725251,
+          "proxy_serial": 0.9379003729396033,
+          "proxy_overlap": 0.7861433149863368
+        },
+        "n4-rpn8": {
+          "default_serial": 0.20911433977512928,
+          "default_overlap": 0.16653033563236286,
+          "trigger_serial": 0.5092253732908134,
+          "trigger_overlap": 0.37079356244493644,
+          "proxy_serial": 0.38883189972183163,
+          "proxy_overlap": 0.28609664452780753
+        }
+      }
+    },
+    "train-400-test-800": {
+      "train_grids": [
+        400
+      ],
+      "test_grid": 800,
+      "oracle_regret_gmean": 1.0026631836920221,
+      "oracle_matches": 3,
+      "policy_cells": 5,
+      "best_global_action": "default_overlap",
+      "picks": {
+        "n1-rpn8": "default_overlap",
+        "n2-rpn1": "trigger_overlap",
+        "n2-rpn8": "default_overlap",
+        "n4-rpn1": "proxy_overlap",
+        "n4-rpn8": "default_overlap"
+      },
+      "oracle_picks": {
+        "n1-rpn8": "proxy_overlap",
+        "n2-rpn1": "proxy_overlap",
+        "n2-rpn8": "default_overlap",
+        "n4-rpn1": "proxy_overlap",
+        "n4-rpn8": "default_overlap"
+      },
+      "speedup_over_default": {
+        "gmean": 1.156026637171775,
+        "bootstrap95": [
+          1.1169300680527983,
+          1.1975413076070787
+        ]
+      },
+      "speedup_over_best_global": {
+        "gmean": 1.0046509500021983,
+        "bootstrap95": [
+          1.0018180525038867,
+          1.0083784872328634
+        ]
+      },
+      "speedup_over_hand_rule": {
+        "gmean": 1.0046602036185834,
+        "bootstrap95": [
+          1.0018164274692374,
+          1.008431746946286
+        ]
+      },
+      "predicted_seconds": {
+        "n1-rpn8": {
+          "default_serial": 0.07326669369678993,
+          "default_overlap": 0.055393781787841566,
+          "trigger_serial": 0.11216739362452487,
+          "trigger_overlap": 0.08480492038935954,
+          "proxy_serial": 0.09659763869298404,
+          "proxy_overlap": 0.07303330134050204
+        },
+        "n2-rpn1": {
+          "default_serial": 0.17615566098394797,
+          "default_overlap": 0.15828829594401805,
+          "trigger_serial": 0.1740198992865104,
+          "trigger_overlap": 0.15636916329882478,
+          "proxy_serial": 0.17491050051461102,
+          "proxy_overlap": 0.1571694313684075
+        },
+        "n2-rpn8": {
+          "default_serial": 0.06342220635019838,
+          "default_overlap": 0.04939679942134763,
+          "trigger_serial": 0.1153175003806516,
+          "trigger_overlap": 0.08981578793744398,
+          "proxy_serial": 0.08888314372538574,
+          "proxy_overlap": 0.06922721669912324
+        },
+        "n4-rpn1": {
+          "default_serial": 0.1409402329878815,
+          "default_overlap": 0.11976952096181556,
+          "trigger_serial": 0.14141761072092965,
+          "trigger_overlap": 0.12017519151587149,
+          "proxy_serial": 0.13993036381069296,
+          "proxy_overlap": 0.11891134480429229
+        },
+        "n4-rpn8": {
+          "default_serial": 0.04827726922968788,
+          "default_overlap": 0.04055972253986239,
+          "trigger_serial": 0.11325188219743991,
+          "trigger_overlap": 0.09514757135891622,
+          "proxy_serial": 0.07955739127594984,
+          "proxy_overlap": 0.06683944157644008
+        }
+      }
+    }
+  }
+}

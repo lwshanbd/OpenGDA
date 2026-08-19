@@ -1,0 +1,182 @@
+{
+  "default": {
+    "oracle_regret_gmean": 1.2083089838694565,
+    "speedup_over_default_gmean": 1.0,
+    "speedup_bootstrap95": [
+      1.0,
+      1.0
+    ],
+    "picks": {
+      "n1-rpn8": "default_serial",
+      "n2-rpn1": "default_serial",
+      "n2-rpn8": "default_serial",
+      "n4-rpn1": "default_serial",
+      "n4-rpn8": "default_serial"
+    }
+  },
+  "best_fixed": {
+    "oracle_regret_gmean": 1.2927912183720407,
+    "speedup_over_default_gmean": 0.9338456531750544,
+    "speedup_bootstrap95": [
+      0.8387698238615626,
+      1.0361124329604423
+    ],
+    "picks": {
+      "n1-rpn8": "proxy_overlap",
+      "n2-rpn1": "proxy_overlap",
+      "n2-rpn8": "proxy_overlap",
+      "n4-rpn1": "proxy_overlap",
+      "n4-rpn8": "proxy_overlap"
+    },
+    "single_action": "proxy_overlap",
+    "candidate_regrets": {
+      "trigger_serial": 1.9261656400506697,
+      "trigger_overlap": 1.5647066926605149,
+      "proxy_serial": 1.6217428535951666,
+      "proxy_overlap": 1.2927912183720407
+    }
+  },
+  "best_global_all_actions": {
+    "oracle_regret_gmean": 1.0072684561593868,
+    "speedup_over_default_gmean": 1.1970454527150682,
+    "speedup_bootstrap95": [
+      1.1566310281343335,
+      1.2378148037573373
+    ],
+    "picks": {
+      "n1-rpn8": "default_overlap",
+      "n2-rpn1": "default_overlap",
+      "n2-rpn8": "default_overlap",
+      "n4-rpn1": "default_overlap",
+      "n4-rpn8": "default_overlap"
+    },
+    "single_action": "default_overlap"
+  },
+  "hand_rule": {
+    "oracle_regret_gmean": 1.0074331218126888,
+    "speedup_over_default_gmean": 1.1968868766965735,
+    "speedup_bootstrap95": [
+      1.1569281005021976,
+      1.2373300310188364
+    ],
+    "picks": {
+      "n1-rpn8": "default_overlap",
+      "n2-rpn1": "trigger_overlap",
+      "n2-rpn8": "default_overlap",
+      "n4-rpn1": "trigger_overlap",
+      "n4-rpn8": "default_overlap"
+    }
+  },
+  "gbt_lono": {
+    "oracle_regret_gmean": 1.004516420977398,
+    "speedup_over_default_gmean": 1.2000950631399594,
+    "speedup_bootstrap95": [
+      1.1615792063211092,
+      1.2394985457304575
+    ],
+    "picks": {
+      "n1-rpn8": "default_overlap",
+      "n2-rpn1": "proxy_overlap",
+      "n2-rpn8": "default_overlap",
+      "n4-rpn1": "default_overlap",
+      "n4-rpn8": "default_overlap"
+    },
+    "predicted_seconds": {
+      "n1-rpn8": {
+        "default_serial": 0.06352853286107281,
+        "default_overlap": 0.05106200054876136,
+        "trigger_serial": 0.11910019193208313,
+        "trigger_overlap": 0.09628712677030829,
+        "proxy_serial": 0.09075965033558751,
+        "proxy_overlap": 0.07269551565452374
+      },
+      "n2-rpn1": {
+        "default_serial": 0.12009260076770611,
+        "default_overlap": 0.09364927299433468,
+        "trigger_serial": 0.12829028933333844,
+        "trigger_overlap": 0.09139988545757592,
+        "proxy_serial": 0.12065844036367684,
+        "proxy_overlap": 0.08687700721698567
+      },
+      "n2-rpn8": {
+        "default_serial": 0.05373274536270587,
+        "default_overlap": 0.04787122189814454,
+        "trigger_serial": 0.11073059282548388,
+        "trigger_overlap": 0.09012946935936447,
+        "proxy_serial": 0.08833856473327709,
+        "proxy_overlap": 0.07266826738028129
+      },
+      "n4-rpn1": {
+        "default_serial": 0.14523408394692974,
+        "default_overlap": 0.13264090520190286,
+        "trigger_serial": 0.16483775751961327,
+        "trigger_overlap": 0.14014400375445246,
+        "proxy_serial": 0.15926920134984668,
+        "proxy_overlap": 0.13443893109658264
+      },
+      "n4-rpn8": {
+        "default_serial": 0.05239054943857878,
+        "default_overlap": 0.04272481346748322,
+        "trigger_serial": 0.11920171066127147,
+        "trigger_overlap": 0.09049375426725446,
+        "proxy_serial": 0.08776881061737737,
+        "proxy_overlap": 0.06615333703604183
+      }
+    }
+  },
+  "oracle": {
+    "oracle_regret_gmean": 1.0,
+    "speedup_over_default_gmean": 1.2057577019362946,
+    "speedup_bootstrap95": [
+      1.1643758552553622,
+      1.248211483744727
+    ],
+    "picks": {
+      "n1-rpn8": "default_overlap",
+      "n2-rpn1": "proxy_overlap",
+      "n2-rpn8": "default_overlap",
+      "n4-rpn1": "proxy_overlap",
+      "n4-rpn8": "default_overlap"
+    }
+  },
+  "pairwise": {
+    "gbt_lono_over_best_fixed": {
+      "speedup_gmean": 1.2851107236615205,
+      "speedup_bootstrap95": [
+        1.1537664549671016,
+        1.4367829734898663
+      ]
+    },
+    "gbt_lono_over_best_global_all_actions": {
+      "speedup_gmean": 1.0025476145604784,
+      "speedup_bootstrap95": [
+        1.0006039355703413,
+        1.0047325027556273
+      ]
+    },
+    "gbt_lono_over_hand_rule": {
+      "speedup_gmean": 1.0026804424928115,
+      "speedup_bootstrap95": [
+        1.0009807867849694,
+        1.0046152070261123
+      ]
+    },
+    "gbt_lono_over_oracle": {
+      "speedup_gmean": 0.9953036677375217,
+      "speedup_bootstrap95": [
+        0.9913572932347097,
+        0.9984338579215557
+      ]
+    }
+  },
+  "scope": {
+    "policy_cells": [
+      "n1-rpn8",
+      "n2-rpn1",
+      "n2-rpn8",
+      "n4-rpn1",
+      "n4-rpn8"
+    ],
+    "excluded_no_communication_control": "n1-rpn1"
+  }
+}

@@ -1,0 +1,14 @@
+ALLOC kind=standard nodes=4 rpn=1 ranks=4 rep=3 grid=400 steps=100 order=trigger_serial,default_serial,proxy_serial,default_overlap,proxy_overlap,trigger_overlap job=unknown
+BEGIN arm=trigger_serial log=/p/lustre2/shan4/new-gicc/docs/experiments/minimod-paper/paper-v1-grid400/raw/standard-n4-rpn1-rep3-trigger_serial.log time=2026-08-18T06:30:55Z
+END arm=trigger_serial time=2026-08-18T06:31:00Z
+BEGIN arm=default_serial log=/p/lustre2/shan4/new-gicc/docs/experiments/minimod-paper/paper-v1-grid400/raw/standard-n4-rpn1-rep3-default_serial.log time=2026-08-18T06:31:00Z
+END arm=default_serial time=2026-08-18T06:31:02Z
+BEGIN arm=proxy_serial log=/p/lustre2/shan4/new-gicc/docs/experiments/minimod-paper/paper-v1-grid400/raw/standard-n4-rpn1-rep3-proxy_serial.log time=2026-08-18T06:31:02Z
+END arm=proxy_serial time=2026-08-18T06:31:05Z
+BEGIN arm=default_overlap log=/p/lustre2/shan4/new-gicc/docs/experiments/minimod-paper/paper-v1-grid400/raw/standard-n4-rpn1-rep3-default_overlap.log time=2026-08-18T06:31:05Z
+END arm=default_overlap time=2026-08-18T06:31:08Z
+BEGIN arm=proxy_overlap log=/p/lustre2/shan4/new-gicc/docs/experiments/minimod-paper/paper-v1-grid400/raw/standard-n4-rpn1-rep3-proxy_overlap.log time=2026-08-18T06:31:08Z
+END arm=proxy_overlap time=2026-08-18T06:31:10Z
+BEGIN arm=trigger_overlap log=/p/lustre2/shan4/new-gicc/docs/experiments/minimod-paper/paper-v1-grid400/raw/standard-n4-rpn1-rep3-trigger_overlap.log time=2026-08-18T06:31:10Z
+END arm=trigger_overlap time=2026-08-18T06:31:13Z
+ALLOC_DONE kind=standard nodes=4 rpn=1 rep=3

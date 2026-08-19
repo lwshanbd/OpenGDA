@@ -1,0 +1,49 @@
+RUN kind=standard arm=proxy_overlap nodes=4 rpn=1 ranks=4 rep=5 grid=400 steps=100 binary=/p/lustre2/shan4/new-gicc/build_ofi/minimod_paper/bin/minimod_proxy
+[minimod-unified] transport = CPU proxy
+[gicc] CPU proxy: 1 worker thread(s) per rank
+ngpus = 4
+nsteps = 100
+ndamp = 27 27 27
+grid = 400 400 400
+u_size = 271669248
+HIP gicc target initialized: 4 GPUs, rank 0 handles x=[0,100)
+Halo size: 2663424 bytes (665856 floats)
+time step 100 / 100
+rank = 0, min_u = 0.000000, max_u = 0.000000
+CHECKSUM rank 0 = 1435ab360f413383
+GICC_ROUTE rank 0 staged=0 pushed=100
+FINAL min_u,  max_u = 0.000000, 0.000000
+I am rank 0 Time comm: 0.0013965 s
+I am rank 0 Time comp: 0.0900433 s
+I am rank 0 Time kernel: 0.0914547 s
+I am rank 0 Time modeling: 0.09146 s
+nsteps = 100
+ndamp = 27 27 27
+rank = 1, min_u = -1143.143799, max_u = 733.619385
+CHECKSUM rank 1 = 367fa51c1d41b9dd
+GICC_ROUTE rank 1 staged=0 pushed=200
+FINAL min_u,  max_u = -1143.143799, 733.619385
+nsteps = 100
+I am rank 1 Time comm: 0.0113373 s
+ndamp = 27 27 27
+nsteps = 100
+I am rank 1 Time comp: 0.0801006 s
+rank = 3, min_u = 0.000000, max_u = 0.000000
+ndamp = 27 27 27
+I am rank 1 Time kernel: 0.091457 s
+CHECKSUM rank 3 = 1435ab360f413383
+rank = 2, min_u = -1151.019775, max_u = 743.350464
+I am rank 1 Time modeling: 0.0914623 s
+GICC_ROUTE rank 3 staged=0 pushed=100
+CHECKSUM rank 2 = ab4e964283aa7aa7
+GICC_ROUTE rank 2 staged=0 pushed=200
+FINAL min_u,  max_u = 0.000000, 0.000000
+FINAL min_u,  max_u = -1151.019775, 743.350464
+I am rank 3 Time comm: 0.000743336 s
+I am rank 2 Time comm: 0.0104835 s
+I am rank 3 Time comp: 0.0906987 s
+I am rank 2 Time comp: 0.0803312 s
+I am rank 3 Time kernel: 0.0914572 s
+I am rank 2 Time kernel: 0.09083 s
+I am rank 3 Time modeling: 0.0914615 s
+I am rank 2 Time modeling: 0.0914653 s

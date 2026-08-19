@@ -1,0 +1,1 @@
+Aug 17 17:01:18.739766 PDT 2026 broker.err[0]: rc2.0: /var/tmp/shan4/jobtmp-0-f5qWga4RZ75Z/script standard 2 1 0 100 10 proxy_overlap,trigger_overlap,default_overlap,trigger_serial,proxy_serial,default_serial /p/lustre2/shan4/new-gicc/docs/experiments/minimod-paper/smoke-standard/raw Exited (rc=1) 0.0s
