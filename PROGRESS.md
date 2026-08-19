@@ -694,29 +694,71 @@ site's offsets come from a device load, so `hk_capable=false` and its legal set
 is exactly `proxy`.  This validates heterogeneous compiler facts and legality
 in one dossier; it is not yet the larger frozen evaluation workload.
 
-This is infrastructure, not a new performance result.  Nine bridge tests and
+This is infrastructure, not a new performance result.  Ten bridge tests and
 all 41 pass tests pass, including pass-side rejection of an invented dispatch;
 no LLM trial is counted yet.
+
+## 12. A frozen compiler-only workload now exposes a real decision gap
+
+`examples/proxy/compiler_lto_eval.cpp` freezes seven heterogeneous scenarios
+and ten device-operation sites behind the intended boundary. Every arm uses
+the identical source (SHA-256
+`d707d5b6773a5299b2d8a19a6c832f82b719bc3be08b01f250a481500ecb486a`);
+the only prospective model input is the content-addressed compiler dossier
+`sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5`.
+The source is neither included in the prompt nor writable through the output
+schema. Accepted decisions are legal-action labels that the real LTO lowering
+materializes.
+
+The workload varies compiler-visible size, batch count, descriptor reuse,
+adjacency, issue-to-use distance, launch geometry, and host-knowability. A
+device-loaded-offset site is deliberately proxy-only; it tests legality and is
+excluded from decision regret. The current batched host placeholder exposed a
+real contract bug during this gate: the feature extractor had advertised IPC
+and hybrid default although those lowerings cannot materialize a batched loop.
+The extractor and bridge now expose only proxy/trigger there, and fail-closed
+fallback pins such sites to trigger.
+
+Four allocation-paired, order-rotated control replicates produced 112/112
+correct payload/route records. The best action is stable in all four
+replicates for every one of the six decision-bearing scenarios: trigger for
+the 256 B and 1 MiB single-op cases, proxy for the reusable, adjacent, distant,
+and four-static-site cases. Relative to the measured better uniform legal
+action in each scenario, the compiler default has **1.1031x** geometric-mean
+regret and selects two of six winners; the existing analytic hand rule has
+**1.0604x** regret and selects one of six. This is the missing evidence that a
+nontrivial compiler-level selection problem exists. It is not evidence that
+an LLM solves it.
+
+For the four static sites, all `2^4` proxy/trigger assignments were compiled
+into distinct binaries and run in one bounded two-node allocation. Every
+payload hash and exact route count passed. The action-space winner is `1111`
+(all proxy) at 39.532 us; the next mask is 1.0981x slower and `0000` (all
+trigger) is 1.4357x slower. This is an exact assignment-space check with one
+allocation-level replicate; repeatability claims come from the four-replicate
+uniform controls above. Full hashes, jobs, raw logs, and analyzers are under
+`docs/experiments/compiler-lto-eval/`.
 
 ## Next
 
 The next model experiment stays entirely on the compiler path:
 
-1. Freeze a heterogeneous, unchanged-source workload whose compiler-generated
-   sites differ in size, batch, reuse, distance, and locality.  The current
-   64-site path is a useful integration gate but all sites are identical, so
-   it cannot establish language-model reasoning value.
-2. Add deployment topology as a separate, hash-bound dossier side-band so the
-   legalizer can distinguish proven same-node IPC from remote DWQ/proxy
-   decisions. Runtime rank placement is not generally knowable at LTO time and
-   must not be guessed into static compiler features.
-3. Run repeated LLM decisions on the frozen dossier and compare LLM, GBT,
-   hand rule, compiler default, and oracle.  Then feed every accepted hint to
-   the second LTO build and retain route counters, hashes, wall time, model
-   version, prompt hash, and response hash.
-4. Only after that dispatch gate is clean, expose another pass-materialized
-   action family such as batching/coalescing.  The pass must generate and
-   prove the candidates; the model may rank them but may not write code.
+1. Freeze the scoring protocol around the checked-in dossier and control
+   results. A trial is a decision response to `prompt.txt`, not a source patch;
+   invalid responses score as the deterministic materializable fallback.
+2. Produce repeated LLM and GBT decisions from the same compiler facts, with
+   prompt/dossier/model/response hashes retained. No application source is sent
+   to a model, and no candidate may generate code.
+3. Feed every accepted response through the second LTO build, then retain
+   binary hashes, exact routes, full payload hashes, and paired runtime. Compare
+   default, hand, GBT, LLM, uniform controls, and measured oracle without using
+   the oracle labels as model input.
+4. Add same-node IPC only as a separate hash-bound deployment profile. Runtime
+   rank placement is not generally knowable at LTO and must never be guessed
+   into static compiler features.
+5. Only after that dispatch gate is clean, expose another pass-materialized
+   action family such as batching/coalescing. The pass must generate and prove
+   candidates; the model may rank them but may not write code.
 
 This two-phase compile keeps provider calls out of the linker, makes every
 decision cacheable and replayable, and preserves the intended research

@@ -1,0 +1,3 @@
+RUN mask=4 binary=/p/lustre2/shan4/new-gicc/build_ofi/compiler_lto_eval/compiler_lto_eval_static4_mask04 sha256=dcf7431c466d30ce11e243484317f0063ff3a98f71ffbfe7850393189e6b6f86
+[gicc] CPU proxy: 8 worker thread(s) per rank
+COMPILER_LTO_EVAL scenario=static4-k4-grid4 runs=100 median_us=51.375 p25_us=51.014 p75_us=51.805 staged=300 pushed=400 hash=fb0cbe081d9a803f data=OK

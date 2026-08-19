@@ -1,0 +1,37 @@
+{
+  "schema_version": "gicc-platform-profile-v1",
+  "platform_id": "tioga-mi250x-slingshot11-compiler-lto-eval-v1",
+  "scope": "two nodes, one rank and one MI250X GCD per node, one cross-node CXI peer per rank",
+  "deployment_constraints": {
+    "proxy_worker_lanes": 8,
+    "rank_placement": "one rank per node",
+    "peer_relation": "cross_node",
+    "note": "proxy producer concurrency is bounded by min(grid_blocks, proxy_worker_lanes); forced IPC is not legal for this deployment"
+  },
+  "evaluation_contract": {
+    "suite": "compiler-lto-eval-v1",
+    "source_visibility": "none",
+    "execution": "each named kernel scenario is timed independently with equal score weight",
+    "primary_score": "geometric mean of per-scenario slowdown relative to the measured legal-action oracle",
+    "secondary_score": "sum of per-scenario median wall times",
+    "candidate_budget": "one decision per compiler site; no source edits or generated code"
+  },
+  "measurements": {
+    "link_bandwidth_GB_s": 24.0,
+    "proxy_fixed_us": 5.37,
+    "proxy_per_op_issue_us": 2.872,
+    "trigger_fixed_us": 7.88,
+    "trigger_per_op_stage_us": 1.033
+  },
+  "action_notes": {
+    "proxy": "device pushes commands into CPU-worker rings; independent static sites may use distinct lanes",
+    "trigger": "host stages compiler-reconstructed descriptors and releases the batch through DWQ",
+    "ipc": "same-node path only and unavailable under this cross-node placement contract"
+  },
+  "provenance": {
+    "dataset": "docs/experiments/grid/grid_big.csv",
+    "dataset_sha256": "c28e3cb69fb78aa4cf9223fb281cf71658a58abd1def661e29351caba0466836",
+    "calibration": "examples/proxy/ctx_bench --exp=distance",
+    "deployment": "one rank per node with GICC_NUM_PROXY_THREADS=8"
+  }
+}

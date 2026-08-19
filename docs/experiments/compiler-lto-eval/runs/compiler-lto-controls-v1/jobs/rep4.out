@@ -1,0 +1,10 @@
+ALLOC rep=4 order=trigger,default,hand,proxy warmup=10 runs=100 job=unknown
+BEGIN rep=4 arm=trigger log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-controls-v1/raw/rep4-trigger.log time=2026-08-19T04:55:40Z
+END rep=4 arm=trigger time=2026-08-19T04:55:45Z
+BEGIN rep=4 arm=default log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-controls-v1/raw/rep4-default.log time=2026-08-19T04:55:45Z
+END rep=4 arm=default time=2026-08-19T04:55:47Z
+BEGIN rep=4 arm=hand log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-controls-v1/raw/rep4-hand.log time=2026-08-19T04:55:47Z
+END rep=4 arm=hand time=2026-08-19T04:55:49Z
+BEGIN rep=4 arm=proxy log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-controls-v1/raw/rep4-proxy.log time=2026-08-19T04:55:49Z
+END rep=4 arm=proxy time=2026-08-19T04:55:52Z
+ALLOC_DONE rep=4

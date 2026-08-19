@@ -1,0 +1,124 @@
+{
+  "artifacts": {
+    "controls/default-hint.json": "52756cc525fd7f981b3523afcea8b254a319e9a003c645ede41beeccd3b0a704",
+    "controls/default-response.json": "70341bbd0c8b41ba2997d14103cafb847a2ce65b3e170cce6f1f337157072f30",
+    "controls/proxy-hint.json": "eeee5ce880400bf3f13ad0610a6d1397c2aa67dbcb70c073aa99b9c93a4d9bc3",
+    "controls/proxy-response.json": "46940aaf93e8fd50d4b8d176d4fb0ddf8c8b85c6c88ece12f42ff149d7da2f3a",
+    "controls/trigger-hint.json": "f35b9c2116c26804a33acb10f502140b177d2de8dbf371fc03c362b40808936f",
+    "controls/trigger-response.json": "be5f09cfd0919aad5f719d029b7462d3106c63b0a1ec68c1b54785c1104f4126",
+    "dossier.json": "c77f4cff5e14552491c7a8cf8129724885c2f9a933898460375f7cadaca32274",
+    "features.json": "a8991c66736f85cf43e4364904f5bfa73b0810c0845424bd2748b0a1610db190",
+    "profile.json": "03c404978aca58b8120e27e73c9c8613f724a6139f2828b3c3019eab776f6105",
+    "prompt.txt": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94"
+  },
+  "boundary": {
+    "model_input": "compiler facts plus hash-bound deployment profile",
+    "model_output": "gicc-llm-decision-v1",
+    "pass_input": "gicc-hint-v1",
+    "source_in_prompt": false
+  },
+  "decision_sites": 10,
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "feature_schema_version": 6,
+  "kernels": {
+    "eval_adjacent_batch": {
+      "batch_size": 16,
+      "coalescable": true,
+      "descriptor_reusable": false,
+      "grid_blocks": 1,
+      "hk_capable": true,
+      "site_ids": [
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2"
+      ],
+      "sites": 1,
+      "size_bytes": 4096,
+      "trip_count": 16
+    },
+    "eval_dynamic_offset": {
+      "batch_size": 1,
+      "coalescable": false,
+      "descriptor_reusable": false,
+      "grid_blocks": 1,
+      "hk_capable": false,
+      "site_ids": [
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0"
+      ],
+      "sites": 1,
+      "size_bytes": 4096,
+      "trip_count": null
+    },
+    "eval_far_batch": {
+      "batch_size": 64,
+      "coalescable": true,
+      "descriptor_reusable": false,
+      "grid_blocks": 8,
+      "hk_capable": true,
+      "site_ids": [
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0"
+      ],
+      "sites": 1,
+      "size_bytes": 4096,
+      "trip_count": 64
+    },
+    "eval_large_single": {
+      "batch_size": 1,
+      "coalescable": false,
+      "descriptor_reusable": false,
+      "grid_blocks": 8,
+      "hk_capable": true,
+      "site_ids": [
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0"
+      ],
+      "sites": 1,
+      "size_bytes": 1048576,
+      "trip_count": null
+    },
+    "eval_reuse_batch": {
+      "batch_size": 32,
+      "coalescable": false,
+      "descriptor_reusable": true,
+      "grid_blocks": 1,
+      "hk_capable": true,
+      "site_ids": [
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2"
+      ],
+      "sites": 1,
+      "size_bytes": 4096,
+      "trip_count": 32
+    },
+    "eval_static4_parallel": {
+      "batch_size": 4,
+      "coalescable": false,
+      "descriptor_reusable": false,
+      "grid_blocks": 4,
+      "hk_capable": true,
+      "site_ids": [
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3"
+      ],
+      "sites": 4,
+      "size_bytes": 4096,
+      "trip_count": null
+    },
+    "eval_tiny_single": {
+      "batch_size": 1,
+      "coalescable": false,
+      "descriptor_reusable": false,
+      "grid_blocks": 1,
+      "hk_capable": true,
+      "site_ids": [
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0"
+      ],
+      "sites": 1,
+      "size_bytes": 256,
+      "trip_count": null
+    }
+  },
+  "schema_version": "gicc-compiler-lto-eval-freeze-v1",
+  "source": {
+    "path": "examples/proxy/compiler_lto_eval.cpp",
+    "sha256": "d707d5b6773a5299b2d8a19a6c832f82b719bc3be08b01f250a481500ecb486a"
+  }
+}

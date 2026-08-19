@@ -1,0 +1,10 @@
+ALLOC rep=1 order=default,proxy,trigger,hand warmup=10 runs=100 job=unknown
+BEGIN rep=1 arm=default log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-smoke-v2/raw/rep1-default.log time=2026-08-19T04:50:18Z
+END rep=1 arm=default time=2026-08-19T04:50:23Z
+BEGIN rep=1 arm=proxy log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-smoke-v2/raw/rep1-proxy.log time=2026-08-19T04:50:23Z
+END rep=1 arm=proxy time=2026-08-19T04:50:25Z
+BEGIN rep=1 arm=trigger log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-smoke-v2/raw/rep1-trigger.log time=2026-08-19T04:50:25Z
+END rep=1 arm=trigger time=2026-08-19T04:50:28Z
+BEGIN rep=1 arm=hand log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-smoke-v2/raw/rep1-hand.log time=2026-08-19T04:50:28Z
+END rep=1 arm=hand time=2026-08-19T04:50:30Z
+ALLOC_DONE rep=1

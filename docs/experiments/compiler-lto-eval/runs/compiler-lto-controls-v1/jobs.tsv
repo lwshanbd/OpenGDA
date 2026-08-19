@@ -1,0 +1,5 @@
+job_id	rep	order	queue
+f5qkHLcrNhBd	1	default,proxy,trigger,hand	pci
+f5qkHLkNF431	2	proxy,hand,default,trigger	pci
+f5qkHLsDZjZR	3	hand,trigger,proxy,default	pci
+f5qkHLz1vSX9	4	trigger,default,hand,proxy	pci

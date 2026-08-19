@@ -1,0 +1,60 @@
+{
+  "decisions": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "deterministic proxy control; not a model trial"
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "deterministic proxy control; not a model trial"
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "deterministic proxy control; not a model trial"
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "deterministic proxy control; not a model trial"
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "deterministic proxy control; not a model trial"
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "deterministic proxy control; not a model trial"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "deterministic proxy control; not a model trial"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "deterministic proxy control; not a model trial"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "deterministic proxy control; not a model trial"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "deterministic proxy control; not a model trial"
+    }
+  },
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "producer": {
+    "kind": "deterministic_control",
+    "policy": "proxy"
+  },
+  "schema_version": "gicc-llm-decision-v1"
+}

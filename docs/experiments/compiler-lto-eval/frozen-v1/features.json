@@ -1,0 +1,1517 @@
+[
+  {
+    "batch_size": 64,
+    "buffer_reusable": true,
+    "coalescable": true,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 5392,
+    "grid_blocks": 8,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": true,
+    "iter_estimate": null,
+    "kernel": "eval_far_batch",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 4096,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": 64
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger"
+    ],
+    "loop": {
+      "bound_const": 64,
+      "bound_known": true,
+      "iv_start": 0,
+      "iv_step": 1
+    },
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0",
+    "size_bytes": 4096,
+    "size_kind": "const",
+    "size_log2": 12,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": 64
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_far_batch",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_far_batch",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::2",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_reuse_batch",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::0",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_reuse_batch",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": 32,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": true,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 66,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": true,
+    "iter_estimate": null,
+    "kernel": "eval_reuse_batch",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 4096,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": 32
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger"
+    ],
+    "loop": {
+      "bound_const": 32,
+      "bound_known": true,
+      "iv_start": 0,
+      "iv_step": 1
+    },
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2",
+    "size_bytes": 4096,
+    "size_kind": "const",
+    "size_log2": 12,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": 32
+  },
+  {
+    "batch_size": 1,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_tiny_single",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 256,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0",
+    "size_bytes": 256,
+    "size_kind": "const",
+    "size_log2": 8,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_tiny_single",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_tiny_single",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::2",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": 1,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_large_single",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 1048576,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0",
+    "size_bytes": 1048576,
+    "size_kind": "const",
+    "size_log2": 20,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_large_single",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_large_single",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::2",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_adjacent_batch",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::0",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_adjacent_batch",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": 16,
+    "buffer_reusable": true,
+    "coalescable": true,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 68,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": true,
+    "iter_estimate": null,
+    "kernel": "eval_adjacent_batch",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 4096,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": 16
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger"
+    ],
+    "loop": {
+      "bound_const": 16,
+      "bound_known": true,
+      "iv_start": 0,
+      "iv_step": 1
+    },
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2",
+    "size_bytes": 4096,
+    "size_kind": "const",
+    "size_log2": 12,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": 16
+  },
+  {
+    "batch_size": 1,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 1,
+    "hk_capable": false,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_dynamic_offset",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 4096,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0",
+    "size_bytes": 4096,
+    "size_kind": "const",
+    "size_log2": 12,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_dynamic_offset",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_dynamic_offset",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::2",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": 4,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_static4_parallel",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 4096,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0",
+    "size_bytes": 4096,
+    "size_kind": "const",
+    "size_log2": 12,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": 4,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_static4_parallel",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 4096,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1",
+    "size_bytes": 4096,
+    "size_kind": "const",
+    "size_log2": 12,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": 4,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_static4_parallel",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 4096,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2",
+    "size_bytes": 4096,
+    "size_kind": "const",
+    "size_log2": 12,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": 4,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_static4_parallel",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 4096,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3",
+    "size_bytes": 4096,
+    "size_kind": "const",
+    "size_log2": 12,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_static4_parallel",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::4",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "eval_static4_parallel",
+    "launch_block": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::5",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": 1,
+    "trip_count": null
+  }
+]

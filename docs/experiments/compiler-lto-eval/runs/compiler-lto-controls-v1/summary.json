@@ -1,0 +1,348 @@
+{
+  "aggregate": {
+    "adjacent-k16-grid1": {
+      "best_uniform_legal_control": "proxy",
+      "decision_bearing": true,
+      "default_matches_best": false,
+      "default_materialized_action": "trigger",
+      "default_over_best": 1.0750778311255278,
+      "geomean_median_us": {
+        "default": 182.23892616478204,
+        "hand": 178.91049703327766,
+        "proxy": 169.51230961017143,
+        "trigger": 181.8737437833079
+      },
+      "hand_matches_best": false,
+      "hand_materialized_action": "trigger",
+      "hand_over_best": 1.0554425070646452,
+      "legal_actions": [
+        "proxy",
+        "trigger"
+      ],
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "stable_winner": true
+    },
+    "dynamic-k1-grid1": {
+      "best_uniform_legal_control": null,
+      "decision_bearing": false,
+      "default_over_best": null,
+      "geomean_median_us": {
+        "default": 29.126975653294416,
+        "hand": 28.727643480510167,
+        "proxy": 29.366145752964467,
+        "trigger": 28.999606427138165
+      },
+      "hand_over_best": null,
+      "legal_actions": [
+        "proxy"
+      ],
+      "note": "Every arm materializes the forced proxy action; timing differences between separately linked binaries are not optimization regret."
+    },
+    "far-k64-grid8": {
+      "best_uniform_legal_control": "proxy",
+      "decision_bearing": true,
+      "default_matches_best": false,
+      "default_materialized_action": "trigger",
+      "default_over_best": 1.101243013192664,
+      "geomean_median_us": {
+        "default": 698.9292501711112,
+        "hand": 692.3611262379835,
+        "proxy": 634.6730392820504,
+        "trigger": 697.5211742593816
+      },
+      "hand_matches_best": false,
+      "hand_materialized_action": "trigger",
+      "hand_over_best": 1.0908941823355072,
+      "legal_actions": [
+        "proxy",
+        "trigger"
+      ],
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "stable_winner": true
+    },
+    "large-k1-grid8": {
+      "best_uniform_legal_control": "trigger",
+      "decision_bearing": true,
+      "default_matches_best": true,
+      "default_materialized_action": "trigger",
+      "default_over_best": 1.00600183853212,
+      "geomean_median_us": {
+        "default": 75.22193700711955,
+        "hand": 78.26493231154127,
+        "proxy": 78.75884749987095,
+        "trigger": 74.77316057083709
+      },
+      "hand_matches_best": false,
+      "hand_materialized_action": "proxy",
+      "hand_over_best": 1.0466981964390314,
+      "legal_actions": [
+        "proxy",
+        "trigger"
+      ],
+      "per_replicate_best_action": [
+        "trigger",
+        "trigger",
+        "trigger",
+        "trigger"
+      ],
+      "stable_winner": true
+    },
+    "reuse-k32-grid1": {
+      "best_uniform_legal_control": "proxy",
+      "decision_bearing": true,
+      "default_matches_best": false,
+      "default_materialized_action": "trigger",
+      "default_over_best": 1.07934385422227,
+      "geomean_median_us": {
+        "default": 350.25293190705617,
+        "hand": 346.86360720283193,
+        "proxy": 324.505421082361,
+        "trigger": 347.1933726808426
+      },
+      "hand_matches_best": false,
+      "hand_materialized_action": "trigger",
+      "hand_over_best": 1.0688992684494978,
+      "legal_actions": [
+        "proxy",
+        "trigger"
+      ],
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "stable_winner": true
+    },
+    "static4-k4-grid4": {
+      "best_uniform_legal_control": "proxy",
+      "decision_bearing": true,
+      "default_matches_best": false,
+      "default_materialized_action": "trigger",
+      "default_over_best": 1.3751314448066403,
+      "geomean_median_us": {
+        "default": 56.56706864290389,
+        "hand": 40.59178447763504,
+        "proxy": 41.135753863048265,
+        "trigger": 56.649098763867585
+      },
+      "hand_matches_best": true,
+      "hand_materialized_action": "proxy",
+      "hand_over_best": 0.9867762388110294,
+      "legal_actions": [
+        "proxy",
+        "trigger"
+      ],
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "stable_winner": true
+    },
+    "tiny-k1-grid1": {
+      "best_uniform_legal_control": "trigger",
+      "decision_bearing": true,
+      "default_matches_best": true,
+      "default_materialized_action": "trigger",
+      "default_over_best": 1.0193609553935203,
+      "geomean_median_us": {
+        "default": 25.565211206629723,
+        "hand": 28.051270709904557,
+        "proxy": 28.127875512474343,
+        "trigger": 25.079645312450065
+      },
+      "hand_matches_best": false,
+      "hand_materialized_action": "proxy",
+      "hand_over_best": 1.118487536822513,
+      "legal_actions": [
+        "proxy",
+        "trigger"
+      ],
+      "per_replicate_best_action": [
+        "trigger",
+        "trigger",
+        "trigger",
+        "trigger"
+      ],
+      "stable_winner": true
+    }
+  },
+  "decision_summary": {
+    "default_matches_best": 2,
+    "excluded_forced_scenarios": [
+      "dynamic-k1-grid1"
+    ],
+    "geomean_default_over_best_uniform": 1.1031273349049977,
+    "geomean_hand_over_best_uniform": 1.0604028406802,
+    "hand_matches_best": 1,
+    "scenario_count": 6,
+    "stable_winner_scenarios": 6
+  },
+  "replicates": {
+    "1": {
+      "default": {
+        "adjacent-k16-grid1": 181.755,
+        "dynamic-k1-grid1": 29.046,
+        "far-k64-grid8": 697.367,
+        "large-k1-grid8": 75.1,
+        "reuse-k32-grid1": 352.48,
+        "static4-k4-grid4": 56.639,
+        "tiny-k1-grid1": 25.91
+      },
+      "hand": {
+        "adjacent-k16-grid1": 176.826,
+        "dynamic-k1-grid1": 28.916,
+        "far-k64-grid8": 691.84,
+        "large-k1-grid8": 78.442,
+        "reuse-k32-grid1": 346.83,
+        "static4-k4-grid4": 40.764,
+        "tiny-k1-grid1": 28.194
+      },
+      "proxy": {
+        "adjacent-k16-grid1": 170.835,
+        "dynamic-k1-grid1": 30.394,
+        "far-k64-grid8": 636.179,
+        "large-k1-grid8": 79.704,
+        "reuse-k32-grid1": 324.807,
+        "static4-k4-grid4": 42.182,
+        "tiny-k1-grid1": 28.234
+      },
+      "trigger": {
+        "adjacent-k16-grid1": 181.375,
+        "dynamic-k1-grid1": 28.856,
+        "far-k64-grid8": 697.887,
+        "large-k1-grid8": 74.639,
+        "reuse-k32-grid1": 346.083,
+        "static4-k4-grid4": 56.334,
+        "tiny-k1-grid1": 24.598
+      }
+    },
+    "2": {
+      "default": {
+        "adjacent-k16-grid1": 182.663,
+        "dynamic-k1-grid1": 29.166,
+        "far-k64-grid8": 701.58,
+        "large-k1-grid8": 75.166,
+        "reuse-k32-grid1": 350.062,
+        "static4-k4-grid4": 56.734,
+        "tiny-k1-grid1": 25.67
+      },
+      "hand": {
+        "adjacent-k16-grid1": 181.932,
+        "dynamic-k1-grid1": 28.72,
+        "far-k64-grid8": 692.693,
+        "large-k1-grid8": 78.186,
+        "reuse-k32-grid1": 351.744,
+        "static4-k4-grid4": 40.403,
+        "tiny-k1-grid1": 28.109
+      },
+      "proxy": {
+        "adjacent-k16-grid1": 168.741,
+        "dynamic-k1-grid1": 28.515,
+        "far-k64-grid8": 634.18,
+        "large-k1-grid8": 77.856,
+        "reuse-k32-grid1": 324.076,
+        "static4-k4-grid4": 40.393,
+        "tiny-k1-grid1": 28.099
+      },
+      "trigger": {
+        "adjacent-k16-grid1": 182.633,
+        "dynamic-k1-grid1": 29.106,
+        "far-k64-grid8": 694.827,
+        "large-k1-grid8": 74.689,
+        "reuse-k32-grid1": 346.775,
+        "static4-k4-grid4": 57.025,
+        "tiny-k1-grid1": 25.54
+      }
+    },
+    "3": {
+      "default": {
+        "adjacent-k16-grid1": 182.102,
+        "dynamic-k1-grid1": 28.911,
+        "far-k64-grid8": 697.633,
+        "large-k1-grid8": 75.266,
+        "reuse-k32-grid1": 348.584,
+        "static4-k4-grid4": 56.098,
+        "tiny-k1-grid1": 25.605
+      },
+      "hand": {
+        "adjacent-k16-grid1": 175.429,
+        "dynamic-k1-grid1": 28.515,
+        "far-k64-grid8": 692.834,
+        "large-k1-grid8": 78.211,
+        "reuse-k32-grid1": 339.1,
+        "static4-k4-grid4": 40.553,
+        "tiny-k1-grid1": 28.014
+      },
+      "proxy": {
+        "adjacent-k16-grid1": 168.05,
+        "dynamic-k1-grid1": 28.4,
+        "far-k64-grid8": 633.625,
+        "large-k1-grid8": 77.965,
+        "reuse-k32-grid1": 324.036,
+        "static4-k4-grid4": 40.107,
+        "tiny-k1-grid1": 28.17
+      },
+      "trigger": {
+        "adjacent-k16-grid1": 180.568,
+        "dynamic-k1-grid1": 29.001,
+        "far-k64-grid8": 693.901,
+        "large-k1-grid8": 74.835,
+        "reuse-k32-grid1": 347.436,
+        "static4-k4-grid4": 56.119,
+        "tiny-k1-grid1": 24.843
+      }
+    },
+    "4": {
+      "default": {
+        "adjacent-k16-grid1": 182.437,
+        "dynamic-k1-grid1": 29.387,
+        "far-k64-grid8": 699.145,
+        "large-k1-grid8": 75.356,
+        "reuse-k32-grid1": 349.897,
+        "static4-k4-grid4": 56.8,
+        "tiny-k1-grid1": 25.083
+      },
+      "hand": {
+        "adjacent-k16-grid1": 181.546,
+        "dynamic-k1-grid1": 28.761,
+        "far-k64-grid8": 692.078,
+        "large-k1-grid8": 78.221,
+        "reuse-k32-grid1": 349.916,
+        "static4-k4-grid4": 40.648,
+        "tiny-k1-grid1": 27.889
+      },
+      "proxy": {
+        "adjacent-k16-grid1": 170.439,
+        "dynamic-k1-grid1": 30.214,
+        "far-k64-grid8": 634.711,
+        "large-k1-grid8": 79.529,
+        "reuse-k32-grid1": 325.104,
+        "static4-k4-grid4": 41.901,
+        "tiny-k1-grid1": 28.009
+      },
+      "trigger": {
+        "adjacent-k16-grid1": 182.929,
+        "dynamic-k1-grid1": 29.036,
+        "far-k64-grid8": 703.51,
+        "large-k1-grid8": 74.93,
+        "reuse-k32-grid1": 348.484,
+        "static4-k4-grid4": 57.125,
+        "tiny-k1-grid1": 25.349
+      }
+    }
+  },
+  "scope": "Control pairing only; no model result. Forced-action scenarios are excluded from decision regret. best_uniform_legal_control is not the full mixed-action oracle for the four-site static group."
+}
