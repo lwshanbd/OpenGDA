@@ -1,0 +1,490 @@
+{
+  "calibration_message_sizes": [
+    512,
+    1024,
+    2048,
+    8192,
+    16384,
+    32768,
+    65536,
+    262144,
+    524288
+  ],
+  "calibration_validation": {
+    "action_matches": 14,
+    "geomean_regret": 1.0217148591121161,
+    "predictions": {
+      "adjacent-1k-k6-g1": {
+        "chosen_action": "proxy",
+        "measured_us": {
+          "proxy": 73.76110600494356,
+          "trigger": 77.52789135534513
+        },
+        "oracle_action": "proxy",
+        "predicted_us": {
+          "proxy": 85.84760544980675,
+          "trigger": 86.72551515104034
+        },
+        "regret": 1.0
+      },
+      "adjacent-32k-k40-g8": {
+        "chosen_action": "proxy",
+        "measured_us": {
+          "proxy": 409.70536188329305,
+          "trigger": 444.9204405536457
+        },
+        "oracle_action": "proxy",
+        "predicted_us": {
+          "proxy": 464.39456517887936,
+          "trigger": 498.76922211470986
+        },
+        "regret": 1.0
+      },
+      "adjacent-8k-k12-g4": {
+        "chosen_action": "proxy",
+        "measured_us": {
+          "proxy": 131.4720329822469,
+          "trigger": 141.80721953368945
+        },
+        "oracle_action": "proxy",
+        "predicted_us": {
+          "proxy": 174.15173570381864,
+          "trigger": 180.58481865858883
+        },
+        "regret": 1.0
+      },
+      "far-16k-k24-i1024-g8": {
+        "chosen_action": "proxy",
+        "measured_us": {
+          "proxy": 248.70342088463752,
+          "trigger": 286.35916668462505
+        },
+        "oracle_action": "proxy",
+        "predicted_us": {
+          "proxy": 334.03558673562395,
+          "trigger": 352.66204220269566
+        },
+        "regret": 1.0
+      },
+      "far-2k-k12-i64-g4": {
+        "chosen_action": "proxy",
+        "measured_us": {
+          "proxy": 131.08779001143898,
+          "trigger": 141.68522983336916
+        },
+        "oracle_action": "proxy",
+        "predicted_us": {
+          "proxy": 133.80996952331026,
+          "trigger": 137.6955093689964
+        },
+        "regret": 1.0
+      },
+      "far-8k-k48-i256-g8": {
+        "chosen_action": "proxy",
+        "measured_us": {
+          "proxy": 482.7747965697993,
+          "trigger": 524.2320335684508
+        },
+        "oracle_action": "proxy",
+        "predicted_us": {
+          "proxy": 454.44732166160696,
+          "trigger": 486.27250507885196
+        },
+        "regret": 1.0
+      },
+      "reuse-1k-k8-g1": {
+        "chosen_action": "proxy",
+        "measured_us": {
+          "proxy": 92.62325419149337,
+          "trigger": 99.28286847818877
+        },
+        "oracle_action": "proxy",
+        "predicted_us": {
+          "proxy": 66.99626998816277,
+          "trigger": 68.03449032378451
+        },
+        "regret": 1.0
+      },
+      "reuse-2k-k24-g1": {
+        "chosen_action": "proxy",
+        "measured_us": {
+          "proxy": 246.87981044548363,
+          "trigger": 261.71074563695396
+        },
+        "oracle_action": "proxy",
+        "predicted_us": {
+          "proxy": 187.740508039711,
+          "trigger": 197.74594522048207
+        },
+        "regret": 1.0
+      },
+      "reuse-8k-k48-g4": {
+        "chosen_action": "proxy",
+        "measured_us": {
+          "proxy": 482.560919515228,
+          "trigger": 521.0029993634756
+        },
+        "oracle_action": "proxy",
+        "predicted_us": {
+          "proxy": 471.84395336238487,
+          "trigger": 511.8883594851983
+        },
+        "regret": 1.0
+      },
+      "single-16k-g1": {
+        "chosen_action": "trigger",
+        "measured_us": {
+          "proxy": 29.372898527842324,
+          "trigger": 26.5872851738998
+        },
+        "oracle_action": "trigger",
+        "predicted_us": {
+          "proxy": 35.407559293535684,
+          "trigger": 33.66893629898529
+        },
+        "regret": 1.0
+      },
+      "single-256k-g4": {
+        "chosen_action": "trigger",
+        "measured_us": {
+          "proxy": 40.648548930783676,
+          "trigger": 37.85450128809461
+        },
+        "oracle_action": "trigger",
+        "predicted_us": {
+          "proxy": 51.9930596645627,
+          "trigger": 50.50697868262868
+        },
+        "regret": 1.0
+      },
+      "single-2k-g4": {
+        "chosen_action": "trigger",
+        "measured_us": {
+          "proxy": 27.683525071718368,
+          "trigger": 25.153916186463583
+        },
+        "oracle_action": "trigger",
+        "predicted_us": {
+          "proxy": 28.89547980838964,
+          "trigger": 28.59600986301197
+        },
+        "regret": 1.0
+      },
+      "single-512-g1": {
+        "chosen_action": "trigger",
+        "measured_us": {
+          "proxy": 28.20558490429902,
+          "trigger": 25.514938338918146
+        },
+        "oracle_action": "trigger",
+        "predicted_us": {
+          "proxy": 30.379261280393074,
+          "trigger": 28.9547415568195
+        },
+        "regret": 1.0
+      },
+      "single-512k-g8": {
+        "chosen_action": "trigger",
+        "measured_us": {
+          "proxy": 53.086576684174396,
+          "trigger": 50.06246795777529
+        },
+        "oracle_action": "trigger",
+        "predicted_us": {
+          "proxy": 39.52886968756358,
+          "trigger": 38.48997946638244
+        },
+        "regret": 1.0
+      },
+      "single-64k-g8": {
+        "chosen_action": "proxy",
+        "measured_us": {
+          "proxy": 31.255699788010073,
+          "trigger": 28.871899289461638
+        },
+        "oracle_action": "trigger",
+        "predicted_us": {
+          "proxy": 38.261035270432735,
+          "trigger": 38.364661264210234
+        },
+        "regret": 1.0825647275452548
+      },
+      "static2-2k-g2": {
+        "chosen_action": "trigger",
+        "measured_us": {
+          "proxy": 32.904410909449666,
+          "trigger": 34.93952332545827
+        },
+        "oracle_action": "proxy",
+        "predicted_us": {
+          "proxy": 41.04758424096272,
+          "trigger": 40.375339549237516
+        },
+        "regret": 1.0618492281052856
+      },
+      "static3-8k-g4": {
+        "chosen_action": "trigger",
+        "measured_us": {
+          "proxy": 37.66854871887124,
+          "trigger": 47.21361142510495
+        },
+        "oracle_action": "proxy",
+        "predicted_us": {
+          "proxy": 34.28023147724096,
+          "trigger": 34.024881262103975
+        },
+        "regret": 1.2533960832276982
+      }
+    },
+    "protocol": "leave one complete scenario (both action labels) out",
+    "scenario_count": 17
+  },
+  "evaluation_message_sizes": [
+    256,
+    4096,
+    1048576
+  ],
+  "evaluation_predictions": [
+    {
+      "chosen_action": "proxy",
+      "confidence": 0.5124047884542443,
+      "facts": {
+        "batch_size": 16,
+        "coalescable": true,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "flops_to_first_use": 68,
+        "grid_blocks": 1,
+        "in_loop": true,
+        "kernel": "eval_adjacent_batch",
+        "legal_actions": [
+          "proxy",
+          "trigger"
+        ],
+        "site_count": 1,
+        "site_ids": [
+          "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2"
+        ],
+        "size_bytes": 4096
+      },
+      "kernel": "eval_adjacent_batch",
+      "predicted_us": {
+        "proxy": 132.42529610533964,
+        "trigger": 139.16329412205417
+      }
+    },
+    {
+      "chosen_action": "proxy",
+      "confidence": 1.0,
+      "facts": {
+        "batch_size": 1,
+        "coalescable": false,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "flops_to_first_use": 0,
+        "grid_blocks": 1,
+        "in_loop": false,
+        "kernel": "eval_dynamic_offset",
+        "legal_actions": [
+          "proxy"
+        ],
+        "site_count": 1,
+        "site_ids": [
+          "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0"
+        ],
+        "size_bytes": 4096
+      },
+      "kernel": "eval_dynamic_offset",
+      "predicted_us": {
+        "proxy": 30.202141165818563
+      }
+    },
+    {
+      "chosen_action": "proxy",
+      "confidence": 0.5213098081122098,
+      "facts": {
+        "batch_size": 64,
+        "coalescable": true,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "flops_to_first_use": 5392,
+        "grid_blocks": 8,
+        "in_loop": true,
+        "kernel": "eval_far_batch",
+        "legal_actions": [
+          "proxy",
+          "trigger"
+        ],
+        "site_count": 1,
+        "site_ids": [
+          "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0"
+        ],
+        "size_bytes": 4096
+      },
+      "kernel": "eval_far_batch",
+      "predicted_us": {
+        "proxy": 421.62826929724645,
+        "trigger": 459.16744459546766
+      }
+    },
+    {
+      "chosen_action": "trigger",
+      "confidence": 0.5114505618397364,
+      "facts": {
+        "batch_size": 1,
+        "coalescable": false,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "flops_to_first_use": 0,
+        "grid_blocks": 8,
+        "in_loop": false,
+        "kernel": "eval_large_single",
+        "legal_actions": [
+          "default",
+          "proxy",
+          "trigger"
+        ],
+        "site_count": 1,
+        "site_ids": [
+          "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0"
+        ],
+        "size_bytes": 1048576
+      },
+      "kernel": "eval_large_single",
+      "predicted_us": {
+        "proxy": 52.36929821550001,
+        "trigger": 50.02436819699285
+      }
+    },
+    {
+      "chosen_action": "proxy",
+      "confidence": 0.5202543364990496,
+      "facts": {
+        "batch_size": 32,
+        "coalescable": false,
+        "descriptor_reusable": true,
+        "distance_exact": true,
+        "flops_to_first_use": 66,
+        "grid_blocks": 1,
+        "in_loop": true,
+        "kernel": "eval_reuse_batch",
+        "legal_actions": [
+          "proxy",
+          "trigger"
+        ],
+        "site_count": 1,
+        "site_ids": [
+          "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2"
+        ],
+        "size_bytes": 4096
+      },
+      "kernel": "eval_reuse_batch",
+      "predicted_us": {
+        "proxy": 377.91687331665753,
+        "trigger": 409.8273463158955
+      }
+    },
+    {
+      "chosen_action": "proxy",
+      "confidence": 0.504370259760063,
+      "facts": {
+        "batch_size": 4,
+        "coalescable": false,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "flops_to_first_use": 0,
+        "grid_blocks": 4,
+        "in_loop": false,
+        "kernel": "eval_static4_parallel",
+        "legal_actions": [
+          "default",
+          "proxy",
+          "trigger"
+        ],
+        "site_count": 4,
+        "site_ids": [
+          "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0",
+          "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1",
+          "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2",
+          "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3"
+        ],
+        "size_bytes": 4096
+      },
+      "kernel": "eval_static4_parallel",
+      "predicted_us": {
+        "proxy": 40.857696183326155,
+        "trigger": 41.578228996520245
+      }
+    },
+    {
+      "chosen_action": "trigger",
+      "confidence": 0.5093663720637781,
+      "facts": {
+        "batch_size": 1,
+        "coalescable": false,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "flops_to_first_use": 0,
+        "grid_blocks": 1,
+        "in_loop": false,
+        "kernel": "eval_tiny_single",
+        "legal_actions": [
+          "default",
+          "proxy",
+          "trigger"
+        ],
+        "site_count": 1,
+        "site_ids": [
+          "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0"
+        ],
+        "size_bytes": 256
+      },
+      "kernel": "eval_tiny_single",
+      "predicted_us": {
+        "proxy": 27.148912184638416,
+        "trigger": 26.150468523672416
+      }
+    }
+  ],
+  "message_size_overlap": [],
+  "model_features": [
+    "log2(size_bytes)",
+    "log2(batch_size)",
+    "log2(size_bytes * batch_size)",
+    "log2(grid_blocks)",
+    "log2(site_count)",
+    "in_loop",
+    "descriptor_reusable",
+    "coalescable",
+    "log2(1 + flops_to_first_use)",
+    "distance_exact",
+    "is_proxy"
+  ],
+  "numpy_version": "2.1.2",
+  "provenance": {
+    "calibration_dossier_id": "sha256:0c7a8d46d2fd554ea3404d5df3e15a1630012f785e283ccc21558977c8c7aec6",
+    "calibration_dossier_sha256": "7b8c38fe4ce49de979172458830a400e27256c9ca56aa9b55cfaad89f53319d1",
+    "calibration_results_sha256": "e3e28e60127ae491d570a6743cd04acb46a40cb42d9d51da6013e260d9f6f8f2",
+    "frozen_evaluation_results_read": false,
+    "historical_runtime_grid_read": false,
+    "kind": "compiler_path_calibrated_gradient_boosting",
+    "learning_rate": 0.04,
+    "loss": "huber",
+    "max_depth": 2,
+    "n_estimators": 200,
+    "random_state": 0,
+    "schema_version": "gicc-compiler-path-calibrated-gbt-v2",
+    "source_read": false,
+    "unstable_calibration_scenarios_excluded": [
+      "static6-16k-g8"
+    ]
+  },
+  "response_sha256_canonical": "ba47efee05536e082f734e803ef362d09a7fbfb4de437aef1a1ccf52bf592890",
+  "schema_version": "gicc-compiler-path-calibrated-gbt-v2",
+  "scikit_learn_version": "1.6.1",
+  "training_rows": 34,
+  "training_scenarios": 17,
+  "unstable_calibration_scenarios_excluded": [
+    "static6-16k-g8"
+  ]
+}

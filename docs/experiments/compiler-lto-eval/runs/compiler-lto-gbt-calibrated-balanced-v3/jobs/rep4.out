@@ -1,0 +1,12 @@
+ALLOC rep=4 order=gbt-calibrated,measured-oracle,gbt-history,default,hand warmup=10 runs=100 job=unknown
+BEGIN rep=4 arm=gbt-calibrated log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-gbt-calibrated-balanced-v3/raw/rep4-gbt-calibrated.log time=2026-08-19T06:25:25Z
+END rep=4 arm=gbt-calibrated time=2026-08-19T06:25:29Z
+BEGIN rep=4 arm=measured-oracle log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-gbt-calibrated-balanced-v3/raw/rep4-measured-oracle.log time=2026-08-19T06:25:29Z
+END rep=4 arm=measured-oracle time=2026-08-19T06:25:32Z
+BEGIN rep=4 arm=gbt-history log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-gbt-calibrated-balanced-v3/raw/rep4-gbt-history.log time=2026-08-19T06:25:32Z
+END rep=4 arm=gbt-history time=2026-08-19T06:25:34Z
+BEGIN rep=4 arm=default log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-gbt-calibrated-balanced-v3/raw/rep4-default.log time=2026-08-19T06:25:34Z
+END rep=4 arm=default time=2026-08-19T06:25:36Z
+BEGIN rep=4 arm=hand log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-gbt-calibrated-balanced-v3/raw/rep4-hand.log time=2026-08-19T06:25:36Z
+END rep=4 arm=hand time=2026-08-19T06:25:38Z
+ALLOC_DONE rep=4

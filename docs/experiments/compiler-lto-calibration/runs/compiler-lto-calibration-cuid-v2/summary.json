@@ -1,0 +1,311 @@
+{
+  "aggregate": {
+    "adjacent-1k-k6-g1": {
+      "best_action": "proxy",
+      "geomean_median_us": {
+        "proxy": 73.76110600494356,
+        "trigger": 77.52789135534513
+      },
+      "kernel": "cal_adjacent_1k_k6_g1",
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "proxy_over_trigger": 0.9514138036705176,
+      "stable_winner": true
+    },
+    "adjacent-32k-k40-g8": {
+      "best_action": "proxy",
+      "geomean_median_us": {
+        "proxy": 409.70536188329305,
+        "trigger": 444.9204405536457
+      },
+      "kernel": "cal_adjacent_32k_k40_g8",
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "proxy_over_trigger": 0.9208508410480488,
+      "stable_winner": true
+    },
+    "adjacent-8k-k12-g4": {
+      "best_action": "proxy",
+      "geomean_median_us": {
+        "proxy": 131.4720329822469,
+        "trigger": 141.80721953368945
+      },
+      "kernel": "cal_adjacent_8k_k12_g4",
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "proxy_over_trigger": 0.92711805093261,
+      "stable_winner": true
+    },
+    "far-16k-k24-i1024-g8": {
+      "best_action": "proxy",
+      "geomean_median_us": {
+        "proxy": 248.70342088463752,
+        "trigger": 286.35916668462505
+      },
+      "kernel": "cal_far_16k_k24_i1024_g8",
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "proxy_over_trigger": 0.8685016923468744,
+      "stable_winner": true
+    },
+    "far-2k-k12-i64-g4": {
+      "best_action": "proxy",
+      "geomean_median_us": {
+        "proxy": 131.08779001143898,
+        "trigger": 141.68522983336916
+      },
+      "kernel": "cal_far_2k_k12_i64_g4",
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "proxy_over_trigger": 0.9252043432163434,
+      "stable_winner": true
+    },
+    "far-8k-k48-i256-g8": {
+      "best_action": "proxy",
+      "geomean_median_us": {
+        "proxy": 482.7747965697993,
+        "trigger": 524.2320335684508
+      },
+      "kernel": "cal_far_8k_k48_i256_g8",
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "proxy_over_trigger": 0.920918153901333,
+      "stable_winner": true
+    },
+    "reuse-1k-k8-g1": {
+      "best_action": "proxy",
+      "geomean_median_us": {
+        "proxy": 92.62325419149337,
+        "trigger": 99.28286847818877
+      },
+      "kernel": "cal_reuse_1k_k8_g1",
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "proxy_over_trigger": 0.9329228255712774,
+      "stable_winner": true
+    },
+    "reuse-2k-k24-g1": {
+      "best_action": "proxy",
+      "geomean_median_us": {
+        "proxy": 246.87981044548363,
+        "trigger": 261.71074563695396
+      },
+      "kernel": "cal_reuse_2k_k24_g1",
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "proxy_over_trigger": 0.9433308129730223,
+      "stable_winner": true
+    },
+    "reuse-8k-k48-g4": {
+      "best_action": "proxy",
+      "geomean_median_us": {
+        "proxy": 482.560919515228,
+        "trigger": 521.0029993634756
+      },
+      "kernel": "cal_reuse_8k_k48_g4",
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "proxy_over_trigger": 0.9262152427237206,
+      "stable_winner": true
+    },
+    "single-16k-g1": {
+      "best_action": "trigger",
+      "geomean_median_us": {
+        "proxy": 29.372898527842324,
+        "trigger": 26.5872851738998
+      },
+      "kernel": "cal_single_16k_g1",
+      "per_replicate_best_action": [
+        "trigger",
+        "trigger",
+        "trigger",
+        "trigger"
+      ],
+      "proxy_over_trigger": 1.1047723878433855,
+      "stable_winner": true
+    },
+    "single-256k-g4": {
+      "best_action": "trigger",
+      "geomean_median_us": {
+        "proxy": 40.648548930783676,
+        "trigger": 37.85450128809461
+      },
+      "kernel": "cal_single_256k_g4",
+      "per_replicate_best_action": [
+        "trigger",
+        "trigger",
+        "trigger",
+        "trigger"
+      ],
+      "proxy_over_trigger": 1.0738101823459447,
+      "stable_winner": true
+    },
+    "single-2k-g4": {
+      "best_action": "trigger",
+      "geomean_median_us": {
+        "proxy": 27.683525071718368,
+        "trigger": 25.153916186463583
+      },
+      "kernel": "cal_single_2k_g4",
+      "per_replicate_best_action": [
+        "trigger",
+        "trigger",
+        "trigger",
+        "trigger"
+      ],
+      "proxy_over_trigger": 1.1005652108603303,
+      "stable_winner": true
+    },
+    "single-512-g1": {
+      "best_action": "trigger",
+      "geomean_median_us": {
+        "proxy": 28.20558490429902,
+        "trigger": 25.514938338918146
+      },
+      "kernel": "cal_single_512_g1",
+      "per_replicate_best_action": [
+        "trigger",
+        "trigger",
+        "trigger",
+        "trigger"
+      ],
+      "proxy_over_trigger": 1.105453774947079,
+      "stable_winner": true
+    },
+    "single-512k-g8": {
+      "best_action": "trigger",
+      "geomean_median_us": {
+        "proxy": 53.086576684174396,
+        "trigger": 50.06246795777529
+      },
+      "kernel": "cal_single_512k_g8",
+      "per_replicate_best_action": [
+        "trigger",
+        "trigger",
+        "trigger",
+        "trigger"
+      ],
+      "proxy_over_trigger": 1.0604067048582135,
+      "stable_winner": true
+    },
+    "single-64k-g8": {
+      "best_action": "trigger",
+      "geomean_median_us": {
+        "proxy": 31.255699788010073,
+        "trigger": 28.871899289461638
+      },
+      "kernel": "cal_single_64k_g8",
+      "per_replicate_best_action": [
+        "trigger",
+        "trigger",
+        "trigger",
+        "trigger"
+      ],
+      "proxy_over_trigger": 1.0825647275452548,
+      "stable_winner": true
+    },
+    "static2-2k-g2": {
+      "best_action": "proxy",
+      "geomean_median_us": {
+        "proxy": 32.904410909449666,
+        "trigger": 34.93952332545827
+      },
+      "kernel": "cal_static2_2k_g2",
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "proxy_over_trigger": 0.9417532861839091,
+      "stable_winner": true
+    },
+    "static3-8k-g4": {
+      "best_action": "proxy",
+      "geomean_median_us": {
+        "proxy": 37.66854871887124,
+        "trigger": 47.21361142510495
+      },
+      "kernel": "cal_static3_8k_g4",
+      "per_replicate_best_action": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "proxy_over_trigger": 0.7978323958256178,
+      "stable_winner": true
+    },
+    "static6-16k-g8": {
+      "best_action": "trigger",
+      "geomean_median_us": {
+        "proxy": 88.6113450844249,
+        "trigger": 80.76233925521797
+      },
+      "kernel": "cal_static6_16k_g8",
+      "per_replicate_best_action": [
+        "trigger",
+        "trigger",
+        "proxy",
+        "trigger"
+      ],
+      "proxy_over_trigger": 1.0971864596987861,
+      "stable_winner": false
+    }
+  },
+  "binary_sha256_by_arm": {
+    "proxy": "8b66783f7ae396a506bd1120f303afb538580b8e25cc1d28d2cf1f506c7277e8",
+    "trigger": "31934c994b8bdde42ce048582ce02f69b9ff83f1b6c3953d59b480f02ef8cdd5"
+  },
+  "dossier_id": "sha256:0c7a8d46d2fd554ea3404d5df3e15a1630012f785e283ccc21558977c8c7aec6",
+  "dossier_sha256": "7b8c38fe4ce49de979172458830a400e27256c9ca56aa9b55cfaad89f53319d1",
+  "frozen_evaluation_results_read": false,
+  "manifest_sha256": "f51ad4aac5f893e8f4b03c757f2ccac7ea2231fec7ea701cc91bc13c622cf8ae",
+  "replicates": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "scenario_count": 18,
+  "schema_version": "gicc-compiler-lto-calibration-results-v1",
+  "scope": "paired real-LTO calibration labels; never frozen evaluation labels",
+  "source_sha256": "ac9a7f75da60dbac36f3871e1c0113ec8071b1f7d924ef3dd96e9fdb5888b37d",
+  "stable_winner_count": 17
+}

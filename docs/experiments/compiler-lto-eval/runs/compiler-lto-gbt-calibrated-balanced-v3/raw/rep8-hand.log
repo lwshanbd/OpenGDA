@@ -1,0 +1,9 @@
+RUN rep=8 arm=hand binary=/p/lustre2/shan4/new-gicc/build_ofi/compiler_lto_eval/compiler_lto_eval_hand sha256=34b632a7d65d1823293ed17eafd6a72ccdc7b8bdafaf16eaf922783af3f7ca0c
+[gicc] CPU proxy: 8 worker thread(s) per rank
+COMPILER_LTO_EVAL scenario=tiny-k1-grid1 runs=100 median_us=28.079 p25_us=27.408 p75_us=28.551 staged=0 pushed=200 hash=15a22e066d7fb538 data=OK
+COMPILER_LTO_EVAL scenario=reuse-k32-grid1 runs=100 median_us=348.534 p25_us=345.829 p75_us=352.076 staged=3200 pushed=0 hash=814c378a96c030a3 data=OK
+COMPILER_LTO_EVAL scenario=adjacent-k16-grid1 runs=100 median_us=179.897 p25_us=178.492 p75_us=182.741 staged=1600 pushed=0 hash=53917253138881ac data=OK
+COMPILER_LTO_EVAL scenario=far-k64-grid8 runs=100 median_us=693.796 p25_us=688.329 p75_us=697.588 staged=6400 pushed=0 hash=007e06fa58b73d0c data=OK
+COMPILER_LTO_EVAL scenario=large-k1-grid8 runs=100 median_us=78.356 p25_us=78.099 p75_us=78.572 staged=0 pushed=200 hash=cd39231a07994870 data=OK
+COMPILER_LTO_EVAL scenario=dynamic-k1-grid1 runs=100 median_us=28.711 p25_us=28.285 p75_us=29.036 staged=0 pushed=200 hash=7066b627447292c7 data=OK
+COMPILER_LTO_EVAL scenario=static4-k4-grid4 runs=100 median_us=40.689 p25_us=40.275 p75_us=41.194 staged=0 pushed=800 hash=fb0cbe081d9a803f data=OK

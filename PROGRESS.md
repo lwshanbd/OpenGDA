@@ -426,19 +426,19 @@ Four transformation families, measured independently:
 | cross-site merging | 1.06x (max 1.33x) | 2.6% |
 
 **The compiler's legality and reachability analysis is worth 1.3-2.7x.
-Choosing among whatever it leaves legal is worth 0-6%, and a rule with two
-constants captures it.** This is not one space that happened to be easy;
-with the corrected intra-node copy sweep it is six selection families, and
-the model does not win any of them. The defensible contribution is the
-compiler analysis that determines reachability and legality, plus an
-honest measurement of how little remains for a learned selector.
+Choosing among whatever it leaves legal is worth 0-6% in these offline
+families, and a rule with two constants captures it.** This is not one space
+that happened to be easy; with the corrected intra-node copy sweep it is six
+selection families, and the model does not win any of them. The defensible
+contribution there is the compiler analysis that determines reachability and
+legality, plus an honest measurement of how little remains for a learned
+selector.
 
-The honest reading is that the contribution this project can demonstrate
-is the analysis, not the decider. That is the plan's own Gate 3 fallback:
-keep compiler-guided communication optimization as the main line and demote
-the model layer. The negative results in the section above are what make
-that framing credible rather than a retreat — a paper claiming the analysis
-matters and the decider does not is stronger when it has measured both.
+Section 14 now adds a narrower positive result: when both training labels and
+testing go through the real compiler/LTO path, a compiler-fact GBT beats the
+existing rule by 3.99%. That does not erase the larger pattern—the analysis
+creates most of the value—but it shows the remaining selector problem is
+measurable when the calibration domain actually matches the lowering domain.
 
 ---
 
@@ -766,33 +766,70 @@ its paired regret is above 1.099x in every replicate.
 This negative result closes another tempting shortcut: a model trained on the
 runtime-oriented microbenchmark cannot be credited with optimizing the
 compiler-generated path. Refitting it on these six oracle labels would leak
-the test. The defensible next evidence is either a separately frozen
-compiler-path calibration/training set or a zero-shot LLM response that uses
-the richer compiler facts, followed by the same strict LTO/runtime gate. It is
-not a license to rewrite application source.
+the test. It therefore motivates the separately frozen compiler-path
+calibration set in the next section. It is not a license to rewrite application
+source.
+
+## 14. Compiler-path calibration produces a positive learned result
+
+The separate calibration workload closes the domain gap without touching the
+frozen test. It has 26 real LTO decision sites in 18 scenarios, excludes all
+three frozen evaluation message sizes, and records that neither frozen test
+results nor application source were model input. Four paired allocations
+measure both legal physical actions. Seventeen scenarios have one winner in
+all four replicates; a bimodal static-six proxy case is retained as noise
+evidence but excluded from training.
+
+The v2 GBT trains on the remaining 17 scenarios (34 action-cost rows). Its
+features are compiler facts only: size, batch and total bytes, launch grid,
+site count, loop membership, descriptor reuse, coalescability,
+issue-to-first-use FLOPs/exactness, and the proposed action. Leave-one-complete-
+scenario-out validation matches 14/17 actions at 1.0217x regret. Without
+reading frozen runtime logs or labels, it then matches the measured frozen
+oracle in all six decision-bearing scenarios and all nine such sites.
+
+The performance protocol was tightened twice before accepting a result.
+First, explicit HIP CUIDs remove per-arm object-name differences; the GBT and
+oracle responses now produce the same byte-for-byte binary. Second, five
+Williams-style orders plus their reversals balance every arm position and
+every ordered pair over ten allocations. The oracle binary is used only as a
+same-binary repeat and action-agreement control, never as the runtime
+denominator.
+
+| reference / calibrated GBT | paired speedup | bootstrap 95% CI | wins | sign p |
+| --- | ---: | ---: | ---: | ---: |
+| compiler default | **1.0690x** | [1.0302, 1.0946] | 9/10 | 0.0215 |
+| hand rule | **1.0399x** | [1.0048, 1.0621] | 9/10 | 0.0215 |
+| historical-grid GBT | **1.0807x** | [1.0468, 1.1028] | 9/10 | 0.0215 |
+
+The byte-identical repeat is 0.9927x with interval [0.9463, 1.0385], covering
+one. All 50 logs and 350 result records pass full payload, exact route,
+replicate, arm, response, and binary checks. This is a positive ML result on
+the intended compiler-only path. It is not yet an LLM result or evidence of
+cross-program generalization: calibration was purpose-built to span the same
+fact families, with exact sizes and every test label/result held out.
 
 ## Next
 
-The next model experiment stays entirely on the compiler path:
+The next model experiment stays entirely on the now-validated compiler path:
 
 1. Keep the checked-in dossier and scoring protocol immutable. A trial is a
    decision response to `prompt.txt`, not a source patch; invalid responses
    score as the deterministic materializable fallback.
 2. Run repeated zero-shot LLM decisions from the same compiler facts, retaining
-   prompt/dossier/model/response hashes. The historical and size-held-out GBT
-   responses are already frozen negative baselines. No application source is
-   sent to a model, and no candidate may generate code.
+   prompt/dossier/model/response hashes. The historical GBT is the negative
+   domain-transfer baseline and the compiler-calibrated GBT is the positive
+   matched-domain baseline. No application source is sent to a model, and no
+   candidate may generate code.
 3. Feed each distinct accepted LLM policy through the second LTO build, then
    retain binary hashes, exact routes, full payload hashes, and paired runtime.
-   Compare default, hand, GBT, LLM, uniform controls, and measured oracle without
-   using oracle labels as model input.
-4. In parallel, freeze a separate compiler-generated calibration/training set.
-   The historical runtime microbenchmark has now demonstrated a domain gap; it
-   must not be silently treated as a cost model for LTO-generated code.
-5. Add same-node IPC only as a separate hash-bound deployment profile. Runtime
+   Use the ten-row pairwise-order-balanced protocol; score oracle action
+   agreement separately from runtime, and never use oracle labels as model
+   input.
+4. Add same-node IPC only as a separate hash-bound deployment profile. Runtime
    rank placement is not generally knowable at LTO and must never be guessed
    into static compiler features.
-6. Only after that dispatch gate is clean, expose another pass-materialized
+5. Only after that dispatch gate is clean, expose another pass-materialized
    action family such as batching/coalescing. The pass must generate and prove
    candidates; the model may rank them but may not write code.
 

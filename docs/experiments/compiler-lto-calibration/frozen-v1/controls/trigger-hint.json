@@ -1,0 +1,118 @@
+{
+  "default_dispatch": "IPC_OR_DWQ",
+  "llm_metadata": {
+    "accepted": true,
+    "decision_schema": "gicc-llm-decision-v1",
+    "decision_sites": 26,
+    "dossier_id": "sha256:0c7a8d46d2fd554ea3404d5df3e15a1630012f785e283ccc21558977c8c7aec6",
+    "pinned_sites": 26
+  },
+  "schema_version": "gicc-hint-v1",
+  "sites": {
+    "?:?:_Z16cal_single_2k_g4PN4gicc9DeviceCtxEii::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z17cal_single_16k_g1PN4gicc9DeviceCtxEii::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z17cal_single_512_g1PN4gicc9DeviceCtxEii::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z17cal_single_64k_g8PN4gicc9DeviceCtxEii::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z17cal_static2_2k_g2PN4gicc9DeviceCtxEii::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z17cal_static2_2k_g2PN4gicc9DeviceCtxEii::1": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z17cal_static3_8k_g4PN4gicc9DeviceCtxEii::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z17cal_static3_8k_g4PN4gicc9DeviceCtxEii::1": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z17cal_static3_8k_g4PN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z18cal_reuse_1k_k8_g1PN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z18cal_single_256k_g4PN4gicc9DeviceCtxEii::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z18cal_single_512k_g8PN4gicc9DeviceCtxEii::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::1": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::3": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::4": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::5": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z19cal_reuse_2k_k24_g1PN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z19cal_reuse_8k_k48_g4PN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z21cal_adjacent_1k_k6_g1PN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z21cal_far_2k_k12_i64_g4PN4gicc9DeviceCtxEiiPVf::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z22cal_adjacent_8k_k12_g4PN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z22cal_far_8k_k48_i256_g8PN4gicc9DeviceCtxEiiPVf::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z23cal_adjacent_32k_k40_g8PN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    },
+    "?:?:_Z24cal_far_16k_k24_i1024_g8PN4gicc9DeviceCtxEiiPVf::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=1.000: uniform trigger calibration control; not a model"
+    }
+  },
+  "version": 1
+}

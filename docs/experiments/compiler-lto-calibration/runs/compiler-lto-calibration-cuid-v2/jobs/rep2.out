@@ -1,0 +1,6 @@
+ALLOC rep=2 order=proxy,trigger warmup=10 runs=100 job=unknown
+BEGIN rep=2 arm=proxy time=2026-08-19T06:19:32Z
+END rep=2 arm=proxy time=2026-08-19T06:19:37Z
+BEGIN rep=2 arm=trigger time=2026-08-19T06:19:37Z
+END rep=2 arm=trigger time=2026-08-19T06:19:39Z
+ALLOC_DONE rep=2

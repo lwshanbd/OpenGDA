@@ -1,0 +1,54 @@
+{
+  "default_dispatch": "IPC_OR_DWQ",
+  "llm_metadata": {
+    "accepted": true,
+    "decision_schema": "gicc-llm-decision-v1",
+    "decision_sites": 10,
+    "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+    "pinned_sites": 10
+  },
+  "schema_version": "gicc-hint-v1",
+  "sites": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.521: compiler-path calibrated GBT; proxy=421.628us, trigger=459.167us"
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.520: compiler-path calibrated GBT; proxy=377.917us, trigger=409.827us"
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.509: compiler-path calibrated GBT; proxy=27.149us, trigger=26.150us"
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.511: compiler-path calibrated GBT; proxy=52.369us, trigger=50.024us"
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.512: compiler-path calibrated GBT; proxy=132.425us, trigger=139.163us"
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=1.000: compiler-path calibrated GBT; proxy=30.202us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.504: compiler-path calibrated GBT; proxy=40.858us, trigger=41.578us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.504: compiler-path calibrated GBT; proxy=40.858us, trigger=41.578us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.504: compiler-path calibrated GBT; proxy=40.858us, trigger=41.578us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.504: compiler-path calibrated GBT; proxy=40.858us, trigger=41.578us"
+    }
+  },
+  "version": 1
+}

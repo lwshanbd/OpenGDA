@@ -27,7 +27,13 @@ case "${MODE}" in
     REPS="1 2 3 4"
     ARMS=(default hand gbt-history measured-oracle)
     ;;
-  *) echo "usage: $0 {smoke|paired|gbt} [TAG]" >&2; exit 2 ;;
+  calibrated-balanced)
+    # Five Williams-style rows followed by their reversals.  For an odd
+    # number of arms this balances both position and ordered carryover.
+    REPS="1 2 3 4 5 6 7 8 9 10"
+    ARMS=(default hand gbt-history gbt-calibrated measured-oracle)
+    ;;
+  *) echo "usage: $0 {smoke|paired|gbt|calibrated-balanced} [TAG]" >&2; exit 2 ;;
 esac
 
 for arm in "${ARMS[@]}"; do
@@ -38,13 +44,49 @@ MANIFEST="${OUT}/jobs.tsv"
 printf 'job_id\trep\torder\tqueue\n' > "${MANIFEST}"
 
 order_for() {
-  local a=${ARMS[0]} b=${ARMS[1]} c=${ARMS[2]} d=${ARMS[3]}
-  case "$1" in
-    1) echo "${a},${b},${c},${d}" ;;
-    2) echo "${b},${d},${a},${c}" ;;
-    3) echo "${d},${c},${b},${a}" ;;
-    4) echo "${c},${a},${d},${b}" ;;
-  esac
+  if [ "${MODE}" = calibrated-balanced ]; then
+    local rep=$1 rotation reverse=0
+    if (( rep > 5 )); then
+      rep=$((rep - 5))
+      reverse=1
+    fi
+    rotation=$((rep - 1))
+    local base=(0 1 4 2 3) indices=() index position order=""
+    for index in "${base[@]}"; do
+      indices+=( $(( (index + rotation) % 5 )) )
+    done
+    if (( reverse )); then
+      for (( index=4; index>=0; --index )); do
+        position=${indices[$index]}
+        if test -n "${order}"; then order+=,; fi
+        order+="${ARMS[$position]}"
+      done
+    else
+      for position in "${indices[@]}"; do
+        if test -n "${order}"; then order+=,; fi
+        order+="${ARMS[$position]}"
+      done
+    fi
+    echo "${order}"
+    return
+  fi
+  if test "${#ARMS[@]}" -eq 4; then
+    local a=${ARMS[0]} b=${ARMS[1]} c=${ARMS[2]} d=${ARMS[3]}
+    case "$1" in
+      1) echo "${a},${b},${c},${d}" ;;
+      2) echo "${b},${d},${a},${c}" ;;
+      3) echo "${d},${c},${b},${a}" ;;
+      4) echo "${c},${a},${d},${b}" ;;
+    esac
+    return
+  fi
+  local rep=$1 index order=""
+  for (( index=0; index<${#ARMS[@]}; ++index )); do
+    local position=$(( (index + rep - 1) % ${#ARMS[@]} ))
+    if test -n "${order}"; then order+=,; fi
+    order+="${ARMS[${position}]}"
+  done
+  echo "${order}"
 }
 
 previous=""

@@ -73,18 +73,25 @@ CFLAGS=(
   -isystem "${MPI}/include" -O3 --offload-arch=gfx90a -std=gnu++17
   -fpass-plugin="${PASSES}" -flto
 )
+# Clang's default HIP compilation-unit ID hashes the full command line.  The
+# per-arm object name therefore gives otherwise identical decision responses
+# different device symbol identities.  Bind this source to one stable CUID so
+# that an arm name cannot become an accidental performance variable.
+EVAL_CUID="gicc_compiler_lto_eval_v1"
 
 source_before=$(sha256sum "${SRC}")
 source_before=${source_before%% *}
 
 echo "=== discover device operations ==="
 env GICC_MODE=discover GICC_META_DIR="${META}" GICC_PROXY_ENABLED=1 \
-  "${HIPCC}" "${CFLAGS[@]}" -x hip -c "${SRC}" -o "${OBJ}/discover.o"
+  "${HIPCC}" "${CFLAGS[@]}" -cuid="${EVAL_CUID}" -x hip -c "${SRC}" \
+  -o "${OBJ}/discover.o"
 
 echo "=== extract host-LTO facts ==="
 env GICC_MODE=feature-extract GICC_META_DIR="${META}" \
   GICC_FEATURES_OUT="${FEATURES}" GICC_PROXY_ENABLED=1 \
-  "${HIPCC}" "${CFLAGS[@]}" -x hip -c "${SRC}" -o "${OBJ}/features.o"
+  "${HIPCC}" "${CFLAGS[@]}" -cuid="${EVAL_CUID}" -x hip -c "${SRC}" \
+  -o "${OBJ}/features.o"
 
 echo "=== emit source-free dossier and prompt ==="
 python3 "${BRIDGE}" emit --features "${FEATURES}" --platform "${PROFILE}" \
@@ -158,7 +165,7 @@ for i in "${!NAMES[@]}"; do
   hint=${HINTS[$i]}
   env GICC_MODE=lower GICC_META_DIR="${META}" GICC_HINT_IN="${hint}" \
     GICC_PROXY_ENABLED=1 \
-    "${HIPCC}" "${CFLAGS[@]}" -x hip -c "${SRC}" \
+    "${HIPCC}" "${CFLAGS[@]}" -cuid="${EVAL_CUID}" -x hip -c "${SRC}" \
     -o "${OBJ}/${name}.o"
 done
 

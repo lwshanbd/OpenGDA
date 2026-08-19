@@ -1,0 +1,313 @@
+{
+  "artifacts": {
+    "controls/proxy-hint.json": "270e1130e84375689d5d375decdafd084091fe2870ee4462facff9618926292b",
+    "controls/proxy-response.json": "4d399203cf8a859ee3de0546783f16f0c09c1faf26b3611c077fac19c54eb00f",
+    "controls/trigger-hint.json": "f93e476be664c573a6956cad21acbe17e96906a253f52ab0814725198025339d",
+    "controls/trigger-response.json": "0ce6de04ed73387982bd21fff500d694a8f0790ec7e27873ef09bddf7d4bf431",
+    "dossier.json": "7b8c38fe4ce49de979172458830a400e27256c9ca56aa9b55cfaad89f53319d1",
+    "features.json": "84035e607860d7f06b5bb8a86731a41bc4b0bcffb4fa2425baaa48431cc164ba",
+    "profile.json": "1281f91bc8e9113800b534d5f783426e43a66d57ad1618e37add99f2ba5124d9",
+    "prompt.txt": "ccaf12faf98964ade69ed017a3e72788b3178b4a7bbe0483979d17ea532004e2"
+  },
+  "boundary": {
+    "frozen_runtime_or_oracle_read": false,
+    "model_output": "gicc-llm-decision-v1",
+    "pass_input": "gicc-hint-v1",
+    "role": "training/calibration only",
+    "source_in_model_input": false
+  },
+  "decision_sites": 26,
+  "dossier_id": "sha256:0c7a8d46d2fd554ea3404d5df3e15a1630012f785e283ccc21558977c8c7aec6",
+  "feature_schema_version": 6,
+  "frozen_evaluation_sizes_excluded": [
+    256,
+    4096,
+    1048576
+  ],
+  "kernels": {
+    "cal_adjacent_1k_k6_g1": {
+      "batch_size": 6,
+      "coalescable": true,
+      "count": 1,
+      "descriptor_reusable": false,
+      "grid_blocks": 1,
+      "in_loop": true,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "adjacent-1k-k6-g1",
+      "site_ids": [
+        "?:?:_Z21cal_adjacent_1k_k6_g1PN4gicc9DeviceCtxEii::2"
+      ],
+      "size_bytes": 1024,
+      "trip_count": 6
+    },
+    "cal_adjacent_32k_k40_g8": {
+      "batch_size": 40,
+      "coalescable": true,
+      "count": 1,
+      "descriptor_reusable": false,
+      "grid_blocks": 8,
+      "in_loop": true,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "adjacent-32k-k40-g8",
+      "site_ids": [
+        "?:?:_Z23cal_adjacent_32k_k40_g8PN4gicc9DeviceCtxEii::2"
+      ],
+      "size_bytes": 32768,
+      "trip_count": 40
+    },
+    "cal_adjacent_8k_k12_g4": {
+      "batch_size": 12,
+      "coalescable": true,
+      "count": 1,
+      "descriptor_reusable": false,
+      "grid_blocks": 4,
+      "in_loop": true,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "adjacent-8k-k12-g4",
+      "site_ids": [
+        "?:?:_Z22cal_adjacent_8k_k12_g4PN4gicc9DeviceCtxEii::2"
+      ],
+      "size_bytes": 8192,
+      "trip_count": 12
+    },
+    "cal_far_16k_k24_i1024_g8": {
+      "batch_size": 24,
+      "coalescable": true,
+      "count": 1,
+      "descriptor_reusable": false,
+      "grid_blocks": 8,
+      "in_loop": true,
+      "minimum_flops_to_first_use": 2000,
+      "scenario": "far-16k-k24-i1024-g8",
+      "site_ids": [
+        "?:?:_Z24cal_far_16k_k24_i1024_g8PN4gicc9DeviceCtxEiiPVf::0"
+      ],
+      "size_bytes": 16384,
+      "trip_count": 24
+    },
+    "cal_far_2k_k12_i64_g4": {
+      "batch_size": 12,
+      "coalescable": true,
+      "count": 1,
+      "descriptor_reusable": false,
+      "grid_blocks": 4,
+      "in_loop": true,
+      "minimum_flops_to_first_use": 100,
+      "scenario": "far-2k-k12-i64-g4",
+      "site_ids": [
+        "?:?:_Z21cal_far_2k_k12_i64_g4PN4gicc9DeviceCtxEiiPVf::0"
+      ],
+      "size_bytes": 2048,
+      "trip_count": 12
+    },
+    "cal_far_8k_k48_i256_g8": {
+      "batch_size": 48,
+      "coalescable": true,
+      "count": 1,
+      "descriptor_reusable": false,
+      "grid_blocks": 8,
+      "in_loop": true,
+      "minimum_flops_to_first_use": 500,
+      "scenario": "far-8k-k48-i256-g8",
+      "site_ids": [
+        "?:?:_Z22cal_far_8k_k48_i256_g8PN4gicc9DeviceCtxEiiPVf::0"
+      ],
+      "size_bytes": 8192,
+      "trip_count": 48
+    },
+    "cal_reuse_1k_k8_g1": {
+      "batch_size": 8,
+      "coalescable": false,
+      "count": 1,
+      "descriptor_reusable": true,
+      "grid_blocks": 1,
+      "in_loop": true,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "reuse-1k-k8-g1",
+      "site_ids": [
+        "?:?:_Z18cal_reuse_1k_k8_g1PN4gicc9DeviceCtxEii::2"
+      ],
+      "size_bytes": 1024,
+      "trip_count": 8
+    },
+    "cal_reuse_2k_k24_g1": {
+      "batch_size": 24,
+      "coalescable": false,
+      "count": 1,
+      "descriptor_reusable": true,
+      "grid_blocks": 1,
+      "in_loop": true,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "reuse-2k-k24-g1",
+      "site_ids": [
+        "?:?:_Z19cal_reuse_2k_k24_g1PN4gicc9DeviceCtxEii::2"
+      ],
+      "size_bytes": 2048,
+      "trip_count": 24
+    },
+    "cal_reuse_8k_k48_g4": {
+      "batch_size": 48,
+      "coalescable": false,
+      "count": 1,
+      "descriptor_reusable": true,
+      "grid_blocks": 4,
+      "in_loop": true,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "reuse-8k-k48-g4",
+      "site_ids": [
+        "?:?:_Z19cal_reuse_8k_k48_g4PN4gicc9DeviceCtxEii::2"
+      ],
+      "size_bytes": 8192,
+      "trip_count": 48
+    },
+    "cal_single_16k_g1": {
+      "batch_size": 1,
+      "coalescable": false,
+      "count": 1,
+      "descriptor_reusable": false,
+      "grid_blocks": 1,
+      "in_loop": false,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "single-16k-g1",
+      "site_ids": [
+        "?:?:_Z17cal_single_16k_g1PN4gicc9DeviceCtxEii::0"
+      ],
+      "size_bytes": 16384,
+      "trip_count": null
+    },
+    "cal_single_256k_g4": {
+      "batch_size": 1,
+      "coalescable": false,
+      "count": 1,
+      "descriptor_reusable": false,
+      "grid_blocks": 4,
+      "in_loop": false,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "single-256k-g4",
+      "site_ids": [
+        "?:?:_Z18cal_single_256k_g4PN4gicc9DeviceCtxEii::0"
+      ],
+      "size_bytes": 262144,
+      "trip_count": null
+    },
+    "cal_single_2k_g4": {
+      "batch_size": 1,
+      "coalescable": false,
+      "count": 1,
+      "descriptor_reusable": false,
+      "grid_blocks": 4,
+      "in_loop": false,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "single-2k-g4",
+      "site_ids": [
+        "?:?:_Z16cal_single_2k_g4PN4gicc9DeviceCtxEii::0"
+      ],
+      "size_bytes": 2048,
+      "trip_count": null
+    },
+    "cal_single_512_g1": {
+      "batch_size": 1,
+      "coalescable": false,
+      "count": 1,
+      "descriptor_reusable": false,
+      "grid_blocks": 1,
+      "in_loop": false,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "single-512-g1",
+      "site_ids": [
+        "?:?:_Z17cal_single_512_g1PN4gicc9DeviceCtxEii::0"
+      ],
+      "size_bytes": 512,
+      "trip_count": null
+    },
+    "cal_single_512k_g8": {
+      "batch_size": 1,
+      "coalescable": false,
+      "count": 1,
+      "descriptor_reusable": false,
+      "grid_blocks": 8,
+      "in_loop": false,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "single-512k-g8",
+      "site_ids": [
+        "?:?:_Z18cal_single_512k_g8PN4gicc9DeviceCtxEii::0"
+      ],
+      "size_bytes": 524288,
+      "trip_count": null
+    },
+    "cal_single_64k_g8": {
+      "batch_size": 1,
+      "coalescable": false,
+      "count": 1,
+      "descriptor_reusable": false,
+      "grid_blocks": 8,
+      "in_loop": false,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "single-64k-g8",
+      "site_ids": [
+        "?:?:_Z17cal_single_64k_g8PN4gicc9DeviceCtxEii::0"
+      ],
+      "size_bytes": 65536,
+      "trip_count": null
+    },
+    "cal_static2_2k_g2": {
+      "batch_size": 2,
+      "coalescable": false,
+      "count": 2,
+      "descriptor_reusable": false,
+      "grid_blocks": 2,
+      "in_loop": false,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "static2-2k-g2",
+      "site_ids": [
+        "?:?:_Z17cal_static2_2k_g2PN4gicc9DeviceCtxEii::0",
+        "?:?:_Z17cal_static2_2k_g2PN4gicc9DeviceCtxEii::1"
+      ],
+      "size_bytes": 2048,
+      "trip_count": null
+    },
+    "cal_static3_8k_g4": {
+      "batch_size": 3,
+      "coalescable": false,
+      "count": 3,
+      "descriptor_reusable": false,
+      "grid_blocks": 4,
+      "in_loop": false,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "static3-8k-g4",
+      "site_ids": [
+        "?:?:_Z17cal_static3_8k_g4PN4gicc9DeviceCtxEii::0",
+        "?:?:_Z17cal_static3_8k_g4PN4gicc9DeviceCtxEii::1",
+        "?:?:_Z17cal_static3_8k_g4PN4gicc9DeviceCtxEii::2"
+      ],
+      "size_bytes": 8192,
+      "trip_count": null
+    },
+    "cal_static6_16k_g8": {
+      "batch_size": 6,
+      "coalescable": false,
+      "count": 6,
+      "descriptor_reusable": false,
+      "grid_blocks": 8,
+      "in_loop": false,
+      "minimum_flops_to_first_use": 0,
+      "scenario": "static6-16k-g8",
+      "site_ids": [
+        "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::0",
+        "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::1",
+        "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::2",
+        "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::3",
+        "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::4",
+        "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::5"
+      ],
+      "size_bytes": 16384,
+      "trip_count": null
+    }
+  },
+  "scenario_count": 18,
+  "schema_version": "gicc-compiler-lto-calibration-freeze-v1",
+  "source": {
+    "path": "examples/proxy/compiler_lto_calibration.cpp",
+    "sha256": "ac9a7f75da60dbac36f3871e1c0113ec8071b1f7d924ef3dd96e9fdb5888b37d"
+  }
+}

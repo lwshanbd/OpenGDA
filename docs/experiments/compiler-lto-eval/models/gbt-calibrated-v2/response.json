@@ -1,0 +1,74 @@
+{
+  "decisions": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "action": "proxy",
+      "confidence": 0.52131,
+      "rationale": "compiler-path calibrated GBT; proxy=421.628us, trigger=459.167us"
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 0.520254,
+      "rationale": "compiler-path calibrated GBT; proxy=377.917us, trigger=409.827us"
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "trigger",
+      "confidence": 0.509366,
+      "rationale": "compiler-path calibrated GBT; proxy=27.149us, trigger=26.150us"
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "trigger",
+      "confidence": 0.511451,
+      "rationale": "compiler-path calibrated GBT; proxy=52.369us, trigger=50.024us"
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 0.512405,
+      "rationale": "compiler-path calibrated GBT; proxy=132.425us, trigger=139.163us"
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "compiler-path calibrated GBT; proxy=30.202us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.50437,
+      "rationale": "compiler-path calibrated GBT; proxy=40.858us, trigger=41.578us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "action": "proxy",
+      "confidence": 0.50437,
+      "rationale": "compiler-path calibrated GBT; proxy=40.858us, trigger=41.578us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 0.50437,
+      "rationale": "compiler-path calibrated GBT; proxy=40.858us, trigger=41.578us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "action": "proxy",
+      "confidence": 0.50437,
+      "rationale": "compiler-path calibrated GBT; proxy=40.858us, trigger=41.578us"
+    }
+  },
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "producer": {
+    "calibration_dossier_id": "sha256:0c7a8d46d2fd554ea3404d5df3e15a1630012f785e283ccc21558977c8c7aec6",
+    "calibration_dossier_sha256": "7b8c38fe4ce49de979172458830a400e27256c9ca56aa9b55cfaad89f53319d1",
+    "calibration_results_sha256": "e3e28e60127ae491d570a6743cd04acb46a40cb42d9d51da6013e260d9f6f8f2",
+    "frozen_evaluation_results_read": false,
+    "historical_runtime_grid_read": false,
+    "kind": "compiler_path_calibrated_gradient_boosting",
+    "learning_rate": 0.04,
+    "loss": "huber",
+    "max_depth": 2,
+    "n_estimators": 200,
+    "random_state": 0,
+    "schema_version": "gicc-compiler-path-calibrated-gbt-v2",
+    "source_read": false,
+    "unstable_calibration_scenarios_excluded": [
+      "static6-16k-g8"
+    ]
+  },
+  "schema_version": "gicc-llm-decision-v1"
+}

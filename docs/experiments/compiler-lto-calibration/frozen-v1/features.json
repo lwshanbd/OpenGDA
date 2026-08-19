@@ -1,0 +1,3927 @@
+[
+  {
+    "batch_size": 1,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_2k_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 2048,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z16cal_single_2k_g4PN4gicc9DeviceCtxEii::0",
+    "size_bytes": 2048,
+    "size_kind": "const",
+    "size_log2": 11,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_2k_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z16cal_single_2k_g4PN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_2k_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z16cal_single_2k_g4PN4gicc9DeviceCtxEii::2",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 1,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_16k_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 16384,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_single_16k_g1PN4gicc9DeviceCtxEii::0",
+    "size_bytes": 16384,
+    "size_kind": "const",
+    "size_log2": 14,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_16k_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_single_16k_g1PN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_16k_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_single_16k_g1PN4gicc9DeviceCtxEii::2",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 1,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_512_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 512,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_single_512_g1PN4gicc9DeviceCtxEii::0",
+    "size_bytes": 512,
+    "size_kind": "const",
+    "size_log2": 9,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_512_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_single_512_g1PN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_512_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_single_512_g1PN4gicc9DeviceCtxEii::2",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 1,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_64k_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 65536,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_single_64k_g8PN4gicc9DeviceCtxEii::0",
+    "size_bytes": 65536,
+    "size_kind": "const",
+    "size_log2": 16,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_64k_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_single_64k_g8PN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_64k_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_single_64k_g8PN4gicc9DeviceCtxEii::2",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 2,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 2,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static2_2k_g2",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 2,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 2,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 2048,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 2,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_static2_2k_g2PN4gicc9DeviceCtxEii::0",
+    "size_bytes": 2048,
+    "size_kind": "const",
+    "size_log2": 11,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 2,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 2,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static2_2k_g2",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 2,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 2,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 2048,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 2,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_static2_2k_g2PN4gicc9DeviceCtxEii::1",
+    "size_bytes": 2048,
+    "size_kind": "const",
+    "size_log2": 11,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 2,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static2_2k_g2",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 2,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 2,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 2,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_static2_2k_g2PN4gicc9DeviceCtxEii::2",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 2,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static2_2k_g2",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 2,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 2,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 2,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_static2_2k_g2PN4gicc9DeviceCtxEii::3",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 3,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static3_8k_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 8192,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_static3_8k_g4PN4gicc9DeviceCtxEii::0",
+    "size_bytes": 8192,
+    "size_kind": "const",
+    "size_log2": 13,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 3,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static3_8k_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 8192,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_static3_8k_g4PN4gicc9DeviceCtxEii::1",
+    "size_bytes": 8192,
+    "size_kind": "const",
+    "size_log2": 13,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 3,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static3_8k_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 8192,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_static3_8k_g4PN4gicc9DeviceCtxEii::2",
+    "size_bytes": 8192,
+    "size_kind": "const",
+    "size_log2": 13,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static3_8k_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_static3_8k_g4PN4gicc9DeviceCtxEii::3",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static3_8k_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z17cal_static3_8k_g4PN4gicc9DeviceCtxEii::4",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_reuse_1k_k8_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_reuse_1k_k8_g1PN4gicc9DeviceCtxEii::0",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_reuse_1k_k8_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_reuse_1k_k8_g1PN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 8,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": true,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 18,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": true,
+    "iter_estimate": null,
+    "kernel": "cal_reuse_1k_k8_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 1024,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": 8
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger"
+    ],
+    "loop": {
+      "bound_const": 8,
+      "bound_known": true,
+      "iv_start": 0,
+      "iv_step": 1
+    },
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_reuse_1k_k8_g1PN4gicc9DeviceCtxEii::2",
+    "size_bytes": 1024,
+    "size_kind": "const",
+    "size_log2": 10,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": 8
+  },
+  {
+    "batch_size": 1,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_256k_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 262144,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_single_256k_g4PN4gicc9DeviceCtxEii::0",
+    "size_bytes": 262144,
+    "size_kind": "const",
+    "size_log2": 18,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_256k_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_single_256k_g4PN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_256k_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_single_256k_g4PN4gicc9DeviceCtxEii::2",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 1,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_512k_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 524288,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_single_512k_g8PN4gicc9DeviceCtxEii::0",
+    "size_bytes": 524288,
+    "size_kind": "const",
+    "size_log2": 19,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_512k_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_single_512k_g8PN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_single_512k_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_single_512k_g8PN4gicc9DeviceCtxEii::2",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 6,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static6_16k_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 16384,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::0",
+    "size_bytes": 16384,
+    "size_kind": "const",
+    "size_log2": 14,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 6,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static6_16k_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 16384,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::1",
+    "size_bytes": 16384,
+    "size_kind": "const",
+    "size_log2": 14,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 6,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static6_16k_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 16384,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::2",
+    "size_bytes": 16384,
+    "size_kind": "const",
+    "size_log2": 14,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 6,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static6_16k_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 16384,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::3",
+    "size_bytes": 16384,
+    "size_kind": "const",
+    "size_log2": 14,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 6,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static6_16k_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 16384,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::4",
+    "size_bytes": 16384,
+    "size_kind": "const",
+    "size_log2": 14,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 6,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static6_16k_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 16384,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::5",
+    "size_bytes": 16384,
+    "size_kind": "const",
+    "size_log2": 14,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static6_16k_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::6",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 1,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_static6_16k_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z18cal_static6_16k_g8PN4gicc9DeviceCtxEii::7",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_reuse_2k_k24_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z19cal_reuse_2k_k24_g1PN4gicc9DeviceCtxEii::0",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_reuse_2k_k24_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z19cal_reuse_2k_k24_g1PN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 24,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": true,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 50,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": true,
+    "iter_estimate": null,
+    "kernel": "cal_reuse_2k_k24_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 2048,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": 24
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger"
+    ],
+    "loop": {
+      "bound_const": 24,
+      "bound_known": true,
+      "iv_start": 0,
+      "iv_step": 1
+    },
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z19cal_reuse_2k_k24_g1PN4gicc9DeviceCtxEii::2",
+    "size_bytes": 2048,
+    "size_kind": "const",
+    "size_log2": 11,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": 24
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_reuse_8k_k48_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z19cal_reuse_8k_k48_g4PN4gicc9DeviceCtxEii::0",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_reuse_8k_k48_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z19cal_reuse_8k_k48_g4PN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 48,
+    "buffer_reusable": true,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": true,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 98,
+    "grid_blocks": 4,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": true,
+    "iter_estimate": null,
+    "kernel": "cal_reuse_8k_k48_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 8192,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": 48
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger"
+    ],
+    "loop": {
+      "bound_const": 48,
+      "bound_known": true,
+      "iv_start": 0,
+      "iv_step": 1
+    },
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z19cal_reuse_8k_k48_g4PN4gicc9DeviceCtxEii::2",
+    "size_bytes": 8192,
+    "size_kind": "const",
+    "size_log2": 13,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": 48
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_adjacent_1k_k6_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z21cal_adjacent_1k_k6_g1PN4gicc9DeviceCtxEii::0",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_adjacent_1k_k6_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z21cal_adjacent_1k_k6_g1PN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 6,
+    "buffer_reusable": true,
+    "coalescable": true,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 28,
+    "grid_blocks": 1,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": true,
+    "iter_estimate": null,
+    "kernel": "cal_adjacent_1k_k6_g1",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 1,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 1024,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": 6
+      }
+    ],
+    "launch_grid": {
+      "x": 1,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger"
+    ],
+    "loop": {
+      "bound_const": 6,
+      "bound_known": true,
+      "iv_start": 0,
+      "iv_step": 1
+    },
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z21cal_adjacent_1k_k6_g1PN4gicc9DeviceCtxEii::2",
+    "size_bytes": 1024,
+    "size_kind": "const",
+    "size_log2": 10,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": 6
+  },
+  {
+    "batch_size": 12,
+    "buffer_reusable": true,
+    "coalescable": true,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 704,
+    "grid_blocks": 4,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": true,
+    "iter_estimate": null,
+    "kernel": "cal_far_2k_k12_i64_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 2048,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": 12
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger"
+    ],
+    "loop": {
+      "bound_const": 12,
+      "bound_known": true,
+      "iv_start": 0,
+      "iv_step": 1
+    },
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z21cal_far_2k_k12_i64_g4PN4gicc9DeviceCtxEiiPVf::0",
+    "size_bytes": 2048,
+    "size_kind": "const",
+    "size_log2": 11,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": 12
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_far_2k_k12_i64_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z21cal_far_2k_k12_i64_g4PN4gicc9DeviceCtxEiiPVf::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_far_2k_k12_i64_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z21cal_far_2k_k12_i64_g4PN4gicc9DeviceCtxEiiPVf::2",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_adjacent_8k_k12_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z22cal_adjacent_8k_k12_g4PN4gicc9DeviceCtxEii::0",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 4,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_adjacent_8k_k12_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z22cal_adjacent_8k_k12_g4PN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 12,
+    "buffer_reusable": true,
+    "coalescable": true,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 52,
+    "grid_blocks": 4,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": true,
+    "iter_estimate": null,
+    "kernel": "cal_adjacent_8k_k12_g4",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 4,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 8192,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": 12
+      }
+    ],
+    "launch_grid": {
+      "x": 4,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger"
+    ],
+    "loop": {
+      "bound_const": 12,
+      "bound_known": true,
+      "iv_start": 0,
+      "iv_step": 1
+    },
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z22cal_adjacent_8k_k12_g4PN4gicc9DeviceCtxEii::2",
+    "size_bytes": 8192,
+    "size_kind": "const",
+    "size_log2": 13,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": 12
+  },
+  {
+    "batch_size": 48,
+    "buffer_reusable": true,
+    "coalescable": true,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 2768,
+    "grid_blocks": 8,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": true,
+    "iter_estimate": null,
+    "kernel": "cal_far_8k_k48_i256_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 8192,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": 48
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger"
+    ],
+    "loop": {
+      "bound_const": 48,
+      "bound_known": true,
+      "iv_start": 0,
+      "iv_step": 1
+    },
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z22cal_far_8k_k48_i256_g8PN4gicc9DeviceCtxEiiPVf::0",
+    "size_bytes": 8192,
+    "size_kind": "const",
+    "size_log2": 13,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": 48
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_far_8k_k48_i256_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z22cal_far_8k_k48_i256_g8PN4gicc9DeviceCtxEiiPVf::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_far_8k_k48_i256_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z22cal_far_8k_k48_i256_g8PN4gicc9DeviceCtxEiiPVf::2",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_adjacent_32k_k40_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z23cal_adjacent_32k_k40_g8PN4gicc9DeviceCtxEii::0",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 0,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_adjacent_32k_k40_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z23cal_adjacent_32k_k40_g8PN4gicc9DeviceCtxEii::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": 40,
+    "buffer_reusable": true,
+    "coalescable": true,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 164,
+    "grid_blocks": 8,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": true,
+    "iter_estimate": null,
+    "kernel": "cal_adjacent_32k_k40_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 32768,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": 40
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger"
+    ],
+    "loop": {
+      "bound_const": 40,
+      "bound_known": true,
+      "iv_start": 0,
+      "iv_step": 1
+    },
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z23cal_adjacent_32k_k40_g8PN4gicc9DeviceCtxEii::2",
+    "size_bytes": 32768,
+    "size_kind": "const",
+    "size_log2": 15,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": 40
+  },
+  {
+    "batch_size": 24,
+    "buffer_reusable": true,
+    "coalescable": true,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "flops_to_first_use": 10352,
+    "grid_blocks": 8,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": true,
+    "iter_estimate": null,
+    "kernel": "cal_far_16k_k24_i1024_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": 16384,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": 24
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger"
+    ],
+    "loop": {
+      "bound_const": 24,
+      "bound_known": true,
+      "iv_start": 0,
+      "iv_step": 1
+    },
+    "max_vector_bytes": 16,
+    "op_kind": "put_no_db",
+    "peer_kind": "param",
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z24cal_far_16k_k24_i1024_g8PN4gicc9DeviceCtxEiiPVf::0",
+    "size_bytes": 16384,
+    "size_kind": "const",
+    "size_log2": 14,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": 24
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 3,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_far_16k_k24_i1024_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "flush",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z24cal_far_16k_k24_i1024_g8PN4gicc9DeviceCtxEiiPVf::1",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  },
+  {
+    "batch_size": null,
+    "buffer_reusable": false,
+    "coalescable": false,
+    "compute_before_flops": 2,
+    "descriptor_reusable": false,
+    "distance_exact": true,
+    "fan_out": 1,
+    "fence_scope": 0,
+    "flops_to_first_use": 0,
+    "grid_blocks": 8,
+    "guard_density": 0.5,
+    "hk_capable": true,
+    "in_loop": false,
+    "iter_estimate": null,
+    "kernel": "cal_far_16k_k24_i1024_g8",
+    "launch_block": {
+      "x": null,
+      "y": null,
+      "z": null
+    },
+    "launch_contexts": [
+      {
+        "grid_blocks": 8,
+        "launch_block": {
+          "x": null,
+          "y": null,
+          "z": null
+        },
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "size_bytes": null,
+        "static_callsite_count": 1,
+        "threads_per_block": null,
+        "trip_count": null
+      }
+    ],
+    "launch_grid": {
+      "x": 8,
+      "y": 1,
+      "z": 1
+    },
+    "legal_paths": [
+      "proxy",
+      "trigger",
+      "ipc"
+    ],
+    "max_vector_bytes": 1,
+    "op_kind": "quiet",
+    "peer_kind": null,
+    "peer_locality": null,
+    "schema_version": 6,
+    "site_id": "?:?:_Z24cal_far_16k_k24_i1024_g8PN4gicc9DeviceCtxEiiPVf::2",
+    "size_bytes": null,
+    "size_kind": null,
+    "size_log2": null,
+    "static_launch_sites": 1,
+    "threads_per_block": null,
+    "trip_count": null
+  }
+]

@@ -59,6 +59,18 @@ def parse_binding(value: str) -> tuple[str, Path]:
     return arm, Path(raw_path)
 
 
+def parse_replicates(value: str) -> list[int]:
+    try:
+        replicates = [int(item) for item in value.split(",") if item]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "replicates must be comma-separated integers"
+        ) from exc
+    if not replicates or len(set(replicates)) != len(replicates):
+        raise argparse.ArgumentTypeError("replicates must be nonempty and unique")
+    return replicates
+
+
 def validated_response(dossier: dict[str, Any], path: Path) -> dict[str, Any]:
     response = read_json(path)
     _, accepted, errors = bridge.decision_to_hint(dossier, response)
@@ -212,6 +224,8 @@ def main() -> int:
                     type=parse_binding, metavar="ARM=PATH")
     ap.add_argument("--base-arms", default="default,hand")
     ap.add_argument("--oracle-arm", default="measured-oracle")
+    ap.add_argument("--expected-reps", type=parse_replicates,
+                    default=parse_replicates("1,2,3,4"))
     ap.add_argument("--json", type=Path)
     args = ap.parse_args()
 
@@ -228,6 +242,15 @@ def main() -> int:
         expected_arms = base_arms + list(responses)
         if args.oracle_arm not in expected_arms:
             raise AnalysisError("--oracle-arm is absent from evaluated arms")
+        if args.oracle_arm in responses:
+            oracle_producer = responses[args.oracle_arm][1].get("producer", {})
+            if (
+                oracle_producer.get("kind") != "measured_oracle_control"
+                or oracle_producer.get("oracle_or_runtime_results_read") is not True
+            ):
+                raise AnalysisError(
+                    "--oracle-arm must be an explicitly labeled measured oracle"
+                )
 
         route_contracts = {arm: routes_for_builtin(arm) for arm in base_arms}
         route_contracts.update({
@@ -262,6 +285,10 @@ def main() -> int:
                 raise AnalysisError(
                     f"rep={rep}: arms={sorted(arms)}, expected={expected_arms}"
                 )
+        if set(parsed) != set(args.expected_reps):
+            raise AnalysisError(
+                f"replicates={sorted(parsed)}, expected={sorted(args.expected_reps)}"
+            )
         inconsistent = {
             arm: sorted(hashes) for arm, hashes in binary_hashes.items()
             if len(hashes) != 1

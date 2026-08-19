@@ -161,6 +161,69 @@ would leak the test labels, so the result is retained as-is. It shows why a
 compiler-path calibration set and/or reasoning over richer compiler facts is
 needed before claiming learned optimization.
 
+## Compiler-path calibrated GBT
+
+The follow-up model trains only on the separate
+`compiler-lto-calibration-cuid-v2` compiler-fact dossier and its paired
+proxy/trigger measurements. Calibration and evaluation message-size sets are
+disjoint. Seventeen of eighteen calibration scenarios have a stable winner
+across all four allocations; the one unstable static-six label is recorded but
+excluded. The resulting GBT has 34 action-cost rows and uses only size, batch,
+total bytes, launch grid, site count, loop membership, descriptor reuse,
+coalescability, issue-to-use FLOPs/exactness, and the proposed action. It never
+reads source, the historical runtime grid, frozen test logs, or frozen oracle
+labels.
+
+Leave-one-complete-scenario-out calibration validation matches 14/17 actions
+at 1.0217x geometric-mean regret. Applied once to the frozen dossier, the
+model chooses trigger for the tiny and large single operations, proxy for the
+reuse, adjacent, far-use, and four-static-site groups, and the only legal proxy
+action for the dynamic-offset control. This matches the separately measured
+action oracle in all six decision-bearing scenarios and all nine such sites.
+
+An initial run exposed a HIP build confound: Clang's default CUID hashes the
+full compiler command, including the per-arm object name, so identical decision
+responses produced different GPU code-object identities. The build now binds
+all versions of this source to one explicit CUID. The calibrated response and
+the measured-oracle response consequently produce byte-identical binaries
+(SHA-256
+`b0ace9bac935a2c5039f09c907353e0474b15ccc2ecdba9e3c4941a0dcc99ef9`).
+The oracle is used only for action-agreement scoring; it is not a runtime
+denominator.
+
+`compiler-lto-gbt-calibrated-balanced-v3` runs five arms in ten allocations.
+Five Williams-style orders and their reversals put every arm in every position
+twice and every ordered arm pair adjacent twice. All 50 logs and 350 scenario
+records pass complete-region hashes, exact route counts, provenance, and stable
+per-arm binary checks. The proxy-only dynamic scenario is excluded from the
+primary score. Speedup is the paired reference time divided by calibrated-GBT
+time over the six decision-bearing scenarios:
+
+| reference | calibrated GBT speedup | paired bootstrap 95% CI | faster allocations | exact sign p |
+| --- | ---: | ---: | ---: | ---: |
+| compiler default | **1.0690x** | [1.0302, 1.0946] | 9/10 | 0.0215 |
+| hand rule | **1.0399x** | [1.0048, 1.0621] | 9/10 | 0.0215 |
+| historical-grid GBT | **1.0807x** | [1.0468, 1.1028] | 9/10 | 0.0215 |
+
+The byte-identical oracle duplicate measures residual order/allocation noise:
+duplicate/candidate is 0.9927x with a 95% interval of [0.9463, 1.0385], which
+contains one. This is the first positive learned result on the real compiler
+path: compiler-path calibration reverses the old GBT's negative transfer and
+beats both the existing hand rule and compiler default on this frozen suite.
+It is an ML/GBT result, not an LLM result, and it does not yet establish
+cross-program or cross-platform generalization: the calibration workload was
+purpose-built to span the same compiler-fact families while holding out exact
+sizes and every test label/result.
+
+The calibrated response SHA-256 is
+`d40c340105cc1fc3026d4bbef4954f9526761f09b926bb414296e494aeb3e75e`,
+the model report is
+`6092038f40b4ab1e83347e08341481094365d5b35b756c78ce9cc371f6c1080b`,
+the accepted pass hint is
+`47bfb028b9b9936e7c365f5314c8730aa912f678baa61b057d67ab42c4a0b5b9`,
+and the final run summary is
+`6fb8af459c0320b212d303572afe03cac95695cae807595b9437fe164c53174e`.
+
 ## Reproduction and gates
 
 ```bash
@@ -193,10 +256,31 @@ python3 examples/proxy/analyze_compiler_lto_candidates.py \
   --response gbt-history=docs/experiments/compiler-lto-eval/models/gbt-v1/history-response.json \
   --response measured-oracle=docs/experiments/compiler-lto-eval/models/measured-oracle-v1/measured-oracle-response.json \
   --oracle-arm measured-oracle
+
+python3 examples/proxy/compiler_lto_calibrated_gbt.py \
+  --calibration-dossier docs/experiments/compiler-lto-calibration/frozen-v1/dossier.json \
+  --calibration-results docs/experiments/compiler-lto-calibration/runs/compiler-lto-calibration-cuid-v2/summary.json \
+  --evaluation-dossier docs/experiments/compiler-lto-eval/frozen-v1/dossier.json \
+  --output docs/experiments/compiler-lto-eval/models/gbt-calibrated-v2/response.json \
+  --report docs/experiments/compiler-lto-eval/models/gbt-calibrated-v2/report.json
+bash examples/proxy/build_compiler_lto_eval.sh candidate \
+  docs/experiments/compiler-lto-eval/models/gbt-calibrated-v2/response.json \
+  gbt-calibrated
+bash examples/proxy/submit_compiler_lto_eval.sh calibrated-balanced \
+  compiler-lto-gbt-calibrated-balanced-v3
+python3 examples/proxy/analyze_compiler_lto_transfer.py \
+  docs/experiments/compiler-lto-eval/runs/compiler-lto-gbt-calibrated-balanced-v3/raw/*.log \
+  --dossier docs/experiments/compiler-lto-eval/frozen-v1/dossier.json \
+  --response gbt-history=docs/experiments/compiler-lto-eval/models/gbt-v1/history-response.json \
+  --response gbt-calibrated=docs/experiments/compiler-lto-eval/models/gbt-calibrated-v2/response.json \
+  --candidate-arm gbt-calibrated \
+  --oracle-response docs/experiments/compiler-lto-eval/models/measured-oracle-v1/measured-oracle-response.json \
+  --expected-reps 1,2,3,4,5,6,7,8,9,10 \
+  --json docs/experiments/compiler-lto-eval/runs/compiler-lto-gbt-calibrated-balanced-v3/summary.json
 ```
 
 Candidate model responses use
 `build_compiler_lto_eval.sh candidate RESPONSE.json NAME`. That command
 strictly validates the response, lowers the same source through LTO, and
-records a distinct binary hash. Provider invocation is intentionally outside
+records its binary hash. Provider invocation is intentionally outside
 the build and is not part of this evidence set.
