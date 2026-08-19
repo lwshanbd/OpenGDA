@@ -12,6 +12,8 @@
 ; RUN:          -passes='gicc-feature-extraction' \
 ; RUN:          -disable-output %s 2>&1 | %FileCheck %s --check-prefix=STDERR
 ; RUN: cat %t.features.json | %FileCheck %s --check-prefix=JSON
+; RUN: grep -A2 '"legal_paths"' %t.features.json | \
+; RUN:     %FileCheck %s --check-prefix=LEGAL
 
 target triple = "x86_64-unknown-linux-gnu"
 
@@ -68,6 +70,12 @@ define void @main(ptr %rt, i64 %dynamic.grid.xy) {
 ; trip_count times, and it is invisible to a runtime looking at one call.
 ; JSON-DAG: "descriptor_reusable": true
 ; JSON-DAG: "buffer_reusable": true
+; A modeled loop becomes a batched host placeholder. The current pass can
+; materialize trigger or proxy for that shape, but not IPC/hybrid.
+; LEGAL: "legal_paths": [
+; LEGAL-NEXT: {{ *}}"proxy",
+; LEGAL-NEXT: {{ *}}"trigger"
+; LEGAL-NOT: ipc
 ; batch_size is carried in the kernel JSON rather than derived, because
 ; grouping transfers by completion point needs the CFG.
 ; JSON-DAG: "batch_size": 3

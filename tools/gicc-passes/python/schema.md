@@ -332,9 +332,13 @@ site exactly once:
 ```
 
 `action` must be one of that site's `legal_actions`.  `default` is an explicit
-abstention and leaves the pass's `IPC_OR_DWQ` baseline in place.  Forced `ipc`
-is withheld unless topology proves `peer_locality=same_node`; a proxy-only
-site cannot abstain because the hybrid host path is not legal there.
+abstention and leaves the pass's `IPC_OR_DWQ` baseline in place, so it is
+offered only when the compiler says both IPC and trigger are materializable.
+Forced `ipc` is withheld unless topology proves `peer_locality=same_node`.
+A proxy-only site cannot abstain because the hybrid host path is not legal
+there.  A modeled loop is represented by one batched host placeholder; the
+current pass exposes only `proxy` and `trigger` for that shape, not `ipc` or
+`default`.
 
 Accept and translate with:
 
@@ -346,7 +350,8 @@ python3 tools/gicc-passes/python/gicc_llm_bridge.py accept \
 ```
 
 By default any malformed, stale, incomplete, or illegal response produces a
-deterministic fallback hint: host-capable sites inherit `IPC_OR_DWQ`, while
+deterministic, materializable fallback hint: ordinary host-capable sites
+inherit `IPC_OR_DWQ`, batched-loop sites are pinned to `DWQ_TRIGGER`, and
 compiler-proven proxy-only sites are pinned to `CPU_PROXY_ENQUEUE`.  No model
 choice is partially applied.  `--strict` instead rejects the sample without
 writing a hint.

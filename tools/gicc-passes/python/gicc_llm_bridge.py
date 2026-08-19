@@ -153,6 +153,11 @@ def _legal_actions(record: dict[str, Any]) -> list[str]:
         )
 
     legal = [path for path in PATH_ORDER if path in paths]
+    # The pass's hybrid baseline is materializable only where the compiler
+    # exposed both of its component lowerings. In particular, a modeled loop
+    # becomes one batched placeholder: it supports trigger/proxy, but not IPC
+    # or IPC_OR_DWQ. Feature extraction deliberately omits "ipc" there.
+    supports_hybrid = "trigger" in legal and "ipc" in legal
     # IPC_PUSH dereferences a mapped peer base.  Until the topology side-band
     # fills peer_locality, the hybrid default is safe but forced IPC is not.
     if record.get("peer_locality") != "same_node" and "ipc" in legal:
@@ -169,9 +174,10 @@ def _legal_actions(record: dict[str, Any]) -> list[str]:
                 f"site {record.get('site_id')!r} exposes host-only paths "
                 f"despite failed compiler legality: {sorted(unsafe)}"
             )
-    else:
+    elif supports_hybrid:
         # Abstention means the pass's hybrid IPC_OR_DWQ default.  It requires
-        # host staging and is therefore unavailable to a proxy-only site.
+        # both materializable branches and is therefore unavailable to a
+        # proxy-only or batched-loop site.
         legal.append("default")
     return legal
 
@@ -267,7 +273,12 @@ def _baseline_hint(dossier: dict[str, Any], errors: list[str]) -> dict[str, Any]
     sites: dict[str, Any] = {}
     for site in dossier.get("sites", []):
         legal = site.get("legal_actions", [])
-        if "default" not in legal and "proxy" in legal:
+        if "default" not in legal and "trigger" in legal:
+            sites[site["site_id"]] = {
+                "dispatch": ACTION_TO_DISPATCH["trigger"],
+                "reason": "deterministic materializable baseline for batched site",
+            }
+        elif "default" not in legal and "proxy" in legal:
             sites[site["site_id"]] = {
                 "dispatch": ACTION_TO_DISPATCH["proxy"],
                 "reason": "deterministic legality baseline for proxy-only site",

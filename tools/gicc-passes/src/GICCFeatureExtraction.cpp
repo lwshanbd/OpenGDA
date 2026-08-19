@@ -576,11 +576,18 @@ json::Value toRecord(const std::string &siteId,
     // drop the transfer, so that disqualifies them too.
     const bool hostCanStage =
         op.hk_capable && !(op.loop.inLoop && op.loop.degraded);
+    // A modeled loop is synthesized as one batched placeholder carrying
+    // arrays of descriptors. The current host lowering can materialize that
+    // shape as DWQ or erase it for CPU proxy, but it cannot issue per-element
+    // IPC (nor the IPC_OR_DWQ hybrid). Do not advertise an action that the
+    // real lowering will reject later.
+    const bool batchedLoop =
+        op.loop.inLoop && op.loop.ivBoundKnown && !op.loop.degraded;
     json::Array legal;
     legal.push_back("proxy");
     if (hostCanStage) {
         legal.push_back("trigger");
-        legal.push_back("ipc");
+        if (!batchedLoop) legal.push_back("ipc");
     }
     r["legal_paths"] = json::Value(std::move(legal));
     return json::Value(std::move(r));

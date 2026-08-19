@@ -11,8 +11,10 @@ sys.path.insert(0, str(PASS_ROOT / "python"))
 import gicc_llm_bridge as bridge
 
 
-def feature(site_id, *, hk=True, locality=None):
-    legal = ["proxy"] + (["trigger", "ipc"] if hk else [])
+def feature(site_id, *, hk=True, locality=None, batched_loop=False):
+    legal = ["proxy"] + (["trigger"] if hk else [])
+    if hk and not batched_loop:
+        legal.append("ipc")
     return {
         "schema_version": 6,
         "site_id": site_id,
@@ -24,7 +26,10 @@ def feature(site_id, *, hk=True, locality=None):
         "size_log2": 12,
         "peer_kind": "param",
         "peer_locality": locality,
-        "in_loop": False,
+        "in_loop": batched_loop,
+        "loop": ({"bound_known": True, "bound_const": 64,
+                  "iv_start": 0, "iv_step": 1}
+                 if batched_loop else None),
         "guard_density": 1.0,
         "fan_out": 1,
         "static_launch_sites": 1,
@@ -119,6 +124,33 @@ class LlmBridgeTests(unittest.TestCase):
             PLATFORM,
         )
         self.assertIn("ipc", dossier["sites"][0]["legal_actions"])
+
+    def test_batched_loop_exposes_only_materializable_actions(self):
+        site_id = "unit.cpp:20:kernel_from_ir::0"
+        dossier = bridge.make_dossier(
+            [feature(site_id, locality="same_node", batched_loop=True)],
+            PLATFORM,
+        )
+        self.assertEqual(
+            ["proxy", "trigger"], dossier["sites"][0]["legal_actions"]
+        )
+        bad = {
+            "schema_version": bridge.DECISION_SCHEMA,
+            "dossier_id": dossier["dossier_id"],
+            "decisions": {
+                site_id: {
+                    "action": "default",
+                    "confidence": 1.0,
+                    "rationale": "the batched lowering cannot materialize this",
+                }
+            },
+        }
+        hint, accepted, errors = bridge.decision_to_hint(dossier, bad)
+        self.assertFalse(accepted)
+        self.assertTrue(any("illegal action" in error for error in errors))
+        self.assertEqual(
+            "DWQ_TRIGGER", hint["sites"][site_id]["dispatch"]
+        )
 
     def test_valid_decision_becomes_hint_and_abstention_is_not_pinned(self):
         hint, accepted, errors = bridge.decision_to_hint(
