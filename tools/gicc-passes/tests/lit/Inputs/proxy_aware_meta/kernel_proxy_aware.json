@@ -10,10 +10,11 @@
   ],
   "ops": [
     {
-      "site_id": "k.cpp:1:kernel_proxy_aware::0",
+      "site_id": "?:?:kernel_proxy_aware::0",
       "kind":    "put_no_db",
       "guard":   { "kind": "always" },
       "hk_capable": true,
+      "block_slot": 9,
       "args": {
         "target_rank": { "kind": "param",     "param": 1 },
         "dst_buf":     { "kind": "const_i64", "value": 0 },
@@ -22,6 +23,14 @@
         "src_off":     { "kind": "const_i64", "value": 0 },
         "size":        { "kind": "param",     "param": 2 }
       }
+    },
+    {
+      "site_id": "?:?:kernel_proxy_aware::1",
+      "kind":    "quiet",
+      "guard":   { "kind": "always" },
+      "hk_capable": true,
+      "fence_scope": 0,
+      "args": {}
     }
   ]
 }

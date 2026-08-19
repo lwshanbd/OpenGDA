@@ -159,6 +159,34 @@ void lowerFlushAMDGCN(CallInst *CI) {
 //   guarantee was quietly gone.
 static constexpr int kAllBlocks = -2;
 
+// AMDGPU has intrinsics for the current workgroup/workitem id, but not for
+// CUDA/HIP's gridDim.x or blockDim.x.  The previous lowering invented
+// llvm.amdgcn.grid.size.x and llvm.amdgcn.workgroup.size.x declarations; opt
+// accepted those as ordinary functions and the device linker then failed with
+// undefined symbols.  Read the standard HSA kernel-dispatch packet instead:
+//
+//   byte  4: uint16_t workgroup_size_x
+//   byte 12: uint32_t grid_size_x (workitems, not workgroups)
+//
+// llvm.amdgcn.dispatch.ptr is a real target intrinsic and returns a constant
+// address-space pointer to that packet.  The quotient is HIP gridDim.x.
+Value *amdgcnGridDimX(IRBuilder<> &B, Module *M) {
+    Function *dispatchFn = Intrinsic::getDeclaration(
+        M, Intrinsic::amdgcn_dispatch_ptr);
+    Value *packet = B.CreateCall(dispatchFn, {}, "dispatch.ptr");
+    Type *i8Ty  = B.getInt8Ty();
+    Type *i16Ty = B.getInt16Ty();
+    Type *i32Ty = B.getInt32Ty();
+    Value *wgPtr = B.CreateGEP(i8Ty, packet, B.getInt64(4), "wg.x.ptr");
+    Value *gsPtr = B.CreateGEP(i8Ty, packet, B.getInt64(12), "grid.x.ptr");
+    Value *wg16 = B.CreateAlignedLoad(i16Ty, wgPtr, Align(2), false, "wg.x");
+    Value *grid = B.CreateAlignedLoad(i32Ty, gsPtr, Align(4), false, "grid.x");
+    Value *wg = B.CreateZExt(wg16, i32Ty, "wg.x.i32");
+    Value *safeWg = B.CreateSelect(
+        B.CreateICmpEQ(wg, B.getInt32(0)), B.getInt32(1), wg, "wg.x.safe");
+    return B.CreateUDiv(grid, safeWg, "grid.dim.x");
+}
+
 void wrapPreservedOpBlockAMDGCN(CallInst *CI, int slot, int laneArgIdx,
                                 int nslots = 0) {
     Module *M = CI->getModule();
@@ -182,15 +210,7 @@ void wrapPreservedOpBlockAMDGCN(CallInst *CI, int slot, int laneArgIdx,
         cond = B.CreateAnd(B.CreateICmpEQ(tid, B.getInt32(0)),
                            B.CreateICmpULT(bid, B.getInt32(nslots)));
     } else if (slot > 0) {
-        auto ngFn = M->getOrInsertFunction(
-            "llvm.amdgcn.grid.size.x",
-            FunctionType::get(B.getInt32Ty(), {}, false));
-        auto wsFn = M->getOrInsertFunction(
-            "llvm.amdgcn.workgroup.size.x",
-            FunctionType::get(B.getInt32Ty(), {}, false));
-        // gridDim.x = grid.size.x / workgroup.size.x on AMDGCN, where
-        // grid.size is in work items.
-        Value *nblocks = B.CreateUDiv(B.CreateCall(ngFn), B.CreateCall(wsFn));
+        Value *nblocks = amdgcnGridDimX(B, M);
         Value *safe = B.CreateSelect(
             B.CreateICmpEQ(nblocks, B.getInt32(0)), B.getInt32(1), nblocks);
         want = B.CreateURem(B.getInt32(slot), safe);
@@ -208,10 +228,17 @@ void wrapPreservedOpBlockAMDGCN(CallInst *CI, int slot, int laneArgIdx,
     const bool haveLane = laneArgIdx >= 0 &&
                           laneArgIdx < (int)CI->arg_size() &&
                           CI->getArgOperand(laneArgIdx)->getType()->isIntegerTy();
-    if (haveLane && slot > 0) {
+    if (haveLane && slot >= 0) {
+        // The issuing block is `slot % gridDim.x`, so its ring lane must be
+        // the same value.  Keeping the unmodded static slot here silently
+        // sends to rings that no launched block will drain whenever the
+        // number of sites exceeds the launch grid.
+        Type *lt = CI->getArgOperand(laneArgIdx)->getType();
+        IRBuilder<> LB(CI);
         CI->setArgOperand(laneArgIdx,
-                          ConstantInt::get(
-                              CI->getArgOperand(laneArgIdx)->getType(), slot));
+                          lt == want->getType()
+                              ? want
+                              : LB.CreateZExtOrTrunc(want, lt));
     } else if (haveLane && slot == kAllBlocks) {
         Type *lt = CI->getArgOperand(laneArgIdx)->getType();
         IRBuilder<> LB(CI);
@@ -335,6 +362,35 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
             }
         }
 
+        // A proxy quiet must drain every lane touched by a preserved proxy
+        // transfer.  Batch ownership is defined by the first host/DWQ
+        // completion point (often flush), so the trace template quite
+        // correctly records the slot count on that point rather than on a
+        // later quiet.  Device proxy pushes, however, are already live when
+        // flush executes and are completed by quiet.  Derive the lane span
+        // from the preserved transfer sites themselves instead of assuming
+        // the quiet carries the count.  This also handles mixed kernels: a
+        // trigger-only site does not force its device body to be preserved.
+        int proxySlotCount = 0;
+        if (haveFence && proxyAware) {
+            for (const auto &s : info.sites) {
+                if (s.kind != GICCOpKind::PutNoDb &&
+                    s.kind != GICCOpKind::GetNoDb)
+                    continue;
+                bool preserve = proxyAware;  // legacy per-kernel metadata
+                if (haveHint)
+                    preserve = hintFor(hint, s.siteId).dispatch ==
+                               DispatchKind::CpuProxyEnqueue;
+                if (!preserve) continue;
+                auto it = std::find_if(
+                    ktFence.ops.begin(), ktFence.ops.end(),
+                    [&](const OpTemplate &o) { return o.siteId == s.siteId; });
+                if (it != ktFence.ops.end() && it->block_slot >= 0)
+                    proxySlotCount =
+                        std::max(proxySlotCount, it->block_slot + 1);
+            }
+        }
+
         for (const auto &s : info.sites) {
             int slot = -1;
             if (haveFence) {
@@ -370,12 +426,14 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
                 case GICCOpKind::Quiet:
                     // Quiet stays a per-KERNEL decision: it drains the
                     // ring, so it is preserved iff some site in this
-                    // kernel actually uses the ring. Its slot is the
-                    // number of rings its group pushed to, so the drain
-                    // covers all of them rather than only the first.
+                    // kernel actually uses the ring. proxySlotCount was
+                    // derived above from the proxy-preserved sites, so the
+                    // drain covers every lane they may have pushed to.
                     putGetCalls.emplace_back(s.CI, proxyAware);
-                    if (proxyAware && slot >= 2) slotOf[s.CI] = -2;   // kAllBlocks
-                    if (proxyAware && slot >= 2) nslotOf[s.CI] = slot;
+                    if (proxyAware && proxySlotCount >= 2)
+                        slotOf[s.CI] = kAllBlocks;
+                    if (proxyAware && proxySlotCount >= 2)
+                        nslotOf[s.CI] = proxySlotCount;
                     break;
             }
         }
