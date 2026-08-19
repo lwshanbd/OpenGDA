@@ -6,6 +6,8 @@
 #   controls             build default/proxy/trigger/hand-rule binaries
 #   oracle               build all 16 proxy/trigger assignments for the
 #                        four-site parallel completion group
+#   measured-oracle      build the scoring-only policy derived from the
+#                        checked-in control and exact-oracle results
 #   candidate FILE NAME  validate one gicc-llm-decision-v1 response and build
 #                        a binary from its pass hint
 #
@@ -30,13 +32,15 @@ PROMPT="${GENERATED}/prompt.txt"
 FROZEN="${GICC_ROOT}/docs/experiments/compiler-lto-eval/frozen-v1"
 EVAL_TOOL="${GICC_ROOT}/examples/proxy/compiler_lto_eval.py"
 BRIDGE="${GICC_ROOT}/tools/gicc-passes/python/gicc_llm_bridge.py"
+CONTROL_RESULTS="${GICC_ROOT}/docs/experiments/compiler-lto-eval/runs/compiler-lto-controls-v1/summary.json"
+STATIC4_RESULTS="${GICC_ROOT}/docs/experiments/compiler-lto-eval/runs/compiler-lto-static4-oracle-v1/summary.json"
 
 test -f "${PASSES}" || {
   echo "ERROR: build the pass plugin first: ${PASSES}" >&2
   exit 1
 }
 case "${MODE}" in
-  facts|freeze|controls|oracle) ;;
+  facts|freeze|controls|oracle|measured-oracle) ;;
   candidate)
     test "$#" -eq 3 || {
       echo "usage: $0 candidate RESPONSE.json NAME" >&2
@@ -48,7 +52,7 @@ case "${MODE}" in
     }
     ;;
   *)
-    echo "usage: $0 {facts|freeze|controls|oracle|candidate RESPONSE.json NAME}" >&2
+    echo "usage: $0 {facts|freeze|controls|oracle|measured-oracle|candidate RESPONSE.json NAME}" >&2
     exit 2
     ;;
 esac
@@ -130,6 +134,14 @@ elif [ "${MODE}" = oracle ]; then
     NAMES+=("static4_mask${suffix}")
     HINTS+=("${ORACLE}/static4-mask${suffix}-hint.json")
   done
+elif [ "${MODE}" = measured-oracle ]; then
+  SCORING_ORACLE="${GENERATED}/measured-oracle"
+  python3 "${EVAL_TOOL}" measured-oracle --features "${FEATURES}" \
+    --dossier "${DOSSIER}" --prompt "${PROMPT}" --profile "${PROFILE}" \
+    --source "${SRC}" --controls "${SCORING_ORACLE}" --frozen "${FROZEN}" \
+    --results "${CONTROL_RESULTS}" --static4-oracle "${STATIC4_RESULTS}"
+  NAMES=(measured-oracle)
+  HINTS=("${SCORING_ORACLE}/measured-oracle-hint.json")
 else
   RESPONSE=$(realpath "$2")
   NAME="$3"

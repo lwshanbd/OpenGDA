@@ -1,0 +1,10 @@
+ALLOC rep=4 order=gbt-history,default,measured-oracle,hand warmup=10 runs=100 job=unknown
+BEGIN rep=4 arm=gbt-history log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-gbt-v1/raw/rep4-gbt-history.log time=2026-08-19T05:28:16Z
+END rep=4 arm=gbt-history time=2026-08-19T05:28:19Z
+BEGIN rep=4 arm=default log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-gbt-v1/raw/rep4-default.log time=2026-08-19T05:28:19Z
+END rep=4 arm=default time=2026-08-19T05:28:21Z
+BEGIN rep=4 arm=measured-oracle log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-gbt-v1/raw/rep4-measured-oracle.log time=2026-08-19T05:28:21Z
+END rep=4 arm=measured-oracle time=2026-08-19T05:28:23Z
+BEGIN rep=4 arm=hand log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-lto-eval/runs/compiler-lto-gbt-v1/raw/rep4-hand.log time=2026-08-19T05:28:23Z
+END rep=4 arm=hand time=2026-08-19T05:28:26Z
+ALLOC_DONE rep=4

@@ -1,0 +1,277 @@
+{
+  "accepted_hint_sha256": "2ae923e6af6f64f9f44404d29ec53c3d16fdc8d5ed089f3aaf9ee4d18da343f0",
+  "distance_policy": "train only historical D=0; do not convert compiler FLOPs to us",
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "excluded_message_sizes": [
+    256,
+    4096,
+    1048576
+  ],
+  "historical_dataset_sha256": "c28e3cb69fb78aa4cf9223fb281cf71658a58abd1def661e29351caba0466836",
+  "model_features": [
+    "log2(size_bytes)",
+    "log2(logical_ops)",
+    "log2(total_bytes)",
+    "is_proxy",
+    "log2(trigger_batch) or -1",
+    "log2(proxy_producers) or -1",
+    "log2(proxy_workers) or -1"
+  ],
+  "numpy_version": "2.1.2",
+  "oracle_or_runtime_results_read": false,
+  "policy": "size-holdout",
+  "predictions": [
+    {
+      "chosen_action": "trigger",
+      "compiler_facts_not_mapped_to_historical_grid": {
+        "coalescable": [
+          true
+        ],
+        "descriptor_reusable": [
+          false
+        ],
+        "flops_to_first_use": [
+          68
+        ]
+      },
+      "confidence": 0.6904327214159389,
+      "grid_blocks": 1,
+      "in_loop": true,
+      "kernel": "eval_adjacent_batch",
+      "legal_actions": [
+        "proxy",
+        "trigger"
+      ],
+      "logical_ops": 16,
+      "predicted_exposed_us": {
+        "proxy": 51.69109941965411,
+        "trigger": 23.176585463017798
+      },
+      "proxy_producers": 1,
+      "proxy_workers": 8,
+      "site_ids": [
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2"
+      ],
+      "size_bytes": 4096
+    },
+    {
+      "chosen_action": "proxy",
+      "compiler_facts_not_mapped_to_historical_grid": {
+        "coalescable": [
+          false
+        ],
+        "descriptor_reusable": [
+          false
+        ],
+        "flops_to_first_use": [
+          0
+        ]
+      },
+      "confidence": 1.0,
+      "grid_blocks": 1,
+      "in_loop": false,
+      "kernel": "eval_dynamic_offset",
+      "legal_actions": [
+        "proxy"
+      ],
+      "logical_ops": 1,
+      "predicted_exposed_us": {
+        "proxy": 14.280295934449859
+      },
+      "proxy_producers": 1,
+      "proxy_workers": 8,
+      "site_ids": [
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0"
+      ],
+      "size_bytes": 4096
+    },
+    {
+      "chosen_action": "trigger",
+      "compiler_facts_not_mapped_to_historical_grid": {
+        "coalescable": [
+          true
+        ],
+        "descriptor_reusable": [
+          false
+        ],
+        "flops_to_first_use": [
+          5392
+        ]
+      },
+      "confidence": 0.7092176073252694,
+      "grid_blocks": 8,
+      "in_loop": true,
+      "kernel": "eval_far_batch",
+      "legal_actions": [
+        "proxy",
+        "trigger"
+      ],
+      "logical_ops": 64,
+      "predicted_exposed_us": {
+        "proxy": 219.7727675830251,
+        "trigger": 90.10781816818347
+      },
+      "proxy_producers": 1,
+      "proxy_workers": 8,
+      "site_ids": [
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0"
+      ],
+      "size_bytes": 4096
+    },
+    {
+      "chosen_action": "proxy",
+      "compiler_facts_not_mapped_to_historical_grid": {
+        "coalescable": [
+          false
+        ],
+        "descriptor_reusable": [
+          false
+        ],
+        "flops_to_first_use": [
+          0
+        ]
+      },
+      "confidence": 0.5043342840092074,
+      "grid_blocks": 8,
+      "in_loop": false,
+      "kernel": "eval_large_single",
+      "legal_actions": [
+        "default",
+        "proxy",
+        "trigger"
+      ],
+      "logical_ops": 1,
+      "predicted_exposed_us": {
+        "proxy": 52.520324552330436,
+        "trigger": 53.43883876673608
+      },
+      "proxy_producers": 1,
+      "proxy_workers": 8,
+      "site_ids": [
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0"
+      ],
+      "size_bytes": 1048576
+    },
+    {
+      "chosen_action": "trigger",
+      "compiler_facts_not_mapped_to_historical_grid": {
+        "coalescable": [
+          false
+        ],
+        "descriptor_reusable": [
+          true
+        ],
+        "flops_to_first_use": [
+          66
+        ]
+      },
+      "confidence": 0.6786088244408767,
+      "grid_blocks": 1,
+      "in_loop": true,
+      "kernel": "eval_reuse_batch",
+      "legal_actions": [
+        "proxy",
+        "trigger"
+      ],
+      "logical_ops": 32,
+      "predicted_exposed_us": {
+        "proxy": 108.88492310690523,
+        "trigger": 51.56822631480811
+      },
+      "proxy_producers": 1,
+      "proxy_workers": 8,
+      "site_ids": [
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2"
+      ],
+      "size_bytes": 4096
+    },
+    {
+      "chosen_action": "trigger",
+      "compiler_facts_not_mapped_to_historical_grid": {
+        "coalescable": [
+          false
+        ],
+        "descriptor_reusable": [
+          false
+        ],
+        "flops_to_first_use": [
+          0
+        ]
+      },
+      "confidence": 0.5642584764234795,
+      "grid_blocks": 4,
+      "in_loop": false,
+      "kernel": "eval_static4_parallel",
+      "legal_actions": [
+        "default",
+        "proxy",
+        "trigger"
+      ],
+      "logical_ops": 4,
+      "predicted_exposed_us": {
+        "proxy": 12.53312381121778,
+        "trigger": 9.678547497042008
+      },
+      "proxy_producers": 4,
+      "proxy_workers": 8,
+      "site_ids": [
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3"
+      ],
+      "size_bytes": 4096
+    },
+    {
+      "chosen_action": "trigger",
+      "compiler_facts_not_mapped_to_historical_grid": {
+        "coalescable": [
+          false
+        ],
+        "descriptor_reusable": [
+          false
+        ],
+        "flops_to_first_use": [
+          0
+        ]
+      },
+      "confidence": 0.5183044746752461,
+      "grid_blocks": 1,
+      "in_loop": false,
+      "kernel": "eval_tiny_single",
+      "legal_actions": [
+        "default",
+        "proxy",
+        "trigger"
+      ],
+      "logical_ops": 1,
+      "predicted_exposed_us": {
+        "proxy": 11.935952500834881,
+        "trigger": 11.092890744853067
+      },
+      "proxy_producers": 1,
+      "proxy_workers": 8,
+      "site_ids": [
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0"
+      ],
+      "size_bytes": 256
+    }
+  ],
+  "response_sha256_canonical": "f4780e8c3980b49a1abba4583c9d6b1e6f177d1728d6a4426c0bff8a65c828a3",
+  "schema_version": "gicc-compiler-lto-gbt-v1",
+  "scikit_learn_version": "1.6.1",
+  "source_read": false,
+  "training": {
+    "distance_us": 0,
+    "message_sizes": [
+      1024,
+      16384,
+      65536,
+      262144
+    ],
+    "min_spin0_us": 13.125,
+    "rows": 399,
+    "target": "log(max(median_us - min_spin0_us, 0.01))",
+    "unique_cells": 399
+  }
+}

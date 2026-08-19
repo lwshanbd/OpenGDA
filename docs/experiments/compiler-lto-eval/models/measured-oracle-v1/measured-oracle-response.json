@@ -1,0 +1,88 @@
+{
+  "decisions": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "measured scoring oracle; never model input or model output"
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "measured scoring oracle; never model input or model output"
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "trigger",
+      "confidence": 1.0,
+      "rationale": "measured scoring oracle; never model input or model output"
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "trigger",
+      "confidence": 1.0,
+      "rationale": "measured scoring oracle; never model input or model output"
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "measured scoring oracle; never model input or model output"
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "measured scoring oracle; never model input or model output"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "measured scoring oracle; never model input or model output"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "measured scoring oracle; never model input or model output"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "measured scoring oracle; never model input or model output"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "measured scoring oracle; never model input or model output"
+    }
+  },
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "producer": {
+    "controls_summary_sha256": "736d64c6fe80a3f9946035cef320c781e0f1994dd4391472fa641e367f716bb8",
+    "kind": "measured_oracle_control",
+    "oracle_or_runtime_results_read": true,
+    "selected_actions_by_kernel": {
+      "eval_adjacent_batch": [
+        "proxy"
+      ],
+      "eval_dynamic_offset": [
+        "proxy"
+      ],
+      "eval_far_batch": [
+        "proxy"
+      ],
+      "eval_large_single": [
+        "trigger"
+      ],
+      "eval_reuse_batch": [
+        "proxy"
+      ],
+      "eval_static4_parallel": [
+        "proxy",
+        "proxy",
+        "proxy",
+        "proxy"
+      ],
+      "eval_tiny_single": [
+        "trigger"
+      ]
+    },
+    "static4_summary_sha256": "42df711a6e4f54079d75791e516addc015954b76f0803308946772612f3da2bf"
+  },
+  "schema_version": "gicc-llm-decision-v1"
+}

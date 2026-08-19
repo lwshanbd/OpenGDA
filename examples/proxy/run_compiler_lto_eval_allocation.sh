@@ -26,10 +26,10 @@ printf 'ALLOC rep=%s order=%s warmup=%s runs=%s job=%s\n' \
   "${REP}" "${ORDER}" "${WARMUP}" "${RUNS}" "${FLUX_JOB_ID:-unknown}"
 
 for arm in "${ARMS[@]}"; do
-  case "${arm}" in default|proxy|trigger|hand) ;; *)
-    echo "unknown arm=${arm}" >&2
+  if [[ ! "${arm}" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+    echo "invalid arm=${arm}" >&2
     exit 2
-  esac
+  fi
   binary="${BIN_DIR}/compiler_lto_eval_${arm}"
   test -x "${binary}"
   log="${OUTDIR}/rep${REP}-${arm}.log"

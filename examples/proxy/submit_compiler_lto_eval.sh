@@ -1,5 +1,5 @@
 #!/bin/bash
-# Submit bounded, allocation-paired control runs for compiler_lto_eval.
+# Submit bounded, allocation-paired control or model-policy runs.
 set -euo pipefail
 
 ROOT="${GICC_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
@@ -15,12 +15,22 @@ case "${LIMIT}" in *m|*s) ;; *)
   exit 2
 esac
 case "${MODE}" in
-  smoke) REPS="1" ;;
-  paired) REPS="1 2 3 4" ;;
-  *) echo "usage: $0 {smoke|paired} [TAG]" >&2; exit 2 ;;
+  smoke)
+    REPS="1"
+    ARMS=(default proxy trigger hand)
+    ;;
+  paired)
+    REPS="1 2 3 4"
+    ARMS=(default proxy trigger hand)
+    ;;
+  gbt)
+    REPS="1 2 3 4"
+    ARMS=(default hand gbt-history measured-oracle)
+    ;;
+  *) echo "usage: $0 {smoke|paired|gbt} [TAG]" >&2; exit 2 ;;
 esac
 
-for arm in default proxy trigger hand; do
+for arm in "${ARMS[@]}"; do
   test -x "${ROOT}/build_ofi/compiler_lto_eval/compiler_lto_eval_${arm}"
 done
 mkdir -p "${OUT}/jobs" "${OUT}/raw"
@@ -28,11 +38,12 @@ MANIFEST="${OUT}/jobs.tsv"
 printf 'job_id\trep\torder\tqueue\n' > "${MANIFEST}"
 
 order_for() {
+  local a=${ARMS[0]} b=${ARMS[1]} c=${ARMS[2]} d=${ARMS[3]}
   case "$1" in
-    1) echo default,proxy,trigger,hand ;;
-    2) echo proxy,hand,default,trigger ;;
-    3) echo hand,trigger,proxy,default ;;
-    4) echo trigger,default,hand,proxy ;;
+    1) echo "${a},${b},${c},${d}" ;;
+    2) echo "${b},${d},${a},${c}" ;;
+    3) echo "${d},${c},${b},${a}" ;;
+    4) echo "${c},${a},${d},${b}" ;;
   esac
 }
 

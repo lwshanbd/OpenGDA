@@ -69,6 +69,16 @@ EXPECTED: dict[str, dict[str, Any]] = {
     },
 }
 
+SCENARIO_FOR_KERNEL = {
+    "eval_tiny_single": "tiny-k1-grid1",
+    "eval_reuse_batch": "reuse-k32-grid1",
+    "eval_adjacent_batch": "adjacent-k16-grid1",
+    "eval_far_batch": "far-k64-grid8",
+    "eval_large_single": "large-k1-grid8",
+    "eval_dynamic_offset": "dynamic-k1-grid1",
+    "eval_static4_parallel": "static4-k4-grid4",
+}
+
 
 class EvalError(ValueError):
     pass
@@ -184,6 +194,87 @@ def make_static4_oracle(dossier_path: Path, output: Path) -> list[Path]:
         write_json(hint_path, hint)
         written.extend((response_path, hint_path))
     return written
+
+
+def make_measured_oracle(dossier_path: Path, controls_summary_path: Path,
+                         static4_summary_path: Path,
+                         output: Path) -> list[Path]:
+    """Turn measured control/oracle results into an explicit scoring arm.
+
+    This response is intentionally marked as reading evaluation results. It
+    must never be passed off as a model output or used as model input.
+    """
+    dossier = bridge._verified_dossier(read_json(dossier_path))
+    controls_summary = read_json(controls_summary_path)
+    static4_summary = read_json(static4_summary_path)
+    aggregate = controls_summary.get("aggregate")
+    if not isinstance(aggregate, dict):
+        raise EvalError("control summary lacks aggregate results")
+    exact = static4_summary.get("oracle")
+    if not isinstance(exact, dict) or not isinstance(exact.get("mask"), int):
+        raise EvalError("static4 summary lacks an exact oracle mask")
+    mask = exact["mask"]
+    if not 0 <= mask < 16:
+        raise EvalError(f"invalid static4 oracle mask {mask}")
+
+    by_kernel: dict[str, list[dict[str, Any]]] = {}
+    for site in dossier["sites"]:
+        by_kernel.setdefault(site["kernel"], []).append(site)
+    if set(by_kernel) != set(SCENARIO_FOR_KERNEL):
+        raise EvalError("measured-oracle kernel set differs from frozen suite")
+
+    decisions: dict[str, Any] = {}
+    selected: dict[str, Any] = {}
+    for kernel, scenario in SCENARIO_FOR_KERNEL.items():
+        sites = sorted(by_kernel[kernel], key=lambda site: site["site_id"])
+        result = aggregate.get(scenario)
+        if not isinstance(result, dict):
+            raise EvalError(f"control summary lacks {scenario}")
+        if kernel == "eval_static4_parallel":
+            if len(sites) != 4:
+                raise EvalError("static4 exact oracle requires four sites")
+            actions = ["proxy" if mask & (1 << bit) else "trigger"
+                       for bit in range(4)]
+        elif result.get("decision_bearing") is False:
+            actions = ["proxy"] * len(sites)
+        else:
+            action = result.get("best_uniform_legal_control")
+            if action not in {"proxy", "trigger"}:
+                raise EvalError(f"{scenario}: invalid measured best action {action!r}")
+            actions = [action] * len(sites)
+        selected[kernel] = actions
+        for site, action in zip(sites, actions):
+            if action not in site["legal_actions"]:
+                raise EvalError(f"{site['site_id']}: oracle action is illegal")
+            decisions[site["site_id"]] = {
+                "action": action,
+                "confidence": 1.0,
+                "rationale": (
+                    "measured scoring oracle; never model input or model output"
+                ),
+            }
+
+    response = {
+        "schema_version": bridge.DECISION_SCHEMA,
+        "dossier_id": dossier["dossier_id"],
+        "producer": {
+            "kind": "measured_oracle_control",
+            "oracle_or_runtime_results_read": True,
+            "controls_summary_sha256": sha256_file(controls_summary_path),
+            "static4_summary_sha256": sha256_file(static4_summary_path),
+            "selected_actions_by_kernel": selected,
+        },
+        "decisions": decisions,
+    }
+    hint, accepted, errors = bridge.decision_to_hint(dossier, response)
+    if not accepted or errors:
+        raise EvalError(f"bridge rejected measured oracle: {errors}")
+    output.mkdir(parents=True, exist_ok=True)
+    response_path = output / "measured-oracle-response.json"
+    hint_path = output / "measured-oracle-hint.json"
+    write_json(response_path, response)
+    write_json(hint_path, hint)
+    return [response_path, hint_path]
 
 
 def decision_sites(features: Any) -> list[dict[str, Any]]:
@@ -372,7 +463,8 @@ def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "command",
-        choices=("verify", "controls", "oracle", "freeze", "check-frozen"),
+        choices=("verify", "controls", "oracle", "measured-oracle",
+                 "freeze", "check-frozen"),
     )
     ap.add_argument("--source", type=Path,
                     default=ROOT / "examples/proxy/compiler_lto_eval.cpp")
@@ -382,6 +474,8 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--profile", type=Path,
                     default=ROOT / "examples/proxy/compiler_lto_eval_profile.json")
     ap.add_argument("--controls", type=Path, required=True)
+    ap.add_argument("--results", type=Path)
+    ap.add_argument("--static4-oracle", type=Path)
     ap.add_argument("--frozen", type=Path,
                     default=ROOT / "docs/experiments/compiler-lto-eval/frozen-v1")
     return ap
@@ -402,6 +496,16 @@ def main() -> int:
         if args.command == "oracle":
             paths = make_static4_oracle(args.dossier, args.controls)
             print(f"wrote {len(paths)} exhaustive static4 oracle artifacts")
+            return 0
+        if args.command == "measured-oracle":
+            if args.results is None or args.static4_oracle is None:
+                raise EvalError(
+                    "measured-oracle requires --results and --static4-oracle"
+                )
+            paths = make_measured_oracle(
+                args.dossier, args.results, args.static4_oracle, args.controls,
+            )
+            print(f"wrote {len(paths)} measured scoring-oracle artifacts")
             return 0
         if args.command == "freeze":
             freeze(args, manifest)

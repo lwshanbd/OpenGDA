@@ -1,0 +1,54 @@
+{
+  "default_dispatch": "IPC_OR_DWQ",
+  "llm_metadata": {
+    "accepted": true,
+    "decision_schema": "gicc-llm-decision-v1",
+    "decision_sites": 10,
+    "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+    "pinned_sites": 10
+  },
+  "schema_version": "gicc-hint-v1",
+  "sites": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.710: GBT history; historical-grid prediction proxy=209.925us, trigger=85.855us"
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.685: GBT history; historical-grid prediction proxy=106.667us, trigger=48.965us"
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.508: GBT history; historical-grid prediction proxy=12.972us, trigger=12.571us"
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.514: GBT history; historical-grid prediction proxy=48.036us, trigger=50.733us"
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.669: GBT history; historical-grid prediction proxy=51.400us, trigger=25.441us"
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=1.000: GBT history; historical-grid prediction proxy=11.437us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.519: GBT history; historical-grid prediction proxy=11.219us, trigger=10.377us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.519: GBT history; historical-grid prediction proxy=11.219us, trigger=10.377us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.519: GBT history; historical-grid prediction proxy=11.219us, trigger=10.377us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.519: GBT history; historical-grid prediction proxy=11.219us, trigger=10.377us"
+    }
+  },
+  "version": 1
+}

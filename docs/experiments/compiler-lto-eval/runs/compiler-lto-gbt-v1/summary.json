@@ -1,0 +1,334 @@
+{
+  "aggregate": {
+    "adjacent-k16-grid1": {
+      "decision_bearing": true,
+      "geomean_median_us": {
+        "default": 180.72342242553955,
+        "gbt-history": 180.74501914494297,
+        "hand": 180.26337676700751,
+        "measured-oracle": 170.26092107629546
+      },
+      "slowdown_vs_measured_oracle": {
+        "default": 1.0614498105795853,
+        "gbt-history": 1.0615766554202388,
+        "hand": 1.0587478067631848,
+        "measured-oracle": 1.0
+      }
+    },
+    "dynamic-k1-grid1": {
+      "decision_bearing": false,
+      "geomean_median_us": {
+        "default": 28.828731816579722,
+        "gbt-history": 28.939381529261183,
+        "hand": 28.554791618321616,
+        "measured-oracle": 29.666552021311517
+      },
+      "slowdown_vs_measured_oracle": {
+        "default": 0.9717587603665593,
+        "gbt-history": 0.9754885403761125,
+        "hand": 0.9625247854151959,
+        "measured-oracle": 1.0
+      }
+    },
+    "far-k64-grid8": {
+      "decision_bearing": true,
+      "geomean_median_us": {
+        "default": 702.2731753707906,
+        "gbt-history": 697.5532646575583,
+        "hand": 693.5543659832354,
+        "measured-oracle": 635.7797893602424
+      },
+      "slowdown_vs_measured_oracle": {
+        "default": 1.1045855611067121,
+        "gbt-history": 1.0971617474023134,
+        "hand": 1.090871993086048,
+        "measured-oracle": 1.0
+      }
+    },
+    "large-k1-grid8": {
+      "decision_bearing": true,
+      "geomean_median_us": {
+        "default": 74.22571166364936,
+        "gbt-history": 80.27434841343941,
+        "hand": 78.13307813106606,
+        "measured-oracle": 75.32117823550509
+      },
+      "slowdown_vs_measured_oracle": {
+        "default": 0.985456061661296,
+        "gbt-history": 1.065760657148078,
+        "hand": 1.0373321283792065,
+        "measured-oracle": 1.0
+      }
+    },
+    "reuse-k32-grid1": {
+      "decision_bearing": true,
+      "geomean_median_us": {
+        "default": 349.42149159708055,
+        "gbt-history": 348.81232929214707,
+        "hand": 348.10844184843853,
+        "measured-oracle": 324.8617438397414
+      },
+      "slowdown_vs_measured_oracle": {
+        "default": 1.075600615409658,
+        "gbt-history": 1.0737254721633853,
+        "hand": 1.0715587429099225,
+        "measured-oracle": 1.0
+      }
+    },
+    "static4-k4-grid4": {
+      "decision_bearing": true,
+      "geomean_median_us": {
+        "default": 55.74579636306003,
+        "gbt-history": 56.151381321519,
+        "hand": 40.52925033768463,
+        "measured-oracle": 41.39471731815326
+      },
+      "slowdown_vs_measured_oracle": {
+        "default": 1.346688659197903,
+        "gbt-history": 1.3564866475581496,
+        "hand": 0.9790923326322828,
+        "measured-oracle": 1.0
+      }
+    },
+    "tiny-k1-grid1": {
+      "decision_bearing": true,
+      "geomean_median_us": {
+        "default": 24.034781466245324,
+        "gbt-history": 24.085830047050703,
+        "hand": 27.88595352148568,
+        "measured-oracle": 23.242508436495807
+      },
+      "slowdown_vs_measured_oracle": {
+        "default": 1.0340872428599606,
+        "gbt-history": 1.036283588445673,
+        "hand": 1.1997824416274556,
+        "measured-oracle": 1.0
+      }
+    }
+  },
+  "binary_sha256_by_arm": {
+    "default": "df07bf621f27a89442944615513627bc95867d030a837ced18b043a698070d45",
+    "gbt-history": "9eb6ef8aabbfd6dcc06c882d3c9f0b6834305d077fe53edd295453da77d02707",
+    "hand": "3c80599979542f1ae9ce933b143bb76bde4e92b39695819ec0763b105a20b219",
+    "measured-oracle": "56fb4d3b49ea4fcc1da79c12aa2be091da2631d9e3d635822f5298f75ffd21bc"
+  },
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "oracle_arm": "measured-oracle",
+  "policies": {
+    "default": {
+      "actions_by_kernel": {
+        "eval_adjacent_batch": [
+          "trigger"
+        ],
+        "eval_dynamic_offset": [
+          "proxy"
+        ],
+        "eval_far_batch": [
+          "trigger"
+        ],
+        "eval_large_single": [
+          "trigger"
+        ],
+        "eval_reuse_batch": [
+          "trigger"
+        ],
+        "eval_static4_parallel": [
+          "trigger",
+          "trigger",
+          "trigger",
+          "trigger"
+        ],
+        "eval_tiny_single": [
+          "trigger"
+        ]
+      },
+      "geomean_paired_primary_regret": 1.0957258800005425,
+      "paired_primary_regret_by_replicate": {
+        "1": 1.084308374715952,
+        "2": 1.0849683408079047,
+        "3": 1.0983444862266387,
+        "4": 1.115576162073916
+      },
+      "primary_geomean_regret": 1.0957258800005427,
+      "scenario_action_count": 6,
+      "scenario_action_matches": 2,
+      "secondary_sum_geomean_medians_us": 1415.2531107029452
+    },
+    "gbt-history": {
+      "actions_by_kernel": {
+        "eval_adjacent_batch": [
+          "trigger"
+        ],
+        "eval_dynamic_offset": [
+          "proxy"
+        ],
+        "eval_far_batch": [
+          "trigger"
+        ],
+        "eval_large_single": [
+          "proxy"
+        ],
+        "eval_reuse_batch": [
+          "trigger"
+        ],
+        "eval_static4_parallel": [
+          "trigger",
+          "trigger",
+          "trigger",
+          "trigger"
+        ],
+        "eval_tiny_single": [
+          "trigger"
+        ]
+      },
+      "geomean_paired_primary_regret": 1.1103115309544553,
+      "paired_primary_regret_by_replicate": {
+        "1": 1.123397300902272,
+        "2": 1.103212882002228,
+        "3": 1.0992823705387489,
+        "4": 1.1155201947631346
+      },
+      "primary_geomean_regret": 1.1103115309544553,
+      "scenario_action_count": 6,
+      "scenario_action_matches": 1,
+      "secondary_sum_geomean_medians_us": 1416.5615544059187
+    },
+    "hand": {
+      "actions_by_kernel": {
+        "eval_adjacent_batch": [
+          "trigger"
+        ],
+        "eval_dynamic_offset": [
+          "proxy"
+        ],
+        "eval_far_batch": [
+          "trigger"
+        ],
+        "eval_large_single": [
+          "proxy"
+        ],
+        "eval_reuse_batch": [
+          "trigger"
+        ],
+        "eval_static4_parallel": [
+          "proxy",
+          "proxy",
+          "proxy",
+          "proxy"
+        ],
+        "eval_tiny_single": [
+          "proxy"
+        ]
+      },
+      "geomean_paired_primary_regret": 1.0708723701631162,
+      "paired_primary_regret_by_replicate": {
+        "1": 1.0507557685741842,
+        "2": 1.068490317393376,
+        "3": 1.0814660475463087,
+        "4": 1.0830926039966131
+      },
+      "primary_geomean_regret": 1.0708723701631162,
+      "scenario_action_count": 6,
+      "scenario_action_matches": 1,
+      "secondary_sum_geomean_medians_us": 1397.0292582072393
+    },
+    "measured-oracle": {
+      "actions_by_kernel": {
+        "eval_adjacent_batch": [
+          "proxy"
+        ],
+        "eval_dynamic_offset": [
+          "proxy"
+        ],
+        "eval_far_batch": [
+          "proxy"
+        ],
+        "eval_large_single": [
+          "trigger"
+        ],
+        "eval_reuse_batch": [
+          "proxy"
+        ],
+        "eval_static4_parallel": [
+          "proxy",
+          "proxy",
+          "proxy",
+          "proxy"
+        ],
+        "eval_tiny_single": [
+          "trigger"
+        ]
+      },
+      "geomean_paired_primary_regret": 1.0,
+      "paired_primary_regret_by_replicate": {
+        "1": 1.0,
+        "2": 1.0,
+        "3": 1.0,
+        "4": 1.0
+      },
+      "primary_geomean_regret": 1.0,
+      "scenario_action_count": 6,
+      "scenario_action_matches": 6,
+      "secondary_sum_geomean_medians_us": 1300.527410287745
+    }
+  },
+  "replicates": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "response_provenance": {
+    "gbt-history": {
+      "producer": {
+        "excluded_message_sizes": [],
+        "historical_dataset_sha256": "c28e3cb69fb78aa4cf9223fb281cf71658a58abd1def661e29351caba0466836",
+        "kind": "gradient_boosted_regression",
+        "max_depth": 3,
+        "n_estimators": 200,
+        "policy": "history",
+        "random_state": 0,
+        "schema_version": "gicc-compiler-lto-gbt-v1"
+      },
+      "response": "docs/experiments/compiler-lto-eval/models/gbt-v1/history-response.json",
+      "response_sha256": "16256237df41058707d98f386a32f6803975a2e5a1c8727b3a2e094a171d1047"
+    },
+    "measured-oracle": {
+      "producer": {
+        "controls_summary_sha256": "736d64c6fe80a3f9946035cef320c781e0f1994dd4391472fa641e367f716bb8",
+        "kind": "measured_oracle_control",
+        "oracle_or_runtime_results_read": true,
+        "selected_actions_by_kernel": {
+          "eval_adjacent_batch": [
+            "proxy"
+          ],
+          "eval_dynamic_offset": [
+            "proxy"
+          ],
+          "eval_far_batch": [
+            "proxy"
+          ],
+          "eval_large_single": [
+            "trigger"
+          ],
+          "eval_reuse_batch": [
+            "proxy"
+          ],
+          "eval_static4_parallel": [
+            "proxy",
+            "proxy",
+            "proxy",
+            "proxy"
+          ],
+          "eval_tiny_single": [
+            "trigger"
+          ]
+        },
+        "static4_summary_sha256": "42df711a6e4f54079d75791e516addc015954b76f0803308946772612f3da2bf"
+      },
+      "response": "docs/experiments/compiler-lto-eval/models/measured-oracle-v1/measured-oracle-response.json",
+      "response_sha256": "a35274b0df139230da65bda20257d37ecc67e67eb6952136acd33f84be25d3c2"
+    }
+  },
+  "scope": "paired real-LTO policy binaries; forced proxy-only scenario excluded from primary decision regret"
+}

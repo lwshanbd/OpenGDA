@@ -1,0 +1,66 @@
+{
+  "decisions": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "action": "trigger",
+      "confidence": 0.709734,
+      "rationale": "GBT history; historical-grid prediction proxy=209.925us, trigger=85.855us"
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.685378,
+      "rationale": "GBT history; historical-grid prediction proxy=106.667us, trigger=48.965us"
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "trigger",
+      "confidence": 0.507842,
+      "rationale": "GBT history; historical-grid prediction proxy=12.972us, trigger=12.571us"
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.513653,
+      "rationale": "GBT history; historical-grid prediction proxy=48.036us, trigger=50.733us"
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.668912,
+      "rationale": "GBT history; historical-grid prediction proxy=51.400us, trigger=25.441us"
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "action": "proxy",
+      "confidence": 1.0,
+      "rationale": "GBT history; historical-grid prediction proxy=11.437us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "action": "trigger",
+      "confidence": 0.519488,
+      "rationale": "GBT history; historical-grid prediction proxy=11.219us, trigger=10.377us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "action": "trigger",
+      "confidence": 0.519488,
+      "rationale": "GBT history; historical-grid prediction proxy=11.219us, trigger=10.377us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.519488,
+      "rationale": "GBT history; historical-grid prediction proxy=11.219us, trigger=10.377us"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "action": "trigger",
+      "confidence": 0.519488,
+      "rationale": "GBT history; historical-grid prediction proxy=11.219us, trigger=10.377us"
+    }
+  },
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "producer": {
+    "excluded_message_sizes": [],
+    "historical_dataset_sha256": "c28e3cb69fb78aa4cf9223fb281cf71658a58abd1def661e29351caba0466836",
+    "kind": "gradient_boosted_regression",
+    "max_depth": 3,
+    "n_estimators": 200,
+    "policy": "history",
+    "random_state": 0,
+    "schema_version": "gicc-compiler-lto-gbt-v1"
+  },
+  "schema_version": "gicc-llm-decision-v1"
+}

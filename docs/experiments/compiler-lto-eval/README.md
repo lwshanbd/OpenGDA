@@ -97,6 +97,70 @@ of legal static-four assignments, but only one allocation-level replicate;
 the four-replicate uniform controls above carry the stronger repeatability
 claim.
 
+## Source-free GBT transfer baseline
+
+`compiler_lto_gbt.py` tests whether a conventional tabular model trained on
+the pre-existing `grid_big.csv` microbenchmark can transfer to the real LTO
+path. The training file is bound by the dossier to SHA-256
+`c28e3cb69fb78aa4cf9223fb281cf71658a58abd1def661e29351caba0466836`.
+The model reads the frozen dossier and that historical table only: it does not
+accept source, frozen runtime logs, or oracle labels.
+
+Only compatible axes are transferred: message bytes, logical op count,
+trigger batch size, proxy producer count, and proxy worker count. Historical
+distance is measured in microseconds while LTO reports instruction/FLOP
+distance, so the GBT trains only on historical `D=0` rows instead of inventing
+a conversion. Consequently, compiler-only semantic facts such as descriptor
+reuse, coalescability, and exact issue-to-use FLOPs remain available to an LLM
+but are not falsely encoded into the tabular baseline.
+
+Two deterministic variants were generated:
+
+- `history`: 621 historical rows, all historical sizes;
+- `size-holdout`: 399 rows after excluding every frozen message size (256 B,
+  4 KiB, and 1 MiB; 1 MiB was already outside the historical table).
+
+Both independently emit the same ten-site action assignment and both pass the
+strict decision bridge. They choose trigger for tiny, reuse, adjacent, far,
+and all four static sites; proxy for large and the forced dynamic site. Since
+their materialized actions are identical, only `history` is run as a distinct
+policy; duplicating the size-holdout binary would add no decision evidence.
+
+`compiler-lto-gbt-v1` compares four real LTO binaries—default, hand rule,
+GBT, and a clearly labeled measured-oracle scoring control—inside four paired
+allocations with rotated order. The oracle response explicitly records that
+it reads control/oracle results and is never model input or model output.
+Jobs `f5qkYLNd58tw`, `f5qkYLWYfJFq`, `f5qkYLdPyynF`, and `f5qkYLkKkd9h`
+completed cleanly; all 112 records passed full-region hashes and exact
+staged/pushed route checks. The analyzer also verifies that the logged arm,
+replicate, and binary name agree and that each arm uses one SHA-256-identical
+binary across all four replicates. Those four binary hashes are retained in
+the machine-readable `summary.json`.
+
+The history response SHA-256 is
+`16256237df41058707d98f386a32f6803975a2e5a1c8727b3a2e094a171d1047`;
+the size-held-out response is
+`5bd79edd74b5e2a8ce8fe19aec503611888edb7cd250e2be75c88f2fe9a8e84a`.
+The measured-oracle response is separately bound as
+`a35274b0df139230da65bda20257d37ecc67e67eb6952136acd33f84be25d3c2`,
+and the final run summary is
+`1217a7ef5beb22c2fe16050e1494f2d52d3f700f8c07c57002ff47358c61eb6d`.
+
+| policy | primary geomean regret | action matches | sum of scenario geomean medians |
+| --- | ---: | ---: | ---: |
+| measured oracle | 1.0000x | 6/6 | 1300.527 us |
+| hand rule | 1.0709x | 1/6 | 1397.029 us |
+| compiler default | 1.0957x | 2/6 | 1415.253 us |
+| historical GBT | 1.1103x | 1/6 | 1416.562 us |
+
+The proxy-only dynamic scenario is excluded from primary regret. GBT regret
+is above 1.099x in every paired replicate. This is a negative ML result, not
+an LLM result: the old runtime-oriented microbenchmark does not transfer to
+the compiler-generated lowering path. Fitting the GBT to the frozen oracle
+would leak the test labels, so the result is retained as-is. It shows why a
+compiler-path calibration set and/or reasoning over richer compiler facts is
+needed before claiming learned optimization.
+
 ## Reproduction and gates
 
 ```bash
@@ -112,6 +176,23 @@ bash examples/proxy/submit_compiler_lto_oracle.sh \
   compiler-lto-static4-oracle-v1
 python3 examples/proxy/analyze_compiler_lto_oracle.py \
   docs/experiments/compiler-lto-eval/runs/compiler-lto-static4-oracle-v1/raw/*.log
+
+python3 examples/proxy/compiler_lto_gbt.py \
+  --dossier docs/experiments/compiler-lto-eval/frozen-v1/dossier.json \
+  --grid docs/experiments/grid/grid_big.csv --policy history \
+  --output docs/experiments/compiler-lto-eval/models/gbt-v1/history-response.json \
+  --report docs/experiments/compiler-lto-eval/models/gbt-v1/history-report.json
+bash examples/proxy/build_compiler_lto_eval.sh candidate \
+  docs/experiments/compiler-lto-eval/models/gbt-v1/history-response.json \
+  gbt-history
+bash examples/proxy/build_compiler_lto_eval.sh measured-oracle
+bash examples/proxy/submit_compiler_lto_eval.sh gbt compiler-lto-gbt-v1
+python3 examples/proxy/analyze_compiler_lto_candidates.py \
+  docs/experiments/compiler-lto-eval/runs/compiler-lto-gbt-v1/raw/*.log \
+  --dossier docs/experiments/compiler-lto-eval/frozen-v1/dossier.json \
+  --response gbt-history=docs/experiments/compiler-lto-eval/models/gbt-v1/history-response.json \
+  --response measured-oracle=docs/experiments/compiler-lto-eval/models/measured-oracle-v1/measured-oracle-response.json \
+  --oracle-arm measured-oracle
 ```
 
 Candidate model responses use

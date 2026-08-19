@@ -739,24 +739,60 @@ allocation-level replicate; repeatability claims come from the four-replicate
 uniform controls above. Full hashes, jobs, raw logs, and analyzers are under
 `docs/experiments/compiler-lto-eval/`.
 
+## 13. Historical tabular ML does not transfer to the real LTO path
+
+The frozen decision gap is not automatically a machine-learning result.
+`examples/proxy/compiler_lto_gbt.py` tests the strongest leakage-free GBT
+baseline available from the existing evidence: the hash-bound historical
+`grid_big.csv`, without source, frozen runtime logs, or oracle labels. It maps
+only axes with compatible units (bytes, logical op count, trigger batch,
+proxy producers, proxy workers). Historical distance is in microseconds while
+LTO distance is in instructions/FLOPs, so the model trains only on `D=0`
+instead of inventing a conversion.
+
+The full-history model uses 621 rows. A stricter variant excludes every frozen
+message size and uses 399 rows. Both independently emit the same ten-site
+response and pass the strict decision bridge: trigger for tiny/reuse/adjacent/
+far/static4, proxy for large, and forced proxy for dynamic. They therefore
+materialize the same policy; only one needs runtime measurement.
+
+Four allocation-paired, order-rotated runs compare default, hand, GBT, and a
+separately labeled measured-oracle binary. All 112 payload and route records
+pass. On the six decision-bearing scenarios, measured oracle is 1.0000x,
+hand is **1.0709x**, compiler default is **1.0957x**, and historical GBT is
+**1.1103x** geometric-mean regret. GBT matches one of six oracle actions and
+its paired regret is above 1.099x in every replicate.
+
+This negative result closes another tempting shortcut: a model trained on the
+runtime-oriented microbenchmark cannot be credited with optimizing the
+compiler-generated path. Refitting it on these six oracle labels would leak
+the test. The defensible next evidence is either a separately frozen
+compiler-path calibration/training set or a zero-shot LLM response that uses
+the richer compiler facts, followed by the same strict LTO/runtime gate. It is
+not a license to rewrite application source.
+
 ## Next
 
 The next model experiment stays entirely on the compiler path:
 
-1. Freeze the scoring protocol around the checked-in dossier and control
-   results. A trial is a decision response to `prompt.txt`, not a source patch;
-   invalid responses score as the deterministic materializable fallback.
-2. Produce repeated LLM and GBT decisions from the same compiler facts, with
-   prompt/dossier/model/response hashes retained. No application source is sent
-   to a model, and no candidate may generate code.
-3. Feed every accepted response through the second LTO build, then retain
-   binary hashes, exact routes, full payload hashes, and paired runtime. Compare
-   default, hand, GBT, LLM, uniform controls, and measured oracle without using
-   the oracle labels as model input.
-4. Add same-node IPC only as a separate hash-bound deployment profile. Runtime
+1. Keep the checked-in dossier and scoring protocol immutable. A trial is a
+   decision response to `prompt.txt`, not a source patch; invalid responses
+   score as the deterministic materializable fallback.
+2. Run repeated zero-shot LLM decisions from the same compiler facts, retaining
+   prompt/dossier/model/response hashes. The historical and size-held-out GBT
+   responses are already frozen negative baselines. No application source is
+   sent to a model, and no candidate may generate code.
+3. Feed each distinct accepted LLM policy through the second LTO build, then
+   retain binary hashes, exact routes, full payload hashes, and paired runtime.
+   Compare default, hand, GBT, LLM, uniform controls, and measured oracle without
+   using oracle labels as model input.
+4. In parallel, freeze a separate compiler-generated calibration/training set.
+   The historical runtime microbenchmark has now demonstrated a domain gap; it
+   must not be silently treated as a cost model for LTO-generated code.
+5. Add same-node IPC only as a separate hash-bound deployment profile. Runtime
    rank placement is not generally knowable at LTO and must never be guessed
    into static compiler features.
-5. Only after that dispatch gate is clean, expose another pass-materialized
+6. Only after that dispatch gate is clean, expose another pass-materialized
    action family such as batching/coalescing. The pass must generate and prove
    candidates; the model may rank them but may not write code.
 
