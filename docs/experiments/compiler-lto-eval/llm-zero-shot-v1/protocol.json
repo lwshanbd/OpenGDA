@@ -1,0 +1,47 @@
+{
+  "data_boundary": {
+    "candidate_may_generate_code": false,
+    "calibration_labels_visible": false,
+    "evaluation_results_visible": false,
+    "model_tools": [],
+    "source_visible": false
+  },
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "frozen_inputs": {
+    "dossier": {
+      "path": "docs/experiments/compiler-lto-eval/frozen-v1/dossier.json",
+      "sha256": "c77f4cff5e14552491c7a8cf8129724885c2f9a933898460375f7cadaca32274"
+    },
+    "prompt": {
+      "path": "docs/experiments/compiler-lto-eval/frozen-v1/prompt.txt",
+      "sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94"
+    },
+    "system_prompt": {
+      "path": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/system-prompt.txt",
+      "sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9"
+    }
+  },
+  "provider": {
+    "cli_version": "2.1.220 (Claude Code)",
+    "effort": "high",
+    "executable": "claude",
+    "fresh_session_per_trial": true,
+    "requested_model": "opus",
+    "structured_output": true
+  },
+  "protocol_id": "compiler-lto-llm-zero-shot-v1",
+  "scoring": {
+    "distinct_accepted_policies_are_materialized": true,
+    "invalid_response": "deterministic compiler fallback; no semantic retry",
+    "oracle_labels_are_withheld_until_all_responses_are_frozen": true,
+    "primary_runtime_protocol": "ten allocation pairwise-order-balanced",
+    "report_action_agreement_separately": true
+  },
+  "schema_version": "gicc-compiler-lto-llm-protocol-v1",
+  "transport_retry": {
+    "max_attempts_per_trial": 3,
+    "retry_condition": "nonzero provider process exit or timeout only",
+    "timeout_seconds": 300
+  },
+  "trials": 20
+}
