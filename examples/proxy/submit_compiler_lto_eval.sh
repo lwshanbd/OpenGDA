@@ -33,7 +33,20 @@ case "${MODE}" in
     REPS="1 2 3 4 5 6 7 8 9 10"
     ARMS=(default hand gbt-history gbt-calibrated measured-oracle)
     ;;
-  *) echo "usage: $0 {smoke|paired|gbt|calibrated-balanced} [TAG]" >&2; exit 2 ;;
+  llm-balanced)
+    test "$#" -eq 3 || {
+      echo "usage: $0 llm-balanced TAG CANDIDATE_ARM" >&2
+      exit 2
+    }
+    CANDIDATE_ARM="$3"
+    [[ "${CANDIDATE_ARM}" =~ ^llm-policy[0-9][0-9]$ ]] || {
+      echo "candidate arm must match llm-policyNN" >&2
+      exit 2
+    }
+    REPS="1 2 3 4 5 6 7 8 9 10"
+    ARMS=(default hand gbt-history gbt-calibrated "${CANDIDATE_ARM}")
+    ;;
+  *) echo "usage: $0 {smoke|paired|gbt|calibrated-balanced|llm-balanced} [TAG] [CANDIDATE_ARM]" >&2; exit 2 ;;
 esac
 
 for arm in "${ARMS[@]}"; do
@@ -44,7 +57,7 @@ MANIFEST="${OUT}/jobs.tsv"
 printf 'job_id\trep\torder\tqueue\n' > "${MANIFEST}"
 
 order_for() {
-  if [ "${MODE}" = calibrated-balanced ]; then
+  if [ "${MODE}" = calibrated-balanced ] || [ "${MODE}" = llm-balanced ]; then
     local rep=$1 rotation reverse=0
     if (( rep > 5 )); then
       rep=$((rep - 5))

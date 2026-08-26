@@ -1,0 +1,894 @@
+{
+  "accepted_count": 20,
+  "actions_by_site_distribution": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "counts": {
+        "proxy": 14,
+        "trigger": 6
+      },
+      "kernel": "eval_far_batch"
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "counts": {
+        "trigger": 20
+      },
+      "kernel": "eval_reuse_batch"
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "counts": {
+        "default": 1,
+        "proxy": 19
+      },
+      "kernel": "eval_tiny_single"
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "counts": {
+        "default": 13,
+        "proxy": 7
+      },
+      "kernel": "eval_large_single"
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "counts": {
+        "trigger": 20
+      },
+      "kernel": "eval_adjacent_batch"
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "counts": {
+        "proxy": 20
+      },
+      "kernel": "eval_dynamic_offset"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "counts": {
+        "proxy": 20
+      },
+      "kernel": "eval_static4_parallel"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "counts": {
+        "proxy": 20
+      },
+      "kernel": "eval_static4_parallel"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "counts": {
+        "proxy": 20
+      },
+      "kernel": "eval_static4_parallel"
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "counts": {
+        "proxy": 20
+      },
+      "kernel": "eval_static4_parallel"
+    }
+  },
+  "all_provider_models_observed": [
+    "claude-haiku-4-5-20251001",
+    "claude-opus-5"
+  ],
+  "calibrated_gbt_response": "docs/experiments/compiler-lto-eval/models/gbt-calibrated-v2/response.json",
+  "calibrated_gbt_response_sha256": "d40c340105cc1fc3026d4bbef4954f9526761f09b926bb414296e494aeb3e75e",
+  "decision_models": [
+    "claude-opus-5"
+  ],
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "fallback_count": 0,
+  "oracle_response": "docs/experiments/compiler-lto-eval/models/measured-oracle-v1/measured-oracle-response.json",
+  "oracle_response_sha256": "a35274b0df139230da65bda20257d37ecc67e67eb6952136acd33f84be25d3c2",
+  "policies": {
+    "llm-policy01": {
+      "actions_by_kernel": {
+        "eval_adjacent_batch": [
+          "trigger"
+        ],
+        "eval_dynamic_offset": [
+          "proxy"
+        ],
+        "eval_far_batch": [
+          "proxy"
+        ],
+        "eval_large_single": [
+          "default"
+        ],
+        "eval_reuse_batch": [
+          "trigger"
+        ],
+        "eval_static4_parallel": [
+          "proxy",
+          "proxy",
+          "proxy",
+          "proxy"
+        ],
+        "eval_tiny_single": [
+          "proxy"
+        ]
+      },
+      "actions_by_site": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "frequency": 10,
+      "matches_calibrated_gbt": false,
+      "oracle_action_agreement": {
+        "by_scenario": {
+          "adjacent-k16-grid1": false,
+          "far-k64-grid8": true,
+          "large-k1-grid8": false,
+          "reuse-k32-grid1": false,
+          "static4-k4-grid4": true,
+          "tiny-k1-grid1": false
+        },
+        "scenario_count": 6,
+        "scenario_matches": 2,
+        "site_count": 9,
+        "site_matches": 5
+      },
+      "representative_response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial01/response.json",
+      "representative_response_sha256": "9829d4337ab92db14c1972a6da03bca78e6f4aa8bb9c1a8659d4f37ce626127f",
+      "trials": [
+        1,
+        2,
+        6,
+        7,
+        9,
+        10,
+        12,
+        13,
+        16,
+        18
+      ]
+    },
+    "llm-policy02": {
+      "actions_by_kernel": {
+        "eval_adjacent_batch": [
+          "trigger"
+        ],
+        "eval_dynamic_offset": [
+          "proxy"
+        ],
+        "eval_far_batch": [
+          "trigger"
+        ],
+        "eval_large_single": [
+          "default"
+        ],
+        "eval_reuse_batch": [
+          "trigger"
+        ],
+        "eval_static4_parallel": [
+          "proxy",
+          "proxy",
+          "proxy",
+          "proxy"
+        ],
+        "eval_tiny_single": [
+          "proxy"
+        ]
+      },
+      "actions_by_site": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "trigger",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "frequency": 2,
+      "matches_calibrated_gbt": false,
+      "oracle_action_agreement": {
+        "by_scenario": {
+          "adjacent-k16-grid1": false,
+          "far-k64-grid8": false,
+          "large-k1-grid8": false,
+          "reuse-k32-grid1": false,
+          "static4-k4-grid4": true,
+          "tiny-k1-grid1": false
+        },
+        "scenario_count": 6,
+        "scenario_matches": 1,
+        "site_count": 9,
+        "site_matches": 4
+      },
+      "representative_response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial03/response.json",
+      "representative_response_sha256": "29316bcca2304998cbaa1ac246bf94c69db600a0ce1eeee37c492ee18e47dced",
+      "trials": [
+        3,
+        8
+      ]
+    },
+    "llm-policy03": {
+      "actions_by_kernel": {
+        "eval_adjacent_batch": [
+          "trigger"
+        ],
+        "eval_dynamic_offset": [
+          "proxy"
+        ],
+        "eval_far_batch": [
+          "trigger"
+        ],
+        "eval_large_single": [
+          "proxy"
+        ],
+        "eval_reuse_batch": [
+          "trigger"
+        ],
+        "eval_static4_parallel": [
+          "proxy",
+          "proxy",
+          "proxy",
+          "proxy"
+        ],
+        "eval_tiny_single": [
+          "proxy"
+        ]
+      },
+      "actions_by_site": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "trigger",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "frequency": 4,
+      "matches_calibrated_gbt": false,
+      "oracle_action_agreement": {
+        "by_scenario": {
+          "adjacent-k16-grid1": false,
+          "far-k64-grid8": false,
+          "large-k1-grid8": false,
+          "reuse-k32-grid1": false,
+          "static4-k4-grid4": true,
+          "tiny-k1-grid1": false
+        },
+        "scenario_count": 6,
+        "scenario_matches": 1,
+        "site_count": 9,
+        "site_matches": 4
+      },
+      "representative_response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial04/response.json",
+      "representative_response_sha256": "fdaee95e324a736f7a58ed118bea04eaf6ceb37c56f973379f6e70ac5abb7c2d",
+      "trials": [
+        4,
+        5,
+        15,
+        17
+      ]
+    },
+    "llm-policy04": {
+      "actions_by_kernel": {
+        "eval_adjacent_batch": [
+          "trigger"
+        ],
+        "eval_dynamic_offset": [
+          "proxy"
+        ],
+        "eval_far_batch": [
+          "proxy"
+        ],
+        "eval_large_single": [
+          "proxy"
+        ],
+        "eval_reuse_batch": [
+          "trigger"
+        ],
+        "eval_static4_parallel": [
+          "proxy",
+          "proxy",
+          "proxy",
+          "proxy"
+        ],
+        "eval_tiny_single": [
+          "proxy"
+        ]
+      },
+      "actions_by_site": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "frequency": 3,
+      "matches_calibrated_gbt": false,
+      "oracle_action_agreement": {
+        "by_scenario": {
+          "adjacent-k16-grid1": false,
+          "far-k64-grid8": true,
+          "large-k1-grid8": false,
+          "reuse-k32-grid1": false,
+          "static4-k4-grid4": true,
+          "tiny-k1-grid1": false
+        },
+        "scenario_count": 6,
+        "scenario_matches": 2,
+        "site_count": 9,
+        "site_matches": 5
+      },
+      "representative_response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial11/response.json",
+      "representative_response_sha256": "00263eb0d16d379b161dbf3aca5f6ffe7902e79ce7612a4ad0f4c193d548c414",
+      "trials": [
+        11,
+        14,
+        20
+      ]
+    },
+    "llm-policy05": {
+      "actions_by_kernel": {
+        "eval_adjacent_batch": [
+          "trigger"
+        ],
+        "eval_dynamic_offset": [
+          "proxy"
+        ],
+        "eval_far_batch": [
+          "proxy"
+        ],
+        "eval_large_single": [
+          "default"
+        ],
+        "eval_reuse_batch": [
+          "trigger"
+        ],
+        "eval_static4_parallel": [
+          "proxy",
+          "proxy",
+          "proxy",
+          "proxy"
+        ],
+        "eval_tiny_single": [
+          "default"
+        ]
+      },
+      "actions_by_site": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "frequency": 1,
+      "matches_calibrated_gbt": false,
+      "oracle_action_agreement": {
+        "by_scenario": {
+          "adjacent-k16-grid1": false,
+          "far-k64-grid8": true,
+          "large-k1-grid8": false,
+          "reuse-k32-grid1": false,
+          "static4-k4-grid4": true,
+          "tiny-k1-grid1": false
+        },
+        "scenario_count": 6,
+        "scenario_matches": 2,
+        "site_count": 9,
+        "site_matches": 5
+      },
+      "representative_response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial19/response.json",
+      "representative_response_sha256": "0840cb289a523581142c0e5a1b2f557419fcfb3e2bc01038b6a652fc5a82a7b9",
+      "trials": [
+        19
+      ]
+    }
+  },
+  "protocol": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/protocol.json",
+  "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+  "provider_cost_usd_reported_total": 2.849265,
+  "retry_count": 0,
+  "schema_version": "gicc-compiler-lto-llm-trial-analysis-v1",
+  "scope": "post-freeze action analysis; no source or labels entered provider calls",
+  "trial_count": 20,
+  "trials": [
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.188509,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial01/response.json",
+      "response_sha256": "9829d4337ab92db14c1972a6da03bca78e6f4aa8bb9c1a8659d4f37ce626127f",
+      "response_sha256_canonical": "ff4e961144ea3766f297ebeea965d554c967e2552518278446374edbc2342cbb",
+      "trial": 1
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.108088,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial02/response.json",
+      "response_sha256": "c48b035a4335e01952bec1d176f6bb9238ed3aaa547e968a31f364e590ec485b",
+      "response_sha256_canonical": "915822bdbe9378d17fd25fa233a431199feae7a6d2c6a708cc25cf27ff6ff0c7",
+      "trial": 2
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "trigger",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.09096800000000001,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial03/response.json",
+      "response_sha256": "29316bcca2304998cbaa1ac246bf94c69db600a0ce1eeee37c492ee18e47dced",
+      "response_sha256_canonical": "cf59b2c567bc0582a48866e1f96d344672fbd9144fb65bf206b06d8fd288fbd0",
+      "trial": 3
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "trigger",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.08954300000000001,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial04/response.json",
+      "response_sha256": "fdaee95e324a736f7a58ed118bea04eaf6ceb37c56f973379f6e70ac5abb7c2d",
+      "response_sha256_canonical": "e1086fe9cdabf7796be08ef362ad02b6e618b2d18e324afc6ab0a142e2b9e754",
+      "trial": 4
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "trigger",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.17031700000000002,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial05/response.json",
+      "response_sha256": "0b0c8dfd977cd64dafd32fb7ee40c037d55f930a5decf477f1c6249a553cb580",
+      "response_sha256_canonical": "f9cbb58f8807a1e7050b77780032399a9d36c202be9a7222adf321acb91b73d3",
+      "trial": 5
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.13771300000000003,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial06/response.json",
+      "response_sha256": "d87de96514f18df697519afee0d6004dbf9bdd300c361c2fb3f0b5a0b9d48c99",
+      "response_sha256_canonical": "b047dbb746c7d68e0e520282a1a3aa284a5e82d1a6bbdc3bef33a353938e1cd9",
+      "trial": 6
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.190757,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial07/response.json",
+      "response_sha256": "9f609b143d7c0c695deef505aa918a1538823e6c531b2cbaf5cec9f10c6bf92d",
+      "response_sha256_canonical": "ac157285956333106c61adc03eecf748c1100db4e5bef58bac0bebe7862f458f",
+      "trial": 7
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "trigger",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.177767,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial08/response.json",
+      "response_sha256": "6f8ee76cbd2bf1e249eba78aa1a1e184e2d9c72855cbf5aea601336fb7b46215",
+      "response_sha256_canonical": "f2f5ccf270c78df7ea8e8b0e7cc0fc2d642a503eae9086fdc347ca4b23072706",
+      "trial": 8
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.20832199999999998,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial09/response.json",
+      "response_sha256": "8fbe4fca9c20fceaeedbcfb46e0235eda1a8a21dd89e4b659739c500ccbb11e9",
+      "response_sha256_canonical": "f4471989da3daafa49d931d90cfad43bce2569720335cb55a71133fc2edb66b0",
+      "trial": 9
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.128238,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial10/response.json",
+      "response_sha256": "68d193066364edc1e8cc312e703b0cc2825b397378f3f1eb1b8a1ad5a2b60258",
+      "response_sha256_canonical": "71748e15285426e01166945f5d355ca5d07b7617e6cb60f6234b286f60cb49f7",
+      "trial": 10
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.136218,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial11/response.json",
+      "response_sha256": "00263eb0d16d379b161dbf3aca5f6ffe7902e79ce7612a4ad0f4c193d548c414",
+      "response_sha256_canonical": "73d1980ae5dbf79aa8691d020ea597719553df619a21f4798a89fba93f9beca8",
+      "trial": 11
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.090038,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial12/response.json",
+      "response_sha256": "04a5df49dd1845042b4690fdcd9e8609a9505a45cd2056a5a7403c9544f33270",
+      "response_sha256_canonical": "3efb649f0076cfe2a3e95eac3a48c2401dbfd7bab132b39a1a8a71f60267ffd2",
+      "trial": 12
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.21635700000000002,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial13/response.json",
+      "response_sha256": "a26e2d5175da4ad44bd0477460b0d917480d8eeb2d912a7c0b7bd898c87cb880",
+      "response_sha256_canonical": "0ef8e3abc134014814e4ba7a611d05764ceb1957c83685e6324910b90b866382",
+      "trial": 13
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.15141800000000002,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial14/response.json",
+      "response_sha256": "df591a915cd82445f70d5f25e97e1517508415fafdc1b7d395033a0947ec8335",
+      "response_sha256_canonical": "0755a18c6bd51b764fb358e6e890a523272cd74229a38a753ecc950a4c3b6420",
+      "trial": 14
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "trigger",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.09470300000000001,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial15/response.json",
+      "response_sha256": "1f4b64baeb83ed7b56376920277d73b03d2393880195d31805dc8ac3ce670c7f",
+      "response_sha256_canonical": "29eca43bed8d8d9e8fb58e8ca4665bc51762b613e107b2c76979fc2fe5103b7d",
+      "trial": 15
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.11696800000000002,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial16/response.json",
+      "response_sha256": "e014cea488b6c9373f22b7cd7d20f727756709d1957b4f5f405f61d7c1886613",
+      "response_sha256_canonical": "571d2362b282130ab797c03bbc26975f771a14586928f6fd86f691dfe288ee33",
+      "trial": 16
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "trigger",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.084713,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial17/response.json",
+      "response_sha256": "db8d2231fa51c19e8e30a34ad37f44f90fb173726a13339f46d881f756507157",
+      "response_sha256_canonical": "a8fe012002860020ee60a42fb80aa9122f42c4bbfc84e693f4a42be2cb6669b8",
+      "trial": 17
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.100028,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial18/response.json",
+      "response_sha256": "15c2dec55d41c6b1c50c303a77056f4171765e3bb3c240b60fd53dd1b68789e4",
+      "response_sha256_canonical": "9113c21e036ff0066a5ace5d4dfdad0dd7ba1e9b0e0674a74461341d030caa34",
+      "trial": 18
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "default",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.24183700000000002,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial19/response.json",
+      "response_sha256": "0840cb289a523581142c0e5a1b2f557419fcfb3e2bc01038b6a652fc5a82a7b9",
+      "response_sha256_canonical": "ec74d9a6163f0abb17aa9cee6b76d101de48e4796c0c7c2ab300dc77ad29e83d",
+      "trial": 19
+    },
+    {
+      "actions": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": "proxy",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": "trigger",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": "proxy",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": "proxy"
+      },
+      "decision_model": "claude-opus-5",
+      "models_observed": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "provider_cost_usd_reported": 0.12676300000000001,
+      "response": "docs/experiments/compiler-lto-eval/llm-zero-shot-v1/trials/trial20/response.json",
+      "response_sha256": "0da4b4fcc84131752111cdce99a8cc64e9a7ac18fe3aa84797a05d6c6f516737",
+      "response_sha256_canonical": "b18fe3758dbbf0f5b578d4a4dd2217b5f242e82cc21f36c1b69ff684946b997c",
+      "trial": 20
+    }
+  ],
+  "unique_policy_count": 5,
+  "unique_response_count": 20
+}
