@@ -1,0 +1,50 @@
+{
+  "default_dispatch": "IPC_OR_DWQ",
+  "llm_metadata": {
+    "accepted": true,
+    "decision_schema": "gicc-llm-decision-v1",
+    "decision_sites": 10,
+    "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+    "pinned_sites": 9
+  },
+  "schema_version": "gicc-hint-v1",
+  "sites": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.700: grid_blocks=8 matches proxy_worker_lanes=8, so proxy issue (2.872us/op) amortizes ~8x to ~0.36us/op effective, below trigger's 1.033us/op staging; fixed-cost gap (5.37 vs 7.88us) is negligible at batch_size=64. Trigger staging is host-serialized across the whole grid."
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.800: grid_blocks=1 gives no proxy lane concurrency: proxy 5.37+32*2.872 ~= 97us vs trigger 7.88+32*1.033 ~= 41us. Batch of 32 is far past the ~1.4-op crossover, and descriptor_reusable=true suits host-staged DWQ release."
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.520: Single op, not in loop: proxy 5.37+2.872=8.24us vs trigger 7.88+1.033=8.91us, so proxy is marginally ahead below the ~1.4-op crossover; 256B payload is latency- not bandwidth-bound. Margin ~8%, hence low confidence."
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.780: grid_blocks=1 means no proxy lane parallelism; at trip_count=16 proxy costs 5.37+16*2.872 ~= 51us vs trigger 7.88+16*1.033 ~= 24us. Coalescable batch well past the ~1.4-op crossover favors host-staged DWQ release."
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.950: Only legal action; hk_capable=false and max_vector_bytes=1 mean the descriptor cannot be compiler-reconstructed for host staging, so the device op must be preserved with CPU proxy work."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.620: batch_size=1 sits below the ~1.4-op crossover (8.24us vs 8.91us), and the four independent static sites can occupy distinct proxy lanes (4 blocks against 8 lanes) so issue overlaps, whereas trigger staging of all sites serializes on the host."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.620: Independent single-op site: below the ~1.4-op crossover (proxy 8.24us vs trigger 8.91us), and distinct proxy lanes let this site's issue overlap its siblings instead of queueing behind one host staging path."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.620: Single-op site with grid_blocks=4 under 8 proxy lanes; proxy issue (5.37+2.872=8.24us) beats trigger (7.88+1.033=8.91us) at n=1 and independent static sites parallelize across lanes, while trigger release is host-serialized."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.620: Fourth independent static site, batch_size=1 below the ~1.4-op crossover; distinct proxy lanes keep the sites concurrent (grid_blocks=4 vs proxy_worker_lanes=8), whereas host-staged trigger descriptors for all sites serialize on one host path."
+    }
+  },
+  "version": 1
+}

@@ -1,0 +1,50 @@
+{
+  "default_dispatch": "IPC_OR_DWQ",
+  "llm_metadata": {
+    "accepted": true,
+    "decision_schema": "gicc-llm-decision-v1",
+    "decision_sites": 10,
+    "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+    "pinned_sites": 9
+  },
+  "schema_version": "gicc-hint-v1",
+  "sites": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.740: 8 grid blocks <= 8 proxy lanes, so the 64-iteration constant-bound loop issues concurrently across lanes (~5.37+2.872*64 us per lane), while trigger must host-stage every descriptor of all 8 blocks serially (7.88+1.033*512 us). Parallel proxy issue dominates despite the higher per-op issue cost; large flops_to_first_use (5392) also hides issue latency."
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.860: Single block gives no proxy lane parallelism, and 32 ops is far above the measured proxy/trigger crossover (~1.4 ops): proxy 5.37+2.872*32 ~ 97 us vs trigger 7.88+1.033*32 ~ 41 us. descriptor_reusable=true further favors host-staged DWQ release."
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.560: One 256B op, below the measured crossover of ~1.4 ops: proxy 5.37+2.872=8.24 us vs trigger 7.88+1.033=8.91 us. Margin is small (~8%) and the transfer is latency-only, so confidence is moderate."
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.820: grid_blocks=1 means no proxy lane concurrency and 16 loop ops exceed the ~1.4-op crossover: proxy 5.37+2.872*16 ~ 51 us vs trigger 7.88+1.033*16 ~ 24 us. Constant loop bound makes descriptor reconstruction and batched DWQ release straightforward."
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.990: Only legal action; hk_capable=false and max_vector_bytes=1 preclude host-side descriptor reconstruction, so the device op must be preserved with CPU proxy work."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.700: Four independent static sites can occupy distinct proxy lanes (16 producers over 8 lanes ~ 2 ops/lane, ~11 us), whereas trigger serializes all 16 descriptors on the host (7.88+1.033*16 ~ 24 us). Lane-parallel issue is the shorter path for this scenario."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.700: Same scenario as sibling sites: distinct static callsites map to distinct proxy lanes, giving concurrent issue bounded by min(grid_blocks=4, lanes=8), versus serial host staging of all sites' descriptors under trigger."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.700: Independent static site with 4 blocks; proxy lane parallelism keeps per-lane cost near 5.37+2.872*2 us while trigger's per-op staging accumulates across all four sites in one host stream."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.700: Uniform lowering with the other three static sites preserves lane-parallel issue (min(4 blocks, 8 lanes) per site); mixing in trigger would add host staging serialization to the same kernel's critical path."
+    }
+  },
+  "version": 1
+}

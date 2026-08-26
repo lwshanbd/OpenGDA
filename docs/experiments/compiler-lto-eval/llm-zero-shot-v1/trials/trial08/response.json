@@ -1,0 +1,56 @@
+{
+  "decisions": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "action": "trigger",
+      "confidence": 0.7,
+      "rationale": "Const 4KiB put in a known 64-trip loop, coalescable and hk_capable, with flops_to_first_use=5392 giving slack to hide host staging. Per-op staging 1.033us vs proxy issue 2.872us makes batched DWQ release cheaper despite higher fixed cost."
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.78,
+      "rationale": "32-trip constant loop on grid_blocks=1 gives proxy no lane parallelism: 5.37+32*2.872=97us vs trigger 7.88+32*1.033=41us; descriptor_reusable=true further amortizes staging."
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.52,
+      "rationale": "Single 256B op, no loop: proxy 5.37+2.872=8.24us vs trigger 7.88+1.033=8.91us. Lower fixed cost wins at op count 1, but margin is small."
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "default",
+      "confidence": 0.55,
+      "rationale": "One 1MiB transfer is bandwidth-bound (~43.7us at 24GB/s); single-op issue-path delta is <1us (~1.5%), so evidence does not justify pinning a lowering. Keep IPC_OR_DWQ baseline."
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.78,
+      "rationale": "16-trip constant loop, coalescable, single block so proxy serializes on one lane: 5.37+16*2.872=51us vs trigger 7.88+16*1.033=24us."
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "action": "proxy",
+      "confidence": 0.95,
+      "rationale": "Only legal action: descriptor not host-reconstructible (hk_capable=false, dynamic offset operand), so the device op must be preserved with CPU proxy work."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.7,
+      "rationale": "Independent static site, one op; grid_blocks=4 <= proxy_worker_lanes=8 so the four sites issue concurrently on distinct lanes, and single-op proxy cost (8.24us) is below trigger (8.91us)."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "action": "proxy",
+      "confidence": 0.7,
+      "rationale": "Distinct independent callsite of the same kernel: 4 producers <= 8 lanes gives full concurrency; at batch_size=1 proxy's lower fixed cost dominates."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 0.7,
+      "rationale": "Independent static site with one 4KiB const-size put; distinct lanes available (4 < 8), so parallel ring issue beats serialized host descriptor staging."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "action": "proxy",
+      "confidence": 0.7,
+      "rationale": "Fourth independent static site; lane budget still covers all producers and proxy fixed cost 5.37us < trigger 7.88us at op count 1."
+    }
+  },
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "schema_version": "gicc-llm-decision-v1"
+}

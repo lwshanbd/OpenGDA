@@ -1,0 +1,56 @@
+{
+  "decisions": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "action": "proxy",
+      "confidence": 0.72,
+      "rationale": "grid_blocks=8 saturates all 8 proxy lanes, so effective issue cost is 2.872/8 ~= 0.36us/op versus serial host staging at 1.033us/op over 8x64 ops; proxy also has the lower fixed cost (5.37 vs 7.88us)."
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.82,
+      "rationale": "grid_blocks=1 gives no lane parallelism: 5.37+32*2.872=97us proxy vs 7.88+32*1.033=41us trigger. descriptor_reusable=true and constant bound 32 favor host-staged DWQ batch release."
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.58,
+      "rationale": "Single 256B op, no loop: fixed-cost dominated, proxy 5.37+2.872=8.24us vs trigger 7.88+1.033=8.91us. No batch exists to amortize trigger's higher fixed cost."
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "default",
+      "confidence": 0.55,
+      "rationale": "1MiB transfer at 24GB/s is ~44us of link time, dwarfing the ~0.7us proxy/trigger overhead delta; evidence is too weak to pin a lowering, so keep the IPC_OR_DWQ baseline."
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.8,
+      "rationale": "grid_blocks=1 means one proxy lane: 5.37+16*2.872=51us vs 7.88+16*1.033=24us staged. coalescable=true with constant bound 16 makes host descriptor reconstruction cheap."
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "action": "proxy",
+      "confidence": 0.99,
+      "rationale": "Only legal action; hk_capable=false and max_vector_bytes=1 preclude host descriptor reconstruction, so the device op must be preserved with CPU proxy work."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.68,
+      "rationale": "Independent static sites may use distinct lanes and grid_blocks=4 fits the 8-lane budget; four single-op issues overlap at ~8.2us, while host staging serializes to ~7.88+4*1.033=12us."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "action": "proxy",
+      "confidence": 0.68,
+      "rationale": "Same 4KB single-op profile as its sibling sites; distinct proxy lanes give cross-site concurrency plus the lower 5.37us fixed cost versus one serialized DWQ stager."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 0.68,
+      "rationale": "Independent site, one 4KB op, grid_blocks=4; lane-parallel proxy issue overlaps with the other three sites, beating serialized host staging in this scenario."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "action": "proxy",
+      "confidence": 0.68,
+      "rationale": "Fourth independent single-op site; keeping all four on proxy lanes stays within the 8-lane budget and avoids stacking staging cost on a single DWQ release path."
+    }
+  },
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "schema_version": "gicc-llm-decision-v1"
+}

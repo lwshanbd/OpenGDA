@@ -1,0 +1,56 @@
+{
+  "decisions": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "action": "proxy",
+      "confidence": 0.72,
+      "rationale": "8 grid blocks match the 8 proxy worker lanes, so the 64-iteration batch issues concurrently (~5.37us + 64*2.872us per lane). Trigger staging is host-serial over all 8*64 descriptors (~7.88us + 512*1.033us), far worse despite the lower per-op stage cost. Descriptor is not reusable, so trigger gains no amortization."
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.82,
+      "rationale": "Single grid block gives no proxy lane parallelism, so 32 ops cost 5.37+32*2.872us via proxy vs 7.88+32*1.033us via trigger; batch size far exceeds the ~1.4-op crossover. descriptor_reusable=true and const 4096B size let the host stage once and release the batch through DWQ."
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.58,
+      "rationale": "Single 256B op with flops_to_first_use=0: cost is pure issue latency. Proxy 5.37+2.872=8.24us beats trigger 7.88+1.033=8.91us since one op is below the ~1.4-op fixed-cost crossover. Margin is small, hence moderate confidence."
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "default",
+      "confidence": 0.5,
+      "rationale": "1 MiB per block over a 24 GB/s cross-node link dominates (tens of microseconds per op) while proxy vs trigger issue overhead differs by only ~8us on a single-op batch. Platform evidence does not justify pinning a lowering, so keep the IPC_OR_DWQ baseline."
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.74,
+      "rationale": "grid_blocks=1 means proxy runs on a single lane: 5.37+16*2.872=51.3us vs trigger 7.88+16*1.033=24.4us. The coalescable, constant-size 16-op batch is well past the fixed-cost crossover, so host staging plus one DWQ release wins."
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "action": "proxy",
+      "confidence": 0.97,
+      "rationale": "Only proxy is legal here (hk_capable=false, max_vector_bytes=1 prevents descriptor reconstruction for host staging), so the device op is preserved with CPU proxy work."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.66,
+      "rationale": "Single-op site (batch_size=1, no loop) sits below the ~1.4-op proxy/trigger crossover, and the platform note allows independent static sites to occupy distinct lanes; 4 sites x 4 blocks map onto 8 lanes, whereas trigger would serialize all 16 descriptor stages on the host."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "action": "proxy",
+      "confidence": 0.66,
+      "rationale": "Same kernel scenario as the sibling static sites: one op each, no loop, so proxy's lower fixed cost (5.37us) plus distinct-lane concurrency across grid_blocks=4 beats host-serial trigger staging of all sites' descriptors."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 0.66,
+      "rationale": "Independent static callsite issuing a single 4096B op; below the trigger break-even batch size and eligible for its own proxy lane within the 8-lane budget, so proxy minimizes wall time consistently with the other three sites."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "action": "proxy",
+      "confidence": 0.66,
+      "rationale": "Fourth independent single-op site in the same launch; uniform proxy lowering keeps all four sites concurrent on separate lanes (16 producers over 8 lanes ~ 11us) versus ~24us of serial host staging under trigger."
+    }
+  },
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "schema_version": "gicc-llm-decision-v1"
+}

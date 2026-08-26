@@ -1,0 +1,50 @@
+{
+  "default_dispatch": "IPC_OR_DWQ",
+  "llm_metadata": {
+    "accepted": true,
+    "decision_schema": "gicc-llm-decision-v1",
+    "decision_sites": 10,
+    "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+    "pinned_sites": 9
+  },
+  "schema_version": "gicc-hint-v1",
+  "sites": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.850: Batch of 64 const-size (4 KiB) ops with grid_blocks=8 <= proxy_worker_lanes=8, so proxy issue cost parallelizes 8-way (5.37us + ceil(64/8)*2.872us ~ 28us) while host trigger staging is serial (7.88us + 64*1.033us ~ 74us). Parallel producer width favors proxy."
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.820: grid_blocks=1 gives no proxy lane parallelism: 5.37 + 32*2.872 ~ 97us versus trigger 7.88 + 32*1.033 ~ 41us. descriptor_reusable=true and const 4 KiB size make host-staged DWQ release cheap."
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.550: Single 256 B op outside any loop: proxy 5.37+2.872=8.24us vs trigger 7.88+1.033=8.91us. Proxy's lower fixed cost wins for one op, but the margin is small so confidence is modest."
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.850: 16-op batch with grid_blocks=1 means fully serialized proxy issue (5.37 + 16*2.872 ~ 51us) versus trigger staging (7.88 + 16*1.033 ~ 24us). Const size and coalescable batch suit host-reconstructed descriptors."
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.990: Only proxy is legal here (hk_capable=false, dynamic offset prevents descriptor reconstruction), so the device op is preserved with CPU proxy work."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.750: Four independent static sites can occupy distinct proxy lanes; with 4 blocks each and 8 lanes the 16 single-op issues overlap (~5.37 + 2*2.872 ~ 11us) whereas host trigger staging of all 16 descriptors is serial (~7.88 + 16*1.033 ~ 24us)."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.750: Same scenario as its sibling sites: independent static callsites map to separate proxy lanes, giving overlapped issue, while trigger serializes all 16 stages on the host. Consistent lowering keeps lanes balanced."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.750: Independent static site with grid_blocks=4 and const 4 KiB payload; proxy lane parallelism (min(4, 8)) beats serial host descriptor staging for the combined 16 ops of this kernel."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.750: Fourth independent static site; lane-parallel proxy issue keeps the kernel's 16 single-op puts overlapped within 8 lanes, versus a serialized ~24us trigger staging path."
+    }
+  },
+  "version": 1
+}

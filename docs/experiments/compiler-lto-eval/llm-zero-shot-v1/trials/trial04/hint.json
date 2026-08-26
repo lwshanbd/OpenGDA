@@ -1,0 +1,54 @@
+{
+  "default_dispatch": "IPC_OR_DWQ",
+  "llm_metadata": {
+    "accepted": true,
+    "decision_schema": "gicc-llm-decision-v1",
+    "decision_sites": 10,
+    "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+    "pinned_sites": 10
+  },
+  "schema_version": "gicc-hint-v1",
+  "sites": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.900: Const-bound loop (trip 64, batch 64) with coalescable, exact-distance descriptors: per-op cost dominates. Trigger stage 1.033us/op vs proxy issue 2.872us/op crosses over above ~1.4 ops even with 8 proxy lanes, so host-staged DWQ release is far cheaper for a 64-op batch."
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.890: 32-op known-bound batch on a single block: proxy has only one lane (min(grid_blocks=1, lanes=8)), so ~5.37+32*2.872us versus trigger ~7.88+32*1.033us. Reusable descriptor further favors host staging."
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.600: Single 256B op, no loop, one block: proxy fixed+one issue (5.37+2.872=8.24us) beats trigger fixed+one stage (7.88+1.033=8.91us). Margin is small but the op count is exactly known, so the single-op regime favors proxy."
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.660: 1MiB transfer is bandwidth-bound (~43.7us at 24GB/s); overhead is secondary. With grid_blocks=8 <= 8 proxy lanes each block issues one op concurrently (~8.24us) versus trigger staging 8 descriptors serially (~16.1us)."
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.860: 16-iteration const-bound coalescable batch on one block: single proxy lane pays 16*2.872us issue, while trigger pays 16*1.033us stage plus 7.88us fixed (~51us vs ~24us)."
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.990: Only legal action; descriptor is not host-reconstructible (hk_capable=false, dynamic offset operand), so the device op must be preserved with CPU proxy work."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.720: Single op per block, no loop; independent static sites map to distinct proxy lanes and 4 blocks fit within 8 lanes, so issue cost stays near one 2.872us op, whereas trigger serializes all sibling descriptors through one DWQ stage."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.720: Same static kernel, batch_size 1, guard_density 1: distinct proxy lane per independent static site preserves parallel issue; host staging would aggregate the 4 sites x 4 blocks into a serial 1.033us/op DWQ release plus 7.88us fixed."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.720: Non-loop single-op site with grid_blocks=4 <= proxy_worker_lanes=8; single-op regime favors proxy (5.37+2.872us) and lane-disjoint sibling sites keep concurrency."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.720: Identical facts to its sibling sites: one 4KiB op, no loop, lane-parallel proxy issue beats serialized host descriptor staging for this small op count."
+    }
+  },
+  "version": 1
+}

@@ -1,0 +1,56 @@
+{
+  "decisions": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "action": "trigger",
+      "confidence": 0.82,
+      "rationale": "Known constant loop bound 64, batch_size 64, coalescable, hk_capable: per-op cost dominates. Trigger stages at 1.033us/op vs proxy 2.872us/op, so the 2.51us fixed-cost premium is amortized after ~4 ops; large flops_to_first_use (5392) also hides host staging latency."
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.84,
+      "rationale": "32-op known-bound batch on a single block, so proxy gets only one lane (min(grid_blocks=1, lanes=8)) and pays 5.37+32*2.872 ~ 97us versus trigger 7.88+32*1.033 ~ 41us. descriptor_reusable=true further favors host-staged descriptor release."
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.6,
+      "rationale": "Single 256B op outside any loop: total cost is dominated by fixed overhead, where proxy_fixed 5.37us < trigger_fixed 7.88us. One op cannot amortize trigger's cheaper per-op staging (8.24us vs 8.91us modeled)."
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.58,
+      "rationale": "Single 1MiB transfer per block; at 24GB/s the wire time (~44us/op) dominates issue overhead, and grid_blocks=8 matches proxy_worker_lanes=8 so issue is fully parallel. Lower proxy fixed cost (5.37 vs 7.88us) makes it the marginally better non-abstaining choice."
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.8,
+      "rationale": "16 iterations with constant bound, coalescable, single block so proxy is limited to one lane: proxy ~5.37+16*2.872=51us vs trigger ~7.88+16*1.033=24us. Batch size well above the ~4-op break-even point."
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "action": "proxy",
+      "confidence": 0.99,
+      "rationale": "Only legal action; hk_capable=false and max_vector_bytes=1 mean the descriptor cannot be compiler-reconstructed for host staging."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.7,
+      "rationale": "Single non-loop op at this static site; fixed cost dominates and proxy_fixed 5.37us < trigger_fixed 7.88us. Four independent static sites can occupy distinct proxy lanes (grid_blocks=4 <= 8 lanes), so issue proceeds concurrently rather than through one DWQ release path."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "action": "proxy",
+      "confidence": 0.7,
+      "rationale": "Same structure as sibling site: one op, no loop, so trigger's cheaper per-op staging cannot amortize its higher fixed cost. Distinct proxy lanes are available for independent static sites under min(grid_blocks=4, lanes=8)."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 0.7,
+      "rationale": "Batch_size 1, in_loop=false: modeled cost 8.24us (proxy) vs 8.91us (trigger). Lane parallelism across the four independent static sites keeps proxy issue off the critical path."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "action": "proxy",
+      "confidence": 0.7,
+      "rationale": "Single-op static site with guard_density 1 and no loop; lower proxy fixed overhead wins, and independent static sites map to separate proxy worker lanes (4 blocks <= 8 lanes) for concurrent issue."
+    }
+  },
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "schema_version": "gicc-llm-decision-v1"
+}

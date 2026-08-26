@@ -1,0 +1,310 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "decisions": {
+      "additionalProperties": false,
+      "properties": {
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "proxy",
+                "trigger"
+              ],
+              "type": "string"
+            },
+            "confidence": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "rationale": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "confidence",
+            "rationale"
+          ],
+          "type": "object"
+        },
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "proxy",
+                "trigger"
+              ],
+              "type": "string"
+            },
+            "confidence": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "rationale": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "confidence",
+            "rationale"
+          ],
+          "type": "object"
+        },
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "proxy",
+                "trigger",
+                "default"
+              ],
+              "type": "string"
+            },
+            "confidence": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "rationale": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "confidence",
+            "rationale"
+          ],
+          "type": "object"
+        },
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "proxy",
+                "trigger",
+                "default"
+              ],
+              "type": "string"
+            },
+            "confidence": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "rationale": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "confidence",
+            "rationale"
+          ],
+          "type": "object"
+        },
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "proxy",
+                "trigger"
+              ],
+              "type": "string"
+            },
+            "confidence": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "rationale": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "confidence",
+            "rationale"
+          ],
+          "type": "object"
+        },
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "proxy"
+              ],
+              "type": "string"
+            },
+            "confidence": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "rationale": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "confidence",
+            "rationale"
+          ],
+          "type": "object"
+        },
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "proxy",
+                "trigger",
+                "default"
+              ],
+              "type": "string"
+            },
+            "confidence": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "rationale": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "confidence",
+            "rationale"
+          ],
+          "type": "object"
+        },
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "proxy",
+                "trigger",
+                "default"
+              ],
+              "type": "string"
+            },
+            "confidence": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "rationale": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "confidence",
+            "rationale"
+          ],
+          "type": "object"
+        },
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "proxy",
+                "trigger",
+                "default"
+              ],
+              "type": "string"
+            },
+            "confidence": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "rationale": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "confidence",
+            "rationale"
+          ],
+          "type": "object"
+        },
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "proxy",
+                "trigger",
+                "default"
+              ],
+              "type": "string"
+            },
+            "confidence": {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "rationale": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "confidence",
+            "rationale"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0",
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2",
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0",
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0",
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2",
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3"
+      ],
+      "type": "object"
+    },
+    "dossier_id": {
+      "const": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5"
+    },
+    "schema_version": {
+      "const": "gicc-llm-decision-v1"
+    }
+  },
+  "required": [
+    "schema_version",
+    "dossier_id",
+    "decisions"
+  ],
+  "type": "object"
+}

@@ -1,0 +1,54 @@
+{
+  "default_dispatch": "IPC_OR_DWQ",
+  "llm_metadata": {
+    "accepted": true,
+    "decision_schema": "gicc-llm-decision-v1",
+    "decision_sites": 10,
+    "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+    "pinned_sites": 10
+  },
+  "schema_version": "gicc-hint-v1",
+  "sites": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.780: 512 total ops (8 blocks x trip_count 64). Proxy concurrency = min(grid_blocks 8, lanes 8) = 8, so per-lane cost 5.37 + 64*2.872 = 189 us, while the single host DWQ must stage all 512 descriptors serially: 7.88 + 512*1.033 = 537 us. Grid width fully covers the proxy lane budget, so proxy is ~2.8x cheaper."
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.820: grid_blocks=1 gives proxy no lane parallelism: 5.37 + 32*2.872 = 97.3 us versus trigger 7.88 + 32*1.033 = 40.9 us. Batch of 32 is far past the n~1.4 crossover, and descriptor_reusable=true plus constant 4096B size favors host-staged DWQ release."
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.560: Single 256B op, one block: proxy 5.37 + 2.872 = 8.24 us vs trigger 7.88 + 1.033 = 8.91 us. n=1 is the only regime below the fixed-cost crossover, so proxy is marginally best; margin is small (~8%) hence moderate confidence."
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.500: 8 x 1 MiB puts are bandwidth bound (8 MiB / 24 GB/s ~ 350 us), so issue overhead is ~2-5% of wall time. Proxy still edges trigger (8.24 us across 8 lanes vs 16.1 us serial staging) with no lane contention since grid_blocks=8 equals the lane budget."
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.750: 16 ops from a single block, so proxy is confined to one lane: 5.37 + 16*2.872 = 51.3 us vs trigger 7.88 + 16*1.033 = 24.4 us. Coalescable constant-size 4096B batch amortizes the higher trigger fixed cost roughly 2x."
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.990: Only proxy is legal here; hk_capable=false and max_vector_bytes=1 mean the descriptor cannot be host-reconstructed for DWQ staging."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.660: Four independent static sites, 4 blocks each = 16 producers over 8 lanes, giving 2 issue rounds: 5.37 + 2*2.872 = 11.1 us for the whole kernel. Routing any site to trigger serializes 4+ descriptors on the single DWQ (>=12 us) and raises the critical path, so uniform proxy across distinct lanes is best."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.660: Same launch context as the sibling sites: independent static sites get distinct proxy lanes, and 16 producers over 8 lanes cost 5.37 + 2*2.872 = 11.1 us in parallel, beating any mix that pushes 4-op batches onto the serial host DWQ (>=12 us)."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.660: Uniform proxy keeps all four sites on separate lanes; per-site 4 ops with grid_blocks=4 issue concurrently, total 2 lane rounds = 11.1 us, versus 24.4 us if all 16 constant-size 4096B ops were staged serially through DWQ."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.660: Identical facts to the other three static sites; lane-parallel proxy issue (min(4 blocks, 8 lanes) per site, 16 producers over 8 lanes) yields the shortest critical path at ~11.1 us and avoids adding ops to the single serial trigger queue."
+    }
+  },
+  "version": 1
+}

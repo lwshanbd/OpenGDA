@@ -1,0 +1,54 @@
+{
+  "default_dispatch": "IPC_OR_DWQ",
+  "llm_metadata": {
+    "accepted": true,
+    "decision_schema": "gicc-llm-decision-v1",
+    "decision_sites": 10,
+    "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+    "pinned_sites": 10
+  },
+  "schema_version": "gicc-hint-v1",
+  "sites": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.860: Constant-size 4KiB put in a known 64-trip loop, coalescable, hk_capable. Per-op cost strongly favors staging: trigger 1.033us/op vs proxy 2.872us/op, with break-even near n=1.4 ops; at 64 ops per block the extra 2.51us fixed cost is amortized many times over even with 8 proxy lanes available."
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.900: grid_blocks=1 caps proxy producer concurrency at a single lane, so 32 loop ops cost ~5.37+2.872*32 us serially, versus ~7.88+1.033*32 us staged. descriptor_reusable=true further favors host-side descriptor staging and DWQ release."
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.600: Single non-loop 256B op (batch_size=1, not coalescable): one-op cost is proxy 5.37+2.872=8.24us vs trigger 7.88+1.033=8.91us, so proxy is the cheaper legal lowering below the ~1.4-op break-even. Margin is small, hence moderate confidence."
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.620: One 1MiB transfer; wire time (~44us at 24GB/s) is action-independent, so only issue overhead differs. At n=1 op proxy (8.24us) beats trigger (8.91us), and 8 grid blocks map onto available proxy lanes without contention."
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.840: 16-iteration known-bound loop of constant 4KiB coalescable puts with grid_blocks=1 (one proxy lane). Staged cost ~7.88+1.033*16 us is well under proxy ~5.37+2.872*16 us; batch far exceeds the ~1.4-op break-even."
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.990: Only proxy is legal here (hk_capable=false, max_vector_bytes=1 prevents descriptor reconstruction for host staging); no alternative to evaluate."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.780: Four independent static sites, each a single non-loop 4KiB op over 4 grid blocks. Platform notes allow independent static sites to occupy distinct proxy lanes (8 available), so issue cost overlaps across sites, whereas trigger pays its 7.88us fixed staging per site with only 1.033us/op to amortize it."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.780: Same static-parallel pattern: one op per site, no loop and not coalescable, so trigger's per-op staging advantage cannot amortize its higher fixed cost. Distinct proxy lanes let this site overlap with the sibling sites under the 8-lane budget."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.780: Single-op site (batch_size=1 per callsite, coalescable=false) below the ~1.4-op proxy/trigger break-even; concurrency bounded by min(grid_blocks=4, lanes=8) keeps proxy issue overlapped rather than serialized through one DWQ staging path."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.780: Fourth independent static site with identical facts; keeping all four on proxy preserves cross-site lane parallelism (16 block-ops over 8 lanes) and avoids four separate 7.88us trigger fixed costs that only 1.033us/op staging cannot repay."
+    }
+  },
+  "version": 1
+}

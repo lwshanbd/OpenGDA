@@ -1,0 +1,56 @@
+{
+  "decisions": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "action": "proxy",
+      "confidence": 0.66,
+      "rationale": "grid_blocks=8 matches proxy_worker_lanes=8, so 8x64=512 ops split into 64 per lane: 5.37+2.872*64 ~= 189us versus host-serial staging 7.88+1.033*512 ~= 537us for trigger. Proxy lane parallelism dominates trigger's cheaper per-op stage; large flops_to_first_use (5392) hides issue latency either way."
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.85,
+      "rationale": "grid_blocks=1 gives no proxy lane parallelism: 32 loop-bound ops cost 5.37+2.872*32 ~= 97us by proxy versus 7.88+1.033*32 ~= 41us by trigger. descriptor_reusable=true and bound_known=true favor host descriptor reconstruction with batched DWQ release."
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "default",
+      "confidence": 0.6,
+      "rationale": "Single 256B op, no loop: proxy 5.37+2.872=8.24us versus trigger 7.88+1.033=8.91us. The sub-microsecond gap is within noise, so evidence is too weak to pin a lowering; keep the IPC_OR_DWQ baseline."
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "default",
+      "confidence": 0.64,
+      "rationale": "1MiB per block at 24 GB/s is ~44us/op (~350us aggregate over 8 blocks), dwarfing the ~8-9us issue overhead of either path; the proxy/trigger delta is bandwidth-masked, so abstain."
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.68,
+      "rationale": "grid_blocks=1 means one proxy lane: 16 known-bound ops cost 5.37+2.872*16 ~= 51us by proxy versus 7.88+1.033*16 ~= 24.4us by trigger. Coalescable const-size batch with known trip count offsets trigger's higher fixed cost; small flops_to_first_use only marginally counters this."
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "action": "proxy",
+      "confidence": 0.99,
+      "rationale": "Only legal action: hk_capable=false and max_vector_bytes=1 with a runtime offset block compile-time descriptor reconstruction, so the device op must be preserved with CPU proxy work."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.74,
+      "rationale": "Four independent static sites x 4 grid_blocks = 16 producers over 8 proxy lanes (~2 ops/lane: 5.37+2*2.872 ~= 11.1us) versus host-serial trigger staging of all 16 ops (7.88+16*1.033 ~= 24.4us). Platform note allows distinct lanes for independent static sites."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "action": "proxy",
+      "confidence": 0.74,
+      "rationale": "Identical facts to its sibling static site: single op, grid_blocks=4, distinct proxy lanes available. Concurrent proxy issue across 8 lanes (~11us) beats serialized host staging of the full 16-op set (~24us)."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 0.74,
+      "rationale": "Same static-parallel shape (batch_size=1, grid_blocks=4, const 4096B); keeping all four sites on proxy exploits min(grid_blocks, 8) lane concurrency instead of funneling every descriptor through one host staging stream."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "action": "proxy",
+      "confidence": 0.74,
+      "rationale": "Same static-parallel shape as its three siblings; uniform proxy assignment maximizes lane usage (2 ops/lane, ~11us) versus host-serial trigger staging of 16 ops (~24.4us)."
+    }
+  },
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "schema_version": "gicc-llm-decision-v1"
+}

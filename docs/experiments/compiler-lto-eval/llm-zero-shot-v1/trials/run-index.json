@@ -1,0 +1,667 @@
+{
+  "protocol_id": "compiler-lto-llm-zero-shot-v1",
+  "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+  "schema_version": "gicc-compiler-lto-llm-run-index-v1",
+  "trials": [
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:25:25.870357Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:24:46.984645Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "4efec208bfcd3a7ed470dad834167a5cb1cb62be40d307182abf051b1a1c1916",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "ff4e961144ea3766f297ebeea965d554c967e2552518278446374edbc2342cbb",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 1
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:26:12.903081Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:25:25.988938Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "dcdd5a8052cf661b12c08f739868f803e6982f492c4802794e3b900723f0cd50",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "915822bdbe9378d17fd25fa233a431199feae7a6d2c6a708cc25cf27ff6ff0c7",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 2
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:26:53.260554Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:26:13.017486Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "e6f1a1c5b875b38d68941d2f98caa0a3bd5abcdcc8a30a6dfc2a9b641eaa0c9a",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "cf59b2c567bc0582a48866e1f96d344672fbd9144fb65bf206b06d8fd288fbd0",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 3
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:27:33.384227Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:26:53.377649Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "bf114a8d8c52d5064410dc697fbf46bcc76d8ffe5363fa3ef5c1dbff959b1f3d",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "e1086fe9cdabf7796be08ef362ad02b6e618b2d18e324afc6ab0a142e2b9e754",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 4
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:28:29.589841Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:27:33.499271Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "883e5ae31240d7fd8103f25ccac421842edad11171ada61883715cf142b3e85f",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "f9cbb58f8807a1e7050b77780032399a9d36c202be9a7222adf321acb91b73d3",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 5
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:29:34.551853Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:28:29.708972Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "270e1aad796d9b002e5e6d2b2c270ad9e1519437e94aa0fb190246a39979e694",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "b047dbb746c7d68e0e520282a1a3aa284a5e82d1a6bbdc3bef33a353938e1cd9",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 6
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:30:40.351847Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:29:34.670048Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "6a63d6a3ac3ae5f2e98aa0e7acf851e1a1bedd60f073158fe6b01be639cc41ef",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "ac157285956333106c61adc03eecf748c1100db4e5bef58bac0bebe7862f458f",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 7
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:31:44.661561Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:30:40.469631Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "c1c290cd082676e3bff42245e6e114e09effa64189caf456d2f517a0455b2cd9",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "f2f5ccf270c78df7ea8e8b0e7cc0fc2d642a503eae9086fdc347ca4b23072706",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 8
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:32:55.108018Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:31:44.778936Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "08cf022d99cf9d5ceea93329b9302573504937618d4c886a99dc2974d7b5be30",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "f4471989da3daafa49d931d90cfad43bce2569720335cb55a71133fc2edb66b0",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 9
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:33:53.062788Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:32:55.221331Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "4c26678eee0d89ea7c4e0548d9f6a4ca3a814169ac679b8cde523c9b24c72668",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "71748e15285426e01166945f5d355ca5d07b7617e6cb60f6234b286f60cb49f7",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 10
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:34:56.614687Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:33:53.189993Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "5c17af53c97fe5c9ef5f492965a0205798dc3d0e455aa85309319ffbd53d5634",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "73d1980ae5dbf79aa8691d020ea597719553df619a21f4798a89fba93f9beca8",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 11
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:35:34.655820Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:34:56.730264Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "4518068d9816b75d09f69295ff14267441bf2eee3304deecc012c4591406624a",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "3efb649f0076cfe2a3e95eac3a48c2401dbfd7bab132b39a1a8a71f60267ffd2",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 12
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:36:51.822777Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:35:34.766274Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "12d111799e84388a81092b1c6b833ab9a4ed5889ae3f7f2225de184294a16d2f",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "0ef8e3abc134014814e4ba7a611d05764ceb1957c83685e6324910b90b866382",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 13
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:37:59.694330Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:36:51.956092Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "c8df3df6ec0d280fcca2516a4382fbfe49aa8c01c1f002ba57d6de91c90d6f95",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "0755a18c6bd51b764fb358e6e890a523272cd74229a38a753ecc950a4c3b6420",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 14
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:38:41.987281Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:37:59.811187Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "8718f98fdbe391d2875a66854eb39e9f67b1c04a14488cd636bafac55ecfdcab",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "29eca43bed8d8d9e8fb58e8ca4665bc51762b613e107b2c76979fc2fe5103b7d",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 15
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:39:33.708560Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:38:42.100698Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "af690b2c2321c52d80862bdf512a0335db2ce1632a0344794cc4bfc451234f7f",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "571d2362b282130ab797c03bbc26975f771a14586928f6fd86f691dfe288ee33",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 16
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:40:10.081939Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:39:33.844920Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "9d262ebf1b549ddc82c0ce9824866394d9fe8f6cb908ea0497c42d7e2c0acddf",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "a8fe012002860020ee60a42fb80aa9122f42c4bbfc84e693f4a42be2cb6669b8",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 17
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:40:53.608826Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:40:10.201457Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "a5b1355ed0697489b06dfb32ce8a7e9aabe4fffd92633838e3b53d830e64efe0",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "9113c21e036ff0066a5ace5d4dfdad0dd7ba1e9b0e0674a74461341d030caa34",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 18
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:42:16.747949Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:40:53.725470Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "053c82a99b6d86c27185a6c443c68a99792ef58f123c96fb047a7d4a06ffbe5a",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "ec74d9a6163f0abb17aa9cee6b76d101de48e4796c0c7c2ab300dc77ad29e83d",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 19
+    },
+    {
+      "actual_models": [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-5"
+      ],
+      "attempts": [
+        {
+          "attempt": 1,
+          "ended_at": "2026-08-26T19:43:14.334436Z",
+          "returncode": 0,
+          "started_at": "2026-08-26T19:42:16.865242Z",
+          "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "ae6bcf976f0285005b4baeaad9072f3b1e1a48ffd6003e2d7dbaf9dd69860b3e",
+          "transport_error": null
+        }
+      ],
+      "bridge_accepted": true,
+      "bridge_errors": [],
+      "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+      "fallback_applied": false,
+      "prompt_sha256": "51cb67f351a8f6e02e64186d1da4d0bff15fc1dcc1000960cb84df12a7b95b94",
+      "protocol_id": "compiler-lto-llm-zero-shot-v1",
+      "protocol_sha256": "bc4b1906cdd932b6f4b9ad4b6b6403ce729d89b367db99c7bab56b5fb2e0b2fb",
+      "provider_call_succeeded": true,
+      "provider_cli_version": "2.1.220 (Claude Code)",
+      "requested_model": "opus",
+      "response_parse_error": null,
+      "response_schema_sha256_canonical": "ce33d04d1ece6f8d595a6994dc9d432b4cf5dad18e05042098e88469f210c50f",
+      "response_sha256_canonical": "b18fe3758dbbf0f5b578d4a4dd2217b5f242e82cc21f36c1b69ff684946b997c",
+      "schema_version": "gicc-compiler-lto-llm-trial-v1",
+      "system_prompt_sha256": "4688eff2bf4365e6502e24ff23dffea4dbdd8c7ca284652baf22b5b7a63aeec9",
+      "trial": 20
+    }
+  ]
+}

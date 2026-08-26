@@ -1,0 +1,50 @@
+{
+  "default_dispatch": "IPC_OR_DWQ",
+  "llm_metadata": {
+    "accepted": true,
+    "decision_schema": "gicc-llm-decision-v1",
+    "decision_sites": 10,
+    "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+    "pinned_sites": 9
+  },
+  "schema_version": "gicc-hint-v1",
+  "sites": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.820: grid_blocks=8 saturates all 8 proxy lanes, so effective per-op issue is 2.872/8\u22480.36us vs trigger's serialized 1.033us stage cost; with 64 batched ops proxy's amortized total (~5.37+64/8*2.872\u224828us) beats trigger (~7.88+64*1.033\u224874us). Large flops_to_first_use (5392) further hides proxy issue latency."
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.850: grid_blocks=1 gives no proxy lane parallelism, so 32 ops cost 5.37+32*2.872\u224897us via proxy vs 7.88+32*1.033\u224841us via trigger; descriptor_reusable=true also amortizes host-side descriptor staging across the known 32-iteration loop."
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.560: Single 256B op with no batching: cost is dominated by fixed overhead, proxy 5.37+2.872=8.24us vs trigger 7.88+1.033=8.91us. Proxy is the cheaper fixed path, though the margin is small."
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.820: grid_blocks=1 means a single proxy producer: 5.37+16*2.872\u224851us vs trigger 7.88+16*1.033\u224824us. Coalescable, constant-bound 16-iteration loop with const 4096B size is ideal for compiler-reconstructed descriptor staging released through DWQ."
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.990: Only legal action; hk_capable=false and dynamic (non-reconstructible) offset preclude host-side descriptor staging."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.740: 4 blocks per site and 4 independent static sites map onto distinct proxy lanes (min(4,8) per site, 8 total), so ops issue concurrently: ~5.37+2.872\u22488.2us vs trigger's serialized 7.88+4*1.033\u224812.0us per site plus shared DWQ staging."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.740: Independent static site can occupy its own proxy lane; with grid_blocks=4 within the 8-lane budget the parallel issue cost (~8.2us) is below trigger's serialized stage cost (~12.0us) for 4 ops."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.740: Same kernel-wide pattern: 4 blocks x 4 static sites stay within proxy_worker_lanes=8, so per-op issue overlaps; proxy ~8.2us beats trigger ~12.0us and avoids serializing all sites through one DWQ release."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.740: Uniform decision with the sibling static sites keeps producer concurrency at min(grid_blocks, lanes); parallel proxy issue (~8.2us) is cheaper than trigger's 7.88+4*1.033\u224812.0us serialized staging."
+    }
+  },
+  "version": 1
+}

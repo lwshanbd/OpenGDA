@@ -1,0 +1,54 @@
+{
+  "default_dispatch": "IPC_OR_DWQ",
+  "llm_metadata": {
+    "accepted": true,
+    "decision_schema": "gicc-llm-decision-v1",
+    "decision_sites": 10,
+    "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+    "pinned_sites": 10
+  },
+  "schema_version": "gicc-hint-v1",
+  "sites": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.880: Constant-bound 64-iteration loop, coalescable, hk_capable, distance_exact: staging at 1.033us/op beats proxy issue at 2.872us/op once past the ~1.4-op break-even, so a 64-op batch strongly favors host-staged DWQ release."
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.880: trip_count 32 with descriptor_reusable=true and grid_blocks=1 gives proxy no lane parallelism; 5.37+2.872*32 issue far exceeds 7.88+1.033*32 staging, and descriptor reuse further reduces staging cost."
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.600: Single 256B op, no loop, batch_size 1: below the ~1.4-op break-even, so proxy fixed+issue (8.24us) narrowly beats trigger (8.91us). Small margin, moderate confidence."
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.620: 1MiB payload is bandwidth-bound (~44us at 24GB/s), so issue overhead is secondary; 8 grid blocks map onto 8 proxy lanes for concurrent single-op issue (~8.2us) versus serialized staging of 8 descriptors (~16.1us)."
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "reason": "LLM confidence=0.850: 16-iteration constant-bound coalescable batch on one block: no proxy lane parallelism, and 5.37+2.872*16=51.3us issue clearly exceeds 7.88+1.033*16=24.4us staging."
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.990: Only legal action; hk_capable=false and max_vector_bytes=1 preclude host descriptor reconstruction, so the device op is preserved with CPU proxy work."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.660: batch_size 1, not in a loop; independent static sites use distinct proxy lanes, so 4 sites x 4 blocks = 16 ops spread over 8 lanes (~2 ops/lane, ~11us) beats serialized host staging of 16 descriptors (~24.4us)."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.660: Same static kernel as its siblings: single-op non-loop site with lane-distinct proxy rings; concurrent issue across 8 lanes dominates one serialized DWQ staging stream for the aggregate ops."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.660: Independent static callsite, batch_size 1, grid_blocks 4: proxy lane concurrency keeps issue overhead overlapped, whereas trigger serializes 1.033us/op staging on a single host path."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "dispatch": "CPU_PROXY_ENQUEUE",
+      "reason": "LLM confidence=0.660: Fourth independent static site, batch_size 1, no loop: individually below trigger's amortization break-even, and distinct proxy lanes let all four sites issue in parallel."
+    }
+  },
+  "version": 1
+}

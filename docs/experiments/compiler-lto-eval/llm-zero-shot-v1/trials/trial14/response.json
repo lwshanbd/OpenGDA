@@ -1,0 +1,56 @@
+{
+  "decisions": {
+    "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0": {
+      "action": "proxy",
+      "confidence": 0.68,
+      "rationale": "512 total ops (8 blocks x trip_count 64) exceed host staging throughput: trigger ~7.88+512*1.033=537us serial, while proxy spreads producers over min(grid_blocks=8, lanes=8) lanes for ~5.37+64*2.872=189us. Grid-level lane parallelism dominates the lower per-op stage cost."
+    },
+    "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.85,
+      "rationale": "grid_blocks=1 gives proxy a single lane: 5.37+32*2.872=97us vs trigger 7.88+32*1.033=41us. descriptor_reusable=true and a known constant bound 32 make compiler-reconstructed descriptor staging through DWQ the cheaper path."
+    },
+    "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.52,
+      "rationale": "Single 256B op: proxy 5.37+2.872=8.24us vs trigger 7.88+1.033=8.91us. Sub-break-even op count (n<1.37) favors proxy's lower fixed cost, but the ~8% margin keeps confidence modest."
+    },
+    "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.5,
+      "rationale": "8 x 1MiB ops are bandwidth-bound (8MiB/24GB/s ~ 350us), so issue overhead is secondary; proxy still issues one op per lane (8.24us) vs trigger 7.88+8*1.033=16.1us. Small deterministic edge, low confidence."
+    },
+    "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2": {
+      "action": "trigger",
+      "confidence": 0.8,
+      "rationale": "grid_blocks=1 caps proxy at one lane: 5.37+16*2.872=51us vs trigger 7.88+16*1.033=24us. coalescable=true with a constant 16-trip loop lets the host stage a reconstructed batch and release it via DWQ."
+    },
+    "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0": {
+      "action": "proxy",
+      "confidence": 0.99,
+      "rationale": "Sole legal action; hk_capable=false and max_vector_bytes=1 preclude descriptor reconstruction, so the device operation must be preserved with CPU proxy work."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0": {
+      "action": "proxy",
+      "confidence": 0.7,
+      "rationale": "Four independent static sites may occupy distinct proxy lanes; 16 total ops over 8 lanes costs ~5.37+2*2.872=11us versus serial host staging 7.88+16*1.033=24us. Batch size 4 per site is too small to amortize trigger's fixed cost."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1": {
+      "action": "proxy",
+      "confidence": 0.7,
+      "rationale": "Independent static site sharing the 4-block launch; lane-parallel issue (min(4 blocks, 8 lanes)) beats serialized DWQ staging for only 4 ops per site, matching the sibling sites for uniform lane utilization."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2": {
+      "action": "proxy",
+      "confidence": 0.7,
+      "rationale": "Same kernel scenario as siblings: 4 ops/site with grid_blocks=4 map onto distinct proxy lanes; aggregate 16 ops finish in ~2 lane rounds (11us) versus 24us of serial host descriptor staging."
+    },
+    "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3": {
+      "action": "proxy",
+      "confidence": 0.7,
+      "rationale": "Fourth independent static site; keeping all four on proxy exploits the 8 worker lanes concurrently, avoiding the single-threaded trigger stage path that would serialize all 16 descriptors."
+    }
+  },
+  "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "schema_version": "gicc-llm-decision-v1"
+}
