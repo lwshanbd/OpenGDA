@@ -83,8 +83,10 @@ def exact_response_schema(dossier: dict[str, Any]) -> dict[str, Any]:
             },
             "required": ["action", "confidence", "rationale"],
         }
+    # Claude Code validates a practical JSON-Schema subset but rejects the
+    # otherwise standard draft URI before making a provider request.  Omitting
+    # the declaration does not relax any constraint below.
     return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "additionalProperties": False,
         "properties": {
