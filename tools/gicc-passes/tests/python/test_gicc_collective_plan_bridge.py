@@ -135,11 +135,27 @@ class CollectivePlanBridgeTests(unittest.TestCase):
             relation.get("property") == "topology"
             for relation in model_opportunity["relations"]
         ))
+        descriptors = collective._model_view(self.graph, "descriptors")
+        descriptor_opportunity = descriptors["opportunities"][0]
+        self.assertEqual([], descriptor_opportunity["relations"])
+        self.assertEqual(4, len(descriptor_opportunity["candidate_classes"]))
+        opaque = collective._model_view(self.graph, "opaque")
+        opaque_opportunity = opaque["opportunities"][0]
+        self.assertEqual([], opaque_opportunity["candidate_classes"])
+        self.assertTrue(all(
+            set(option) == {"option_id"}
+            for slot in opaque_opportunity["decision_slots"]
+            for option in slot["allowed_options"]
+        ))
         prompt = collective.render_prompt(self.graph)
         self.assertNotIn("target_id", prompt)
         self.assertNotIn("SECRET_SOURCE_SENTINEL", prompt)
         self.assertIn("step_complexity", prompt)
         self.assertEqual(1, prompt.count('"algorithm": "flat_double_tree"'))
+        self.assertEqual(3, len({
+            collective.render_prompt(self.graph, kind)
+            for kind in collective.MODEL_VIEW_KINDS
+        }))
         self.assertEqual(
             "compiler-generated option IDs only",
             self.graph["boundary"]["model_output"],

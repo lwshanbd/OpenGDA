@@ -440,6 +440,13 @@ scheme. Each interval maps its opaque options to those entities, so the model
 can reason jointly about structural variants while still returning only
 compiler-generated option IDs. Its complete response consists of one existing
 option ID per interval plus bounded confidence/rationale fields.
+
+`emit --prompt-view relational` is the primary rich view. Two preregistered
+input ablations preserve the identical compiler graph, action space, response
+schema, validator, and materializer: `descriptors` removes explicit relation
+edges, while `opaque` removes candidate descriptors and option-to-candidate
+mappings. These are input-information ablations, not different compiler
+permissions; none can name or create a materializer target.
 It cannot output a target symbol, algorithm string, threshold, source, code,
 IR, or legality. `accept` converts valid option IDs to a narrow
 `gicc-collective-hint-v1`; malformed or invented content falls back atomically

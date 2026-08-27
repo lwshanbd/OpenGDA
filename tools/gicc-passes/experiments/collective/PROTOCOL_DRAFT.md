@@ -169,6 +169,14 @@ to the restricted oracle, baseline speedup, bin-choice accuracy, invalid-output
 rate, and stability over 20 independent responses. Every accepted response is
 compiled through the same LTO verifier; rejected responses execute the anchor.
 
+Subject to explicit authorization for every exact prompt hash, use the same
+model and decoding settings for three compiler-input views: primary
+`relational`, `descriptors` without explicit relation edges, and `opaque`
+without candidate semantics. All three expose the same option IDs and response
+schema. This ablation tests the value of compiler semantic/relational context;
+it does not grant any view additional transformation authority and is not a
+general model-family ranking.
+
 ## Stop conditions
 
 - Any source/catalog hash mismatch.

@@ -31,6 +31,7 @@ GRAPH_SCHEMA = "gicc-collective-opportunity-graph-v1"
 DECISION_SCHEMA = "gicc-collective-plan-decision-v1"
 HINT_SCHEMA = "gicc-collective-hint-v1"
 ID_RE = re.compile(r"^(anchor|catalog|opportunity|option|candidate):[0-9a-f]{24}$")
+MODEL_VIEW_KINDS = ("relational", "descriptors", "opaque")
 
 
 class CollectivePlanError(ValueError):
@@ -387,9 +388,14 @@ def _model_candidate_class_id(
     return f"candidate-class:{digest}"
 
 
-def _model_view(graph: dict[str, Any]) -> dict[str, Any]:
+def _model_view(
+    graph: dict[str, Any], view_kind: str = "relational",
+) -> dict[str, Any]:
+    if view_kind not in MODEL_VIEW_KINDS:
+        raise CollectivePlanError(f"unknown model view {view_kind}")
     view = {
         "schema_version": "gicc-collective-model-view-v2",
+        "view_kind": view_kind,
         "compiler_graph_schema": graph["schema_version"],
         "graph_id": graph["graph_id"],
         "boundary": graph["boundary"],
@@ -425,9 +431,12 @@ def _model_view(graph: dict[str, Any]) -> dict[str, Any]:
             "semantic_contract": opportunity["semantic_contract"],
             "compiler_facts": opportunity["compiler_facts"],
             "joint_action_space_size": opportunity["joint_action_space_size"],
-            "candidate_classes": sorted(
-                candidate_classes.values(),
-                key=lambda item: item["candidate_class_id"],
+            "candidate_classes": (
+                sorted(
+                    candidate_classes.values(),
+                    key=lambda item: item["candidate_class_id"],
+                )
+                if view_kind != "opaque" else []
             ),
             "decision_slots": [],
             "relations": [],
@@ -437,21 +446,22 @@ def _model_view(graph: dict[str, Any]) -> dict[str, Any]:
                 "slot_id": slot["slot_id"],
                 "message_bytes": slot["message_bytes"],
                 "allowed_options": [
-                    {
+                    ({
                         "option_id": option["option_id"],
-                        "candidate_class_id": target_to_class[
-                            option["target_id"]
-                        ],
-                    }
+                        "candidate_class_id": target_to_class[option["target_id"]],
+                    } if view_kind != "opaque" else {
+                        "option_id": option["option_id"],
+                    })
                     for option in slot["options"]
                 ],
             })
-        shown["relations"].append({
-            "kind": "increasing_message_size",
-            "ordered_slot_ids": [
-                slot["slot_id"] for slot in opportunity["decision_slots"]
-            ],
-        })
+        if view_kind == "relational":
+            shown["relations"].append({
+                "kind": "increasing_message_size",
+                "ordered_slot_ids": [
+                    slot["slot_id"] for slot in opportunity["decision_slots"]
+                ],
+            })
         relation_fields = (
             "communication_graph", "topology", "cross_node_pattern",
             "resource_model", "synchronization",
@@ -465,7 +475,7 @@ def _model_view(graph: dict[str, Any]) -> dict[str, Any]:
                         candidate["candidate_class_id"]
                     )
             for value, members in sorted(groups.items()):
-                if len(members) > 1:
+                if view_kind == "relational" and len(members) > 1:
                     shown["relations"].append({
                         "kind": "shared_compiler_property",
                         "property": field,
@@ -476,7 +486,9 @@ def _model_view(graph: dict[str, Any]) -> dict[str, Any]:
     return view
 
 
-def render_prompt(graph_value: Any) -> str:
+def render_prompt(
+    graph_value: Any, view_kind: str = "relational",
+) -> str:
     graph = verified_graph(graph_value)
     skeleton = {
         "schema_version": DECISION_SCHEMA,
@@ -500,7 +512,7 @@ def render_prompt(graph_value: Any) -> str:
         "code, LLVM IR, function names, algorithms, thresholds, or new "
         "legality claims. LLVM independently validates and materializes the "
         "selection.\n\nCompiler opportunity graph:\n"
-        + json.dumps(_model_view(graph), indent=2, sort_keys=True)
+        + json.dumps(_model_view(graph, view_kind), indent=2, sort_keys=True)
         + "\n\nRequired response shape:\n"
         + json.dumps(skeleton, indent=2, sort_keys=True)
         + "\n"
@@ -669,7 +681,7 @@ def decision_to_hint(
 def _emit(args: argparse.Namespace) -> int:
     graph = make_graph(_read_json(args.inventory), _read_json(args.platform))
     bridge._write_json_atomic(args.graph, graph)
-    bridge._write_text_atomic(args.prompt, render_prompt(graph))
+    bridge._write_text_atomic(args.prompt, render_prompt(graph, args.prompt_view))
     capacity = sum(item["joint_action_space_size"]
                    for item in graph["opportunities"])
     print(
@@ -712,6 +724,9 @@ def _parser() -> argparse.ArgumentParser:
     emit.add_argument("--platform", type=Path, required=True)
     emit.add_argument("--graph", type=Path, required=True)
     emit.add_argument("--prompt", type=Path, required=True)
+    emit.add_argument(
+        "--prompt-view", choices=MODEL_VIEW_KINDS, default="relational"
+    )
     emit.set_defaults(run=_emit)
     accept = sub.add_parser("accept")
     accept.add_argument("--graph", type=Path, required=True)
