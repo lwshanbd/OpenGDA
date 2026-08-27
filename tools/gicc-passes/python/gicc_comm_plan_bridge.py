@@ -33,6 +33,7 @@ _CANDIDATE_KINDS = (
     "proxy_device",
     "trigger_descriptor_batch",
     "trigger_coalesced_loop",
+    "trigger_coalesced_early",
 )
 
 _MATERIALIZER_FOR_KIND = {
@@ -40,6 +41,9 @@ _MATERIALIZER_FOR_KIND = {
     "trigger_descriptor_batch": {"dispatch": "DWQ_TRIGGER", "transform": "NONE"},
     "trigger_coalesced_loop": {
         "dispatch": "DWQ_TRIGGER", "transform": "COALESCE_LOOP"
+    },
+    "trigger_coalesced_early": {
+        "dispatch": "DWQ_TRIGGER", "transform": "COALESCE_LOOP_EARLY"
     },
 }
 
@@ -132,6 +136,13 @@ def _fixed_materializer(site: dict[str, Any]) -> dict[str, str]:
 
 def make_opportunity_graph(dossier_value: Any) -> dict[str, Any]:
     dossier = bridge._verified_dossier(dossier_value)
+    transform_profile = dossier["platform_profile"].get(
+        "compiler_transforms", {}
+    )
+    early_trigger_enabled = (
+        isinstance(transform_profile, dict)
+        and transform_profile.get("early_trigger") is True
+    )
     opportunities: list[dict[str, Any]] = []
     fixed_sites: list[dict[str, Any]] = []
     for site in dossier["sites"]:
@@ -180,6 +191,36 @@ def make_opportunity_graph(dossier_value: Any) -> dict[str, Any]:
                 proof,
             ),
         ])
+        flops = site.get("flops_to_first_use")
+        if (
+            early_trigger_enabled
+            and site.get("distance_exact") is True
+            and isinstance(flops, int)
+            and not isinstance(flops, bool)
+            and flops >= 0
+        ):
+            candidates.append(_candidate(
+                site,
+                "trigger_coalesced_early",
+                "DWQ_TRIGGER",
+                "COALESCE_LOOP_EARLY",
+                (
+                    "Coalesce the loop and move the compiler-owned trigger "
+                    "to the proven loop exit so communication may overlap "
+                    "intervening GPU work."
+                ),
+                {
+                    "network_operations": 1,
+                    "host_descriptors": 1,
+                    "coalesced_bytes": size * trips,
+                    "trigger_placement": "loop_exit",
+                    "overlap_flops": flops,
+                },
+                proof + [
+                    "compiler measured an exact operation-to-completion distance",
+                    "device pass must reprove one communication loop and one later flush",
+                ],
+            ))
         opportunities.append({
             "opportunity_id": _opportunity_id(site["site_id"]),
             "kind": "loop_communication_plan",

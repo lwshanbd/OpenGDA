@@ -188,4 +188,50 @@ late triggering avoids contention but loses overlap.  The device pass must
 independently prove and materialize the placement, so the model still returns
 only a compiler-generated candidate ID.
 
-Content IDs and artifact hashes are frozen in `protocol-v1.json`.
+Content IDs and artifact hashes are frozen in
+`protocol-calibration-v1.json`.
+
+## Trigger-placement capacity expansion
+
+The preregistered placement graph adds a fourth compiler-owned candidate,
+`trigger_coalesced_early`.  Its host trace still stages exactly one coalesced
+descriptor.  The AMDGPU device pass, not a planner, moves the compiler-owned
+trigger from the later completion point to the unique communication-loop exit.
+It independently proves the one-communication/one-flush shape, natural loop,
+unique exit, dominance, post-dominance, and operand dominance; an unproved or
+bypass CFG fails compilation.
+
+The six opportunities now define 4^6 = 4096 factorized compiler plans.  Four
+uniform controls (`p`, `t`, late `c`, and early `e`) are run sequentially in
+each of four one-at-a-time `pdebug` allocations.  A single fixed oracle plan
+is selected from aggregate per-site medians and evaluated unchanged in every
+replicate, avoiding per-replicate minimum-selection bias.
+
+This graph advances to a provider experiment only if late and early placement
+each win at least one opportunity in all four replicates, and the paired
+bootstrap 95% lower bound for best-uniform/fixed-oracle exceeds 1.01.  Failure
+means the compiler action space still needs expansion; it is not evidence
+against LLM reasoning.  No provider input is authorized by this protocol.
+
+```bash
+bash examples/proxy/build_compiler_comm_plan_placement.sh controls
+
+# Submit exactly one pdebug allocation, validate it, then invoke again.
+bash examples/proxy/submit_compiler_comm_plan_placement.sh 1
+
+python3 examples/proxy/analyze_compiler_comm_plan_calibration.py \
+  --graph build_ofi/compiler_comm_plan_placement/generated/\
+opportunity-graph.json \
+  --manifest build_ofi/compiler_comm_plan_placement/generated/controls/\
+manifest.json \
+  --protocol docs/experiments/compiler-comm-plan-capacity/\
+protocol-placement-v1.json \
+  --expected-reps 1,2,3,4 \
+  --json docs/experiments/compiler-comm-plan-capacity/runs/\
+compiler-comm-plan-placement-v1/summary.json \
+  docs/experiments/compiler-comm-plan-capacity/runs/\
+compiler-comm-plan-placement-v1/raw/*.log
+```
+
+The complete pre-runtime contract and artifact hashes are frozen in
+`protocol-placement-v1.json`.

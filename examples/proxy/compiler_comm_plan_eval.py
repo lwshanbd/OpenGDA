@@ -31,12 +31,19 @@ import gicc_llm_bridge as bridge  # noqa: E402
 
 MANIFEST_SCHEMA = "gicc-communication-plan-controls-v1"
 UNIFORM_MANIFEST_SCHEMA = "gicc-communication-plan-uniform-controls-v1"
+PLACEMENT_MANIFEST_SCHEMA = "gicc-communication-plan-placement-controls-v1"
 KIND_CODES = {
     "proxy_device": "p",
     "trigger_descriptor_batch": "t",
     "trigger_coalesced_loop": "c",
+    "trigger_coalesced_early": "e",
 }
-EXPECTED_KINDS = tuple(KIND_CODES)
+EXPECTED_KINDS = (
+    "proxy_device",
+    "trigger_descriptor_batch",
+    "trigger_coalesced_loop",
+)
+PLACEMENT_KINDS = EXPECTED_KINDS + ("trigger_coalesced_early",)
 
 
 class ControlError(ValueError):
@@ -73,16 +80,16 @@ def _ordered_opportunities(graph: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _candidate_by_kind(
-    opportunity: dict[str, Any],
+    opportunity: dict[str, Any], expected_kinds: tuple[str, ...] = EXPECTED_KINDS,
 ) -> dict[str, dict[str, Any]]:
     candidates = {
         candidate["kind"]: candidate
         for candidate in opportunity["candidates"]
     }
-    if set(candidates) != set(EXPECTED_KINDS):
+    if set(candidates) != set(expected_kinds):
         raise ControlError(
             f"{opportunity['opportunity_id']}: candidate kinds "
-            f"{sorted(candidates)}, expected {list(EXPECTED_KINDS)}"
+            f"{sorted(candidates)}, expected {list(expected_kinds)}"
         )
     return candidates
 
@@ -177,19 +184,21 @@ def generate_controls(
 
 
 def generate_uniform_controls(
-    graph_value: Any, outdir: Path, source_sha256: str,
+    graph_value: Any, outdir: Path, source_sha256: str, *,
+    kinds: tuple[str, ...] = EXPECTED_KINDS,
+    schema: str = UNIFORM_MANIFEST_SCHEMA,
 ) -> dict[str, Any]:
-    """Generate three uniform arms for a graph with any opportunity count."""
+    """Generate one uniform arm per requested compiler candidate kind."""
     graph = plans.verified_graph(graph_value)
     opportunities = _ordered_opportunities(graph)
     if len(source_sha256) != 64 or any(
         character not in "0123456789abcdef" for character in source_sha256
     ):
         raise ControlError("source_sha256 must be 64 lowercase hex characters")
-    choices = [_candidate_by_kind(item) for item in opportunities]
+    choices = [_candidate_by_kind(item, kinds) for item in opportunities]
     outdir.mkdir(parents=True, exist_ok=True)
     arms: list[dict[str, Any]] = []
-    for kind in EXPECTED_KINDS:
+    for kind in kinds:
         name = f"uniform_{KIND_CODES[kind]}"
         response = {
             "schema_version": plans.DECISION_SCHEMA,
@@ -233,7 +242,7 @@ def generate_uniform_controls(
             "selections": selected,
         })
     payload = {
-        "schema_version": UNIFORM_MANIFEST_SCHEMA,
+        "schema_version": schema,
         "graph_id": graph["graph_id"],
         "source_sha256": source_sha256,
         "model_invoked": False,
@@ -253,15 +262,29 @@ def generate_uniform_controls(
     return manifest
 
 
+def generate_placement_controls(
+    graph_value: Any, outdir: Path, source_sha256: str,
+) -> dict[str, Any]:
+    return generate_uniform_controls(
+        graph_value,
+        outdir,
+        source_sha256,
+        kinds=PLACEMENT_KINDS,
+        schema=PLACEMENT_MANIFEST_SCHEMA,
+    )
+
+
 def verify_manifest(graph_value: Any, manifest_value: Any, root: Path) -> None:
     graph = plans.verified_graph(graph_value)
     if not isinstance(manifest_value, dict):
         raise ControlError("control manifest must be a JSON object")
     schema = manifest_value.get("schema_version")
-    if schema not in (MANIFEST_SCHEMA, UNIFORM_MANIFEST_SCHEMA):
+    if schema not in (
+        MANIFEST_SCHEMA, UNIFORM_MANIFEST_SCHEMA, PLACEMENT_MANIFEST_SCHEMA,
+    ):
         raise ControlError(
             f"expected manifest schema {MANIFEST_SCHEMA} or "
-            f"{UNIFORM_MANIFEST_SCHEMA}"
+            f"{UNIFORM_MANIFEST_SCHEMA}, or {PLACEMENT_MANIFEST_SCHEMA}"
         )
     manifest_id = manifest_value.get("manifest_id")
     payload = dict(manifest_value)
@@ -271,7 +294,15 @@ def verify_manifest(graph_value: Any, manifest_value: Any, root: Path) -> None:
     if manifest_value.get("graph_id") != graph["graph_id"]:
         raise ControlError("manifest graph_id does not match graph")
     arms = manifest_value.get("arms")
-    expected_arm_count = 9 if schema == MANIFEST_SCHEMA else 3
+    expected_arm_count = {
+        MANIFEST_SCHEMA: 9,
+        UNIFORM_MANIFEST_SCHEMA: 3,
+        PLACEMENT_MANIFEST_SCHEMA: 4,
+    }[schema]
+    expected_kinds = (
+        PLACEMENT_KINDS
+        if schema == PLACEMENT_MANIFEST_SCHEMA else EXPECTED_KINDS
+    )
     if not isinstance(arms, list) or len(arms) != expected_arm_count:
         raise ControlError(
             f"manifest must contain exactly {expected_arm_count} arms"
@@ -307,7 +338,7 @@ def verify_manifest(graph_value: Any, manifest_value: Any, root: Path) -> None:
         kinds = tuple(item["kind"] for item in arm.get("selections", []))
         if (
             len(kinds) != len(graph["opportunities"])
-            or any(kind not in EXPECTED_KINDS for kind in kinds)
+            or any(kind not in expected_kinds for kind in kinds)
         ):
             raise ControlError(f"{arm['name']}: invalid selection summary")
         combinations.add(kinds)
@@ -321,7 +352,10 @@ def verify_manifest(graph_value: Any, manifest_value: Any, root: Path) -> None:
             kinds[0] for kinds in combinations
             if kinds and len(set(kinds)) == 1
         }
-        if uniform_kinds != set(EXPECTED_KINDS) or len(combinations) != 3:
+        if (
+            uniform_kinds != set(expected_kinds)
+            or len(combinations) != expected_arm_count
+        ):
             raise ControlError(
                 "uniform manifest must cover one all-site arm per action kind"
             )
@@ -346,7 +380,9 @@ def verify_ir(
         if not isinstance(trips, int) or not isinstance(size, int):
             raise ControlError(f"{opportunity_id}: missing constant IR signature")
         signatures[opportunity_id] = (trips, trips * size)
-    if manifest["schema_version"] == UNIFORM_MANIFEST_SCHEMA:
+    if manifest["schema_version"] in (
+        UNIFORM_MANIFEST_SCHEMA, PLACEMENT_MANIFEST_SCHEMA,
+    ):
         texts: dict[str, str] = {}
         kind_for_arm: dict[str, str] = {}
         for arm in manifest["arms"]:
@@ -360,7 +396,12 @@ def verify_ir(
                 raise ControlError(f"{arm['name']}: IR arm is not uniform")
             kind_for_arm[arm["name"]] = next(iter(kinds))
         arm_for_kind = {kind: arm for arm, kind in kind_for_arm.items()}
-        if set(arm_for_kind) != set(EXPECTED_KINDS):
+        expected_kinds = (
+            PLACEMENT_KINDS
+            if manifest["schema_version"] == PLACEMENT_MANIFEST_SCHEMA
+            else EXPECTED_KINDS
+        )
+        if set(arm_for_kind) != set(expected_kinds):
             raise ControlError("uniform IR set is missing an action kind")
         baseline = texts[arm_for_kind["proxy_device"]]
         trip_multiplicity = Counter(trips for trips, _ in signatures.values())
@@ -395,7 +436,13 @@ def verify_ir(
                     coalesced_count(text, total)
                     - coalesced_count(baseline, total)
                 )
-                wanted = multiplicity if kind == "trigger_coalesced_loop" else 0
+                wanted = (
+                    multiplicity
+                    if kind in (
+                        "trigger_coalesced_loop", "trigger_coalesced_early",
+                    )
+                    else 0
+                )
                 if delta != wanted:
                     raise ControlError(
                         f"{arm_name}: coalesced-call delta for bytes={total} "
@@ -450,6 +497,41 @@ def verify_ir(
                 )
 
 
+def verify_placement_device_ir(
+    graph_value: Any, manifest_value: Any, root: Path, ir_dir: Path,
+) -> None:
+    """Prove the real device lowering moved only early-plan triggers."""
+    graph = plans.verified_graph(graph_value)
+    verify_manifest(graph, manifest_value, root)
+    if manifest_value["schema_version"] != PLACEMENT_MANIFEST_SCHEMA:
+        raise ControlError("device placement verifier requires placement controls")
+    opportunity_count = len(graph["opportunities"])
+    for arm in manifest_value["arms"]:
+        path = ir_dir / f"{arm['name']}.device.ll"
+        try:
+            text = path.read_text()
+        except OSError as exc:
+            raise ControlError(f"cannot read device LLVM IR {path}: {exc}") from exc
+        kinds = {selection["kind"] for selection in arm["selections"]}
+        if len(kinds) != 1:
+            raise ControlError(f"{arm['name']}: device IR arm is not uniform")
+        kind = next(iter(kinds))
+        moved = len(re.findall(
+            r"store volatile i64[^\n]*!gicc\.communication_transform ![0-9]+",
+            text,
+        ))
+        wanted = opportunity_count if kind == "trigger_coalesced_early" else 0
+        if moved != wanted:
+            raise ControlError(
+                f"{path}: early-trigger store count={moved}, expected={wanted}"
+            )
+        has_marker = '!{!"COALESCE_LOOP_EARLY"}' in text
+        if has_marker != (wanted > 0):
+            raise ControlError(
+                f"{path}: early-trigger metadata marker does not match plan"
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -461,6 +543,10 @@ def main() -> int:
     uniform.add_argument("--graph", required=True, type=Path)
     uniform.add_argument("--out", required=True, type=Path)
     uniform.add_argument("--source-sha256", required=True)
+    placement = sub.add_parser("placement-controls")
+    placement.add_argument("--graph", required=True, type=Path)
+    placement.add_argument("--out", required=True, type=Path)
+    placement.add_argument("--source-sha256", required=True)
     verify = sub.add_parser("verify")
     verify.add_argument("--graph", required=True, type=Path)
     verify.add_argument("--manifest", required=True, type=Path)
@@ -468,6 +554,10 @@ def main() -> int:
     verify_ir_parser.add_argument("--graph", required=True, type=Path)
     verify_ir_parser.add_argument("--manifest", required=True, type=Path)
     verify_ir_parser.add_argument("--ir", required=True, type=Path)
+    verify_device = sub.add_parser("verify-placement-device-ir")
+    verify_device.add_argument("--graph", required=True, type=Path)
+    verify_device.add_argument("--manifest", required=True, type=Path)
+    verify_device.add_argument("--ir", required=True, type=Path)
     args = parser.parse_args()
     try:
         graph = _read_json(args.graph)
@@ -487,6 +577,16 @@ def main() -> int:
                 f"{len(manifest['opportunity_order'])} opportunities; "
                 f"manifest_id={manifest['manifest_id']}"
             )
+        elif args.command == "placement-controls":
+            manifest = generate_placement_controls(
+                graph, args.out, args.source_sha256
+            )
+            print(
+                f"compiler-comm-plan-eval: generated {len(manifest['arms'])} "
+                f"placement controls over "
+                f"{len(manifest['opportunity_order'])} opportunities; "
+                f"manifest_id={manifest['manifest_id']}"
+            )
         elif args.command == "verify":
             manifest = _read_json(args.manifest)
             verify_manifest(graph, manifest, args.manifest.parent)
@@ -494,12 +594,21 @@ def main() -> int:
                 f"compiler-comm-plan-eval: verified {len(manifest['arms'])} "
                 "compiler-generated controls"
             )
-        else:
+        elif args.command == "verify-ir":
             manifest = _read_json(args.manifest)
             verify_ir(graph, manifest, args.manifest.parent, args.ir)
             print(
                 f"compiler-comm-plan-eval: verified LTO IR for "
                 f"{len(manifest['arms'])} compiler-generated controls"
+            )
+        else:
+            manifest = _read_json(args.manifest)
+            verify_placement_device_ir(
+                graph, manifest, args.manifest.parent, args.ir
+            )
+            print(
+                "compiler-comm-plan-eval: verified device trigger placement "
+                f"for {len(manifest['arms'])} controls"
             )
         return 0
     except (ControlError, plans.PlanBridgeError, OSError, ValueError) as exc:

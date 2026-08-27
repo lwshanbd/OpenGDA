@@ -128,6 +128,55 @@ class CommunicationPlanBridgeTests(unittest.TestCase):
         self.assertEqual("COALESCE_LOOP", site["transform"])
         self.assertTrue(hint["llm_metadata"]["compiler_only_output"])
 
+    def test_profile_enabled_early_trigger_is_candidate_id_only(self):
+        platform = copy.deepcopy(PLATFORM)
+        platform["compiler_transforms"] = {"early_trigger": True}
+        dossier = bridge.make_dossier([coalescable_feature()], platform)
+        graph = plans.make_opportunity_graph(dossier)
+        opportunity = graph["opportunities"][0]
+        self.assertEqual(
+            {
+                "proxy_device",
+                "trigger_descriptor_batch",
+                "trigger_coalesced_loop",
+                "trigger_coalesced_early",
+            },
+            {candidate["kind"] for candidate in opportunity["candidates"]},
+        )
+        early = next(
+            candidate for candidate in opportunity["candidates"]
+            if candidate["kind"] == "trigger_coalesced_early"
+        )
+        decision = {
+            "schema_version": plans.DECISION_SCHEMA,
+            "graph_id": graph["graph_id"],
+            "selections": {
+                opportunity["opportunity_id"]: {
+                    "candidate_id": early["candidate_id"],
+                    "confidence": 0.8,
+                    "rationale": "overlap the compiler-measured distance",
+                }
+            },
+        }
+        hint, accepted, errors = plans.plan_to_hint(graph, decision)
+        self.assertTrue(accepted, errors)
+        self.assertEqual(
+            "COALESCE_LOOP_EARLY",
+            hint["sites"]["unit.cpp:10:k::0"]["transform"],
+        )
+
+    def test_early_trigger_requires_exact_compiler_distance(self):
+        platform = copy.deepcopy(PLATFORM)
+        platform["compiler_transforms"] = {"early_trigger": True}
+        feature = coalescable_feature()
+        feature["distance_exact"] = False
+        dossier = bridge.make_dossier([feature], platform)
+        graph = plans.make_opportunity_graph(dossier)
+        self.assertNotIn(
+            "trigger_coalesced_early",
+            {candidate["kind"] for candidate in graph["opportunities"][0]["candidates"]},
+        )
+
     def test_invented_candidate_falls_back_without_transform(self):
         decision = self.decision()
         selection = decision["selections"][self.opportunity["opportunity_id"]]

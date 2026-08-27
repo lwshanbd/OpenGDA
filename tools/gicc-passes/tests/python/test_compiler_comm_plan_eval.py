@@ -153,6 +153,58 @@ class CompilerCommunicationPlanControlTests(unittest.TestCase):
                 (ir_dir / f"{arm['name']}.ll").write_text("\n".join(lines))
             controls.verify_ir(graph, manifest, out, ir_dir)
 
+    def test_placement_controls_cover_early_and_late_materializers(self):
+        platform = dict(PLATFORM)
+        platform["compiler_transforms"] = {"early_trigger": True}
+        graph = plans.make_opportunity_graph(
+            bridge.make_dossier([coalescable_feature()], platform)
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            out = Path(temporary)
+            ir_dir = out / "ir"
+            ir_dir.mkdir()
+            manifest = controls.generate_placement_controls(
+                graph, out, "e" * 64
+            )
+            controls.verify_manifest(graph, manifest, out)
+            self.assertEqual(
+                ["uniform_p", "uniform_t", "uniform_c", "uniform_e"],
+                [arm["name"] for arm in manifest["arms"]],
+            )
+            facts = graph["opportunities"][0]["compiler_facts"]
+            trips = facts["trip_count"]
+            total = trips * facts["size_bytes"]
+            for arm in manifest["arms"]:
+                kind = arm["selections"][0]["kind"]
+                lines = []
+                if kind == "trigger_descriptor_batch":
+                    lines.append(
+                        "call void @gicc_runtime_dwq_enqueue_batched("
+                        f"ptr null, i32 {trips}, ptr null)"
+                    )
+                elif kind in (
+                    "trigger_coalesced_loop", "trigger_coalesced_early",
+                ):
+                    lines.append(
+                        "call void @gicc_runtime_dwq_enqueue("
+                        f"ptr null, i64 {total})"
+                    )
+                (ir_dir / f"{arm['name']}.ll").write_text("\n".join(lines))
+                device_lines = []
+                if kind == "trigger_coalesced_early":
+                    device_lines = [
+                        "store volatile i64 1, ptr null, "
+                        "!gicc.communication_transform !1",
+                        '!1 = !{!"COALESCE_LOOP_EARLY"}',
+                    ]
+                (ir_dir / f"{arm['name']}.device.ll").write_text(
+                    "\n".join(device_lines)
+                )
+            controls.verify_ir(graph, manifest, out, ir_dir)
+            controls.verify_placement_device_ir(
+                graph, manifest, out, ir_dir
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

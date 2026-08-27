@@ -5,8 +5,12 @@
 #include "DispatchDecision.h"
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicsAMDGPU.h"
@@ -14,6 +18,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/TargetParser/Triple.h"
 
 using namespace llvm;
@@ -56,7 +61,7 @@ constexpr unsigned kTriggerValOffset  = 8;
 //   fence release
 //   br label %skip
 // skip:
-void lowerFlushAMDGCN(CallInst *CI) {
+void lowerFlushAMDGCN(CallInst *CI, bool earlyPlacement = false) {
     LLVMContext &Ctx = CI->getContext();
     Module      *M   = CI->getModule();
     Value       *ctxArg = CI->getArgOperand(0);
@@ -105,6 +110,12 @@ void lowerFlushAMDGCN(CallInst *CI) {
     auto *nt = MDNode::get(Ctx,
         {ConstantAsMetadata::get(ConstantInt::get(B.getInt32Ty(), 1))});
     st->setMetadata(LLVMContext::MD_nontemporal, nt);
+    if (earlyPlacement) {
+        st->setMetadata(
+            "gicc.communication_transform",
+            MDNode::get(Ctx,
+                        MDString::get(Ctx, "COALESCE_LOOP_EARLY")));
+    }
     B.CreateFence(AtomicOrdering::Release, SyncScope::System);
     B.CreateBr(skipBB);
 
@@ -252,10 +263,95 @@ void wrapPreservedOpLeadThreadAMDGCN(CallInst *CI) {
     wrapPreservedOpBlockAMDGCN(CI, /*slot=*/-1, /*laneArgIdx=*/-1);
 }
 
+// A late DWQ trigger waits until the source-level flush site, potentially
+// leaving compiler-proved intervening GPU work unable to hide communication.
+// COALESCE_LOOP_EARLY keeps the same host-staged descriptor but relocates the
+// compiler-owned MMIO trigger to the unique exit of the loop that originally
+// contained put_no_db.  The candidate ID cannot assert any of these facts:
+// the device pass re-proves the complete narrow shape and fails closed.
+void relocateEarlyTrigger(
+        Function &F, const GICCKernelInfo &info, const HintFile &hint,
+        FunctionAnalysisManager &FAM, DenseSet<CallInst *> &earlyFlushes) {
+    const GICCCallSite *earlySite = nullptr;
+    unsigned dataSiteCount = 0;
+    SmallVector<CallInst *, 2> flushes;
+    for (const auto &site : info.sites) {
+        if (site.kind == GICCOpKind::PutNoDb ||
+            site.kind == GICCOpKind::GetNoDb) {
+            ++dataSiteCount;
+            SiteHint selected = hintFor(hint, site.siteId);
+            if (selected.transform ==
+                CommunicationTransform::CoalesceLoopEarly) {
+                if (earlySite)
+                    report_fatal_error(
+                        Twine("gicc: COALESCE_LOOP_EARLY rejected in kernel ") +
+                        F.getName() + ": multiple early-trigger sites");
+                if (selected.dispatch != DispatchKind::DwqTrigger)
+                    report_fatal_error(
+                        Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
+                        site.siteId + ": requires DWQ_TRIGGER");
+                if (site.kind != GICCOpKind::PutNoDb)
+                    report_fatal_error(
+                        Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
+                        site.siteId + ": put_no_db is required");
+                earlySite = &site;
+            }
+        } else if (site.kind == GICCOpKind::Flush) {
+            flushes.push_back(site.CI);
+        }
+    }
+    if (!earlySite) return;
+    if (dataSiteCount != 1)
+        report_fatal_error(
+            Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
+            earlySite->siteId +
+            ": requires exactly one communication site in the kernel");
+    if (flushes.size() != 1)
+        report_fatal_error(
+            Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
+            earlySite->siteId + ": requires exactly one flush site");
+
+    LoopInfo &LI = FAM.getResult<LoopAnalysis>(F);
+    DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
+    PostDominatorTree &PDT = FAM.getResult<PostDominatorTreeAnalysis>(F);
+    Loop *loop = LI.getLoopFor(earlySite->CI->getParent());
+    if (!loop)
+        report_fatal_error(
+            Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
+            earlySite->siteId + ": put_no_db is not inside a natural loop");
+    BasicBlock *exit = loop->getUniqueExitBlock();
+    if (!exit)
+        report_fatal_error(
+            Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
+            earlySite->siteId + ": loop has no unique exit block");
+    CallInst *flush = flushes.front();
+    if (loop->contains(flush->getParent()) ||
+        !DT.dominates(exit, flush->getParent()) ||
+        !PDT.dominates(flush->getParent(), exit))
+        report_fatal_error(
+            Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
+            earlySite->siteId +
+            ": the later flush is not a mandatory post-dominated completion");
+
+    Instruction *insertBefore = &*exit->getFirstInsertionPt();
+    for (Value *operand : flush->args()) {
+        auto *definition = dyn_cast<Instruction>(operand);
+        if (definition && !DT.dominates(definition, insertBefore))
+            report_fatal_error(
+                Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
+                earlySite->siteId +
+                ": a flush operand does not dominate the loop exit");
+    }
+    if (flush != insertBefore) flush->moveBefore(insertBefore);
+    earlyFlushes.insert(flush);
+    errs() << "[device-lowering] " << earlySite->siteId
+           << ": moved compiler trigger to unique loop exit\n";
+}
+
 }  // namespace
 
 PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
-                                              ModuleAnalysisManager &) {
+                                              ModuleAnalysisManager &MAM) {
     const auto &cfg = getConfig();
     if (cfg.mode != Mode::Lower) return PreservedAnalyses::all();
 
@@ -273,11 +369,14 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
     // this kernel — keep the device-side call so the put_no_db body in
     // ofi_device.cuh runs and pushes a TransferCmd into the proxy ring.
     SmallVector<std::pair<CallInst *, bool>, 16> putGetCalls;
+    DenseSet<CallInst *> earlyFlushes;
     // Which block issues each preserved op, and for a completion point how
     // many rings it has to drain.
     DenseMap<CallInst *, int> slotOf, nslotOf;
     bool changed = false;
     const auto &cfgRef = cfg;  // capture for the inner switch.
+    FunctionAnalysisManager &FAM =
+        MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
 
     for (Function &F : M) {
         if (F.isDeclaration() || !isGPUKernel(F)) continue;
@@ -329,6 +428,9 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
             if (readKernelTemplate(cfgRef.metaDir, info.mangledName, kt))
                 proxyAware = kt.proxy_aware;
         }
+
+        if (haveHint)
+            relocateEarlyTrigger(F, info, hint, FAM, earlyFlushes);
 
         // Fence scope, per completion point. The device header defaults the
         // argument to FENCE_SYSTEM, so a site the analysis says nothing
@@ -469,7 +571,7 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
     }
     for (CallInst *CI : flushCalls) {
         if (isAMDGCN) {
-            lowerFlushAMDGCN(CI);
+            lowerFlushAMDGCN(CI, earlyFlushes.contains(CI));
             changed = true;
         }
         // NVPTX flush lowering lands in Phase 4.

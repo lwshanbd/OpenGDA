@@ -2,14 +2,37 @@
 # Build a six-opportunity compiler-only communication-plan capacity sweep from
 # the existing, unchanged compiler_lto_calibration.cpp workload.
 #
+# Set GICC_COMM_PLAN_VARIANT=placement (or use the placement wrapper) to build
+# the four-action early/late trigger-placement graph in a disjoint directory.
+#
 #   facts                emit compiler graph/prompt only
-#   controls             build uniform proxy/trigger/coalesce controls
+#   controls             build uniform controls for the selected variant
 #   candidate FILE NAME  validate candidate-ID-only response and build it
 set -euo pipefail
 
 GICC_ROOT="${GICC_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 MODE="${1:-controls}"
-OUT="${GICC_ROOT}/build_ofi/compiler_comm_plan_calibration"
+VARIANT="${GICC_COMM_PLAN_VARIANT:-calibration}"
+case "${VARIANT}" in
+  calibration)
+    OUT="${GICC_ROOT}/build_ofi/compiler_comm_plan_calibration"
+    PROFILE="${GICC_ROOT}/examples/proxy/compiler_lto_calibration_profile.json"
+    CONTROL_COMMAND=uniform-controls
+    BINARY_STEM=compiler_comm_plan_calibration
+    EVAL_CUID=gicc_compiler_comm_plan_calibration_v1
+    ;;
+  placement)
+    OUT="${GICC_ROOT}/build_ofi/compiler_comm_plan_placement"
+    PROFILE="${GICC_ROOT}/examples/proxy/compiler_comm_plan_placement_profile.json"
+    CONTROL_COMMAND=placement-controls
+    BINARY_STEM=compiler_comm_plan_placement
+    EVAL_CUID=gicc_compiler_comm_plan_placement_v1
+    ;;
+  *)
+    echo "ERROR: GICC_COMM_PLAN_VARIANT must be calibration or placement" >&2
+    exit 2
+    ;;
+esac
 META="${OUT}/meta"
 OBJ="${OUT}/obj"
 GENERATED="${OUT}/generated"
@@ -17,7 +40,6 @@ CONTROLS="${GENERATED}/controls"
 IR="${GENERATED}/ir"
 PASSES="${GICC_PASSES_SO:-${GICC_ROOT}/tools/gicc-passes/build/libgicc-passes.so}"
 SRC="${GICC_ROOT}/examples/proxy/compiler_lto_calibration.cpp"
-PROFILE="${GICC_ROOT}/examples/proxy/compiler_lto_calibration_profile.json"
 FEATURES="${GENERATED}/features.json"
 DOSSIER="${GENERATED}/dossier.json"
 GRAPH="${GENERATED}/opportunity-graph.json"
@@ -70,8 +92,6 @@ CFLAGS=(
   -isystem "${MPI}/include" -O3 --offload-arch=gfx90a -std=gnu++17
   -fpass-plugin="${PASSES}" -flto
 )
-EVAL_CUID="gicc_compiler_comm_plan_calibration_v1"
-
 source_before=$(sha256sum "${SRC}")
 source_before=${source_before%% *}
 test "${source_before}" = "${EXPECTED_SOURCE_SHA256}" || {
@@ -108,7 +128,7 @@ fi
 declare -a NAMES=()
 declare -a HINTS=()
 if [ "${MODE}" = controls ]; then
-  python3 "${EVAL_TOOL}" uniform-controls --graph "${GRAPH}" \
+  python3 "${EVAL_TOOL}" "${CONTROL_COMMAND}" --graph "${GRAPH}" \
     --out "${CONTROLS}" --source-sha256 "${source_before}"
   python3 "${EVAL_TOOL}" verify --graph "${GRAPH}" \
     --manifest "${CONTROLS}/manifest.json"
@@ -137,11 +157,22 @@ for i in "${!NAMES[@]}"; do
     "${HIPCC}" "${CFLAGS[@]}" -cuid="${EVAL_CUID}" -x hip -c "${SRC}" \
     -o "${OBJ}/${name}.o"
   "${LLVM_DIS}" "${OBJ}/${name}.o" -o "${IR}/${name}.ll"
+  if [ "${VARIANT}" = placement ]; then
+    env GICC_MODE=lower GICC_META_DIR="${META}" GICC_HINT_IN="${hint}" \
+      GICC_PROXY_ENABLED=1 \
+      "${HIPCC}" "${CFLAGS[@]}" -cuid="${EVAL_CUID}" -x hip \
+      --cuda-device-only -S -emit-llvm "${SRC}" \
+      -o "${IR}/${name}.device.ll"
+  fi
 done
 
 if [ "${MODE}" = controls ]; then
   python3 "${EVAL_TOOL}" verify-ir --graph "${GRAPH}" \
     --manifest "${CONTROLS}/manifest.json" --ir "${IR}"
+  if [ "${VARIANT}" = placement ]; then
+    python3 "${EVAL_TOOL}" verify-placement-device-ir --graph "${GRAPH}" \
+      --manifest "${CONTROLS}/manifest.json" --ir "${IR}"
+  fi
 fi
 
 for extra in runtime_helpers proxy_thread proxy_libfabric; do
@@ -162,7 +193,7 @@ for name in "${NAMES[@]}"; do
     --rtlib=compiler-rt -unwindlib=libgcc \
     "${OBJ}/${name}.o" "${OBJ}/runtime_helpers.o" \
     "${OBJ}/proxy_thread.o" "${OBJ}/proxy_libfabric.o" \
-    -o "${OUT}/compiler_comm_plan_calibration_${name}" \
+    -o "${OUT}/${BINARY_STEM}_${name}" \
     -Wl,-rpath,"${LIBFAB}/lib64:${MPI}/lib" \
     "${LIBFAB}/lib64/libfabric.so" /usr/lib64/libhwloc.so -lpthread \
     /opt/rocm-6.4.0/lib/libamdhip64.so.6.4.60400 \
@@ -175,5 +206,8 @@ test "${source_before}" = "${source_after}"
 test "${source_after}" = "${EXPECTED_SOURCE_SHA256}"
 echo "SOURCE_SHA256=${source_after}"
 for name in "${NAMES[@]}"; do
-  sha256sum "${OUT}/compiler_comm_plan_calibration_${name}" "${IR}/${name}.ll"
+  sha256sum "${OUT}/${BINARY_STEM}_${name}" "${IR}/${name}.ll"
+  if [ "${VARIANT}" = placement ]; then
+    sha256sum "${IR}/${name}.device.ll"
+  fi
 done

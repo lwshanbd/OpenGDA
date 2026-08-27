@@ -496,9 +496,10 @@ void emitOpInLoop(Module &M, IRBuilder<> &B, Function *traceFn,
 void emitCoalescedLoop(Module &M, IRBuilder<> &B, Function *traceFn,
                        const OpTemplate &op, GICCOpKind kind,
                        const SiteHint &hint) {
+    const char *transform = communicationTransformName(hint.transform);
     auto reject = [&](const Twine &reason) -> void {
         report_fatal_error(
-            Twine("gicc: COALESCE_LOOP rejected for site ") + op.siteId +
+            Twine("gicc: ") + transform + " rejected for site " + op.siteId +
             ": " + reason);
     };
 
@@ -543,7 +544,7 @@ void emitCoalescedLoop(Module &M, IRBuilder<> &B, Function *traceFn,
     CI->setMetadata(
         "gicc.communication_transform",
         MDNode::get(M.getContext(),
-                    MDString::get(M.getContext(), "COALESCE_LOOP")));
+                    MDString::get(M.getContext(), transform)));
 }
 
 void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,
@@ -587,7 +588,8 @@ void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,
     B.SetInsertPoint(doBB);
 
     SiteHint hint = hintFor(hints, op.siteId);
-    if (hint.transform == CommunicationTransform::CoalesceLoop) {
+    if (hint.transform == CommunicationTransform::CoalesceLoop ||
+        hint.transform == CommunicationTransform::CoalesceLoopEarly) {
         emitCoalescedLoop(M, B, traceFn, op, kind, hint);
         B.CreateBr(contBB);
         return;

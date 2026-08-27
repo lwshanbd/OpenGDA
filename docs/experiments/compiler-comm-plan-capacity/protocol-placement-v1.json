@@ -1,0 +1,173 @@
+{
+  "artifacts": {
+    "binaries": {
+      "uniform_c": "746c38e3c8459e443f1f7fa09b7a0a39d6a09e31a2aa7195e6558e0638e6b150",
+      "uniform_e": "b7ea627a68e55a7d0b21d6ff07eaf040119e4343c7fbbacfb779a9e7cfd0ead3",
+      "uniform_p": "3ea55e277f251659b080dd2ad59fdfcccee5ac823b9a389137e1ab8582f7b54b",
+      "uniform_t": "db88feb0eb8ee3073181049ea4262a58bade201b441c7767e8e33c8e7743c1fa"
+    },
+    "compiler_dossier": {
+      "id": "sha256:9cbf2a490b94105775438a2f5bc093264894df08b1d3d33ee42e7eb072932cf4",
+      "sha256": "22bd729fa84564800979f71e177054d4d640d6273478c8213718a02a0f50318c"
+    },
+    "control_manifest": {
+      "id": "sha256:6676624303b81453651a09de822f26f6e34c8ce038a352f0f1e8f136b5bbbbff",
+      "sha256": "1d2818bfd565a76c113d1a75aa52d3270598ae9d1c659dfd313eb6e3a9077593"
+    },
+    "device_ir": {
+      "uniform_c": "121e235526936776e538469a1236ba142f3100e860c859101937b81264d01be3",
+      "uniform_e": "5cd2d733cf131273e11fe8e1bbd99e6612f9661fb7b96e0e05e26c4b891b309e",
+      "uniform_p": "e6c3d36ce4bfc046dbb70f8269c714cd1d3736197e06656ca1848a54552d1fa3",
+      "uniform_t": "121e235526936776e538469a1236ba142f3100e860c859101937b81264d01be3"
+    },
+    "features_sha256": "43f112529c8491bd9c302fd65f9ba7cc13b8a7be2162bae3d0925591358a1fe0",
+    "host_lto_ir": {
+      "uniform_c": "ea9d1c811edcf3fd14233c37674ace16bd368f2f56f411f83cbb937503312642",
+      "uniform_e": "c8ac39a98fe9e7c2a4bbe47c5eb29cba508a47eeffb25185be662c2957c88797",
+      "uniform_p": "00c7b63e87e4addb72e57fffe2854e03c1fcb9d8209c6178621f372d6ca14a58",
+      "uniform_t": "4bc06be51fb5db4888d8f38ba48045c293e0b3ff816642001e769e87b1c243eb"
+    },
+    "opportunity_graph": {
+      "id": "sha256:544a66f3b4c217fe5aea56c1c0ed7a87f685e47f460659110764ed26f9756d7b",
+      "sha256": "2855c21224c5797cbb6b6c76ef35910a4d1073b237d5ce4ec7bdaab2743294f8"
+    },
+    "pass_plugin_sha256": "7f11ba4ccbbee6d2d79d0c02059476cefc87d4339a73af471c1639629bab8a73",
+    "platform_profile_sha256": "a641dc09f5a0608097f4795977f071a5e9eb0ef96cd7897408d983e132177c19",
+    "prompt_sha256": "e3e1bb74aa2f248656e740fa77addb3e4aa9cc8f75be31d7eca1ef3c6def467b",
+    "source_sha256": "ac9a7f75da60dbac36f3871e1c0113ec8071b1f7d924ef3dd96e9fdb5888b37d"
+  },
+  "compiler_only_boundary": {
+    "candidate_build_prefix": "llm_",
+    "compiler_revalidates_before_materialization": true,
+    "control_artifacts_overwritable_by_candidate_build": false,
+    "model_may_generate_code": false,
+    "model_may_generate_ir": false,
+    "model_output_influence": "one compiler-generated candidate_id per opportunity_id",
+    "source_file_modified": false,
+    "source_visible": false
+  },
+  "factorized_capacity": {
+    "action_count_per_opportunity": 4,
+    "actions": [
+      "proxy_device",
+      "trigger_descriptor_batch",
+      "trigger_coalesced_loop",
+      "trigger_coalesced_early"
+    ],
+    "exact_policy_count": 4096,
+    "independence_basis": "each named opportunity scenario is timed independently",
+    "primary_metric": "geometric mean of six per-scenario median wall times",
+    "replicates": 4,
+    "reported_interval": "paired bootstrap 95% over one aggregate-selected fixed policy",
+    "uniform_controls": [
+      "uniform_p",
+      "uniform_t",
+      "uniform_c",
+      "uniform_e"
+    ]
+  },
+  "legality_and_materialization_gates": {
+    "device_early_marker_count": {
+      "uniform_c": 0,
+      "uniform_e": 6,
+      "uniform_p": 0,
+      "uniform_t": 0
+    },
+    "device_pass_reproof": [
+      "DWQ_TRIGGER selected",
+      "put_no_db selected",
+      "exactly one communication site in the kernel",
+      "exactly one flush in the kernel",
+      "selected communication is inside a natural loop",
+      "loop has a unique exit",
+      "unique exit dominates the original flush",
+      "original flush post-dominates the unique exit",
+      "all flush operands dominate the unique exit"
+    ],
+    "device_ir_late_and_early_differ": true,
+    "host_ir_coalesces_late_and_early": true,
+    "llvm_lit_tests_passed": 46,
+    "python_tests_passed": 29,
+    "unproved_or_bypass_shape_fails_closed": true
+  },
+  "llm_gate": {
+    "minimum_best_uniform_over_fixed_oracle_ratio": 1.01,
+    "new_provider_call_made": false,
+    "provider_input_authorized_by_this_protocol": false,
+    "requires_new_external_send_authorization": true,
+    "requires_stable_early_winner_count_at_least": 1,
+    "requires_stable_late_winner_count_at_least": 1,
+    "run_only_after_four_valid_runtime_replicates": true,
+    "statistical_rule": "the paired-bootstrap 95% lower bound for best-uniform/fixed-oracle must exceed 1.01",
+    "when_gate_fails": "do not claim LLM capacity; expand or redesign the compiler-owned action space before any provider call"
+  },
+  "opportunities": [
+    {
+      "flops_to_first_use": 704,
+      "grid_blocks": 4,
+      "kernel": "cal_far_2k_k12_i64_g4",
+      "opportunity_id": "opportunity:5323ec1d2bd9fa12f2198acd",
+      "size_bytes": 2048,
+      "trip_count": 12
+    },
+    {
+      "flops_to_first_use": 164,
+      "grid_blocks": 8,
+      "kernel": "cal_adjacent_32k_k40_g8",
+      "opportunity_id": "opportunity:7ad80144b8dbb774ad5438cd",
+      "size_bytes": 32768,
+      "trip_count": 40
+    },
+    {
+      "flops_to_first_use": 52,
+      "grid_blocks": 4,
+      "kernel": "cal_adjacent_8k_k12_g4",
+      "opportunity_id": "opportunity:8d921bb3c6e3600c85f67177",
+      "size_bytes": 8192,
+      "trip_count": 12
+    },
+    {
+      "flops_to_first_use": 10352,
+      "grid_blocks": 8,
+      "kernel": "cal_far_16k_k24_i1024_g8",
+      "opportunity_id": "opportunity:9fa38d27495ea173fef90321",
+      "size_bytes": 16384,
+      "trip_count": 24
+    },
+    {
+      "flops_to_first_use": 2768,
+      "grid_blocks": 8,
+      "kernel": "cal_far_8k_k48_i256_g8",
+      "opportunity_id": "opportunity:b725b7eb6e11fc04199a5d82",
+      "size_bytes": 8192,
+      "trip_count": 48
+    },
+    {
+      "flops_to_first_use": 28,
+      "grid_blocks": 1,
+      "kernel": "cal_adjacent_1k_k6_g1",
+      "opportunity_id": "opportunity:d42d15a9ecf08bde87bcb065",
+      "size_bytes": 1024,
+      "trip_count": 6
+    }
+  ],
+  "runtime": {
+    "allocation": "two nodes, one rank and one MI250X GCD per node",
+    "arm_orders": {
+      "1": ["uniform_p", "uniform_t", "uniform_e", "uniform_c"],
+      "2": ["uniform_t", "uniform_c", "uniform_p", "uniform_e"],
+      "3": ["uniform_c", "uniform_e", "uniform_t", "uniform_p"],
+      "4": ["uniform_e", "uniform_p", "uniform_c", "uniform_t"]
+    },
+    "arm_timeout_seconds": 180,
+    "exact_route_counter_validation": true,
+    "queue": "pdebug",
+    "required_data_hashes_per_arm": 18,
+    "runs_per_scenario": 100,
+    "scheduler_jobs_active_at_once": 1,
+    "uniform_arms_run_sequentially_in_one_allocation": true,
+    "warmups_per_scenario": 10
+  },
+  "schema_version": "gicc-communication-plan-placement-protocol-v1",
+  "status": "preregistered-before-first-trigger-placement-runtime-job"
+}

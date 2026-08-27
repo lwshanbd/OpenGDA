@@ -17,6 +17,11 @@
 ; RUN:     %opt -load-pass-plugin=%gicc_passes_so \
 ; RUN:          -passes='gicc-trace-synthesis,gicc-dispatch-lowering' -S %s | \
 ; RUN:     %FileCheck %s --check-prefix=LOWER
+; RUN: env GICC_MODE=lower GICC_META_DIR=%t.metadir \
+; RUN:     GICC_HINT_IN=%S/../Inputs/hint_coalesce_loop_early.json \
+; RUN:     %opt -load-pass-plugin=%gicc_passes_so \
+; RUN:          -passes='gicc-trace-synthesis' -S %s | \
+; RUN:     %FileCheck %s --check-prefix=EARLY
 
 target triple = "x86_64-unknown-linux-gnu"
 
@@ -53,3 +58,9 @@ define void @main(ptr %rt, i32 %peer, i32 %buf) {
 ; LOWER: call void @gicc_runtime_dwq_enqueue(ptr %rt, i32 %peer, i32 %buf, i64 0, i32 %buf, i64 0, i64 4096)
 ; LOWER-NOT: gicc_runtime_dwq_enqueue_batched
 ; LOWER: ret void
+
+; The host trace is byte-identical except for the compiler transform marker;
+; the AMDGPU device pass independently owns and verifies trigger placement.
+; EARLY-LABEL: define internal void @gicc_trace_k_plan
+; EARLY: call void @gicc.runtime.put_no_db.placeholder(ptr %rt, i32 %peer, i32 %buf, i64 0, i32 %buf, i64 0, i64 4096), !gicc.site_id !{{[0-9]+}}, !gicc.communication_transform !{{[0-9]+}}
+; EARLY: !{{[0-9]+}} = !{!"COALESCE_LOOP_EARLY"}

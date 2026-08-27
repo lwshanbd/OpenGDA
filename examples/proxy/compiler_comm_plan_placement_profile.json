@@ -1,0 +1,41 @@
+{
+  "schema_version": "gicc-platform-profile-v1",
+  "platform_id": "tioga-mi250x-slingshot11-compiler-trigger-placement-v1",
+  "scope": "two nodes, one rank and one MI250X GCD per node, one cross-node CXI peer per rank",
+  "compiler_transforms": {
+    "early_trigger": true,
+    "note": "candidate generation is enabled here, but the AMDGPU pass must independently reprove unique-loop and unique-flush placement"
+  },
+  "deployment_constraints": {
+    "proxy_worker_lanes": 8,
+    "rank_placement": "one rank per node",
+    "peer_relation": "cross_node",
+    "note": "proxy producer concurrency is bounded by min(grid_blocks, proxy_worker_lanes); forced IPC is unavailable"
+  },
+  "evaluation_contract": {
+    "suite": "compiler-trigger-placement-v1",
+    "role": "compiler-only capacity experiment; disjoint from frozen evaluation labels",
+    "source_visibility": "none",
+    "execution": "each named kernel scenario is timed independently under four compiler-generated plans",
+    "candidate_budget": "one opaque compiler candidate ID per opportunity; no source edits, generated code, generated IR, or model-authored placement"
+  },
+  "measurements": {
+    "link_bandwidth_GB_s": 24.0,
+    "proxy_fixed_us": 5.37,
+    "proxy_per_op_issue_us": 2.872,
+    "trigger_fixed_us": 7.88,
+    "trigger_per_op_stage_us": 1.033
+  },
+  "action_notes": {
+    "proxy": "device pushes commands into CPU-worker rings",
+    "trigger_batch": "host stages N descriptors; the source-level device flush triggers them after intervening work",
+    "coalesce_late": "host stages one compiler-coalesced descriptor; the source-level device flush triggers it after intervening work",
+    "coalesce_early": "host stages one compiler-coalesced descriptor; the device pass moves the trigger to the proven communication-loop exit to expose overlap, which may also create resource contention",
+    "ipc": "same-node path only and unavailable under this cross-node placement contract"
+  },
+  "provenance": {
+    "dataset": "pre-existing compiler-path calibration constants only; no trigger-placement runtime labels",
+    "labels": "none at graph construction",
+    "deployment": "one rank per node with GICC_NUM_PROXY_THREADS=8"
+  }
+}

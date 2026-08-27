@@ -60,6 +60,10 @@ const char  *dispatchName(DispatchKind d);
 enum class CommunicationTransform {
     None,
     CoalesceLoop,  // replace a proven contiguous constant-trip PUT loop by one PUT
+    // As above, and move the compiler-owned device trigger from the later
+    // completion point to the proven loop exit.  The device pass must reprove
+    // the unique-loop/unique-flush placement before moving anything.
+    CoalesceLoopEarly,
     Unknown,
 };
 

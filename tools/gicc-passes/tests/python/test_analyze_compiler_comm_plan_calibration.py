@@ -91,6 +91,26 @@ class CompilerCommunicationPlanCalibrationRuntimeTests(unittest.TestCase):
         routes = runtime.routes_for(arm)
         self.assertEqual((0, 7), routes["adjacent-1k-k6-g1"])
 
+    def test_early_structural_route_is_one_staged_descriptor(self):
+        arm = {
+            "name": "uniform_e",
+            "selections": [
+                {
+                    "kernel": kernel,
+                    "kind": "trigger_coalesced_early",
+                    "effects": {
+                        "network_operations": 1,
+                        "host_descriptors": 1,
+                    },
+                }
+                for kernel, scenario in runtime.SCENARIO_FOR_KERNEL.items()
+                if scenario not in runtime.FIXED_ROUTES
+            ],
+        }
+        routes = runtime.routes_for(arm)
+        self.assertEqual((1, 0), routes["adjacent-1k-k6-g1"])
+        self.assertEqual((1, 0), routes["far-16k-k24-i1024-g8"])
+
 
 if __name__ == "__main__":
     unittest.main()
