@@ -1,4 +1,5 @@
 #include "GICCTraceSynthesis.h"
+#include "DispatchDecision.h"
 #include "GICCHostDiscovery.h"
 #include "GICCPassConfig.h"
 #include "KernelInventory.h"
@@ -16,8 +17,10 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/ErrorHandling.h"
 
 #include <array>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -274,9 +277,10 @@ GICCOpKind opKindFromStr(StringRef s) {
 // each ArgRef in `op.args`. If `currentIv` is non-null, ArgRef::LoopIv
 // leaves are substituted with it. Caller is responsible for branching to
 // the next block after this returns.
-void emitPlaceholderCall(Module &M, IRBuilder<> &B, Function *traceFn,
-                         const OpTemplate &op, GICCOpKind kind,
-                         Value *currentIv) {
+CallInst *emitPlaceholderCall(Module &M, IRBuilder<> &B, Function *traceFn,
+                              const OpTemplate &op, GICCOpKind kind,
+                              Value *currentIv,
+                              Value *sizeOverride = nullptr) {
     LLVMContext &Ctx = M.getContext();
     auto callee = getPlaceholder(M, kind);
     SmallVector<Value *, 8> args;
@@ -289,7 +293,9 @@ void emitPlaceholderCall(Module &M, IRBuilder<> &B, Function *traceFn,
         Type       *expected = (i == 0 || i == 1 || i == 3) ? i32Ty : i64Ty;
         auto        it = op.args.find(argName);
         Value      *v;
-        if (it == op.args.end())
+        if (StringRef(argName) == "size" && sizeOverride)
+            v = sizeOverride;
+        else if (it == op.args.end())
             v = ConstantInt::get(expected, 0);
         else
             v = evalArgRef(B, traceFn, it->second, expected, currentIv);
@@ -299,6 +305,7 @@ void emitPlaceholderCall(Module &M, IRBuilder<> &B, Function *traceFn,
     auto *CI = B.CreateCall(callee, args);
     auto *md = MDNode::get(Ctx, MDString::get(Ctx, op.siteId));
     CI->setMetadata("gicc.site_id", md);
+    return CI;
 }
 
 // Emit a host-side loop around `op`: bound = evalArgRef(Param(ivParamIdx))
@@ -477,9 +484,71 @@ void emitOpInLoop(Module &M, IRBuilder<> &B, Function *traceFn,
     // Caller continues at exitBB.
 }
 
+// Materialize the first structural communication transform exposed to the
+// plan bridge.  The device pass has already proved that each iteration's
+// source and destination begin exactly one transfer-size after the previous
+// iteration.  Under the deliberately narrow v1 contract below, N PUTs are
+// therefore byte-for-byte equivalent to one PUT of N*size bytes.
+//
+// Keep the proof local to the compiler.  The model merely selects a
+// compiler-generated candidate ID; an untrusted hint cannot assert
+// adjacency, a trip count, or a size.
+void emitCoalescedLoop(Module &M, IRBuilder<> &B, Function *traceFn,
+                       const OpTemplate &op, GICCOpKind kind,
+                       const SiteHint &hint) {
+    auto reject = [&](const Twine &reason) -> void {
+        report_fatal_error(
+            Twine("gicc: COALESCE_LOOP rejected for site ") + op.siteId +
+            ": " + reason);
+    };
+
+    if (hint.dispatch != DispatchKind::DwqTrigger)
+        reject(Twine("requires DWQ_TRIGGER, got ") +
+               dispatchName(hint.dispatch));
+    if (kind != GICCOpKind::PutNoDb || op.kind != "put_no_db")
+        reject("v1 supports put_no_db only");
+    if (!op.hk_capable)
+        reject("descriptor is not host-knowable");
+    if (!op.loop.inLoop || op.loop.degraded ||
+        !op.loop.ivBoundKnown || !op.loop.ivBoundIsConst)
+        reject("requires a compiler-proven constant loop bound");
+    if (op.loop.ivStep != 1)
+        reject("v1 requires iv_step=1");
+    if (op.guard.kind == GuardSpec::Kind::FieldNotNull)
+        reject("per-iteration guards cannot be coalesced");
+    if (!transfersAreAdjacent(op))
+        reject("source/destination adjacency was not proved");
+
+    int64_t sizeBytes = 0;
+    auto size = op.args.find("size");
+    if (size == op.args.end() || !constOf(size->second, sizeBytes) ||
+        sizeBytes <= 0)
+        reject("requires a positive constant transfer size");
+
+    const int64_t trips = op.loop.ivBoundConst - op.loop.ivStart;
+    if (trips <= 0 || op.trip_count != trips)
+        reject("constant trip-count proof is missing or inconsistent");
+    const __int128 total =
+        static_cast<__int128>(sizeBytes) * static_cast<__int128>(trips);
+    if (total <= 0 || total > std::numeric_limits<int64_t>::max())
+        reject("coalesced byte count overflows i64");
+
+    Type *i64Ty = Type::getInt64Ty(M.getContext());
+    Value *startIv = ConstantInt::get(
+        i64Ty, op.loop.ivStart, /*isSigned=*/true);
+    Value *totalBytes = ConstantInt::get(
+        i64Ty, static_cast<uint64_t>(total));
+    CallInst *CI = emitPlaceholderCall(
+        M, B, traceFn, op, kind, startIv, totalBytes);
+    CI->setMetadata(
+        "gicc.communication_transform",
+        MDNode::get(M.getContext(),
+                    MDString::get(M.getContext(), "COALESCE_LOOP")));
+}
+
 void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,
             const OpTemplate &op, const KernelTemplate &t,
-            BasicBlock *contBB) {
+            BasicBlock *contBB, const HintFile &hints) {
     LLVMContext &Ctx = M.getContext();
     GICCOpKind   kind = opKindFromStr(op.kind);
 
@@ -517,6 +586,13 @@ void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,
     B.CreateCondBr(guard, doBB, contBB);
     B.SetInsertPoint(doBB);
 
+    SiteHint hint = hintFor(hints, op.siteId);
+    if (hint.transform == CommunicationTransform::CoalesceLoop) {
+        emitCoalescedLoop(M, B, traceFn, op, kind, hint);
+        B.CreateBr(contBB);
+        return;
+    }
+
     if (op.loop.inLoop && op.loop.ivBoundKnown) {
         emitOpInLoop(M, B, traceFn, op, kind);
         // Builder is now at loop.exit; thread to contBB.
@@ -529,7 +605,8 @@ void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,
     B.CreateBr(contBB);
 }
 
-void emitTraceBody(Module &M, Function *traceFn, const KernelTemplate &t) {
+void emitTraceBody(Module &M, Function *traceFn, const KernelTemplate &t,
+                   const HintFile &hints) {
     LLVMContext &Ctx = M.getContext();
     BasicBlock *entry = BasicBlock::Create(Ctx, "entry", traceFn);
     IRBuilder<>  B(entry);
@@ -539,7 +616,7 @@ void emitTraceBody(Module &M, Function *traceFn, const KernelTemplate &t) {
         BasicBlock *next = BasicBlock::Create(
             Ctx, "after." + op.siteId, traceFn);
         B.SetInsertPoint(cur);
-        emitOp(M, B, traceFn, op, t, next);
+        emitOp(M, B, traceFn, op, t, next, hints);
         cur = next;
     }
     B.SetInsertPoint(cur);
@@ -606,6 +683,13 @@ PreservedAnalyses GICCTraceSynthesisPass::run(Module &M,
     auto inv = collectLaunchInventory(M, cfg.metaDir);
     if (inv.sites.empty()) return PreservedAnalyses::all();
 
+    HintFile hints;
+    if (!cfg.hintIn.empty() && !readHintFile(cfg.hintIn, hints)) {
+        errs() << "[trace-synthesis] WARN: could not read hint "
+               << cfg.hintIn
+               << "; structural transforms are disabled\n";
+    }
+
     // De-dup by kernel mangled name — multiple launch sites may share a
     // wrapper, but we want exactly one trace function per kernel.
     std::unordered_set<std::string>     emitted;
@@ -616,7 +700,7 @@ PreservedAnalyses GICCTraceSynthesisPass::run(Module &M,
             Function *traceFn =
                 getOrCreateTraceFn(M, site.kernelTemplate);
             if (traceFn->isDeclaration())
-                emitTraceBody(M, traceFn, site.kernelTemplate);
+                emitTraceBody(M, traceFn, site.kernelTemplate, hints);
             traceByKernel[site.kernelMangled] = traceFn;
         }
     }

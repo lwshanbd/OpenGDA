@@ -397,6 +397,18 @@ double guardDensity(const GuardSpec &g) {
     return g.kind == GuardSpec::Kind::Always ? 1.0 : 0.5;
 }
 
+const char *guardKindName(const GuardSpec &g) {
+    switch (g.kind) {
+        case GuardSpec::Kind::Always:       return "always";
+        case GuardSpec::Kind::ParamTruthy:  return "param_truthy";
+        case GuardSpec::Kind::ParamEqConst: return "param_eq_const";
+        case GuardSpec::Kind::BinOp:        return "binop";
+        case GuardSpec::Kind::FieldNotNull: return "field_not_null";
+        case GuardSpec::Kind::Unknown:      return "unknown";
+    }
+    return "unknown";
+}
+
 // Number of distinct param-indexed peers across the kernel's put_no_db /
 // get_no_db ops. Coarse fan-out estimate; ops without a Param target_rank
 // don't contribute (target == const_i64 doesn't fan out).
@@ -490,6 +502,11 @@ json::Value toRecord(const std::string &siteId,
     if (op.loop.inLoop) r["loop"] = loopDescriptor(op.loop);
 
     r["guard_density"] = guardDensity(op.guard);
+    // A scalar density was enough for the original per-site cost model, but
+    // structural transforms need to distinguish a loop-invariant degraded
+    // guard from a per-iteration FieldNotNull guard.  The plan materializer
+    // still rechecks the full GuardSpec from kernel metadata.
+    r["guard_kind"] = guardKindName(op.guard);
     r["fan_out"]       = fanOut;
 
     unsigned staticLaunchSites = 0;

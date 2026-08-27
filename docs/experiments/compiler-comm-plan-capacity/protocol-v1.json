@@ -1,0 +1,67 @@
+{
+  "action_codes": {
+    "c": "trigger_coalesced_loop",
+    "p": "proxy_device",
+    "t": "trigger_descriptor_batch"
+  },
+  "artifacts": {
+    "control_manifest": {
+      "id": "sha256:2102da0296e63b42c121a9702f27bd9a28236d5198b7b63e9a67d1df5acb5046",
+      "sha256": "c9c4d769e8e9510db410d41f973affe7f02c8c42dc10eac3513f50be30df006d"
+    },
+    "dossier": {
+      "id": "sha256:67ead44293353714eec133f2719d67c0cfff1019bdf45fc8b946706266671919",
+      "sha256": "7740c557fcb1bf921095d67ba8f9ce793eb231bcb9fcf46bf33d258377ebe630"
+    },
+    "opportunity_graph": {
+      "id": "sha256:08328648ffa6286a68528feda45b3779fc9e6fb4e9404d4606a019be683af986",
+      "sha256": "41d0aae6b3ccec4028a4083b02913d43fe304549d1c318ed6173de3c4a327653"
+    },
+    "pass_plugin_sha256": "ffd2167b0db33d302d675fa6d710c15486e4ebb3597b96c5ff2a0e7c8c5b7989",
+    "prompt_sha256": "705206cae4662e7d068242a69a689cc2b04ad600240a1d031f4135ef1e673c52",
+    "source_sha256": "d707d5b6773a5299b2d8a19a6c832f82b719bc3be08b01f250a481500ecb486a"
+  },
+  "compiler_only_boundary": {
+    "compiler_revalidates_before_materialization": true,
+    "model_may_generate_code": false,
+    "model_may_generate_ir": false,
+    "model_output": "candidate IDs only",
+    "source_visible": false
+  },
+  "llm_gate": {
+    "new_provider_call_made": false,
+    "planned_independent_trials": 20,
+    "requires_new_external_send_authorization": true,
+    "run_only_after_reproducible_structural_headroom": true
+  },
+  "opportunity_order": [
+    {
+      "coalesced_bytes": 65536,
+      "kernel": "eval_adjacent_batch",
+      "opportunity_id": "opportunity:fc5ad9bfc8c244e90c39727e",
+      "original_operations": 16
+    },
+    {
+      "coalesced_bytes": 262144,
+      "kernel": "eval_far_batch",
+      "opportunity_id": "opportunity:5b60e03f76a9545a0a15830d",
+      "original_operations": 64
+    }
+  ],
+  "primary_metric": {
+    "baseline_arm": "plan_tt",
+    "confidence_interval": "paired bootstrap 95%",
+    "metric": "geometric mean of adjacent and far per-arm median wall time",
+    "oracle": "minimum over all nine executable 3x3 controls"
+  },
+  "runtime": {
+    "allocation": "two nodes, one rank and one MI250X GCD per node",
+    "arm_timeout_seconds": 120,
+    "queue": "pdebug",
+    "runs_per_scenario": 100,
+    "scheduler_jobs_active_at_once": 1,
+    "warmups_per_scenario": 10
+  },
+  "schema_version": "gicc-communication-plan-capacity-protocol-v1",
+  "status": "preregistered-before-first-structural-runtime-job"
+}

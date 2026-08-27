@@ -1,0 +1,174 @@
+#!/bin/bash
+# Build the compiler-only structural communication-plan capacity experiment.
+#
+#   facts                emit compiler facts, opportunity graph, and prompt
+#   controls             enumerate and build the exact 3x3 candidate product
+#   candidate FILE NAME  accept one candidate-ID-only model response and build
+#
+# The provider is intentionally absent.  Every arm compiles the exact same
+# source.  Responses become narrow pass hints; the LTO pass independently
+# re-proves a requested structural transform before changing compiler IR.
+set -euo pipefail
+
+GICC_ROOT="${GICC_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+MODE="${1:-controls}"
+OUT="${GICC_ROOT}/build_ofi/compiler_comm_plan_eval"
+META="${OUT}/meta"
+OBJ="${OUT}/obj"
+GENERATED="${OUT}/generated"
+CONTROLS="${GENERATED}/controls"
+IR="${GENERATED}/ir"
+PASSES="${GICC_PASSES_SO:-${GICC_ROOT}/tools/gicc-passes/build/libgicc-passes.so}"
+SRC="${GICC_ROOT}/examples/proxy/compiler_lto_eval.cpp"
+PROFILE="${GICC_ROOT}/examples/proxy/compiler_lto_eval_profile.json"
+FEATURES="${GENERATED}/features.json"
+DOSSIER="${GENERATED}/dossier.json"
+GRAPH="${GENERATED}/opportunity-graph.json"
+PROMPT="${GENERATED}/prompt.txt"
+FACT_BRIDGE="${GICC_ROOT}/tools/gicc-passes/python/gicc_llm_bridge.py"
+PLAN_BRIDGE="${GICC_ROOT}/tools/gicc-passes/python/gicc_comm_plan_bridge.py"
+EVAL_TOOL="${GICC_ROOT}/examples/proxy/compiler_comm_plan_eval.py"
+
+test -f "${PASSES}" || {
+  echo "ERROR: build the pass plugin first: ${PASSES}" >&2
+  exit 1
+}
+case "${MODE}" in
+  facts|controls) ;;
+  candidate)
+    test "$#" -eq 3 || {
+      echo "usage: $0 candidate RESPONSE.json NAME" >&2
+      exit 2
+    }
+    [[ "$3" =~ ^[a-zA-Z0-9_.-]+$ ]] || {
+      echo "ERROR: candidate NAME must use letters, digits, dot, dash, underscore" >&2
+      exit 2
+    }
+    ;;
+  *)
+    echo "usage: $0 {facts|controls|candidate RESPONSE.json NAME}" >&2
+    exit 2
+    ;;
+esac
+
+mkdir -p "${META}" "${OBJ}" "${GENERATED}" "${CONTROLS}" "${IR}"
+find "${META}" -mindepth 1 -maxdepth 1 -type f -delete
+find "${OBJ}" -mindepth 1 -maxdepth 1 -type f -delete
+find "${CONTROLS}" -mindepth 1 -maxdepth 1 -type f -delete
+find "${IR}" -mindepth 1 -maxdepth 1 -type f -delete
+
+HIPCC=/opt/rocm-6.4.0/lib/llvm/bin/clang++
+LLVM_DIS=/opt/rocm-6.4.0/lib/llvm/bin/llvm-dis
+LIBFAB=/opt/cray/libfabric/2.1
+MPI=/opt/cray/pe/mpich/9.0.1/ofi/cray/20.0
+CFLAGS=(
+  -DGICC_BOOTSTRAP_MPI=1 -DGICC_PLATFORM_OFI -DGICC_GPU_HIP=1
+  -DGICC_CPU_PROXY=1 -DUSE_PROF_API=1 -D__HIP_PLATFORM_AMD__=1
+  -D__HIP_ROCclr__=1 -I"${GICC_ROOT}/src"
+  -I"${GICC_ROOT}/src/gicc/platform/ofi/internal" -I"${LIBFAB}/include"
+  -isystem "${MPI}/include" -O3 --offload-arch=gfx90a -std=gnu++17
+  -fpass-plugin="${PASSES}" -flto
+)
+EVAL_CUID="gicc_compiler_comm_plan_eval_v1"
+
+source_before=$(sha256sum "${SRC}")
+source_before=${source_before%% *}
+
+echo "=== discover unchanged-source device operations ==="
+env GICC_MODE=discover GICC_META_DIR="${META}" GICC_PROXY_ENABLED=1 \
+  "${HIPCC}" "${CFLAGS[@]}" -cuid="${EVAL_CUID}" -x hip -c "${SRC}" \
+  -o "${OBJ}/discover.o"
+
+echo "=== extract source-free compiler/LTO facts ==="
+env GICC_MODE=feature-extract GICC_META_DIR="${META}" \
+  GICC_FEATURES_OUT="${FEATURES}" GICC_PROXY_ENABLED=1 \
+  "${HIPCC}" "${CFLAGS[@]}" -cuid="${EVAL_CUID}" -x hip -c "${SRC}" \
+  -o "${OBJ}/features.o"
+
+echo "=== emit candidate-ID-only communication opportunity graph ==="
+python3 "${FACT_BRIDGE}" emit --features "${FEATURES}" \
+  --platform "${PROFILE}" --dossier "${DOSSIER}" \
+  --prompt "${GENERATED}/site-prompt-unused.txt"
+python3 "${PLAN_BRIDGE}" emit --dossier "${DOSSIER}" \
+  --graph "${GRAPH}" --prompt "${PROMPT}"
+
+if [ "${MODE}" = facts ]; then
+  source_after=$(sha256sum "${SRC}")
+  source_after=${source_after%% *}
+  test "${source_before}" = "${source_after}"
+  echo "SOURCE_SHA256=${source_after}"
+  sha256sum "${DOSSIER}" "${GRAPH}" "${PROMPT}"
+  exit 0
+fi
+
+declare -a NAMES=()
+declare -a HINTS=()
+if [ "${MODE}" = controls ]; then
+  python3 "${EVAL_TOOL}" controls --graph "${GRAPH}" \
+    --out "${CONTROLS}" --source-sha256 "${source_before}"
+  python3 "${EVAL_TOOL}" verify --graph "${GRAPH}" \
+    --manifest "${CONTROLS}/manifest.json"
+  mapfile -t NAMES < <(python3 -c \
+    'import json,sys; print("\n".join(x["name"] for x in json.load(open(sys.argv[1]))["arms"]))' \
+    "${CONTROLS}/manifest.json")
+  for name in "${NAMES[@]}"; do
+    HINTS+=("${CONTROLS}/${name}-hint.json")
+  done
+else
+  RESPONSE=$(realpath "$2")
+  NAME="$3"
+  HINT="${GENERATED}/${NAME}-hint.json"
+  python3 "${PLAN_BRIDGE}" accept --strict --graph "${GRAPH}" \
+    --response "${RESPONSE}" --hint "${HINT}"
+  NAMES=("${NAME}")
+  HINTS=("${HINT}")
+fi
+
+echo "=== materialize plans in LTO from unchanged source ==="
+for i in "${!NAMES[@]}"; do
+  name=${NAMES[$i]}
+  hint=${HINTS[$i]}
+  env GICC_MODE=lower GICC_META_DIR="${META}" GICC_HINT_IN="${hint}" \
+    GICC_PROXY_ENABLED=1 \
+    "${HIPCC}" "${CFLAGS[@]}" -cuid="${EVAL_CUID}" -x hip -c "${SRC}" \
+    -o "${OBJ}/${name}.o"
+  "${LLVM_DIS}" "${OBJ}/${name}.o" -o "${IR}/${name}.ll"
+done
+
+if [ "${MODE}" = controls ]; then
+  python3 "${EVAL_TOOL}" verify-ir --graph "${GRAPH}" \
+    --manifest "${CONTROLS}/manifest.json" --ir "${IR}"
+fi
+
+for extra in runtime_helpers proxy_thread proxy_libfabric; do
+  extra_src="${GICC_ROOT}/src/gicc/platform/ofi/"
+  if [ "${extra}" = runtime_helpers ]; then
+    extra_src+="runtime_helpers.cpp"
+  else
+    extra_src+="proxy/${extra}.cpp"
+  fi
+  env GICC_MODE=lower GICC_META_DIR="${META}" GICC_PROXY_ENABLED=1 \
+    "${HIPCC}" "${CFLAGS[@]}" -x hip -c "${extra_src}" \
+    -o "${OBJ}/${extra}.o"
+done
+
+echo "=== link compiler-plan arms ==="
+for name in "${NAMES[@]}"; do
+  "${HIPCC}" -O3 --offload-arch=gfx90a --hip-link -flto \
+    --rtlib=compiler-rt -unwindlib=libgcc \
+    "${OBJ}/${name}.o" "${OBJ}/runtime_helpers.o" \
+    "${OBJ}/proxy_thread.o" "${OBJ}/proxy_libfabric.o" \
+    -o "${OUT}/compiler_comm_plan_eval_${name}" \
+    -Wl,-rpath,"${LIBFAB}/lib64:${MPI}/lib" \
+    "${LIBFAB}/lib64/libfabric.so" /usr/lib64/libhwloc.so -lpthread \
+    /opt/rocm-6.4.0/lib/libamdhip64.so.6.4.60400 \
+    "${MPI}/lib/libmpi_cray.so"
+done
+
+source_after=$(sha256sum "${SRC}")
+source_after=${source_after%% *}
+test "${source_before}" = "${source_after}"
+echo "SOURCE_SHA256=${source_after}"
+for name in "${NAMES[@]}"; do
+  sha256sum "${OUT}/compiler_comm_plan_eval_${name}" "${IR}/${name}.ll"
+done

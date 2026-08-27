@@ -53,9 +53,23 @@ enum class DispatchKind {
 DispatchKind parseDispatch(llvm::StringRef s);
 const char  *dispatchName(DispatchKind d);
 
+// Optional compiler-verified structural transformation.  These are not
+// arbitrary model-authored IR rewrites: a hint may only request a named
+// transform and the pass must re-prove every legality precondition before it
+// materializes anything.
+enum class CommunicationTransform {
+    None,
+    CoalesceLoop,  // replace a proven contiguous constant-trip PUT loop by one PUT
+    Unknown,
+};
+
+CommunicationTransform parseCommunicationTransform(llvm::StringRef s);
+const char *communicationTransformName(CommunicationTransform t);
+
 struct SiteHint {
-    DispatchKind dispatch    = DispatchKind::Unknown;
-    int          streamIndex = 0;
+    DispatchKind          dispatch    = DispatchKind::Unknown;
+    CommunicationTransform transform = CommunicationTransform::None;
+    int                   streamIndex = 0;
 };
 
 struct HintFile {

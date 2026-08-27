@@ -35,6 +35,21 @@ const char *dispatchName(DispatchKind d) {
     return "UNKNOWN";
 }
 
+CommunicationTransform parseCommunicationTransform(llvm::StringRef s) {
+    if (s == "NONE")          return CommunicationTransform::None;
+    if (s == "COALESCE_LOOP") return CommunicationTransform::CoalesceLoop;
+    return CommunicationTransform::Unknown;
+}
+
+const char *communicationTransformName(CommunicationTransform t) {
+    switch (t) {
+        case CommunicationTransform::None:         return "NONE";
+        case CommunicationTransform::CoalesceLoop: return "COALESCE_LOOP";
+        case CommunicationTransform::Unknown:      return "UNKNOWN";
+    }
+    return "UNKNOWN";
+}
+
 bool readHintFile(const std::string &path, HintFile &out) {
     auto bufOr = llvm::MemoryBuffer::getFile(path);
     if (!bufOr) return false;
@@ -69,6 +84,11 @@ bool readHintFile(const std::string &path, HintFile &out) {
             SiteHint sh;
             sh.dispatch = parseDispatch(*disp);
             if (sh.dispatch == DispatchKind::Unknown) return false;
+            if (auto transform = entry->getString("transform")) {
+                sh.transform = parseCommunicationTransform(*transform);
+                if (sh.transform == CommunicationTransform::Unknown)
+                    return false;
+            }
             if (auto v = entry->getInteger("stream_index")) {
                 if (*v < 0 || *v > 1024) return false;
                 sh.streamIndex = static_cast<int>(*v);

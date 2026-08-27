@@ -68,6 +68,7 @@ FACT_FIELDS = (
     "peer_locality",
     "in_loop",
     "loop",
+    "guard_kind",
     "guard_density",
     "fan_out",
     "static_launch_sites",
