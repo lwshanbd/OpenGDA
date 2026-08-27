@@ -218,6 +218,31 @@ class CollectivePlanBridgeTests(unittest.TestCase):
              for option in opportunity["decision_slots"][0]["options"]},
         )
 
+    def test_primitive_calibration_must_be_label_disjoint_and_hash_pinned(self):
+        profile = copy.deepcopy(PROFILE)
+        profile["primitive_calibration"] = {
+            "schema_version": "gicc-collective-primitive-calibration-v1",
+            "role": "prior primitive evidence",
+            "collective_action_labels_visible": False,
+            "applicability": "cross-node link prior",
+            "artifacts": [{"sha256": "a" * 64, "role": "calibration"}],
+            "measurements": {"link_bandwidth_GB_s": 24.0},
+        }
+        graph = collective.make_graph(inventory(), profile)
+        shown = graph["opportunities"][0]["compiler_facts"]
+        self.assertEqual(
+            24.0,
+            shown["primitive_calibration"]["measurements"][
+                "link_bandwidth_GB_s"
+            ],
+        )
+        profile["primitive_calibration"][
+            "collective_action_labels_visible"
+        ] = True
+        with self.assertRaisesRegex(
+                collective.CollectivePlanError, "label-disjoint"):
+            collective.make_graph(inventory(), profile)
+
     def test_ids_and_graph_are_deterministic(self):
         self.assertEqual(self.graph, collective.make_graph(inventory(), PROFILE))
 

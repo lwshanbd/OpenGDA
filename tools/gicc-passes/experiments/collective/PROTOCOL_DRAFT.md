@@ -56,6 +56,10 @@ Every graph used for model reasoning must describe the exact runtime topology.
 A graph or response generated for two nodes is invalid evidence at eight nodes,
 and vice versa. Safety results may motivate a later topology, but are never
 silently extrapolated across topology profiles.
+The two-node profile may expose only hash-pinned, pre-existing primitive link
+and proxy cost measurements whose scope is declared and whose data contains no
+collective action labels. Gate-B timings, winners, and oracle choices are
+evaluation-only and must never enter a model prompt.
 
 ## Compiler action space
 

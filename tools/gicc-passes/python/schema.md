@@ -447,6 +447,13 @@ schema, validator, and materializer: `descriptors` removes explicit relation
 edges, while `opaque` removes candidate descriptors and option-to-candidate
 mappings. These are input-information ablations, not different compiler
 permissions; none can name or create a materializer target.
+
+A platform profile may carry a strictly validated
+`gicc-collective-primitive-calibration-v1` block. It must identify immutable
+artifact hashes, declare that no collective action labels are visible, bound
+its applicability, and contain only positive finite primitive measurements.
+Such measurements are compiler cost-model priors (for example link bandwidth
+or proxy issue cost), never results from the collective controls being scored.
 It cannot output a target symbol, algorithm string, threshold, source, code,
 IR, or legality. `accept` converts valid option IDs to a narrow
 `gicc-collective-hint-v1`; malformed or invented content falls back atomically

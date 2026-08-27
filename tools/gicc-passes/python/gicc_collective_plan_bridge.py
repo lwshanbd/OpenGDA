@@ -212,6 +212,41 @@ def _verified_profile(value: Any) -> dict[str, Any]:
     disabled = value.get("disabled_algorithms", [])
     if not isinstance(disabled, list) or any(not isinstance(item, str) for item in disabled):
         raise CollectivePlanError("disabled_algorithms must be strings")
+    calibration = value.get("primitive_calibration")
+    if calibration is not None:
+        if (not isinstance(calibration, dict)
+                or calibration.get("schema_version")
+                != "gicc-collective-primitive-calibration-v1"
+                or calibration.get("collective_action_labels_visible") is not False):
+            raise CollectivePlanError(
+                "primitive calibration must be source-free and label-disjoint"
+            )
+        if not isinstance(calibration.get("role"), str) or not isinstance(
+                calibration.get("applicability"), str):
+            raise CollectivePlanError("primitive calibration lacks scope")
+        artifacts = calibration.get("artifacts")
+        if (not isinstance(artifacts, list) or not artifacts
+                or any(not isinstance(item, dict) for item in artifacts)):
+            raise CollectivePlanError("primitive calibration lacks provenance")
+        for artifact in artifacts:
+            digest = artifact.get("sha256")
+            if (not isinstance(digest, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                    or not isinstance(artifact.get("role"), str)):
+                raise CollectivePlanError(
+                    "primitive calibration has invalid artifact provenance"
+                )
+        measurements = calibration.get("measurements")
+        if not isinstance(measurements, dict) or not measurements:
+            raise CollectivePlanError("primitive calibration has no measurements")
+        for name, measurement in measurements.items():
+            if (not isinstance(name, str) or isinstance(measurement, bool)
+                    or not isinstance(measurement, (int, float))
+                    or not math.isfinite(float(measurement))
+                    or float(measurement) <= 0):
+                raise CollectivePlanError(
+                    "primitive calibration measurements must be positive numbers"
+                )
     return value
 
 
@@ -280,6 +315,9 @@ def make_graph(inventory_value: Any, profile_value: Any) -> dict[str, Any]:
                 "transport": profile.get("transport", {}),
                 "resource_constraints": profile.get("resource_constraints", {}),
                 "message_distribution": profile.get("message_distribution", {}),
+                "primitive_calibration": profile.get(
+                    "primitive_calibration", {}
+                ),
             },
             "decision_slots": decision_slots,
             "joint_action_space_size": len(targets) ** len(decision_slots),
