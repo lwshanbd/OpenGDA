@@ -3,6 +3,10 @@
 Status: **draft until the pdebug safety qualification completes**. This file
 does not authorize a provider call or a scheduler job by itself.
 
+The content-addressed v2 offline bundle is recorded in
+`FROZEN_V2_MANIFEST.json`. Its status is `offline_frozen_pending_gate_a`; it
+does not turn offline artifacts into runtime evidence or authorize model use.
+
 ## Scientific question
 
 Can an LLM use a source-free, relational compiler description of collective

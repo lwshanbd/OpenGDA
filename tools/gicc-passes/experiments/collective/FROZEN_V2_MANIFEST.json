@@ -1,0 +1,99 @@
+{
+  "schema_version": "gicc-collective-offline-freeze-v1",
+  "status": "offline_frozen_pending_gate_a",
+  "implementation_commit": "1906592",
+  "compiler_only": true,
+  "model_invoked": false,
+  "performance_evidence": false,
+  "application_source_modified": false,
+  "fixed_inputs": {
+    "benchmark_source_sha256": "391b4888f88039975f3d990802763b3694b185a20d2b23c2419d23d4b0ed19c8",
+    "catalog_source_sha256": "8958731e3f5b2f6fb6b2380437f62363c52dddcc8d8a32646ff6c9133ab5f77f",
+    "platform_profile_sha256": "85a32af92ab37d387d452d77022f29485821854a747657112d90e8da05e22dcc",
+    "calibration_artifact_sha256": "6f15e0a4ec26756c23c69447472502ad93b879603478c7cd5d37fb59d9781378",
+    "inventory_sha256": "2211129a46141ab0dfe9741e7181c83bbba06e996aeabe1a72034c4c281a8831",
+    "inventory_id": "sha256:81e957cf9a9b3c3381ceefc049e8d60697dec8e3f23b72ec175d6a2c6e68089a"
+  },
+  "graph": {
+    "platform_id": "tioga-mi250x-cxi-collective-capacity-n2-v2",
+    "graph_id": "sha256:339b928b7d1ab1d82ea40f1ec7546d61d9b59ac50f57f3d514b984901ea49ab4",
+    "file_sha256": "6181badb35065e3f91d86d4d295ef957e2f611aa52c1b69ea76f419e6ea826e9",
+    "joint_action_space_size": 4096
+  },
+  "prompts": {
+    "relational": {
+      "bytes": 21755,
+      "sha256": "b5a7ebd18c195e8901b24e2fe6e0305b6666f5a018648f3a4de1156f3fa3e9d5"
+    },
+    "descriptors": {
+      "bytes": 18923,
+      "sha256": "804ad52e90aa5b0fa39bda389e66ecf8686e088d8610176b44864a4bf6b73cd8"
+    },
+    "opaque": {
+      "bytes": 8461,
+      "sha256": "f0c7cd2d237c00837b82af18b49bef371fa48a28acf3664b2bf9b8ed9aa76012"
+    }
+  },
+  "uniform_controls": {
+    "manifest_id": "sha256:3cc62017441569aa0838eef890ba15c8d366ab156e98f18c8933f80e8f3f9e2b",
+    "manifest_sha256": "08ec783048503be93d48d6656faa70dead0e4a00233d50d5169be9acd1ec8f9c",
+    "artifacts": {
+      "baseline_auto": {
+        "materialized_ir_sha256": "841d193604aaccda0b6c9976ea392c7e6ce4027c2c430994dee9746eacc97cf1",
+        "binary_sha256": "740be90cee32b8af1ddbe73316fbbb196a3a502b220ad97f871bd8365c0392dc"
+      },
+      "flat_double_tree": {
+        "materialized_ir_sha256": "9142cad2b429276cbea8abd46decf9ad89ba65edc9b700a0d23b3897e384c28b",
+        "binary_sha256": "f400acf225e9bbb6536769cf6abed8e86ddf7133b804539247e5520cc9d01509"
+      },
+      "flat_double_tree_pipe4": {
+        "materialized_ir_sha256": "302d8618c36d965b03aaf3702cd90832f3f0ac5bd82f56759f0b6b255ec9d298",
+        "binary_sha256": "50cdb0f826485124a524f6782af0a85231165cd29715bc1cf4465e74504e0e91"
+      },
+      "flat_double_tree_pipe8": {
+        "materialized_ir_sha256": "bf4c105007ffe8b36222fd53fb5ca8326c5ad8fdfa319219ae49c4efa0924756",
+        "binary_sha256": "0de8762ca3cd8e64c48d86d84864aaa9827a5c40f57ce271c82685adf041707a"
+      },
+      "hierarchical_direct": {
+        "materialized_ir_sha256": "173933e737f80bc1b260e4e834403f5a20655face9bc31f38b37acc72dd8b65f",
+        "binary_sha256": "f701edfe0c58c822dfe321e1869b6d33741f36e8fda950947c8780f0615626d3"
+      },
+      "hierarchical_double_tree": {
+        "materialized_ir_sha256": "9f620480939c637f59c96ad5caf0dfeed1856fcc128c6f294832c021428023aa",
+        "binary_sha256": "5f8a2817d13dd3a8c82c1a8e500cf55aa410b0b75090bd80173a64382d56d931"
+      },
+      "hierarchical_ring": {
+        "materialized_ir_sha256": "0d2aa83a20aa086cc2592a74f209e763e245c7a9a8b6595a86c870cae641721a",
+        "binary_sha256": "ee68796433eae887666880c901708ee5a03b9a5c29a9ba104b759ab2c4a9b2ba"
+      },
+      "locality_ring": {
+        "materialized_ir_sha256": "c358234d1e8c4ea1fe40365401365851a9a1af8689cfa931b09e0fff6dd2c207",
+        "binary_sha256": "762d48532b5f0d0e9b5fe5c0629eea1b9074c98801b6a1407eecabb22e558659"
+      }
+    }
+  },
+  "mixed_policy_canary": {
+    "candidate_id": "candidate:048e2e54a0bc720e224c5e4a",
+    "decision_sha256": "9023281e1661cd3ac7d3e74d154d4420acaacb7a29243f089971b85b3e7128a1",
+    "hint_sha256": "f54b05e695fdd36399b20679095335b905c78150e5a6a6f9d658e64db4e2f030",
+    "materialized_ir_sha256": "a5fffe48cd218d73edb615715d233a867a13163c5de168230aaef0c6c952faea",
+    "binary_sha256": "418e37980728043e423d353c8d4b7ee143a1498db7e7dcaacad16748617c1d55",
+    "compiler_thresholds_bytes": [4096, 262144, 8388608],
+    "materialized_count_cutoffs": [1025, 65537, 2097153]
+  },
+  "capacity_audit": {
+    "file_sha256": "ad3f0839689d75721dda86523b3f06f8470caf92c8f66c83b80941eb2b665f00",
+    "accepted_action_count": 4096,
+    "unique_composite_candidate_id_count": 4096,
+    "uniform_count": 8,
+    "size_policy_count": 4088,
+    "candidate_id_set_sha256": "46ee2a020b9d693d215e9f6591562b46ab67dc8b9d949f7a24fd97ea80427723"
+  },
+  "runtime": {
+    "queue": "pdebug",
+    "submission_rule": "exactly one active or queued experiment job",
+    "gate_a_job_id": "f5sQzioBrwRq",
+    "gate_a_role": "diagnostic only; not v2 graph or performance evidence",
+    "gate_a_status_at_freeze": "queued"
+  }
+}
