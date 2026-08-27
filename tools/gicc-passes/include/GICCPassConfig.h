@@ -29,12 +29,16 @@ enum class Target {
 //   GICC_META_DIR      ("/tmp/gicc-meta")
 //   GICC_FEATURES_OUT  ("")
 //   GICC_HINT_IN       ("")
+//   GICC_COLLECTIVE_OUT     ("")
+//   GICC_COLLECTIVE_HINT_IN ("")
 struct Config {
     Mode        mode           = Mode::Passthrough;
     Target      target         = Target::Auto;
     std::string metaDir        = "/tmp/gicc-meta";
     std::string featuresOut;
     std::string hintIn;
+    std::string collectiveOut;
+    std::string collectiveHintIn;
 };
 
 // Returns a singleton Config, lazily populated from getenv() on first call.

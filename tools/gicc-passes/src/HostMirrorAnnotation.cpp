@@ -79,6 +79,13 @@ void forEachAnnotationOn(const Function &target, Consume consume) {
 
 }  // namespace
 
+std::vector<std::string>
+getFunctionAnnotations(const Function &F) {
+    std::vector<std::string> out;
+    forEachAnnotationOn(F, [&](StringRef ann) { out.push_back(ann.str()); });
+    return out;
+}
+
 std::set<std::string>
 getHostMirroredFormalNames(const Function &F) {
     std::set<std::string> out;

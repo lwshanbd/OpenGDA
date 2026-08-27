@@ -37,6 +37,8 @@ Config buildConfig() {
     c.metaDir     = envOr("GICC_META_DIR", "/tmp/gicc-meta");
     c.featuresOut = envOr("GICC_FEATURES_OUT", "");
     c.hintIn      = envOr("GICC_HINT_IN", "");
+    c.collectiveOut = envOr("GICC_COLLECTIVE_OUT", "");
+    c.collectiveHintIn = envOr("GICC_COLLECTIVE_HINT_IN", "");
     return c;
 }
 

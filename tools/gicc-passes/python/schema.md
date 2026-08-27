@@ -402,3 +402,53 @@ The response contains only one existing candidate ID per group. `accept`
 content-validates the graph and candidate, then emits `gicc-hint-v1`; source,
 model-authored code/IR, dispatch strings, site IDs, or new legality assertions
 are rejected.
+
+### Relational collective algorithm and size-policy bridge
+
+`GICCCollectivePlanningPass` recognizes a trusted, fixed-ABI compiler catalog
+at the early LTO extension point. A semantic anchor declares the collective
+family, contract, element width, argument roles, and the only message-size
+thresholds the compiler may materialize. Catalog entries declare algorithms
+and structural facts such as communication graph, topology, step complexity,
+cross-node pattern, synchronization, pipeline depth, and resource model.
+
+With `GICC_COLLECTIVE_OUT=<path>`, the pass emits
+`gicc-collective-inventory-v1`. It contains no application source, source
+location, or function name. Every catalog target is content-addressed and is
+included only when LLVM proves exact function-type, family, semantic-contract,
+and void-call materializer equality. Call facts include constant/dynamic
+message shape, element width, ranks-per-node shape, loop depth, and structural
+arithmetic counts.
+
+The bridge joins that inventory with a platform topology/resource profile:
+
+```bash
+python3 tools/gicc-passes/python/gicc_collective_plan_bridge.py emit \
+  --inventory build/inventory.json \
+  --platform tools/gicc-passes/python/profiles/tioga-mi250x-cxi-collective-capacity.json \
+  --graph build/collective-graph.json \
+  --prompt build/collective-prompt.txt
+```
+
+For each compiler-owned message interval, the model sees semantic algorithm
+descriptors and opaque `option_id` values. Its complete response consists of
+one existing option ID per interval plus bounded confidence/rationale fields.
+It cannot output a target symbol, algorithm string, threshold, source, code,
+IR, or legality. `accept` converts valid option IDs to a narrow
+`gicc-collective-hint-v1`; malformed or invented content falls back atomically
+to the semantic anchor unless `--strict` is requested.
+
+During the second LTO build, set
+`GICC_COLLECTIVE_HINT_IN=<collective-hint.json>`. The pass independently
+recomputes opportunity, target, and composite-plan IDs; checks catalog
+membership, exact ABI, family, contract, and the complete ordered threshold
+list; and only then retargets the call or creates the size-policy CFG. Every
+materialized call receives `gicc.collective.candidate_id` and
+`gicc.collective.target_id` IR metadata for pre-runtime audit. Any mismatch
+preserves the original semantic anchor call.
+
+The fixed-source capacity experiment and its control generator live under
+`tools/gicc-passes/experiments/collective/`. Uniform catalog arms establish the
+measurable headroom before any model is evaluated; their source and catalog
+hashes, option IDs, hints, binaries, and materialized IR are auditable without
+changing the benchmark source.

@@ -4,6 +4,7 @@
 #include "GICCHostDiscovery.h"
 #include "GICCPassConfig.h"
 #include "GICCTraceSynthesis.h"
+#include "GICCCollectivePlanning.h"
 #ifndef GICC_PASSES_ANALYZE_ONLY
 #  include "GICCDeviceLowering.h"
 #  include "GICCDispatchLowering.h"
@@ -89,6 +90,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     MPM.addPass(GICCHostDiscoveryPass());
                     MPM.addPass(GICCFeatureExtractionPass());
                     MPM.addPass(GICCTraceSynthesisPass());
+                    MPM.addPass(GICCCollectivePlanningPass());
 #ifndef GICC_PASSES_ANALYZE_ONLY
                     MPM.addPass(GICCDispatchLoweringPass());
                     MPM.addPass(GICCDeviceLoweringPass());
@@ -127,6 +129,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-trace-synthesis") {
                         MPM.addPass(GICCTraceSynthesisPass());
+                        return true;
+                    }
+                    if (Name == "gicc-collective-planning") {
+                        MPM.addPass(GICCCollectivePlanningPass());
                         return true;
                     }
 #ifndef GICC_PASSES_ANALYZE_ONLY

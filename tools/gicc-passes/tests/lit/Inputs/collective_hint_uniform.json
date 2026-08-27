@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "schema_version": "gicc-collective-hint-v1",
+  "selections": {
+    "opportunity:cdf4f08e3ce490976a66b7b2": {
+      "kind": "uniform",
+      "candidate_id": "candidate:41e6a660fa18af2dc52c560d",
+      "target_id": "catalog:bd6d7878b8f01a327d9706e5"
+    }
+  }
+}

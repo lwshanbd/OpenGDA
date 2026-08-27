@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "schema_version": "gicc-collective-hint-v1",
+  "selections": {
+    "opportunity:cdf4f08e3ce490976a66b7b2": {
+      "kind": "size_policy",
+      "candidate_id": "candidate:7d93f6405b76b87f7fce3187",
+      "rules": [
+        {
+          "max_bytes": 4096,
+          "target_id": "catalog:bd6d7878b8f01a327d9706e5"
+        },
+        {
+          "max_bytes": 262144,
+          "target_id": "catalog:b4de2b0be2b0e8b2a07eca27"
+        },
+        {
+          "max_bytes": null,
+          "target_id": "anchor:55ffaff5ae53aba6d3bbd6c7"
+        }
+      ]
+    }
+  },
+  "llm_metadata": {
+    "compiler_only_output": true
+  }
+}

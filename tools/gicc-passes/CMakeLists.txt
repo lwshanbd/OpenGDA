@@ -78,6 +78,7 @@ set(_GICC_PASS_SOURCES
     src/GICCHostDiscovery.cpp
     src/GICCFeatureExtraction.cpp
     src/GICCTraceSynthesis.cpp
+    src/GICCCollectivePlanning.cpp
 )
 if(NOT GICC_PASSES_ANALYZE_ONLY)
     list(APPEND _GICC_PASS_SOURCES

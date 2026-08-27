@@ -5,8 +5,16 @@
 
 #include <set>
 #include <string>
+#include <vector>
 
 namespace gicc::pass {
+
+// Return every clang ``annotate`` string attached to F.  Keeping the generic
+// reader here gives all compiler-owned catalogs one audited implementation of
+// llvm.global.annotations decoding instead of duplicating the brittle
+// ConstantExpr peeling logic in each pass.
+std::vector<std::string>
+getFunctionAnnotations(const llvm::Function &F);
 
 // Walk @llvm.global.annotations looking for entries of the form
 //     gicc_kernel_host_mirror=<name>
