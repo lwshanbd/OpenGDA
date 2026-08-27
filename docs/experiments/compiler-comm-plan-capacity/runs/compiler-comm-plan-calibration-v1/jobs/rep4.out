@@ -1,0 +1,8 @@
+ALLOC rep=4 order=uniform_c,uniform_t,uniform_p warmup=10 runs=100 job=unknown
+BEGIN rep=4 arm=uniform_c log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-calibration-v1/raw/rep4-uniform_c.log time=2026-08-27T19:12:45Z
+END rep=4 arm=uniform_c time=2026-08-27T19:12:49Z
+BEGIN rep=4 arm=uniform_t log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-calibration-v1/raw/rep4-uniform_t.log time=2026-08-27T19:12:49Z
+END rep=4 arm=uniform_t time=2026-08-27T19:12:51Z
+BEGIN rep=4 arm=uniform_p log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-calibration-v1/raw/rep4-uniform_p.log time=2026-08-27T19:12:51Z
+END rep=4 arm=uniform_p time=2026-08-27T19:12:53Z
+ALLOC_DONE rep=4

@@ -1,0 +1,5 @@
+job_id	rep	order	queue
+f5sQ63b8yKcT	1	uniform_p,uniform_t,uniform_c	pdebug
+f5sQ6M6XbS8P	2	uniform_t,uniform_c,uniform_p	pdebug
+f5sQ6we7QqKM	3	uniform_c,uniform_p,uniform_t	pdebug
+f5sQ7XNzcreK	4	uniform_c,uniform_t,uniform_p	pdebug

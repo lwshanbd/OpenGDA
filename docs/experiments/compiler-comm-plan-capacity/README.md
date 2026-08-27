@@ -167,4 +167,25 @@ authorization.  The provider may receive only the content-addressed compiler
 graph and may return only graph-bound candidate selections; candidate builds
 are named with an `llm_` prefix and cannot overwrite any control artifact.
 
+### Frozen six-opportunity control result
+
+Four one-at-a-time `pdebug` replicates completed and passed all 216 data-hash
+and exact-route checks (4 replicates x 3 arms x 18 scenarios):
+`f5sQ63b8yKcT`, `f5sQ6M6XbS8P`, `f5sQ6we7QqKM`, and `f5sQ7XNzcreK`.
+Full coalescing won all six opportunities in every replicate.  The factorized
+oracle score is 41.714 us, and the uniform descriptor-batch baseline is
+5.138991x slower, with paired-bootstrap 95% CI
+`[5.113713, 5.178232]`.
+
+This is a strong compiler-transform result but an intentionally negative
+capacity diagnosis: all six choices are dominated by the same action, so the
+graph does not require global reasoning and is too easy to support an LLM
+capability claim.  The next graph must expose a real compiler scheduling
+tradeoff.  The concrete next candidate is **late versus early trigger
+placement** for a compiler-coalesced transfer: early triggering can overlap
+communication with intervening GPU work but may contend for HBM/NIC resources;
+late triggering avoids contention but loses overlap.  The device pass must
+independently prove and materialize the placement, so the model still returns
+only a compiler-generated candidate ID.
+
 Content IDs and artifact hashes are frozen in `protocol-v1.json`.

@@ -1,0 +1,20 @@
+RUN rep=2 arm=uniform_p binary=/p/lustre2/shan4/new-gicc/build_ofi/compiler_comm_plan_calibration/compiler_comm_plan_calibration_uniform_p sha256=23efb2565208988b274cfc1f5bbf88d0ca6269467b4f309486d072ea1a586e74
+[gicc] CPU proxy: 8 worker thread(s) per rank
+COMPILER_LTO_CALIBRATION scenario=single-512-g1 kernel=cal_single_512_g1 runs=100 median_us=26.391 p25_us=25.955 p75_us=26.947 staged=100 pushed=0 hash=a1c17d1ed171b977 data=OK
+COMPILER_LTO_CALIBRATION scenario=single-2k-g4 kernel=cal_single_2k_g4 runs=100 median_us=26.010 p25_us=25.780 p75_us=26.464 staged=100 pushed=0 hash=9e2331cb996ea163 data=OK
+COMPILER_LTO_CALIBRATION scenario=single-16k-g1 kernel=cal_single_16k_g1 runs=100 median_us=27.112 p25_us=26.779 p75_us=27.415 staged=100 pushed=0 hash=4081e8998e396e47 data=OK
+COMPILER_LTO_CALIBRATION scenario=single-64k-g8 kernel=cal_single_64k_g8 runs=100 median_us=28.921 p25_us=28.580 p75_us=29.612 staged=100 pushed=0 hash=63c09623930c9870 data=OK
+COMPILER_LTO_CALIBRATION scenario=single-256k-g4 kernel=cal_single_256k_g4 runs=100 median_us=38.068 p25_us=37.777 p75_us=38.487 staged=100 pushed=0 hash=e659c340143c89bc data=OK
+COMPILER_LTO_CALIBRATION scenario=single-512k-g8 kernel=cal_single_512k_g8 runs=100 median_us=50.543 p25_us=50.235 p75_us=50.863 staged=100 pushed=0 hash=1052ed0f78983337 data=OK
+COMPILER_LTO_CALIBRATION scenario=reuse-1k-k8-g1 kernel=cal_reuse_1k_k8_g1 runs=100 median_us=100.058 p25_us=99.184 p75_us=101.130 staged=800 pushed=0 hash=e7f9fd07a371c81b data=OK
+COMPILER_LTO_CALIBRATION scenario=reuse-2k-k24-g1 kernel=cal_reuse_2k_k24_g1 runs=100 median_us=265.016 p25_us=262.674 p75_us=268.939 staged=2400 pushed=0 hash=7fc6781ef51a28c3 data=OK
+COMPILER_LTO_CALIBRATION scenario=reuse-8k-k48-g4 kernel=cal_reuse_8k_k48_g4 runs=100 median_us=522.803 p25_us=518.061 p75_us=525.881 staged=4800 pushed=0 hash=76a5c48618b7cd4c data=OK
+COMPILER_LTO_CALIBRATION scenario=adjacent-1k-k6-g1 kernel=cal_adjacent_1k_k6_g1 runs=100 median_us=74.343 p25_us=73.680 p75_us=74.907 staged=0 pushed=700 hash=dec9dfa810789c47 data=OK
+COMPILER_LTO_CALIBRATION scenario=adjacent-8k-k12-g4 kernel=cal_adjacent_8k_k12_g4 runs=100 median_us=131.859 p25_us=131.398 p75_us=132.338 staged=0 pushed=1300 hash=4a8ac2c39c718498 data=OK
+COMPILER_LTO_CALIBRATION scenario=adjacent-32k-k40-g8 kernel=cal_adjacent_32k_k40_g8 runs=100 median_us=408.843 p25_us=407.699 p75_us=410.662 staged=0 pushed=4100 hash=391a184dd0ed8990 data=OK
+COMPILER_LTO_CALIBRATION scenario=far-2k-k12-i64-g4 kernel=cal_far_2k_k12_i64_g4 runs=100 median_us=131.318 p25_us=130.933 p75_us=131.757 staged=0 pushed=1300 hash=9256b96e8bb28bfc data=OK
+COMPILER_LTO_CALIBRATION scenario=far-8k-k48-i256-g8 kernel=cal_far_8k_k48_i256_g8 runs=100 median_us=481.213 p25_us=480.294 p75_us=482.666 staged=0 pushed=4900 hash=41ca84e611c9c06f data=OK
+COMPILER_LTO_CALIBRATION scenario=far-16k-k24-i1024-g8 kernel=cal_far_16k_k24_i1024_g8 runs=100 median_us=248.570 p25_us=248.088 p75_us=249.829 staged=0 pushed=2500 hash=ddca28d17a90ee98 data=OK
+COMPILER_LTO_CALIBRATION scenario=static2-2k-g2 kernel=cal_static2_2k_g2 runs=100 median_us=35.814 p25_us=35.506 p75_us=36.277 staged=200 pushed=0 hash=28e3fa1e8367e293 data=OK
+COMPILER_LTO_CALIBRATION scenario=static3-8k-g4 kernel=cal_static3_8k_g4 runs=100 median_us=47.101 p25_us=46.788 p75_us=48.769 staged=300 pushed=0 hash=70790c43a79206a4 data=OK
+COMPILER_LTO_CALIBRATION scenario=static6-16k-g8 kernel=cal_static6_16k_g8 runs=100 median_us=81.061 p25_us=80.348 p75_us=82.050 staged=600 pushed=0 hash=b3ab1aa4f98e018b data=OK
