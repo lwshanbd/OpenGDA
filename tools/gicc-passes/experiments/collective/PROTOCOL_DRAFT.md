@@ -21,6 +21,9 @@ different compiler-owned message regions.
 - The application source calls one neutral semantic collective anchor.
 - The model receives no source, source location, function name, IR, or
   materializer target.
+- The model-facing compiler graph normalizes catalog candidates into entities
+  and exposes explicit message-order and shared-structure relations; it is not
+  a prose rendering of a per-size scalar feature row.
 - The model response contains existing compiler-generated `option_id` values,
   bounded confidence, and a short rationale only.
 - The model cannot name or create an algorithm, threshold, function, dispatch,

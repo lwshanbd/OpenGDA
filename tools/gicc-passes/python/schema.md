@@ -431,8 +431,15 @@ python3 tools/gicc-passes/python/gicc_collective_plan_bridge.py emit \
 ```
 
 For each compiler-owned message interval, the model sees semantic algorithm
-descriptors and opaque `option_id` values. Its complete response consists of
-one existing option ID per interval plus bounded confidence/rationale fields.
+descriptors and opaque `option_id` values. The model-facing v2 view normalizes
+each compiler candidate into one source-free `candidate_class` entity instead
+of repeating its descriptor in every interval. Explicit relations preserve
+message-size order and identify candidates that share a communication graph,
+topology strategy, cross-node pattern, resource model, or synchronization
+scheme. Each interval maps its opaque options to those entities, so the model
+can reason jointly about structural variants while still returning only
+compiler-generated option IDs. Its complete response consists of one existing
+option ID per interval plus bounded confidence/rationale fields.
 It cannot output a target symbol, algorithm string, threshold, source, code,
 IR, or legality. `accept` converts valid option IDs to a narrow
 `gicc-collective-hint-v1`; malformed or invented content falls back atomically

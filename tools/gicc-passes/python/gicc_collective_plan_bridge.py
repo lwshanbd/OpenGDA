@@ -375,32 +375,103 @@ def verified_graph(value: Any) -> dict[str, Any]:
     return value
 
 
+def _model_candidate_class_id(
+    opportunity_id: str, visible_candidate: dict[str, Any],
+) -> str:
+    payload = json.dumps(
+        visible_candidate, sort_keys=True, separators=(",", ":")
+    )
+    digest = hashlib.sha256(
+        (opportunity_id + "\0" + payload).encode()
+    ).hexdigest()[:24]
+    return f"candidate-class:{digest}"
+
+
 def _model_view(graph: dict[str, Any]) -> dict[str, Any]:
     view = {
-        "schema_version": graph["schema_version"],
+        "schema_version": "gicc-collective-model-view-v2",
+        "compiler_graph_schema": graph["schema_version"],
         "graph_id": graph["graph_id"],
         "boundary": graph["boundary"],
         "objective": graph["objective"],
         "opportunities": [],
     }
     for opportunity in graph["opportunities"]:
-        shown = {key: value for key, value in opportunity.items()
-                 if key != "decision_slots"}
-        shown["decision_slots"] = []
+        candidate_classes: dict[str, dict[str, Any]] = {}
+        target_to_class: dict[str, str] = {}
         for slot in opportunity["decision_slots"]:
-            shown_slot = {key: value for key, value in slot.items()
-                          if key != "options"}
-            shown_slot["options"] = [
-                {
-                    "option_id": option["option_id"],
+            for option in slot["options"]:
+                visible = {
                     "role": option["role"],
-                    "algorithm": option["algorithm"],
                     "compiler_descriptor": option["compiler_descriptor"],
                     "compiler_legality": option["compiler_legality"],
                 }
-                for option in slot["options"]
-            ]
-            shown["decision_slots"].append(shown_slot)
+                class_id = _model_candidate_class_id(
+                    opportunity["opportunity_id"], visible
+                )
+                previous = target_to_class.setdefault(option["target_id"], class_id)
+                if previous != class_id:
+                    raise CollectivePlanError(
+                        "one compiler target has inconsistent visible descriptors"
+                    )
+                candidate = {"candidate_class_id": class_id, **visible}
+                existing = candidate_classes.setdefault(class_id, candidate)
+                if existing != candidate:
+                    raise CollectivePlanError("model candidate-class ID collision")
+
+        shown = {
+            "opportunity_id": opportunity["opportunity_id"],
+            "kind": opportunity["kind"],
+            "semantic_contract": opportunity["semantic_contract"],
+            "compiler_facts": opportunity["compiler_facts"],
+            "joint_action_space_size": opportunity["joint_action_space_size"],
+            "candidate_classes": sorted(
+                candidate_classes.values(),
+                key=lambda item: item["candidate_class_id"],
+            ),
+            "decision_slots": [],
+            "relations": [],
+        }
+        for slot in opportunity["decision_slots"]:
+            shown["decision_slots"].append({
+                "slot_id": slot["slot_id"],
+                "message_bytes": slot["message_bytes"],
+                "allowed_options": [
+                    {
+                        "option_id": option["option_id"],
+                        "candidate_class_id": target_to_class[
+                            option["target_id"]
+                        ],
+                    }
+                    for option in slot["options"]
+                ],
+            })
+        shown["relations"].append({
+            "kind": "increasing_message_size",
+            "ordered_slot_ids": [
+                slot["slot_id"] for slot in opportunity["decision_slots"]
+            ],
+        })
+        relation_fields = (
+            "communication_graph", "topology", "cross_node_pattern",
+            "resource_model", "synchronization",
+        )
+        for field in relation_fields:
+            groups: dict[str, list[str]] = {}
+            for candidate in candidate_classes.values():
+                value = candidate["compiler_descriptor"].get(field)
+                if isinstance(value, str):
+                    groups.setdefault(value, []).append(
+                        candidate["candidate_class_id"]
+                    )
+            for value, members in sorted(groups.items()):
+                if len(members) > 1:
+                    shown["relations"].append({
+                        "kind": "shared_compiler_property",
+                        "property": field,
+                        "value": value,
+                        "candidate_class_ids": sorted(members),
+                    })
         view["opportunities"].append(shown)
     return view
 

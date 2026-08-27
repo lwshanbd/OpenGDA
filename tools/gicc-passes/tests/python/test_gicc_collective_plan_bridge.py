@@ -123,10 +123,23 @@ class CollectivePlanBridgeTests(unittest.TestCase):
         collective.verified_graph(self.graph)
         self.assertEqual(4, len(self.opportunity["decision_slots"]))
         self.assertEqual(4 ** 4, self.opportunity["joint_action_space_size"])
+        model_view = collective._model_view(self.graph)
+        model_opportunity = model_view["opportunities"][0]
+        self.assertEqual(4, len(model_opportunity["candidate_classes"]))
+        self.assertTrue(all(
+            set(option) == {"option_id", "candidate_class_id"}
+            for slot in model_opportunity["decision_slots"]
+            for option in slot["allowed_options"]
+        ))
+        self.assertTrue(any(
+            relation.get("property") == "topology"
+            for relation in model_opportunity["relations"]
+        ))
         prompt = collective.render_prompt(self.graph)
         self.assertNotIn("target_id", prompt)
         self.assertNotIn("SECRET_SOURCE_SENTINEL", prompt)
         self.assertIn("step_complexity", prompt)
+        self.assertEqual(1, prompt.count('"algorithm": "flat_double_tree"'))
         self.assertEqual(
             "compiler-generated option IDs only",
             self.graph["boundary"]["model_output"],
