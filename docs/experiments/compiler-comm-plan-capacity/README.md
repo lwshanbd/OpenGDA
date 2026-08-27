@@ -235,3 +235,32 @@ compiler-comm-plan-placement-v1/raw/*.log
 
 The complete pre-runtime contract and artifact hashes are frozen in
 `protocol-placement-v1.json`.
+
+### Frozen trigger-placement result
+
+Four one-at-a-time `pdebug` replicates completed successfully:
+`f5sQLgoMLzbH`, `f5sQM6wMpnTq`, `f5sQMf5qda4F`, and `f5sQNH8avkD5`.
+All 288 data-hash and exact-route checks passed (4 replicates x 4 arms x
+18 scenarios), and every runtime binary hash matched the preregistered
+protocol.
+
+The aggregate factorized oracle is mixed: late coalescing wins the three
+adjacent scenarios, while early coalescing wins all three far scenarios.
+The two largest compute-distance opportunities select early in every
+replicate.  However, no late winner is stable in all four replicates.  The
+fixed aggregate-selected oracle scores 39.383 us versus 40.091 us for the
+best uniform arm (`uniform_e`), a ratio of 1.017982 with paired-bootstrap 95%
+CI `[0.989739, 1.054439]`.
+
+The preregistered LLM gate therefore **fails**: the interval crosses 1 and the
+required stable late winner is absent.  No provider call is made for this
+graph.  This is evidence that trigger placement can be context-sensitive, but
+not yet that the exposed action space supports a robust LLM-planning claim.
+The next graph must strengthen the compiler-owned tradeoff, for example with
+chunking/pipelining and coupled resource constraints, or carry the verified
+placement mechanism into a real application communication graph.  Additional
+replicates must not be used post hoc to relabel this failed gate.
+
+The machine-readable result is
+`runs/compiler-comm-plan-placement-v1/summary.json` (SHA-256
+`6ab7ad1016b76ed5b43098291cab82ab5b345b0eb3fc8d5f91c2bfa4696c0d8c`).

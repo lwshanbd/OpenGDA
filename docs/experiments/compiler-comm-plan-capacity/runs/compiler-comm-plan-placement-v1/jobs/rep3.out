@@ -1,0 +1,10 @@
+ALLOC rep=3 order=uniform_c,uniform_e,uniform_t,uniform_p warmup=10 runs=100 job=unknown
+BEGIN rep=3 arm=uniform_c log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-placement-v1/raw/rep3-uniform_c.log time=2026-08-27T19:43:40Z
+END rep=3 arm=uniform_c time=2026-08-27T19:43:44Z
+BEGIN rep=3 arm=uniform_e log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-placement-v1/raw/rep3-uniform_e.log time=2026-08-27T19:43:44Z
+END rep=3 arm=uniform_e time=2026-08-27T19:43:46Z
+BEGIN rep=3 arm=uniform_t log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-placement-v1/raw/rep3-uniform_t.log time=2026-08-27T19:43:46Z
+END rep=3 arm=uniform_t time=2026-08-27T19:43:49Z
+BEGIN rep=3 arm=uniform_p log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-placement-v1/raw/rep3-uniform_p.log time=2026-08-27T19:43:49Z
+END rep=3 arm=uniform_p time=2026-08-27T19:43:51Z
+ALLOC_DONE rep=3

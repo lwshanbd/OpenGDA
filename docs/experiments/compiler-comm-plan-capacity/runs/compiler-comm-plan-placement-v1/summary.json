@@ -1,0 +1,652 @@
+{
+  "aggregate": {
+    "uniform_c": {
+      "geomean_median_us": {
+        "adjacent-1k-k6-g1": 25.66102601797265,
+        "adjacent-32k-k40-g8": 88.27663017996751,
+        "adjacent-8k-k12-g4": 30.325515447565586,
+        "far-16k-k24-i1024-g8": 60.9755408582182,
+        "far-2k-k12-i64-g4": 28.505531063917342,
+        "far-8k-k48-i256-g8": 48.863377343786205,
+        "reuse-1k-k8-g1": 99.61177000002424,
+        "reuse-2k-k24-g1": 265.69446115875104,
+        "reuse-8k-k48-g4": 518.0476909063235,
+        "single-16k-g1": 26.28140046197619,
+        "single-256k-g4": 37.72418810023173,
+        "single-2k-g4": 25.173780635141593,
+        "single-512-g1": 25.390981940108766,
+        "single-512k-g8": 50.248482756155504,
+        "single-64k-g8": 28.68467864811164,
+        "static2-2k-g2": 35.588701770737686,
+        "static3-8k-g4": 46.993670223720535,
+        "static6-16k-g8": 80.00756736984607
+      },
+      "selections": [
+        {
+          "candidate_id": "candidate:b18689e48fc4fbd5693812c3",
+          "effects": {
+            "coalesced_bytes": 6144,
+            "host_descriptors": 1,
+            "network_operations": 1
+          },
+          "kernel": "cal_adjacent_1k_k6_g1",
+          "kind": "trigger_coalesced_loop",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "COALESCE_LOOP"
+          },
+          "opportunity_id": "opportunity:d42d15a9ecf08bde87bcb065"
+        },
+        {
+          "candidate_id": "candidate:49ef98199a0e3213b49f4906",
+          "effects": {
+            "coalesced_bytes": 1310720,
+            "host_descriptors": 1,
+            "network_operations": 1
+          },
+          "kernel": "cal_adjacent_32k_k40_g8",
+          "kind": "trigger_coalesced_loop",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "COALESCE_LOOP"
+          },
+          "opportunity_id": "opportunity:7ad80144b8dbb774ad5438cd"
+        },
+        {
+          "candidate_id": "candidate:2aae2dd37e0ea5b52556e839",
+          "effects": {
+            "coalesced_bytes": 98304,
+            "host_descriptors": 1,
+            "network_operations": 1
+          },
+          "kernel": "cal_adjacent_8k_k12_g4",
+          "kind": "trigger_coalesced_loop",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "COALESCE_LOOP"
+          },
+          "opportunity_id": "opportunity:8d921bb3c6e3600c85f67177"
+        },
+        {
+          "candidate_id": "candidate:960efa385032d861905ef39e",
+          "effects": {
+            "coalesced_bytes": 393216,
+            "host_descriptors": 1,
+            "network_operations": 1
+          },
+          "kernel": "cal_far_16k_k24_i1024_g8",
+          "kind": "trigger_coalesced_loop",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "COALESCE_LOOP"
+          },
+          "opportunity_id": "opportunity:9fa38d27495ea173fef90321"
+        },
+        {
+          "candidate_id": "candidate:c8c684da031562ce822d9f9c",
+          "effects": {
+            "coalesced_bytes": 24576,
+            "host_descriptors": 1,
+            "network_operations": 1
+          },
+          "kernel": "cal_far_2k_k12_i64_g4",
+          "kind": "trigger_coalesced_loop",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "COALESCE_LOOP"
+          },
+          "opportunity_id": "opportunity:5323ec1d2bd9fa12f2198acd"
+        },
+        {
+          "candidate_id": "candidate:c123cc706942fc9580858c96",
+          "effects": {
+            "coalesced_bytes": 393216,
+            "host_descriptors": 1,
+            "network_operations": 1
+          },
+          "kernel": "cal_far_8k_k48_i256_g8",
+          "kind": "trigger_coalesced_loop",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "COALESCE_LOOP"
+          },
+          "opportunity_id": "opportunity:b725b7eb6e11fc04199a5d82"
+        }
+      ],
+      "structural_score_us": 42.42931681504262
+    },
+    "uniform_e": {
+      "geomean_median_us": {
+        "adjacent-1k-k6-g1": 26.595989766326085,
+        "adjacent-32k-k40-g8": 90.95025565730583,
+        "adjacent-8k-k12-g4": 31.6045418796158,
+        "far-16k-k24-i1024-g8": 44.698876513717764,
+        "far-2k-k12-i64-g4": 27.284352232496154,
+        "far-8k-k48-i256-g8": 44.53402474849104,
+        "reuse-1k-k8-g1": 100.00977184274734,
+        "reuse-2k-k24-g1": 265.1020120007466,
+        "reuse-8k-k48-g4": 518.2279108287833,
+        "single-16k-g1": 26.276996610439248,
+        "single-256k-g4": 37.92158546534908,
+        "single-2k-g4": 24.105556397390366,
+        "single-512-g1": 24.156362578260328,
+        "single-512k-g8": 50.435435334887465,
+        "single-64k-g8": 28.622872533240617,
+        "static2-2k-g2": 36.03037319455301,
+        "static3-8k-g4": 47.684947251800004,
+        "static6-16k-g8": 81.02842479820818
+      },
+      "selections": [
+        {
+          "candidate_id": "candidate:4b5e853a920a543c1e038355",
+          "effects": {
+            "coalesced_bytes": 6144,
+            "host_descriptors": 1,
+            "network_operations": 1,
+            "overlap_flops": 28,
+            "trigger_placement": "loop_exit"
+          },
+          "kernel": "cal_adjacent_1k_k6_g1",
+          "kind": "trigger_coalesced_early",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "COALESCE_LOOP_EARLY"
+          },
+          "opportunity_id": "opportunity:d42d15a9ecf08bde87bcb065"
+        },
+        {
+          "candidate_id": "candidate:ca986ca395c5a1552aceac84",
+          "effects": {
+            "coalesced_bytes": 1310720,
+            "host_descriptors": 1,
+            "network_operations": 1,
+            "overlap_flops": 164,
+            "trigger_placement": "loop_exit"
+          },
+          "kernel": "cal_adjacent_32k_k40_g8",
+          "kind": "trigger_coalesced_early",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "COALESCE_LOOP_EARLY"
+          },
+          "opportunity_id": "opportunity:7ad80144b8dbb774ad5438cd"
+        },
+        {
+          "candidate_id": "candidate:dc94f52d3bf4bfa60d43a4f2",
+          "effects": {
+            "coalesced_bytes": 98304,
+            "host_descriptors": 1,
+            "network_operations": 1,
+            "overlap_flops": 52,
+            "trigger_placement": "loop_exit"
+          },
+          "kernel": "cal_adjacent_8k_k12_g4",
+          "kind": "trigger_coalesced_early",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "COALESCE_LOOP_EARLY"
+          },
+          "opportunity_id": "opportunity:8d921bb3c6e3600c85f67177"
+        },
+        {
+          "candidate_id": "candidate:6c60e616ba60562098da4db3",
+          "effects": {
+            "coalesced_bytes": 393216,
+            "host_descriptors": 1,
+            "network_operations": 1,
+            "overlap_flops": 10352,
+            "trigger_placement": "loop_exit"
+          },
+          "kernel": "cal_far_16k_k24_i1024_g8",
+          "kind": "trigger_coalesced_early",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "COALESCE_LOOP_EARLY"
+          },
+          "opportunity_id": "opportunity:9fa38d27495ea173fef90321"
+        },
+        {
+          "candidate_id": "candidate:10c9d757c15c85c3fc0a10c1",
+          "effects": {
+            "coalesced_bytes": 24576,
+            "host_descriptors": 1,
+            "network_operations": 1,
+            "overlap_flops": 704,
+            "trigger_placement": "loop_exit"
+          },
+          "kernel": "cal_far_2k_k12_i64_g4",
+          "kind": "trigger_coalesced_early",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "COALESCE_LOOP_EARLY"
+          },
+          "opportunity_id": "opportunity:5323ec1d2bd9fa12f2198acd"
+        },
+        {
+          "candidate_id": "candidate:d7e25d35858e7ca445f8283f",
+          "effects": {
+            "coalesced_bytes": 393216,
+            "host_descriptors": 1,
+            "network_operations": 1,
+            "overlap_flops": 2768,
+            "trigger_placement": "loop_exit"
+          },
+          "kernel": "cal_far_8k_k48_i256_g8",
+          "kind": "trigger_coalesced_early",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "COALESCE_LOOP_EARLY"
+          },
+          "opportunity_id": "opportunity:b725b7eb6e11fc04199a5d82"
+        }
+      ],
+      "structural_score_us": 40.0908530269859
+    },
+    "uniform_p": {
+      "geomean_median_us": {
+        "adjacent-1k-k6-g1": 76.73447330948262,
+        "adjacent-32k-k40-g8": 426.73461908459484,
+        "adjacent-8k-k12-g4": 136.63379797225932,
+        "far-16k-k24-i1024-g8": 258.89175753005577,
+        "far-2k-k12-i64-g4": 136.16545314256612,
+        "far-8k-k48-i256-g8": 501.8444633355822,
+        "reuse-1k-k8-g1": 99.57827173544335,
+        "reuse-2k-k24-g1": 264.8128014175083,
+        "reuse-8k-k48-g4": 518.6918035616691,
+        "single-16k-g1": 26.793404407002445,
+        "single-256k-g4": 37.74036273156427,
+        "single-2k-g4": 24.95011117101452,
+        "single-512-g1": 25.147995683839905,
+        "single-512k-g8": 50.086694262780256,
+        "single-64k-g8": 28.976000133963346,
+        "static2-2k-g2": 35.07433926410596,
+        "static3-8k-g4": 46.854427373036465,
+        "static6-16k-g8": 80.67876110638642
+      },
+      "selections": [
+        {
+          "candidate_id": "candidate:f1f150c39cce15e72efc817a",
+          "effects": {
+            "host_descriptors": 0,
+            "network_operations": 6
+          },
+          "kernel": "cal_adjacent_1k_k6_g1",
+          "kind": "proxy_device",
+          "materializer": {
+            "dispatch": "CPU_PROXY_ENQUEUE",
+            "transform": "NONE"
+          },
+          "opportunity_id": "opportunity:d42d15a9ecf08bde87bcb065"
+        },
+        {
+          "candidate_id": "candidate:e34507e85bc25853bc3196d5",
+          "effects": {
+            "host_descriptors": 0,
+            "network_operations": 40
+          },
+          "kernel": "cal_adjacent_32k_k40_g8",
+          "kind": "proxy_device",
+          "materializer": {
+            "dispatch": "CPU_PROXY_ENQUEUE",
+            "transform": "NONE"
+          },
+          "opportunity_id": "opportunity:7ad80144b8dbb774ad5438cd"
+        },
+        {
+          "candidate_id": "candidate:9ed1570958f88ccfb360ab42",
+          "effects": {
+            "host_descriptors": 0,
+            "network_operations": 12
+          },
+          "kernel": "cal_adjacent_8k_k12_g4",
+          "kind": "proxy_device",
+          "materializer": {
+            "dispatch": "CPU_PROXY_ENQUEUE",
+            "transform": "NONE"
+          },
+          "opportunity_id": "opportunity:8d921bb3c6e3600c85f67177"
+        },
+        {
+          "candidate_id": "candidate:47d89e455fdde83584441d17",
+          "effects": {
+            "host_descriptors": 0,
+            "network_operations": 24
+          },
+          "kernel": "cal_far_16k_k24_i1024_g8",
+          "kind": "proxy_device",
+          "materializer": {
+            "dispatch": "CPU_PROXY_ENQUEUE",
+            "transform": "NONE"
+          },
+          "opportunity_id": "opportunity:9fa38d27495ea173fef90321"
+        },
+        {
+          "candidate_id": "candidate:5b38efb66efb48d21d72d8af",
+          "effects": {
+            "host_descriptors": 0,
+            "network_operations": 12
+          },
+          "kernel": "cal_far_2k_k12_i64_g4",
+          "kind": "proxy_device",
+          "materializer": {
+            "dispatch": "CPU_PROXY_ENQUEUE",
+            "transform": "NONE"
+          },
+          "opportunity_id": "opportunity:5323ec1d2bd9fa12f2198acd"
+        },
+        {
+          "candidate_id": "candidate:6d8ad752023cf74b7f399ea2",
+          "effects": {
+            "host_descriptors": 0,
+            "network_operations": 48
+          },
+          "kernel": "cal_far_8k_k48_i256_g8",
+          "kind": "proxy_device",
+          "materializer": {
+            "dispatch": "CPU_PROXY_ENQUEUE",
+            "transform": "NONE"
+          },
+          "opportunity_id": "opportunity:b725b7eb6e11fc04199a5d82"
+        }
+      ],
+      "structural_score_us": 207.2097269223011
+    },
+    "uniform_t": {
+      "geomean_median_us": {
+        "adjacent-1k-k6-g1": 77.24261398735402,
+        "adjacent-32k-k40-g8": 440.03953519353325,
+        "adjacent-8k-k12-g4": 141.6414599787688,
+        "far-16k-k24-i1024-g8": 285.4558685336981,
+        "far-2k-k12-i64-g4": 142.08442616227774,
+        "far-8k-k48-i256-g8": 520.6713473335442,
+        "reuse-1k-k8-g1": 99.41226590260884,
+        "reuse-2k-k24-g1": 263.0284559667015,
+        "reuse-8k-k48-g4": 516.3437029232157,
+        "single-16k-g1": 26.035698145238843,
+        "single-256k-g4": 37.41685743309042,
+        "single-2k-g4": 24.598210823756865,
+        "single-512-g1": 24.84384696314321,
+        "single-512k-g8": 51.39633004849355,
+        "single-64k-g8": 28.297379706353276,
+        "static2-2k-g2": 35.55724308065345,
+        "static3-8k-g4": 47.3182686368493,
+        "static6-16k-g8": 80.53407715006081
+      },
+      "selections": [
+        {
+          "candidate_id": "candidate:5191d36ee5063ab3ddcaa453",
+          "effects": {
+            "host_descriptors": 6,
+            "network_operations": 6
+          },
+          "kernel": "cal_adjacent_1k_k6_g1",
+          "kind": "trigger_descriptor_batch",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "NONE"
+          },
+          "opportunity_id": "opportunity:d42d15a9ecf08bde87bcb065"
+        },
+        {
+          "candidate_id": "candidate:e768164a27f8ba769217b8b6",
+          "effects": {
+            "host_descriptors": 40,
+            "network_operations": 40
+          },
+          "kernel": "cal_adjacent_32k_k40_g8",
+          "kind": "trigger_descriptor_batch",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "NONE"
+          },
+          "opportunity_id": "opportunity:7ad80144b8dbb774ad5438cd"
+        },
+        {
+          "candidate_id": "candidate:7ea8cae092aa564385a2b912",
+          "effects": {
+            "host_descriptors": 12,
+            "network_operations": 12
+          },
+          "kernel": "cal_adjacent_8k_k12_g4",
+          "kind": "trigger_descriptor_batch",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "NONE"
+          },
+          "opportunity_id": "opportunity:8d921bb3c6e3600c85f67177"
+        },
+        {
+          "candidate_id": "candidate:5232a729e4b666f9d91cf0fc",
+          "effects": {
+            "host_descriptors": 24,
+            "network_operations": 24
+          },
+          "kernel": "cal_far_16k_k24_i1024_g8",
+          "kind": "trigger_descriptor_batch",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "NONE"
+          },
+          "opportunity_id": "opportunity:9fa38d27495ea173fef90321"
+        },
+        {
+          "candidate_id": "candidate:23efadf3807f101a2813aa5d",
+          "effects": {
+            "host_descriptors": 12,
+            "network_operations": 12
+          },
+          "kernel": "cal_far_2k_k12_i64_g4",
+          "kind": "trigger_descriptor_batch",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "NONE"
+          },
+          "opportunity_id": "opportunity:5323ec1d2bd9fa12f2198acd"
+        },
+        {
+          "candidate_id": "candidate:529977332d758e07f639cb0d",
+          "effects": {
+            "host_descriptors": 48,
+            "network_operations": 48
+          },
+          "kernel": "cal_far_8k_k48_i256_g8",
+          "kind": "trigger_descriptor_batch",
+          "materializer": {
+            "dispatch": "DWQ_TRIGGER",
+            "transform": "NONE"
+          },
+          "opportunity_id": "opportunity:b725b7eb6e11fc04199a5d82"
+        }
+      ],
+      "structural_score_us": 216.0386050843794
+    }
+  },
+  "binary_sha256_by_arm": {
+    "uniform_c": "746c38e3c8459e443f1f7fa09b7a0a39d6a09e31a2aa7195e6558e0638e6b150",
+    "uniform_e": "b7ea627a68e55a7d0b21d6ff07eaf040119e4343c7fbbacfb779a9e7cfd0ead3",
+    "uniform_p": "3ea55e277f251659b080dd2ad59fdfcccee5ac823b9a389137e1ab8582f7b54b",
+    "uniform_t": "db88feb0eb8ee3073181049ea4262a58bade201b441c7767e8e33c8e7743c1fa"
+  },
+  "factorized_oracle": {
+    "best_uniform_arm": "uniform_e",
+    "best_uniform_over_oracle": 1.017982403548134,
+    "best_uniform_over_oracle_paired_bootstrap_95_ci": [
+      0.9897392954847184,
+      1.0544388792579842
+    ],
+    "best_uniform_score_us": 40.0908530269859,
+    "paired_bootstrap_95_ci": [
+      5.369796581563537,
+      5.603957628507263
+    ],
+    "policy_space_size": 4096,
+    "scope": "Exact factorized oracle over 4^6 compiler candidate-ID plans because the six named scenarios are timed independently; it does not measure cross-site interaction.",
+    "site_count": 6,
+    "stable_site_count": 2,
+    "stable_winner_count_by_action": {
+      "proxy_device": 0,
+      "trigger_coalesced_early": 2,
+      "trigger_coalesced_loop": 0,
+      "trigger_descriptor_batch": 0
+    },
+    "structural_score_us": 39.38265817488686,
+    "trigger_batch_baseline": "uniform_t",
+    "trigger_batch_over_oracle": 5.485627814278436
+  },
+  "graph_id": "sha256:544a66f3b4c217fe5aea56c1c0ed7a87f685e47f460659110764ed26f9756d7b",
+  "graph_sha256": "2855c21224c5797cbb6b6c76ef35910a4d1073b237d5ce4ec7bdaab2743294f8",
+  "manifest_id": "sha256:6676624303b81453651a09de822f26f6e34c8ce038a352f0f1e8f136b5bbbbff",
+  "manifest_sha256": "1d2818bfd565a76c113d1a75aa52d3270598ae9d1c659dfd313eb6e3a9077593",
+  "model_invoked": false,
+  "placement_llm_gate": {
+    "definition": "The preregistered minimum number of stable late and early winners must be met, and the paired-bootstrap lower bound for best-uniform/fixed-oracle must exceed the preregistered effect ratio.",
+    "minimum_effect_ratio": 1.01,
+    "mixed_stable_placement": false,
+    "passed": false,
+    "required_stable_early_winner_count": 1,
+    "required_stable_late_winner_count": 1,
+    "stable_early_winner_count": 2,
+    "stable_late_winner_count": 0
+  },
+  "protocol_sha256": "58f905dc23f22121d1eaf39fb6556e138a064f2ef7e4570688f8b5d4df811a27",
+  "replicates": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "schema_version": "gicc-communication-plan-placement-runtime-v1",
+  "scope": "Compiler-generated uniform controls and factorized capacity labels; no LLM result and no source modification.",
+  "site_oracles": [
+    {
+      "best_action": "trigger_coalesced_loop",
+      "candidate_id": "candidate:b18689e48fc4fbd5693812c3",
+      "geomean_median_us_by_action": {
+        "proxy_device": 76.73447330948262,
+        "trigger_coalesced_early": 26.595989766326085,
+        "trigger_coalesced_loop": 25.66102601797265,
+        "trigger_descriptor_batch": 77.24261398735402
+      },
+      "kernel": "cal_adjacent_1k_k6_g1",
+      "opportunity_id": "opportunity:d42d15a9ecf08bde87bcb065",
+      "per_replicate_best_action": [
+        "trigger_coalesced_loop",
+        "trigger_coalesced_loop",
+        "trigger_coalesced_loop",
+        "trigger_coalesced_early"
+      ],
+      "scenario": "adjacent-1k-k6-g1",
+      "stable_winner": false
+    },
+    {
+      "best_action": "trigger_coalesced_loop",
+      "candidate_id": "candidate:49ef98199a0e3213b49f4906",
+      "geomean_median_us_by_action": {
+        "proxy_device": 426.73461908459484,
+        "trigger_coalesced_early": 90.95025565730583,
+        "trigger_coalesced_loop": 88.27663017996751,
+        "trigger_descriptor_batch": 440.03953519353325
+      },
+      "kernel": "cal_adjacent_32k_k40_g8",
+      "opportunity_id": "opportunity:7ad80144b8dbb774ad5438cd",
+      "per_replicate_best_action": [
+        "trigger_coalesced_loop",
+        "trigger_coalesced_early",
+        "trigger_coalesced_loop",
+        "trigger_coalesced_early"
+      ],
+      "scenario": "adjacent-32k-k40-g8",
+      "stable_winner": false
+    },
+    {
+      "best_action": "trigger_coalesced_loop",
+      "candidate_id": "candidate:2aae2dd37e0ea5b52556e839",
+      "geomean_median_us_by_action": {
+        "proxy_device": 136.63379797225932,
+        "trigger_coalesced_early": 31.6045418796158,
+        "trigger_coalesced_loop": 30.325515447565586,
+        "trigger_descriptor_batch": 141.6414599787688
+      },
+      "kernel": "cal_adjacent_8k_k12_g4",
+      "opportunity_id": "opportunity:8d921bb3c6e3600c85f67177",
+      "per_replicate_best_action": [
+        "trigger_coalesced_loop",
+        "trigger_coalesced_early",
+        "trigger_coalesced_loop",
+        "trigger_coalesced_early"
+      ],
+      "scenario": "adjacent-8k-k12-g4",
+      "stable_winner": false
+    },
+    {
+      "best_action": "trigger_coalesced_early",
+      "candidate_id": "candidate:6c60e616ba60562098da4db3",
+      "geomean_median_us_by_action": {
+        "proxy_device": 258.89175753005577,
+        "trigger_coalesced_early": 44.698876513717764,
+        "trigger_coalesced_loop": 60.9755408582182,
+        "trigger_descriptor_batch": 285.4558685336981
+      },
+      "kernel": "cal_far_16k_k24_i1024_g8",
+      "opportunity_id": "opportunity:9fa38d27495ea173fef90321",
+      "per_replicate_best_action": [
+        "trigger_coalesced_early",
+        "trigger_coalesced_early",
+        "trigger_coalesced_early",
+        "trigger_coalesced_early"
+      ],
+      "scenario": "far-16k-k24-i1024-g8",
+      "stable_winner": true
+    },
+    {
+      "best_action": "trigger_coalesced_early",
+      "candidate_id": "candidate:10c9d757c15c85c3fc0a10c1",
+      "geomean_median_us_by_action": {
+        "proxy_device": 136.16545314256612,
+        "trigger_coalesced_early": 27.284352232496154,
+        "trigger_coalesced_loop": 28.505531063917342,
+        "trigger_descriptor_batch": 142.08442616227774
+      },
+      "kernel": "cal_far_2k_k12_i64_g4",
+      "opportunity_id": "opportunity:5323ec1d2bd9fa12f2198acd",
+      "per_replicate_best_action": [
+        "trigger_coalesced_loop",
+        "trigger_coalesced_early",
+        "trigger_coalesced_early",
+        "trigger_coalesced_early"
+      ],
+      "scenario": "far-2k-k12-i64-g4",
+      "stable_winner": false
+    },
+    {
+      "best_action": "trigger_coalesced_early",
+      "candidate_id": "candidate:d7e25d35858e7ca445f8283f",
+      "geomean_median_us_by_action": {
+        "proxy_device": 501.8444633355822,
+        "trigger_coalesced_early": 44.53402474849104,
+        "trigger_coalesced_loop": 48.863377343786205,
+        "trigger_descriptor_batch": 520.6713473335442
+      },
+      "kernel": "cal_far_8k_k48_i256_g8",
+      "opportunity_id": "opportunity:b725b7eb6e11fc04199a5d82",
+      "per_replicate_best_action": [
+        "trigger_coalesced_early",
+        "trigger_coalesced_early",
+        "trigger_coalesced_early",
+        "trigger_coalesced_early"
+      ],
+      "scenario": "far-8k-k48-i256-g8",
+      "stable_winner": true
+    }
+  ],
+  "source_sha256": "ac9a7f75da60dbac36f3871e1c0113ec8071b1f7d924ef3dd96e9fdb5888b37d",
+  "source_visible_to_model": false,
+  "structural_scenarios": [
+    "adjacent-1k-k6-g1",
+    "adjacent-32k-k40-g8",
+    "adjacent-8k-k12-g4",
+    "far-16k-k24-i1024-g8",
+    "far-2k-k12-i64-g4",
+    "far-8k-k48-i256-g8"
+  ]
+}
