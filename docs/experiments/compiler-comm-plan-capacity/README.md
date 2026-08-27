@@ -264,3 +264,31 @@ replicates must not be used post hoc to relabel this failed gate.
 The machine-readable result is
 `runs/compiler-comm-plan-placement-v1/summary.json` (SHA-256
 `6ab7ad1016b76ed5b43098291cab82ab5b345b0eb3fc8d5f91c2bfa4696c0d8c`).
+
+## Relational real-application expansion (in progress)
+
+The next compiler graph is no longer a collection of independent flat sites.
+The unchanged OFI Jacobi source (SHA-256
+`6e65ca42fcb74fd74ab003ef6d0ca85c6649c39d4dbfca0c5235dc029585277a`)
+produces one compiler-discovered group containing two `put_no_db` operations,
+two distinct peer formals, one shared source-buffer formal, distinct source and
+destination offsets, and one shared flush. The relational bridge enumerates
+the full 3 x 3 materializable route product for this group and gives an LLM
+only opaque candidate IDs.
+
+This application also exposes why a language model must not decide legality.
+Both puts have an exact static issue-to-completion distance of 37 arithmetic
+operations, which looks like overlap headroom in the old flat dossier. The
+device dependence analysis, however, finds an intervening instruction that
+may write the registered source buffer. It therefore masks
+`group_trigger_early`; the final lowering independently rejects the same move.
+This prevents a fast-but-stale halo exchange even if a planner asks for it.
+
+The current generated graph has ID
+`sha256:7801e84cfc6e00162491d7cbe9ea1dfa8b7d1822435d609715a5727927c0db38`
+and nine legal route candidates. It is diagnostic infrastructure, not yet a
+frozen runtime protocol: no provider call and no scheduler job has been made
+for it. The next capacity step is to add a compiler-owned producer-frontier or
+kernel-splitting action that can safely expose communication/computation
+overlap, then preregister a one-job-at-a-time `pdebug` evaluation only if the
+resulting legal action space is non-dominated.

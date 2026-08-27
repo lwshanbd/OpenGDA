@@ -3,7 +3,12 @@
 #include "KernelInventory.h"
 #include "MetadataIO.h"
 
-namespace llvm { class LoopInfo; class DominatorTree; class ScalarEvolution; }
+namespace llvm {
+class LoopInfo;
+class DominatorTree;
+class PostDominatorTree;
+class ScalarEvolution;
+}
 
 namespace gicc::pass {
 
@@ -30,6 +35,7 @@ namespace gicc::pass {
 KernelTemplate buildKernelTemplate(const GICCKernelInfo  &info,
                                    llvm::LoopInfo        *LI = nullptr,
                                    llvm::DominatorTree   *DT = nullptr,
-                                   llvm::ScalarEvolution *SE = nullptr);
+                                   llvm::ScalarEvolution *SE = nullptr,
+                                   llvm::PostDominatorTree *PDT = nullptr);
 
 }  // namespace gicc::pass

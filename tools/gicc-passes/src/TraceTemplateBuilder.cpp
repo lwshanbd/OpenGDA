@@ -11,6 +11,7 @@
 #include "HostMirrorAnnotation.h"
 
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -642,7 +643,8 @@ int fenceScopeFor(const CallInst *CI, const Function *K) {
 //
 // Transfers with no completion point downstream still form a group — the
 // host's reset() drains them.
-void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t) {
+void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
+                      DominatorTree *DT, PostDominatorTree *PDT) {
     if (!info.kernel) return;
 
     // Position within a block, so two sites in the same block can be
@@ -698,8 +700,141 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t) {
         // Without a provable trip count the best honest answer is one.
         total[owner[i]] += t.ops[i].trip_count > 0 ? t.ops[i].trip_count : 1;
     }
-    for (unsigned i = 0; i < t.ops.size(); ++i)
-        if (owner[i] != kNotATransfer) t.ops[i].batch_size = total[owner[i]];
+    for (unsigned i = 0; i < t.ops.size(); ++i) {
+        if (owner[i] == kNotATransfer) continue;
+        t.ops[i].batch_size = total[owner[i]];
+        if (owner[i] >= 0)
+            t.ops[i].completion_site_id = t.ops[owner[i]].siteId;
+    }
+
+    // Prove the narrow multi-site early-trigger shape advertised to the
+    // communication-plan bridge.  A registered buffer is represented in the
+    // device API by an integer handle, so LLVM AA cannot relate it to ordinary
+    // pointer stores.  Refuse to move the trigger across *any* instruction
+    // which may write memory.  This loses opportunities but cannot turn a
+    // producer store into a stale or racing RDMA read.
+    for (const auto &group : total) {
+        const int completion = group.first;
+        SmallVector<unsigned, 4> members;
+        for (unsigned i = 0; i < owner.size(); ++i)
+            if (owner[i] == completion) members.push_back(i);
+        if (members.size() < 2) continue;
+
+        auto finish = [&](bool legal, StringRef reason) {
+            for (unsigned i : members) {
+                t.ops[i].group_early_trigger_analyzed = true;
+                t.ops[i].group_early_trigger_legal = legal;
+                t.ops[i].group_early_trigger_reason = reason.str();
+            }
+        };
+        if (completion < 0 ||
+            t.ops[static_cast<unsigned>(completion)].kind != "flush") {
+            finish(false, "group has no compiler-identified flush completion");
+            continue;
+        }
+        bool supportedMembers = true;
+        for (unsigned i : members) {
+            const OpTemplate &op = t.ops[i];
+            if (op.kind != "put_no_db" || !op.hk_capable || op.loop.inLoop ||
+                op.guard.kind != GuardSpec::Kind::Always) {
+                supportedMembers = false;
+                break;
+            }
+        }
+        if (!supportedMembers) {
+            finish(false, "group members are not unconditional non-loop host-knowable PUTs");
+            continue;
+        }
+        if (!DT || !PDT) {
+            finish(false, "dominance analyses unavailable");
+            continue;
+        }
+
+        // Select a last member only when every other group member dominates
+        // it.  That gives one insertion frontier after all descriptors have
+        // logically been issued, without inventing a join block.
+        CallInst *last = nullptr;
+        for (unsigned candidate : members) {
+            bool afterAll = true;
+            for (unsigned other : members) {
+                if (other == candidate) continue;
+                if (!DT->dominates(info.sites[other].CI,
+                                   info.sites[candidate].CI)) {
+                    afterAll = false;
+                    break;
+                }
+            }
+            if (afterAll) {
+                last = info.sites[candidate].CI;
+                break;
+            }
+        }
+        if (!last || !last->getNextNode()) {
+            finish(false, "group has no unique post-issue insertion frontier");
+            continue;
+        }
+        CallInst *flush = info.sites[static_cast<unsigned>(completion)].CI;
+        if (!DT->dominates(last, flush) ||
+            !PDT->dominates(flush->getParent(), last->getParent()) ||
+            (last->getParent() == flush->getParent() &&
+             !last->comesBefore(flush))) {
+            finish(false, "flush is not a mandatory completion after every group member");
+            continue;
+        }
+
+        Instruction *insertBefore = last->getNextNode();
+        bool operandsDominate = true;
+        for (Value *operand : flush->args()) {
+            auto *definition = dyn_cast<Instruction>(operand);
+            if (definition && !DT->dominates(definition, insertBefore)) {
+                operandsDominate = false;
+                break;
+            }
+        }
+        if (!operandsDominate) {
+            finish(false, "a flush operand does not dominate the group frontier");
+            continue;
+        }
+
+        auto mayWrite = [](const Instruction &I) {
+            return I.mayWriteToMemory();
+        };
+        bool interveningWrite = false;
+        BasicBlock *startBB = last->getParent();
+        BasicBlock *flushBB = flush->getParent();
+        bool afterLast = false;
+        for (const Instruction &I : *startBB) {
+            if (&I == last) {
+                afterLast = true;
+                continue;
+            }
+            if (&I == flush) break;
+            if (afterLast && mayWrite(I)) interveningWrite = true;
+        }
+        if (!interveningWrite && startBB != flushBB) {
+            SmallPtrSet<const BasicBlock *, 32> visited;
+            SmallVector<const BasicBlock *, 32> work(succ_begin(startBB),
+                                                       succ_end(startBB));
+            while (!work.empty() && !interveningWrite) {
+                const BasicBlock *BB = work.pop_back_val();
+                if (!visited.insert(BB).second) continue;
+                for (const Instruction &I : *BB) {
+                    if (&I == flush) break;
+                    if (mayWrite(I)) {
+                        interveningWrite = true;
+                        break;
+                    }
+                }
+                if (BB != flushBB)
+                    work.append(succ_begin(BB), succ_end(BB));
+            }
+        }
+        if (interveningWrite) {
+            finish(false, "intervening instruction may write a registered source buffer");
+            continue;
+        }
+        finish(true, "proved mandatory flush and no intervening memory writes");
+    }
 
     // Spread the transfers of a group across blocks so their pushes
     // overlap. Only worth doing when a group has more than one transfer;
@@ -729,7 +864,8 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t) {
 KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
                                    LoopInfo *LI,
                                    DominatorTree *DT,
-                                   ScalarEvolution *SE) {
+                                   ScalarEvolution *SE,
+                                   PostDominatorTree *PDT) {
     KernelTemplate t;
     t.mangledName = info.mangledName;
     t.simpleName  = info.simpleName;
@@ -801,7 +937,7 @@ KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
         fillArgs(site.CI, site.kind, op, info.kernel, ivPhi, &hostMirrored);
         t.ops.push_back(std::move(op));
     }
-    assignBatchSizes(info, t);
+    assignBatchSizes(info, t, DT, PDT);
     return t;
 }
 

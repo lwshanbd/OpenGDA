@@ -603,7 +603,14 @@ void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,
     }
 
     // Non-loop path: single call inside doBB, branch to contBB.
-    emitPlaceholderCall(M, B, traceFn, op, kind, /*currentIv=*/nullptr);
+    CallInst *emitted =
+        emitPlaceholderCall(M, B, traceFn, op, kind, /*currentIv=*/nullptr);
+    if (hint.transform == CommunicationTransform::TriggerGroupEarly) {
+        emitted->setMetadata(
+            "gicc.communication_transform",
+            MDNode::get(M.getContext(), MDString::get(
+                M.getContext(), "TRIGGER_GROUP_EARLY")));
+    }
     B.CreateBr(contBB);
 }
 

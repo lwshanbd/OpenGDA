@@ -64,6 +64,12 @@ enum class CommunicationTransform {
     // completion point to the proven loop exit.  The device pass must reprove
     // the unique-loop/unique-flush placement before moving anything.
     CoalesceLoopEarly,
+    // Keep every descriptor in a compiler-proved multi-site communication
+    // group, but release the shared DWQ trigger immediately after the last
+    // group member.  This is legal only when the device pass independently
+    // proves a mandatory later flush and that moving it crosses no operation
+    // which may write memory.
+    TriggerGroupEarly,
     Unknown,
 };
 

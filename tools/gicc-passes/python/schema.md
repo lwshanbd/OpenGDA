@@ -250,6 +250,27 @@ preserve the device-side `put_no_db` body so the proxy ring enqueue
 stays in the kernel. Defaults to `false`; absent in JSON files written
 before Task 2.
 
+For each transfer assigned to a compiler-discovered completion group, newer
+kernel templates may also carry:
+
+```json
+{
+  "batch_size": 2,
+  "completion_site_id": "<flush site_id>",
+  "group_early_trigger_legal": false,
+  "group_early_trigger_reason":
+    "intervening instruction may write a registered source buffer"
+}
+```
+
+`group_early_trigger_legal` is a compiler proof, not a model feature that can
+be overridden. A registered source buffer is named by an integer handle at the
+device API, so LLVM alias analysis cannot generally relate it to pointer
+stores. The proof therefore rejects `TRIGGER_GROUP_EARLY` if moving the shared
+flush would cross *any* instruction that may write memory. The final device
+lowering repeats dominance, post-dominance, group-completeness, operand
+dominance, and intervening-write checks before moving the MMIO trigger.
+
 
 ## Decider invocation
 
@@ -355,3 +376,29 @@ inherit `IPC_OR_DWQ`, batched-loop sites are pinned to `DWQ_TRIGGER`, and
 compiler-proven proxy-only sites are pinned to `CPU_PROXY_ENQUEUE`.  No model
 choice is partially applied.  `--strict` instead rejects the sample without
 writing a hint.
+
+### Relational communication-group bridge
+
+`gicc_comm_group_plan_bridge.py` augments the flat per-site dossier with the
+compiler's source-free kernel template. It groups multiple communication sites
+by `completion_site_id` and supplies the planner with operation order, shared
+completion, formal argument-expression relations, launch contexts, compute
+distance, and dependence legality. This is intentionally richer than the
+flat scalar input used by the original cost model.
+
+The bridge enumerates complete compiler-materializable route combinations and
+adds `group_trigger_early` only when both the platform profile enables it and
+the compiler proof above succeeds. A rejected transformation remains visible
+as a masked candidate and reason, but has no candidate ID and therefore cannot
+be selected.
+
+```bash
+python3 tools/gicc-passes/python/gicc_comm_group_plan_bridge.py emit \
+  --dossier build/dossier.json --meta-dir build/meta \
+  --graph build/group-graph.json --prompt build/group-prompt.txt
+```
+
+The response contains only one existing candidate ID per group. `accept`
+content-validates the graph and candidate, then emits `gicc-hint-v1`; source,
+model-authored code/IR, dispatch strings, site IDs, or new legality assertions
+are rejected.

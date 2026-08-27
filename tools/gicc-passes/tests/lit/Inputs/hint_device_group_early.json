@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "schema_version": "gicc-hint-v1",
+  "default_dispatch": "DWQ_TRIGGER",
+  "sites": {
+    "?:?:kernel_group::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "transform": "TRIGGER_GROUP_EARLY"
+    },
+    "?:?:kernel_group::1": {
+      "dispatch": "DWQ_TRIGGER",
+      "transform": "TRIGGER_GROUP_EARLY"
+    }
+  }
+}

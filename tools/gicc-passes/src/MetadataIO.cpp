@@ -286,6 +286,14 @@ json::Value templateToJSON(const KernelTemplate &t) {
         // `args` on read, so they are deliberately not stored.
         if (op.batch_size >= 0)
             o["batch_size"] = static_cast<int64_t>(op.batch_size);
+        if (!op.completion_site_id.empty())
+            o["completion_site_id"] = op.completion_site_id;
+        if (op.group_early_trigger_analyzed) {
+            o["group_early_trigger_legal"] =
+                op.group_early_trigger_legal;
+            o["group_early_trigger_reason"] =
+                op.group_early_trigger_reason;
+        }
         if (op.fence_scope != 3) o["fence_scope"] = op.fence_scope;
         if (op.block_slot >= 0) o["block_slot"] = op.block_slot;
 
@@ -364,6 +372,14 @@ bool templateFromJSON(const json::Value &v, KernelTemplate &out) {
                 op.batch_size = static_cast<long long>(*c);
             else
                 op.batch_size = -1;
+            if (auto c = oo->getString("completion_site_id"))
+                op.completion_site_id = c->str();
+            if (auto b = oo->getBoolean("group_early_trigger_legal")) {
+                op.group_early_trigger_analyzed = true;
+                op.group_early_trigger_legal = *b;
+            }
+            if (auto r = oo->getString("group_early_trigger_reason"))
+                op.group_early_trigger_reason = r->str();
             if (auto c = oo->getInteger("trip_count"))
                 op.trip_count = static_cast<long long>(*c);
             else

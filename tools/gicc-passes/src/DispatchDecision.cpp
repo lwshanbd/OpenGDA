@@ -39,6 +39,7 @@ CommunicationTransform parseCommunicationTransform(llvm::StringRef s) {
     if (s == "NONE")                return CommunicationTransform::None;
     if (s == "COALESCE_LOOP")       return CommunicationTransform::CoalesceLoop;
     if (s == "COALESCE_LOOP_EARLY") return CommunicationTransform::CoalesceLoopEarly;
+    if (s == "TRIGGER_GROUP_EARLY") return CommunicationTransform::TriggerGroupEarly;
     return CommunicationTransform::Unknown;
 }
 
@@ -48,6 +49,8 @@ const char *communicationTransformName(CommunicationTransform t) {
         case CommunicationTransform::CoalesceLoop: return "COALESCE_LOOP";
         case CommunicationTransform::CoalesceLoopEarly:
             return "COALESCE_LOOP_EARLY";
+        case CommunicationTransform::TriggerGroupEarly:
+            return "TRIGGER_GROUP_EARLY";
         case CommunicationTransform::Unknown:      return "UNKNOWN";
     }
     return "UNKNOWN";

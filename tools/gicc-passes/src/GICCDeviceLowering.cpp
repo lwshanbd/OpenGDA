@@ -5,10 +5,13 @@
 #include "DispatchDecision.h"
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
@@ -61,7 +64,9 @@ constexpr unsigned kTriggerValOffset  = 8;
 //   fence release
 //   br label %skip
 // skip:
-void lowerFlushAMDGCN(CallInst *CI, bool earlyPlacement = false) {
+void lowerFlushAMDGCN(
+        CallInst *CI,
+        CommunicationTransform placement = CommunicationTransform::None) {
     LLVMContext &Ctx = CI->getContext();
     Module      *M   = CI->getModule();
     Value       *ctxArg = CI->getArgOperand(0);
@@ -110,11 +115,12 @@ void lowerFlushAMDGCN(CallInst *CI, bool earlyPlacement = false) {
     auto *nt = MDNode::get(Ctx,
         {ConstantAsMetadata::get(ConstantInt::get(B.getInt32Ty(), 1))});
     st->setMetadata(LLVMContext::MD_nontemporal, nt);
-    if (earlyPlacement) {
+    if (placement != CommunicationTransform::None) {
         st->setMetadata(
             "gicc.communication_transform",
             MDNode::get(Ctx,
-                        MDString::get(Ctx, "COALESCE_LOOP_EARLY")));
+                        MDString::get(Ctx,
+                                      communicationTransformName(placement))));
     }
     B.CreateFence(AtomicOrdering::Release, SyncScope::System);
     B.CreateBr(skipBB);
@@ -269,10 +275,12 @@ void wrapPreservedOpLeadThreadAMDGCN(CallInst *CI) {
 // compiler-owned MMIO trigger to the unique exit of the loop that originally
 // contained put_no_db.  The candidate ID cannot assert any of these facts:
 // the device pass re-proves the complete narrow shape and fails closed.
-void relocateEarlyTrigger(
+void relocateEarlyTriggers(
         Function &F, const GICCKernelInfo &info, const HintFile &hint,
-        FunctionAnalysisManager &FAM, DenseSet<CallInst *> &earlyFlushes) {
+        FunctionAnalysisManager &FAM,
+        DenseMap<CallInst *, CommunicationTransform> &earlyFlushes) {
     const GICCCallSite *earlySite = nullptr;
+    SmallVector<const GICCCallSite *, 4> groupSites;
     unsigned dataSiteCount = 0;
     SmallVector<CallInst *, 2> flushes;
     for (const auto &site : info.sites) {
@@ -295,57 +303,170 @@ void relocateEarlyTrigger(
                         Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
                         site.siteId + ": put_no_db is required");
                 earlySite = &site;
+            } else if (selected.transform ==
+                       CommunicationTransform::TriggerGroupEarly) {
+                if (selected.dispatch != DispatchKind::DwqTrigger)
+                    report_fatal_error(
+                        Twine("gicc: TRIGGER_GROUP_EARLY rejected for site ") +
+                        site.siteId + ": requires DWQ_TRIGGER");
+                if (site.kind != GICCOpKind::PutNoDb)
+                    report_fatal_error(
+                        Twine("gicc: TRIGGER_GROUP_EARLY rejected for site ") +
+                        site.siteId + ": put_no_db is required");
+                groupSites.push_back(&site);
             }
         } else if (site.kind == GICCOpKind::Flush) {
             flushes.push_back(site.CI);
         }
     }
-    if (!earlySite) return;
-    if (dataSiteCount != 1)
-        report_fatal_error(
-            Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
-            earlySite->siteId +
-            ": requires exactly one communication site in the kernel");
-    if (flushes.size() != 1)
-        report_fatal_error(
-            Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
-            earlySite->siteId + ": requires exactly one flush site");
-
     LoopInfo &LI = FAM.getResult<LoopAnalysis>(F);
     DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
     PostDominatorTree &PDT = FAM.getResult<PostDominatorTreeAnalysis>(F);
-    Loop *loop = LI.getLoopFor(earlySite->CI->getParent());
-    if (!loop)
-        report_fatal_error(
-            Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
-            earlySite->siteId + ": put_no_db is not inside a natural loop");
-    BasicBlock *exit = loop->getUniqueExitBlock();
-    if (!exit)
-        report_fatal_error(
-            Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
-            earlySite->siteId + ": loop has no unique exit block");
-    CallInst *flush = flushes.front();
-    if (loop->contains(flush->getParent()) ||
-        !DT.dominates(exit, flush->getParent()) ||
-        !PDT.dominates(flush->getParent(), exit))
-        report_fatal_error(
-            Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
-            earlySite->siteId +
-            ": the later flush is not a mandatory post-dominated completion");
 
-    Instruction *insertBefore = &*exit->getFirstInsertionPt();
+    if (earlySite) {
+        if (!groupSites.empty())
+            report_fatal_error(
+                Twine("gicc: incompatible early-trigger transforms in kernel ") +
+                F.getName());
+        if (dataSiteCount != 1)
+            report_fatal_error(
+                Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
+                earlySite->siteId +
+                ": requires exactly one communication site in the kernel");
+        if (flushes.size() != 1)
+            report_fatal_error(
+                Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
+                earlySite->siteId + ": requires exactly one flush site");
+
+        Loop *loop = LI.getLoopFor(earlySite->CI->getParent());
+        if (!loop)
+            report_fatal_error(
+                Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
+                earlySite->siteId + ": put_no_db is not inside a natural loop");
+        BasicBlock *exit = loop->getUniqueExitBlock();
+        if (!exit)
+            report_fatal_error(
+                Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
+                earlySite->siteId + ": loop has no unique exit block");
+        CallInst *flush = flushes.front();
+        if (loop->contains(flush->getParent()) ||
+            !DT.dominates(exit, flush->getParent()) ||
+            !PDT.dominates(flush->getParent(), exit))
+            report_fatal_error(
+                Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
+                earlySite->siteId +
+                ": the later flush is not a mandatory post-dominated completion");
+
+        Instruction *insertBefore = &*exit->getFirstInsertionPt();
+        for (Value *operand : flush->args()) {
+            auto *definition = dyn_cast<Instruction>(operand);
+            if (definition && !DT.dominates(definition, insertBefore))
+                report_fatal_error(
+                    Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
+                    earlySite->siteId +
+                    ": a flush operand does not dominate the loop exit");
+        }
+        if (flush != insertBefore) flush->moveBefore(insertBefore);
+        earlyFlushes[flush] = CommunicationTransform::CoalesceLoopEarly;
+        errs() << "[device-lowering] " << earlySite->siteId
+               << ": moved compiler trigger to unique loop exit\n";
+        return;
+    }
+
+    if (groupSites.empty()) return;
+    const std::string &groupId = groupSites.front()->siteId;
+    if (groupSites.size() < 2 || groupSites.size() != dataSiteCount)
+        report_fatal_error(
+            Twine("gicc: TRIGGER_GROUP_EARLY rejected for group ") + groupId +
+            ": every communication site in a group of at least two must be selected");
+    if (flushes.size() != 1)
+        report_fatal_error(
+            Twine("gicc: TRIGGER_GROUP_EARLY rejected for group ") + groupId +
+            ": requires exactly one flush site");
+    for (const GICCCallSite *site : groupSites)
+        if (LI.getLoopFor(site->CI->getParent()))
+            report_fatal_error(
+                Twine("gicc: TRIGGER_GROUP_EARLY rejected for group ") + groupId +
+                ": loop-wrapped group members are unsupported");
+
+    CallInst *last = nullptr;
+    for (const GICCCallSite *candidate : groupSites) {
+        bool afterAll = true;
+        for (const GICCCallSite *other : groupSites) {
+            if (other == candidate) continue;
+            if (!DT.dominates(other->CI, candidate->CI)) {
+                afterAll = false;
+                break;
+            }
+        }
+        if (afterAll) {
+            last = candidate->CI;
+            break;
+        }
+    }
+    if (!last || !last->getNextNode())
+        report_fatal_error(
+            Twine("gicc: TRIGGER_GROUP_EARLY rejected for group ") + groupId +
+            ": group has no unique post-issue insertion frontier");
+
+    CallInst *flush = flushes.front();
+    if (!DT.dominates(last, flush) ||
+        !PDT.dominates(flush->getParent(), last->getParent()) ||
+        (last->getParent() == flush->getParent() &&
+         !last->comesBefore(flush)))
+        report_fatal_error(
+            Twine("gicc: TRIGGER_GROUP_EARLY rejected for group ") + groupId +
+            ": the later flush is not a mandatory completion");
+
+    Instruction *insertBefore = last->getNextNode();
     for (Value *operand : flush->args()) {
         auto *definition = dyn_cast<Instruction>(operand);
         if (definition && !DT.dominates(definition, insertBefore))
             report_fatal_error(
-                Twine("gicc: COALESCE_LOOP_EARLY rejected for site ") +
-                earlySite->siteId +
-                ": a flush operand does not dominate the loop exit");
+                Twine("gicc: TRIGGER_GROUP_EARLY rejected for group ") + groupId +
+                ": a flush operand does not dominate the group frontier");
     }
+
+    bool interveningWrite = false;
+    BasicBlock *startBB = last->getParent();
+    BasicBlock *flushBB = flush->getParent();
+    bool afterLast = false;
+    for (const Instruction &I : *startBB) {
+        if (&I == last) {
+            afterLast = true;
+            continue;
+        }
+        if (&I == flush) break;
+        if (afterLast && I.mayWriteToMemory()) interveningWrite = true;
+    }
+    if (!interveningWrite && startBB != flushBB) {
+        SmallPtrSet<const BasicBlock *, 32> visited;
+        SmallVector<const BasicBlock *, 32> work(succ_begin(startBB),
+                                                   succ_end(startBB));
+        while (!work.empty() && !interveningWrite) {
+            const BasicBlock *BB = work.pop_back_val();
+            if (!visited.insert(BB).second) continue;
+            for (const Instruction &I : *BB) {
+                if (&I == flush) break;
+                if (I.mayWriteToMemory()) {
+                    interveningWrite = true;
+                    break;
+                }
+            }
+            if (BB != flushBB)
+                work.append(succ_begin(BB), succ_end(BB));
+        }
+    }
+    if (interveningWrite)
+        report_fatal_error(
+            Twine("gicc: TRIGGER_GROUP_EARLY rejected for group ") + groupId +
+            ": intervening instruction may write a registered source buffer");
+
     if (flush != insertBefore) flush->moveBefore(insertBefore);
-    earlyFlushes.insert(flush);
-    errs() << "[device-lowering] " << earlySite->siteId
-           << ": moved compiler trigger to unique loop exit\n";
+    earlyFlushes[flush] = CommunicationTransform::TriggerGroupEarly;
+    errs() << "[device-lowering] " << groupSites.size()
+           << "-site group " << groupId
+           << ": moved compiler trigger to post-issue frontier\n";
 }
 
 }  // namespace
@@ -369,7 +490,7 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
     // this kernel — keep the device-side call so the put_no_db body in
     // ofi_device.cuh runs and pushes a TransferCmd into the proxy ring.
     SmallVector<std::pair<CallInst *, bool>, 16> putGetCalls;
-    DenseSet<CallInst *> earlyFlushes;
+    DenseMap<CallInst *, CommunicationTransform> earlyFlushes;
     // Which block issues each preserved op, and for a completion point how
     // many rings it has to drain.
     DenseMap<CallInst *, int> slotOf, nslotOf;
@@ -430,7 +551,7 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
         }
 
         if (haveHint)
-            relocateEarlyTrigger(F, info, hint, FAM, earlyFlushes);
+            relocateEarlyTriggers(F, info, hint, FAM, earlyFlushes);
 
         // Fence scope, per completion point. The device header defaults the
         // argument to FENCE_SYSTEM, so a site the analysis says nothing
@@ -571,7 +692,11 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
     }
     for (CallInst *CI : flushCalls) {
         if (isAMDGCN) {
-            lowerFlushAMDGCN(CI, earlyFlushes.contains(CI));
+            const auto it = earlyFlushes.find(CI);
+            lowerFlushAMDGCN(
+                CI, it == earlyFlushes.end()
+                        ? CommunicationTransform::None
+                        : it->second);
             changed = true;
         }
         // NVPTX flush lowering lands in Phase 4.

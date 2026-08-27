@@ -125,6 +125,19 @@ struct OpTemplate {
     // Needs the CFG to compute, so unlike the reuse predicates below it
     // is carried rather than derived. -1 when not computed.
     long long                    batch_size          = -1;
+    // Site ID of the first compiler-discovered flush/quiet that releases this
+    // transfer group.  Empty means the host-side reset closes the group or the
+    // CFG analysis could not name a completion point.
+    std::string                  completion_site_id;
+    // A conservative compiler proof for moving a shared DWQ trigger from the
+    // completion point to immediately after the last static transfer site in
+    // this group.  The proof is deliberately stronger than alias analysis:
+    // without a mapping from a registered-buffer handle to an LLVM pointer,
+    // *any* intervening instruction that may write memory rejects the move.
+    // The lowering pass repeats the proof on the final device IR.
+    bool                         group_early_trigger_analyzed = false;
+    bool                         group_early_trigger_legal    = false;
+    std::string                  group_early_trigger_reason;
     // For a flush/quiet: the weakest memory fence scope that is still
     // sound here (0 none, 1 block, 2 device, 3 system). Needs forward
     // reachability, so it is carried rather than derived. Defaults to the

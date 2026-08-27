@@ -1,0 +1,35 @@
+{
+  "schema_version": "gicc-platform-profile-v1",
+  "platform_id": "tioga-mi250x-slingshot11-compiler-group-v1",
+  "scope": "compiler-only multi-site communication planning on pdebug; no application-source input or edits",
+  "compiler_transforms": {
+    "group_early_trigger": true,
+    "note": "candidate generation requires a compiler proof and final device LTO independently repeats all placement and memory-stability checks"
+  },
+  "deployment_constraints": {
+    "queue": "pdebug",
+    "rank_placement": "one rank and one MI250X GCD per node for cross-node controls",
+    "peer_relation": "runtime-dependent multi-peer halo",
+    "proxy_worker_lanes": 8
+  },
+  "evaluation_contract": {
+    "suite": "compiler-communication-group-v1",
+    "role": "relational compiler-action capacity study",
+    "source_visibility": "none",
+    "model_output": "one opaque compiler-generated candidate ID per opportunity",
+    "materialization": "LTO hint only; the model cannot emit source, code, IR, site IDs, dispatch names, or legality claims",
+    "execution": "one pdebug allocation at a time after protocol freeze"
+  },
+  "measurements": {
+    "link_bandwidth_GB_s": 24.0,
+    "proxy_fixed_us": 5.37,
+    "proxy_per_op_issue_us": 2.872,
+    "trigger_fixed_us": 7.88,
+    "trigger_per_op_stage_us": 1.033
+  },
+  "provenance": {
+    "labels": "no group-plan runtime labels at graph construction",
+    "calibration": "pre-existing compiler-path constants only",
+    "scheduler": "pdebug only; jobs submitted serially"
+  }
+}
