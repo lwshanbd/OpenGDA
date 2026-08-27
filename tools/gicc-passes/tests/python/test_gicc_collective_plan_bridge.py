@@ -1,5 +1,7 @@
 import copy
+import hashlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -242,6 +244,26 @@ class CollectivePlanBridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(
                 collective.CollectivePlanError, "label-disjoint"):
             collective.make_graph(inventory(), profile)
+
+    def test_calibration_artifact_content_is_verified_before_emit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "calibration.json"
+            artifact.write_text('{"prior":"primitive only"}\n')
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            profile = copy.deepcopy(PROFILE)
+            profile["primitive_calibration"] = {
+                "schema_version": "gicc-collective-primitive-calibration-v1",
+                "role": "prior primitive evidence",
+                "collective_action_labels_visible": False,
+                "applicability": "cross-node link prior",
+                "artifacts": [{"sha256": digest, "role": "calibration"}],
+                "measurements": {"link_bandwidth_GB_s": 24.0},
+            }
+            verified = collective._verified_profile(profile)
+            collective._verify_calibration_artifacts(verified, [artifact])
+            with self.assertRaisesRegex(
+                    collective.CollectivePlanError, "do not match"):
+                collective._verify_calibration_artifacts(verified, [])
 
     def test_ids_and_graph_are_deterministic(self):
         self.assertEqual(self.graph, collective.make_graph(inventory(), PROFILE))

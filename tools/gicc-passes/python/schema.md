@@ -454,6 +454,10 @@ artifact hashes, declare that no collective action labels are visible, bound
 its applicability, and contain only positive finite primitive measurements.
 Such measurements are compiler cost-model priors (for example link bandwidth
 or proxy issue cost), never results from the collective controls being scored.
+When a profile contains this block, `emit` requires one
+`--calibration-artifact <path>` per declared hash and verifies exact content
+before constructing the graph. Artifact paths are never serialized into the
+model view.
 It cannot output a target symbol, algorithm string, threshold, source, code,
 IR, or legality. `accept` converts valid option IDs to a narrow
 `gicc-collective-hint-v1`; malformed or invented content falls back atomically

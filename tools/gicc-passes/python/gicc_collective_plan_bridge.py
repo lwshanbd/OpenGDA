@@ -81,6 +81,19 @@ def _read_json(path: Path) -> Any:
         raise CollectivePlanError(f"cannot read JSON {path}: {exc}") from exc
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(block)
+    except OSError as exc:
+        raise CollectivePlanError(
+            f"cannot read calibration artifact {path}: {exc}"
+        ) from exc
+    return digest.hexdigest()
+
+
 def _string_fields(value: Any, *, label: str) -> dict[str, str]:
     if not isinstance(value, dict) or not value:
         raise CollectivePlanError(f"{label} descriptor must be a nonempty object")
@@ -248,6 +261,23 @@ def _verified_profile(value: Any) -> dict[str, Any]:
                     "primitive calibration measurements must be positive numbers"
                 )
     return value
+
+
+def _verify_calibration_artifacts(
+    profile: dict[str, Any], artifact_paths: list[Path],
+) -> None:
+    calibration = profile.get("primitive_calibration")
+    expected = (
+        {artifact["sha256"] for artifact in calibration["artifacts"]}
+        if calibration is not None else set()
+    )
+    observed = [_file_sha256(path) for path in artifact_paths]
+    if len(set(observed)) != len(observed):
+        raise CollectivePlanError("duplicate primitive calibration artifact")
+    if set(observed) != expected:
+        raise CollectivePlanError(
+            "primitive calibration artifact hashes do not match profile"
+        )
 
 
 def _slot_bounds(thresholds: list[int]) -> list[tuple[int | None, int | None]]:
@@ -717,7 +747,9 @@ def decision_to_hint(
 
 
 def _emit(args: argparse.Namespace) -> int:
-    graph = make_graph(_read_json(args.inventory), _read_json(args.platform))
+    profile = _verified_profile(_read_json(args.platform))
+    _verify_calibration_artifacts(profile, args.calibration_artifact)
+    graph = make_graph(_read_json(args.inventory), profile)
     bridge._write_json_atomic(args.graph, graph)
     bridge._write_text_atomic(args.prompt, render_prompt(graph, args.prompt_view))
     capacity = sum(item["joint_action_space_size"]
@@ -760,6 +792,9 @@ def _parser() -> argparse.ArgumentParser:
     emit = sub.add_parser("emit")
     emit.add_argument("--inventory", type=Path, required=True)
     emit.add_argument("--platform", type=Path, required=True)
+    emit.add_argument(
+        "--calibration-artifact", type=Path, action="append", default=[]
+    )
     emit.add_argument("--graph", type=Path, required=True)
     emit.add_argument("--prompt", type=Path, required=True)
     emit.add_argument(

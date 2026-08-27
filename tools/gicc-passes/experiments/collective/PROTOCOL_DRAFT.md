@@ -60,6 +60,9 @@ The two-node profile may expose only hash-pinned, pre-existing primitive link
 and proxy cost measurements whose scope is declared and whose data contains no
 collective action labels. Gate-B timings, winners, and oracle choices are
 evaluation-only and must never enter a model prompt.
+Graph generation must content-verify every declared primitive-calibration
+artifact; a hash string in the profile without the matching local artifact is
+not sufficient provenance.
 
 ## Compiler action space
 
