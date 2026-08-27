@@ -79,6 +79,17 @@ class CompilerCollectiveEvalTests(unittest.TestCase):
             with self.assertRaisesRegex(controls.EvalError, "policy cutoffs"):
                 controls.verify_plan_ir(self.graph, hint, ir)
 
+            audit = controls.audit_capacity(self.graph)
+            self.assertEqual(4 ** 4, audit["enumerated_action_count"])
+            self.assertEqual(4 ** 4, audit[
+                "unique_composite_candidate_id_count"
+            ])
+            self.assertEqual(
+                {"size_policy": 252, "uniform": 4},
+                audit["materializer_kind_counts"],
+            )
+            self.assertFalse(audit["model_invoked"])
+
     def test_analysis_constructs_a_compiler_bin_oracle(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

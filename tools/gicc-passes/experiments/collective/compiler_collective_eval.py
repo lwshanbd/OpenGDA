@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import json
 import math
 import re
@@ -729,6 +730,63 @@ def canary_decision(graph_value: Any) -> tuple[dict, dict]:
     return decision, hint
 
 
+def audit_capacity(graph_value: Any) -> dict[str, Any]:
+    graph = plans.verified_graph(graph_value)
+    if len(graph["opportunities"]) != 1:
+        raise EvalError("capacity audit v1 requires one collective opportunity")
+    opportunity = graph["opportunities"][0]
+    slots = opportunity["decision_slots"]
+    candidate_ids = set()
+    kind_counts: Counter[str] = Counter()
+    enumerated = 0
+    for combination in itertools.product(
+            *(slot["options"] for slot in slots)):
+        response = {
+            "schema_version": plans.DECISION_SCHEMA,
+            "graph_id": graph["graph_id"],
+            "selections": {
+                opportunity["opportunity_id"]: {
+                    "slot_candidate_ids": {
+                        slot["slot_id"]: option["option_id"]
+                        for slot, option in zip(slots, combination, strict=True)
+                    },
+                    "confidence": 1.0,
+                    "rationale": "compiler action-space audit",
+                }
+            },
+        }
+        hint, accepted, errors = plans.decision_to_hint(graph, response)
+        if not accepted:
+            raise EvalError(
+                f"declared compiler action rejected during audit: {errors}"
+            )
+        selection = hint["selections"][opportunity["opportunity_id"]]
+        candidate_id = selection["candidate_id"]
+        if candidate_id in candidate_ids:
+            raise EvalError("composite compiler candidate-ID collision")
+        candidate_ids.add(candidate_id)
+        kind_counts[selection["kind"]] += 1
+        enumerated += 1
+    declared = opportunity["joint_action_space_size"]
+    if enumerated != declared or len(candidate_ids) != declared:
+        raise EvalError("enumerated compiler action space does not match graph")
+    digest = hashlib.sha256(
+        ("\n".join(sorted(candidate_ids)) + "\n").encode()
+    ).hexdigest()
+    return {
+        "schema_version": "gicc-collective-capacity-audit-v1",
+        "graph_id": graph["graph_id"],
+        "declared_joint_action_space_size": declared,
+        "enumerated_action_count": enumerated,
+        "accepted_action_count": enumerated,
+        "unique_composite_candidate_id_count": len(candidate_ids),
+        "materializer_kind_counts": dict(sorted(kind_counts.items())),
+        "candidate_id_set_sha256": digest,
+        "model_invoked": False,
+        "output_scope": "compiler-generated option IDs only",
+    }
+
+
 def score_decisions(
     graph_value: Any,
     analysis_value: Any,
@@ -936,6 +994,9 @@ def main() -> int:
     canary.add_argument("--graph", type=Path, required=True)
     canary.add_argument("--decision", type=Path, required=True)
     canary.add_argument("--hint", type=Path, required=True)
+    capacity = sub.add_parser("capacity-audit")
+    capacity.add_argument("--graph", type=Path, required=True)
+    capacity.add_argument("--out", type=Path, required=True)
     score = sub.add_parser("score")
     score.add_argument("--graph", type=Path, required=True)
     score.add_argument("--analysis", type=Path, required=True)
@@ -1003,6 +1064,10 @@ def main() -> int:
                 "compiler-collective-eval: wrote mixed-policy canary; "
                 "model_invoked=false"
             )
+        elif args.command == "capacity-audit":
+            summary = audit_capacity(_read_json(args.graph))
+            bridge._write_json_atomic(args.out, summary)
+            print(json.dumps(summary, indent=2, sort_keys=True))
         else:
             summary = score_decisions(
                 _read_json(args.graph), _read_json(args.analysis),

@@ -94,6 +94,10 @@ all four message regions, lower to a real size-policy CFG in the unchanged
 benchmark, and expose the exact composite candidate ID plus every branch target
 through IR metadata. This is an offline materializer test, not performance
 evidence and not a model output.
+Also enumerate the complete declared joint action space through the strict
+bridge. Every action must be accepted, every materialized composite candidate
+ID must be unique, and the content hash of the complete ID set must be frozen.
+This proves compiler-plan capacity only; it is not a performance result.
 
 ### Gate A: diagnostic runtime smoke
 
