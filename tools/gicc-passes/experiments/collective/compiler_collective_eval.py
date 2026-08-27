@@ -32,6 +32,31 @@ import gicc_llm_bridge as bridge  # noqa: E402
 
 MANIFEST_SCHEMA = "gicc-collective-uniform-controls-v1"
 RESULT_RE = re.compile(r"([a-z_]+)=([^ ]+)")
+GATE_A_SIZES = [1024, 4096]
+GATE_B_SIZES = [
+    1024, 4096, 8192, 65536, 262144,
+    1048576, 4194304, 8388608, 16777216,
+]
+GATE_SPECS = {
+    "a": {
+        "nodes": 2,
+        "ranks": 16,
+        "ppn": 8,
+        "runs": 1,
+        "warmup": 0,
+        "sizes": GATE_A_SIZES,
+        "catalog_complete": False,
+    },
+    "b": {
+        "nodes": 2,
+        "ranks": 16,
+        "ppn": 8,
+        "runs": 3,
+        "warmup": 1,
+        "sizes": GATE_B_SIZES,
+        "catalog_complete": True,
+    },
+}
 
 
 class EvalError(ValueError):
@@ -57,6 +82,23 @@ def _check_sha(value: str, *, name: str) -> None:
     if len(value) != 64 or any(character not in "0123456789abcdef"
                                for character in value):
         raise EvalError(f"{name} must be 64 lowercase hex characters")
+
+
+def _manifest_arms(value: Any) -> list[dict[str, Any]]:
+    if (not isinstance(value, dict)
+            or value.get("schema_version") != MANIFEST_SCHEMA):
+        raise EvalError(f"expected manifest schema {MANIFEST_SCHEMA}")
+    payload = dict(value)
+    manifest_id = payload.pop("manifest_id", None)
+    if manifest_id != bridge._fingerprint(payload):
+        raise EvalError("manifest_id does not match manifest content")
+    if value.get("model_invoked") is not False:
+        raise EvalError("compiler controls must record model_invoked=false")
+    arms = value.get("arms")
+    if (not isinstance(arms, list) or not arms
+            or any(not isinstance(arm, dict) for arm in arms)):
+        raise EvalError("manifest has no valid compiler controls")
+    return arms
 
 
 def _algorithm_options(opportunity: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -216,28 +258,141 @@ def verify_ir(manifest_value: Any, root: Path, ir_dir: Path) -> None:
             raise EvalError(f"{path}: expected one materialized collective call")
 
 
-def parse_log(path: Path) -> tuple[str, dict[int, float]]:
-    label = None
+def _int_field(fields: dict[str, str], name: str, path: Path) -> int:
+    try:
+        return int(fields[name])
+    except (KeyError, ValueError) as exc:
+        raise EvalError(f"{path}: missing or invalid integer field {name}") from exc
+
+
+def _float_field(fields: dict[str, str], name: str, path: Path) -> float:
+    try:
+        value = float(fields[name])
+    except (KeyError, ValueError) as exc:
+        raise EvalError(f"{path}: missing or invalid numeric field {name}") from exc
+    if value <= 0 or not math.isfinite(value):
+        raise EvalError(f"{path}: {name} must be positive and finite")
+    return value
+
+
+def _parse_log_record(path: Path) -> dict[str, Any]:
+    config = None
+    done = None
     rows: dict[int, float] = {}
-    done_errors = None
+    result_fields: dict[int, dict[str, str]] = {}
     for line in path.read_text().splitlines():
         if line.startswith("COLLECTIVE_CONFIG "):
-            fields = dict(RESULT_RE.findall(line))
-            label = fields.get("plan")
+            if config is not None:
+                raise EvalError(f"{path}: duplicate COLLECTIVE_CONFIG")
+            config = dict(RESULT_RE.findall(line))
         elif line.startswith("RESULT "):
             fields = dict(RESULT_RE.findall(line))
-            if int(fields["errors"]) != 0:
-                raise EvalError(f"{path}: correctness errors at {fields['bytes']} B")
-            size = int(fields["bytes"])
+            size = _int_field(fields, "bytes", path)
+            errors = _int_field(fields, "errors", path)
+            if errors != 0:
+                raise EvalError(f"{path}: correctness errors at {size} B")
             if size in rows:
                 raise EvalError(f"{path}: duplicate result at {size} B")
-            rows[size] = float(fields["median_us"])
+            rows[size] = _float_field(fields, "median_us", path)
+            result_fields[size] = fields
         elif line.startswith("COLLECTIVE_DONE "):
-            fields = dict(RESULT_RE.findall(line))
-            done_errors = int(fields["total_errors"])
-    if not label or not rows or done_errors != 0:
+            if done is not None:
+                raise EvalError(f"{path}: duplicate COLLECTIVE_DONE")
+            done = dict(RESULT_RE.findall(line))
+    if config is None or done is None or not rows:
         raise EvalError(f"{path}: incomplete or failing collective log")
-    return label, rows
+    label = config.get("plan")
+    if not label:
+        raise EvalError(f"{path}: missing plan label")
+    ranks = _int_field(config, "ranks", path)
+    ppn = _int_field(config, "ppn", path)
+    runs = _int_field(config, "runs", path)
+    warmup = _int_field(config, "warmup", path)
+    if ranks <= 0 or ppn <= 0 or ranks % ppn != 0 or runs <= 0 or warmup < 0:
+        raise EvalError(f"{path}: invalid runtime configuration")
+    for size, fields in result_fields.items():
+        if fields.get("plan") != label:
+            raise EvalError(f"{path}: RESULT plan does not match config")
+        if (_int_field(fields, "ranks", path) != ranks
+                or _int_field(fields, "ppn", path) != ppn
+                or _int_field(fields, "nodes", path) != ranks // ppn):
+            raise EvalError(f"{path}: RESULT topology does not match config")
+    if done.get("plan") != label or _int_field(done, "total_errors", path) != 0:
+        raise EvalError(f"{path}: incomplete or failing collective log")
+    return {
+        "label": label,
+        "nodes": ranks // ppn,
+        "ranks": ranks,
+        "ppn": ppn,
+        "runs": runs,
+        "warmup": warmup,
+        "rows": rows,
+    }
+
+
+def parse_log(path: Path) -> tuple[str, dict[int, float]]:
+    record = _parse_log_record(path)
+    return record["label"], record["rows"]
+
+
+def qualify_logs(
+    manifest_value: Any, logs: list[Path], gate: str,
+) -> dict[str, Any]:
+    if gate not in GATE_SPECS:
+        raise EvalError(f"unknown qualification gate {gate}")
+    arms = _manifest_arms(manifest_value)
+    by_name = {arm.get("name"): arm for arm in arms}
+    if len(by_name) != len(arms) or any(not isinstance(name, str) for name in by_name):
+        raise EvalError("manifest has invalid or duplicate arm names")
+    baseline_names = [
+        name for name, arm in by_name.items()
+        if arm.get("algorithm") == "baseline_auto"
+    ]
+    if len(baseline_names) != 1:
+        raise EvalError("manifest must have exactly one baseline_auto arm")
+    spec = GATE_SPECS[gate]
+    expected_labels = set(by_name) if spec["catalog_complete"] else set(baseline_names)
+    if len(logs) != len(expected_labels):
+        raise EvalError(
+            f"Gate {gate.upper()} requires {len(expected_labels)} log(s), got {len(logs)}"
+        )
+    observed = {}
+    for path in logs:
+        record = _parse_log_record(path)
+        label = record["label"]
+        if label not in expected_labels or label in observed:
+            raise EvalError(f"{path}: unexpected or duplicate plan label {label}")
+        for field in ("nodes", "ranks", "ppn", "runs", "warmup"):
+            if record[field] != spec[field]:
+                raise EvalError(
+                    f"{path}: {field}={record[field]}, expected {spec[field]}"
+                )
+        if sorted(record["rows"]) != spec["sizes"]:
+            raise EvalError(
+                f"{path}: sizes={sorted(record['rows'])}, expected {spec['sizes']}"
+            )
+        observed[label] = {
+            "log": str(path),
+            "log_sha256": _sha256(path),
+            "result_rows": len(record["rows"]),
+        }
+    if set(observed) != expected_labels:
+        raise EvalError(f"Gate {gate.upper()}: catalog coverage is incomplete")
+    return {
+        "schema_version": "gicc-collective-qualification-v1",
+        "gate": gate.upper(),
+        "passed": True,
+        "manifest_id": manifest_value.get("manifest_id"),
+        "graph_id": manifest_value.get("graph_id"),
+        "source_sha256": manifest_value.get("source_sha256"),
+        "catalog_sha256": manifest_value.get("catalog_sha256"),
+        "runtime": {
+            key: spec[key]
+            for key in ("nodes", "ranks", "ppn", "runs", "warmup")
+        },
+        "sizes": spec["sizes"],
+        "logs": observed,
+    }
 
 
 def _geomean(values: list[float]) -> float:
@@ -251,8 +406,15 @@ def analyze_logs(
     graph_value: Any, manifest_value: Any, logs: list[Path]
 ) -> dict[str, Any]:
     graph = plans.verified_graph(graph_value)
-    algorithms = {arm["name"]: arm["algorithm"]
-                  for arm in manifest_value["arms"]}
+    arms = _manifest_arms(manifest_value)
+    if manifest_value.get("graph_id") != graph["graph_id"]:
+        raise EvalError("control manifest does not match the compiler graph")
+    try:
+        algorithms = {arm["name"]: arm["algorithm"] for arm in arms}
+    except KeyError as exc:
+        raise EvalError("control manifest arm lacks name or algorithm") from exc
+    if len(algorithms) != len(arms):
+        raise EvalError("control manifest has duplicate arm names")
     samples: dict[str, dict[int, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
@@ -271,6 +433,12 @@ def analyze_logs(
     for algorithm, by_size in samples.items():
         if sorted(by_size) != sizes:
             raise EvalError(f"{algorithm}: size coverage differs")
+    replicate_counts = {
+        len(samples[algorithm][size])
+        for algorithm in samples for size in sizes
+    }
+    if len(replicate_counts) != 1:
+        raise EvalError("compiler controls have unequal replicate coverage")
     medians = {
         algorithm: {
             size: statistics.median(by_size[size]) for size in sizes
@@ -282,7 +450,9 @@ def analyze_logs(
         raise EvalError("baseline_auto arm is missing")
     per_size = {}
     for size in sizes:
-        winner = min(medians, key=lambda algorithm: medians[algorithm][size])
+        winner = min(
+            medians, key=lambda algorithm: (medians[algorithm][size], algorithm)
+        )
         per_size[str(size)] = {
             "winner": winner,
             "winner_us": medians[winner][size],
@@ -297,7 +467,7 @@ def analyze_logs(
         algorithm: _geomean([medians[algorithm][size] for size in sizes])
         for algorithm in medians
     }
-    best_uniform = min(aggregate, key=aggregate.get)
+    best_uniform = min(aggregate, key=lambda algorithm: (aggregate[algorithm], algorithm))
     oracle_geomean = _geomean(
         [per_size[str(size)]["winner_us"] for size in sizes]
     )
@@ -315,7 +485,7 @@ def analyze_logs(
             algorithm: _geomean([medians[algorithm][size] for size in in_bin])
             for algorithm in medians
         }
-        winner = min(score, key=score.get)
+        winner = min(score, key=lambda algorithm: (score[algorithm], algorithm))
         option = next(item for item in slot["options"]
                       if item["algorithm"] == winner)
         bin_choices.append({
@@ -325,6 +495,48 @@ def analyze_logs(
             "sizes": in_bin,
             "geomean_us": score[winner],
         })
+    bin_by_slot = {item["slot_id"]: item["algorithm"] for item in bin_choices}
+    compiler_bin_latencies = []
+    for size in sizes:
+        slot = next(
+            item for item in opportunity["decision_slots"]
+            if (item["message_bytes"]["min"] is None
+                or size >= item["message_bytes"]["min"])
+            and (item["message_bytes"]["max"] is None
+                 or size <= item["message_bytes"]["max"])
+        )
+        compiler_bin_latencies.append(medians[bin_by_slot[slot["slot_id"]]][size])
+    compiler_bin_geomean = _geomean(compiler_bin_latencies)
+    pointwise_ratio = aggregate[baseline] / oracle_geomean
+    maximum_size_headroom = max(
+        item["baseline_over_oracle"] for item in per_size.values()
+    )
+    distinct_winners = sorted({item["winner"] for item in per_size.values()})
+    bin_differs_from_baseline = any(
+        item["algorithm"] != baseline for item in bin_choices
+    )
+    gate_c_criteria = {
+        "at_least_two_distinct_size_winners": {
+            "observed": len(distinct_winners),
+            "threshold": 2,
+            "passed": len(distinct_winners) >= 2,
+        },
+        "baseline_over_pointwise_oracle_geomean": {
+            "observed": pointwise_ratio,
+            "threshold": 1.05,
+            "passed": pointwise_ratio >= 1.05,
+        },
+        "maximum_single_size_headroom": {
+            "observed": maximum_size_headroom,
+            "threshold": 1.10,
+            "passed": maximum_size_headroom >= 1.10,
+        },
+        "compiler_bin_policy_differs_from_baseline": {
+            "observed": bin_differs_from_baseline,
+            "threshold": True,
+            "passed": bin_differs_from_baseline,
+        },
+    }
     return {
         "schema_version": "gicc-collective-control-analysis-v1",
         "graph_id": graph["graph_id"],
@@ -339,13 +551,23 @@ def analyze_logs(
             "best_uniform_geomean_us": aggregate[best_uniform],
             "baseline_geomean_us": aggregate[baseline],
             "per_size_oracle_geomean_us": oracle_geomean,
-            "baseline_over_per_size_oracle": aggregate[baseline] / oracle_geomean,
+            "baseline_over_per_size_oracle": pointwise_ratio,
             "best_uniform_over_per_size_oracle": aggregate[best_uniform] / oracle_geomean,
-            "distinct_per_size_winners": sorted({
-                item["winner"] for item in per_size.values()
-            }),
+            "compiler_bin_oracle_geomean_us": compiler_bin_geomean,
+            "baseline_over_compiler_bin_oracle": (
+                aggregate[baseline] / compiler_bin_geomean
+            ),
+            "best_uniform_over_compiler_bin_oracle": (
+                aggregate[best_uniform] / compiler_bin_geomean
+            ),
+            "maximum_single_size_headroom": maximum_size_headroom,
+            "distinct_per_size_winners": distinct_winners,
         },
         "compiler_bin_oracle": bin_choices,
+        "gate_c": {
+            "passed": all(item["passed"] for item in gate_c_criteria.values()),
+            "criteria": gate_c_criteria,
+        },
         "scope": (
             "Compiler-generated controls only; no LLM result. The oracle is "
             "restricted to the exact source-free catalog and compiler-owned "
@@ -399,6 +621,11 @@ def main() -> int:
     verify_ir_parser = sub.add_parser("verify-ir")
     verify_ir_parser.add_argument("--manifest", type=Path, required=True)
     verify_ir_parser.add_argument("--ir", type=Path, required=True)
+    qualify = sub.add_parser("qualify")
+    qualify.add_argument("--manifest", type=Path, required=True)
+    qualify.add_argument("--gate", choices=sorted(GATE_SPECS), required=True)
+    qualify.add_argument("--out", type=Path, required=True)
+    qualify.add_argument("logs", type=Path, nargs="+")
     analyze = sub.add_parser("analyze")
     analyze.add_argument("--graph", type=Path, required=True)
     analyze.add_argument("--manifest", type=Path, required=True)
@@ -429,12 +656,24 @@ def main() -> int:
         elif args.command == "verify-ir":
             verify_ir(_read_json(args.manifest), args.manifest.parent, args.ir)
             print("compiler-collective-eval: verified compiler plan metadata in IR")
+        elif args.command == "qualify":
+            summary = qualify_logs(
+                _read_json(args.manifest), args.logs, args.gate
+            )
+            bridge._write_json_atomic(args.out, summary)
+            print(
+                f"compiler-collective-eval: Gate {summary['gate']} passed; "
+                f"verified {len(summary['logs'])} immutable log(s)"
+            )
         elif args.command == "analyze":
             summary = analyze_logs(
                 _read_json(args.graph), _read_json(args.manifest), args.logs
             )
             bridge._write_json_atomic(args.out, summary)
-            print(json.dumps(summary["aggregate"], indent=2, sort_keys=True))
+            print(json.dumps({
+                "aggregate": summary["aggregate"],
+                "gate_c": summary["gate_c"],
+            }, indent=2, sort_keys=True))
         else:
             decision, hint = oracle_decision(
                 _read_json(args.graph), _read_json(args.analysis)

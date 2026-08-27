@@ -44,9 +44,15 @@ different compiler-owned message regions.
 - target: Tioga MI250X GCD + Slingshot-11/CXI, CPU-proxy collective catalog
 - scheduler queue: `pdebug` only
 - submission rule: exactly one scheduler job active or queued at a time
+- Gate-B two-node compiler profile:
+  `tioga-mi250x-cxi-collective-capacity-n2.json`
 
 The source and catalog hashes must be rechecked before every build or runtime
 phase. A mismatch invalidates, rather than silently updates, this draft.
+Every graph used for model reasoning must describe the exact runtime topology.
+A graph or response generated for two nodes is invalid evidence at eight nodes,
+and vice versa. Safety results may motivate a later topology, but are never
+silently extrapolated across topology profiles.
 
 ## Compiler action space
 
@@ -82,10 +88,15 @@ No later gate runs unless the previous gate passes. A gate submission is one
   timeout/hang.
 
 This is diagnostic and is not paper evidence.
+The already submitted baseline smoke predates topology-specific graph freezing;
+because it exercises only the semantic anchor and invokes no model, it may
+qualify runtime safety but cannot qualify a graph or model prompt.
 
 ### Gate B: catalog safety qualification
 
 - same 2-node topology;
+- regenerate the graph, prompt, controls, manifest, and materialized IR from
+  the frozen two-node profile before the first Gate-B submission;
 - all eight uniform compiler arms, one job at a time;
 - sizes: 1 KiB, 4 KiB, 8 KiB, 64 KiB, 256 KiB, 1 MiB, 4 MiB, 8 MiB, 16 MiB;
 - one correctness call per size, one warmup, three timed calls;
@@ -109,6 +120,8 @@ all of the following hold:
 
 Failure narrows the paper claim to a negative capacity result; it does not
 trigger more model calls or a larger scheduler sweep.
+The analysis artifact must record every observed value, threshold, and Boolean
+result for these four criteria; a narrative judgment is not sufficient.
 
 ### Gate D: confirmatory compiler controls
 
@@ -133,6 +146,10 @@ semantic baseline and best uniform target, not an unconstrained source oracle.
 Requires separate explicit authorization before sending the new collective
 graph to any external provider. The previous authorization for cleaned
 Minimod/Jacobi prompts does not cover this graph.
+
+The prompt profile and runtime topology must match exactly. A later eight-node
+evaluation therefore requires its own eight-node qualification and frozen
+graph; the two-node screen cannot serve as its performance control.
 
 If authorized, use one frozen graph and prompt per evaluated topology. Compare:
 
