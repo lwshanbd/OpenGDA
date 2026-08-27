@@ -1,0 +1,20 @@
+ALLOC rep=2 order=plan_pt,plan_pc,plan_pp,plan_tp,plan_cc,plan_tt,plan_ct,plan_tc,plan_cp warmup=10 runs=100 job=unknown
+BEGIN rep=2 arm=plan_pt log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-controls-v1/raw/rep2-plan_pt.log time=2026-08-27T18:45:48Z
+END rep=2 arm=plan_pt time=2026-08-27T18:45:52Z
+BEGIN rep=2 arm=plan_pc log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-controls-v1/raw/rep2-plan_pc.log time=2026-08-27T18:45:52Z
+END rep=2 arm=plan_pc time=2026-08-27T18:45:54Z
+BEGIN rep=2 arm=plan_pp log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-controls-v1/raw/rep2-plan_pp.log time=2026-08-27T18:45:54Z
+END rep=2 arm=plan_pp time=2026-08-27T18:45:57Z
+BEGIN rep=2 arm=plan_tp log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-controls-v1/raw/rep2-plan_tp.log time=2026-08-27T18:45:57Z
+END rep=2 arm=plan_tp time=2026-08-27T18:45:59Z
+BEGIN rep=2 arm=plan_cc log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-controls-v1/raw/rep2-plan_cc.log time=2026-08-27T18:45:59Z
+END rep=2 arm=plan_cc time=2026-08-27T18:46:01Z
+BEGIN rep=2 arm=plan_tt log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-controls-v1/raw/rep2-plan_tt.log time=2026-08-27T18:46:01Z
+END rep=2 arm=plan_tt time=2026-08-27T18:46:03Z
+BEGIN rep=2 arm=plan_ct log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-controls-v1/raw/rep2-plan_ct.log time=2026-08-27T18:46:03Z
+END rep=2 arm=plan_ct time=2026-08-27T18:46:05Z
+BEGIN rep=2 arm=plan_tc log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-controls-v1/raw/rep2-plan_tc.log time=2026-08-27T18:46:05Z
+END rep=2 arm=plan_tc time=2026-08-27T18:46:07Z
+BEGIN rep=2 arm=plan_cp log=/p/lustre2/shan4/new-gicc/docs/experiments/compiler-comm-plan-capacity/runs/compiler-comm-plan-controls-v1/raw/rep2-plan_cp.log time=2026-08-27T18:46:07Z
+END rep=2 arm=plan_cp time=2026-08-27T18:46:09Z
+ALLOC_DONE rep=2

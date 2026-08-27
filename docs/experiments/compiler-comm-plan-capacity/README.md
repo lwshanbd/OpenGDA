@@ -106,15 +106,65 @@ compiler-comm-plan-controls-v1/summary.json \
 compiler-comm-plan-controls-v1/raw/*.log
 ```
 
-## Current pre-runtime evidence
+## Frozen V1 evidence
 
-- 22 Python schema/control/runtime-analysis tests pass.
+- 25 Python schema/control/runtime-analysis tests pass after adding the larger
+  graph controls; the original 43/43 LLVM lit suite remains green.
 - 43/43 LLVM lit tests pass, including positive coalescing and negative
   unproved-transform rejection.
 - All nine exact controls build from the unchanged source.
 - Automated host-LTO IR verification passes for all nine arms.
+- Four manually submitted `pdebug` replicates completed and passed all data
+  hash and exact-route checks: `f5sPtpNQtgHV`, `f5sPuQBcecEj`,
+  `f5sPv6VHLAeb`, and `f5sPwLZXH89M`.
+- `plan_cc` is the oracle in every replicate.  Its aggregate structural score
+  is 36.405 us, versus 353.315 us for the descriptor-batch `plan_tt`
+  baseline.  The baseline/oracle ratio is **9.705220x**, with paired-bootstrap
+  95% CI `[9.683634, 9.722655]`.
 - No new LLM/provider call has been made for this V1 graph.
-- No structural runtime job has been submitted yet; an older `pdebug` job must
-  finish first to preserve the one-job-at-a-time rule.
+
+This is evidence of compiler-stage structural headroom, not yet evidence that
+an LLM realizes it.  The machine-readable result is
+`runs/compiler-comm-plan-controls-v1/summary.json`.
+
+## Six-opportunity capacity expansion
+
+The next preregistered control expands the same compiler-only mechanism to six
+independent, compiler-proved opportunities in the existing unchanged
+`compiler_lto_calibration.cpp` workload.  Message sizes range from 1 KiB to
+32 KiB, trip counts from 6 to 48, grid sizes from 1 to 8, and compiler-counted
+work before first use from 28 to 10352 FLOPs.  Each opportunity still exposes
+only `p`, `t`, and `c`, giving 729 candidate-ID plans.
+
+Three compiler-generated uniform controls measure every action at every site.
+Because each named scenario is timed independently, these measurements provide
+an exact factorized oracle over the 729 policies; they do not measure
+cross-site interactions.  Every control must pass 18 data hashes and exact
+route-counter contracts.  The source hash, graph, manifest, binaries, IR, and
+runtime rules were frozen in `protocol-calibration-v1.json` before the first
+runtime submission.
+
+```bash
+bash examples/proxy/build_compiler_comm_plan_calibration.sh controls
+
+# Submit exactly one pdebug allocation, then validate it before the next.
+bash examples/proxy/submit_compiler_comm_plan_calibration.sh 1
+
+python3 examples/proxy/analyze_compiler_comm_plan_calibration.py \
+  --graph build_ofi/compiler_comm_plan_calibration/generated/\
+opportunity-graph.json \
+  --manifest build_ofi/compiler_comm_plan_calibration/generated/controls/\
+manifest.json \
+  --json docs/experiments/compiler-comm-plan-capacity/runs/\
+compiler-comm-plan-calibration-v1/summary.json \
+  docs/experiments/compiler-comm-plan-capacity/runs/\
+compiler-comm-plan-calibration-v1/raw/*.log
+```
+
+No provider input is authorized by this runtime protocol.  After the controls
+are frozen, a provider experiment requires a new explicit external-send
+authorization.  The provider may receive only the content-addressed compiler
+graph and may return only graph-bound candidate selections; candidate builds
+are named with an `llm_` prefix and cannot overwrite any control artifact.
 
 Content IDs and artifact hashes are frozen in `protocol-v1.json`.

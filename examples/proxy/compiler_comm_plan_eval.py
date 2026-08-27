@@ -11,6 +11,7 @@ compiler action space before any model is evaluated.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import itertools
 import json
@@ -29,6 +30,7 @@ import gicc_llm_bridge as bridge  # noqa: E402
 
 
 MANIFEST_SCHEMA = "gicc-communication-plan-controls-v1"
+UNIFORM_MANIFEST_SCHEMA = "gicc-communication-plan-uniform-controls-v1"
 KIND_CODES = {
     "proxy_device": "p",
     "trigger_descriptor_batch": "t",
@@ -174,13 +176,93 @@ def generate_controls(
     return manifest
 
 
+def generate_uniform_controls(
+    graph_value: Any, outdir: Path, source_sha256: str,
+) -> dict[str, Any]:
+    """Generate three uniform arms for a graph with any opportunity count."""
+    graph = plans.verified_graph(graph_value)
+    opportunities = _ordered_opportunities(graph)
+    if len(source_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in source_sha256
+    ):
+        raise ControlError("source_sha256 must be 64 lowercase hex characters")
+    choices = [_candidate_by_kind(item) for item in opportunities]
+    outdir.mkdir(parents=True, exist_ok=True)
+    arms: list[dict[str, Any]] = []
+    for kind in EXPECTED_KINDS:
+        name = f"uniform_{KIND_CODES[kind]}"
+        response = {
+            "schema_version": plans.DECISION_SCHEMA,
+            "graph_id": graph["graph_id"],
+            "selections": {},
+        }
+        selected: list[dict[str, Any]] = []
+        for opportunity, candidates in zip(opportunities, choices, strict=True):
+            candidate = candidates[kind]
+            opportunity_id = opportunity["opportunity_id"]
+            response["selections"][opportunity_id] = {
+                "candidate_id": candidate["candidate_id"],
+                "confidence": 1.0,
+                "rationale": "compiler-generated uniform capacity control",
+            }
+            selected.append({
+                "opportunity_id": opportunity_id,
+                "kernel": opportunity["compiler_facts"]["kernel"],
+                "kind": kind,
+                "candidate_id": candidate["candidate_id"],
+                "materializer": candidate["materializer"],
+                "effects": candidate["effects"],
+            })
+        hint, accepted, errors = plans.plan_to_hint(graph, response)
+        if not accepted:
+            raise ControlError(f"internally generated {name} rejected: {errors}")
+        hint["llm_metadata"].update({
+            "producer": "compiler-generated uniform control",
+            "model_invoked": False,
+        })
+        response_path = outdir / f"{name}-response.json"
+        hint_path = outdir / f"{name}-hint.json"
+        _write_json(response_path, response)
+        _write_json(hint_path, hint)
+        arms.append({
+            "name": name,
+            "response": response_path.name,
+            "response_sha256": _sha256(response_path),
+            "hint": hint_path.name,
+            "hint_sha256": _sha256(hint_path),
+            "selections": selected,
+        })
+    payload = {
+        "schema_version": UNIFORM_MANIFEST_SCHEMA,
+        "graph_id": graph["graph_id"],
+        "source_sha256": source_sha256,
+        "model_invoked": False,
+        "model_output_scope": "compiler candidate IDs only",
+        "opportunity_order": [
+            {
+                "opportunity_id": item["opportunity_id"],
+                "kernel": item["compiler_facts"]["kernel"],
+            }
+            for item in opportunities
+        ],
+        "arms": arms,
+    }
+    manifest = dict(payload)
+    manifest["manifest_id"] = bridge._fingerprint(payload)
+    _write_json(outdir / "manifest.json", manifest)
+    return manifest
+
+
 def verify_manifest(graph_value: Any, manifest_value: Any, root: Path) -> None:
     graph = plans.verified_graph(graph_value)
-    if (
-        not isinstance(manifest_value, dict)
-        or manifest_value.get("schema_version") != MANIFEST_SCHEMA
-    ):
-        raise ControlError(f"expected manifest schema {MANIFEST_SCHEMA}")
+    if not isinstance(manifest_value, dict):
+        raise ControlError("control manifest must be a JSON object")
+    schema = manifest_value.get("schema_version")
+    if schema not in (MANIFEST_SCHEMA, UNIFORM_MANIFEST_SCHEMA):
+        raise ControlError(
+            f"expected manifest schema {MANIFEST_SCHEMA} or "
+            f"{UNIFORM_MANIFEST_SCHEMA}"
+        )
     manifest_id = manifest_value.get("manifest_id")
     payload = dict(manifest_value)
     payload.pop("manifest_id", None)
@@ -189,8 +271,11 @@ def verify_manifest(graph_value: Any, manifest_value: Any, root: Path) -> None:
     if manifest_value.get("graph_id") != graph["graph_id"]:
         raise ControlError("manifest graph_id does not match graph")
     arms = manifest_value.get("arms")
-    if not isinstance(arms, list) or len(arms) != 9:
-        raise ControlError("manifest must contain exactly nine arms")
+    expected_arm_count = 9 if schema == MANIFEST_SCHEMA else 3
+    if not isinstance(arms, list) or len(arms) != expected_arm_count:
+        raise ControlError(
+            f"manifest must contain exactly {expected_arm_count} arms"
+        )
     if manifest_value.get("model_invoked") is not False:
         raise ControlError("exact controls must record model_invoked=false")
     names: set[str] = set()
@@ -220,11 +305,26 @@ def verify_manifest(graph_value: Any, manifest_value: Any, root: Path) -> None:
         if hint != stored_core:
             raise ControlError(f"{hint_path}: hint does not match response")
         kinds = tuple(item["kind"] for item in arm.get("selections", []))
-        if len(kinds) != 2 or any(kind not in EXPECTED_KINDS for kind in kinds):
+        if (
+            len(kinds) != len(graph["opportunities"])
+            or any(kind not in EXPECTED_KINDS for kind in kinds)
+        ):
             raise ControlError(f"{arm['name']}: invalid selection summary")
         combinations.add(kinds)
-    if len(combinations) != 9:
-        raise ControlError("manifest does not cover the exact 3x3 action product")
+    if schema == MANIFEST_SCHEMA:
+        if len(graph["opportunities"]) != 2 or len(combinations) != 9:
+            raise ControlError(
+                "manifest does not cover the exact 3x3 action product"
+            )
+    else:
+        uniform_kinds = {
+            kinds[0] for kinds in combinations
+            if kinds and len(set(kinds)) == 1
+        }
+        if uniform_kinds != set(EXPECTED_KINDS) or len(combinations) != 3:
+            raise ControlError(
+                "uniform manifest must cover one all-site arm per action kind"
+            )
 
 
 def verify_ir(
@@ -246,6 +346,63 @@ def verify_ir(
         if not isinstance(trips, int) or not isinstance(size, int):
             raise ControlError(f"{opportunity_id}: missing constant IR signature")
         signatures[opportunity_id] = (trips, trips * size)
+    if manifest["schema_version"] == UNIFORM_MANIFEST_SCHEMA:
+        texts: dict[str, str] = {}
+        kind_for_arm: dict[str, str] = {}
+        for arm in manifest["arms"]:
+            path = ir_dir / f"{arm['name']}.ll"
+            try:
+                texts[arm["name"]] = path.read_text()
+            except OSError as exc:
+                raise ControlError(f"cannot read LLVM IR {path}: {exc}") from exc
+            kinds = {selection["kind"] for selection in arm["selections"]}
+            if len(kinds) != 1:
+                raise ControlError(f"{arm['name']}: IR arm is not uniform")
+            kind_for_arm[arm["name"]] = next(iter(kinds))
+        arm_for_kind = {kind: arm for arm, kind in kind_for_arm.items()}
+        if set(arm_for_kind) != set(EXPECTED_KINDS):
+            raise ControlError("uniform IR set is missing an action kind")
+        baseline = texts[arm_for_kind["proxy_device"]]
+        trip_multiplicity = Counter(trips for trips, _ in signatures.values())
+        byte_multiplicity = Counter(total for _, total in signatures.values())
+
+        def batch_count(text: str, trips: int) -> int:
+            return len(re.findall(
+                rf"(?:tail )?call void @gicc_runtime_dwq_enqueue_batched\("
+                rf"[^\n]*, i32 {trips},",
+                text,
+            ))
+
+        def coalesced_count(text: str, total: int) -> int:
+            return len(re.findall(
+                rf"(?:tail )?call void @gicc_runtime_dwq_enqueue\("
+                rf"[^\n]*, i64 {total}\)",
+                text,
+            ))
+
+        for kind, arm_name in arm_for_kind.items():
+            text = texts[arm_name]
+            for trips, multiplicity in trip_multiplicity.items():
+                delta = batch_count(text, trips) - batch_count(baseline, trips)
+                wanted = multiplicity if kind == "trigger_descriptor_batch" else 0
+                if delta != wanted:
+                    raise ControlError(
+                        f"{arm_name}: batch-count delta for trip_count={trips} "
+                        f"is {delta}, expected {wanted}"
+                    )
+            for total, multiplicity in byte_multiplicity.items():
+                delta = (
+                    coalesced_count(text, total)
+                    - coalesced_count(baseline, total)
+                )
+                wanted = multiplicity if kind == "trigger_coalesced_loop" else 0
+                if delta != wanted:
+                    raise ControlError(
+                        f"{arm_name}: coalesced-call delta for bytes={total} "
+                        f"is {delta}, expected {wanted}"
+                    )
+        return
+
     if len(set(signatures.values())) != len(signatures):
         raise ControlError("v1 IR verifier requires unique opportunity signatures")
 
@@ -278,17 +435,19 @@ def verify_ir(
                     f"{path}: {selection['kernel']} materialized "
                     f"batch/coalesced={(batch, coalesced)}, expected={wanted}"
                 )
-        # Reuse is outside the LLM opportunity graph and must stay on the
-        # compiler-fixed 32-descriptor trigger path in every arm.
-        fixed_reuse = len(re.findall(
-            r"(?:tail )?call void @gicc_runtime_dwq_enqueue_batched\("
-            r"[^\n]*, i32 32,",
-            text,
-        ))
-        if fixed_reuse != 1:
-            raise ControlError(
-                f"{path}: compiler-fixed reuse path count={fixed_reuse}, expected=1"
-            )
+        if manifest["schema_version"] == MANIFEST_SCHEMA:
+            # Reuse is outside the two-op exact graph and must stay on the
+            # compiler-fixed 32-descriptor trigger path in every arm.
+            fixed_reuse = len(re.findall(
+                r"(?:tail )?call void @gicc_runtime_dwq_enqueue_batched\("
+                r"[^\n]*, i32 32,",
+                text,
+            ))
+            if fixed_reuse != 1:
+                raise ControlError(
+                    f"{path}: compiler-fixed reuse path count={fixed_reuse}, "
+                    "expected=1"
+                )
 
 
 def main() -> int:
@@ -298,6 +457,10 @@ def main() -> int:
     controls.add_argument("--graph", required=True, type=Path)
     controls.add_argument("--out", required=True, type=Path)
     controls.add_argument("--source-sha256", required=True)
+    uniform = sub.add_parser("uniform-controls")
+    uniform.add_argument("--graph", required=True, type=Path)
+    uniform.add_argument("--out", required=True, type=Path)
+    uniform.add_argument("--source-sha256", required=True)
     verify = sub.add_parser("verify")
     verify.add_argument("--graph", required=True, type=Path)
     verify.add_argument("--manifest", required=True, type=Path)
@@ -314,19 +477,29 @@ def main() -> int:
                 f"compiler-comm-plan-eval: generated {len(manifest['arms'])} "
                 f"exact controls; manifest_id={manifest['manifest_id']}"
             )
+        elif args.command == "uniform-controls":
+            manifest = generate_uniform_controls(
+                graph, args.out, args.source_sha256
+            )
+            print(
+                f"compiler-comm-plan-eval: generated {len(manifest['arms'])} "
+                f"uniform controls over "
+                f"{len(manifest['opportunity_order'])} opportunities; "
+                f"manifest_id={manifest['manifest_id']}"
+            )
         elif args.command == "verify":
             manifest = _read_json(args.manifest)
             verify_manifest(graph, manifest, args.manifest.parent)
             print(
                 f"compiler-comm-plan-eval: verified {len(manifest['arms'])} "
-                "exact controls"
+                "compiler-generated controls"
             )
         else:
             manifest = _read_json(args.manifest)
             verify_ir(graph, manifest, args.manifest.parent, args.ir)
             print(
                 f"compiler-comm-plan-eval: verified LTO IR for "
-                f"{len(manifest['arms'])} exact controls"
+                f"{len(manifest['arms'])} compiler-generated controls"
             )
         return 0
     except (ControlError, plans.PlanBridgeError, OSError, ValueError) as exc:

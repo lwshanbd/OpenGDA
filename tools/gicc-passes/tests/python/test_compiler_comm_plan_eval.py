@@ -92,6 +92,67 @@ class CompilerCommunicationPlanControlTests(unittest.TestCase):
                 (ir_dir / f"{arm['name']}.ll").write_text("\n".join(lines))
             controls.verify_ir(self.graph, manifest, out, ir_dir)
 
+    def test_uniform_controls_and_ir_cover_larger_graph(self):
+        features = []
+        for index, (trips, size) in enumerate((
+            (6, 1024), (12, 2048), (12, 8192),
+            (24, 16384), (48, 8192),
+        )):
+            feature = coalescable_feature(f"unit.cpp:{index}:k{index}::0")
+            feature["kernel"] = f"k{index}"
+            feature["loop"]["bound_const"] = trips
+            feature["trip_count"] = trips
+            feature["batch_size"] = trips
+            feature["size_bytes"] = size
+            features.append(feature)
+        graph = plans.make_opportunity_graph(
+            bridge.make_dossier(features, PLATFORM)
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            out = Path(temporary)
+            ir_dir = out / "ir"
+            ir_dir.mkdir()
+            manifest = controls.generate_uniform_controls(
+                graph, out, "d" * 64
+            )
+            controls.verify_manifest(graph, manifest, out)
+            self.assertEqual(3, len(manifest["arms"]))
+            self.assertTrue(all(
+                len({item["kind"] for item in arm["selections"]}) == 1
+                for arm in manifest["arms"]
+            ))
+
+            facts = {
+                item["opportunity_id"]: item["compiler_facts"]
+                for item in graph["opportunities"]
+            }
+            for arm in manifest["arms"]:
+                # Include fixed baseline calls that collide with a structural
+                # trip count and byte count.  The verifier must use deltas
+                # between uniform arms rather than assume unique signatures.
+                lines = [
+                    "call void @gicc_runtime_dwq_enqueue_batched("
+                    "ptr null, i32 24, ptr null)",
+                    "call void @gicc_runtime_dwq_enqueue("
+                    "ptr null, i64 393216)",
+                ]
+                for selection in arm["selections"]:
+                    item = facts[selection["opportunity_id"]]
+                    trips = item["trip_count"]
+                    total = trips * item["size_bytes"]
+                    if selection["kind"] == "trigger_descriptor_batch":
+                        lines.append(
+                            "call void @gicc_runtime_dwq_enqueue_batched("
+                            f"ptr null, i32 {trips}, ptr null)"
+                        )
+                    elif selection["kind"] == "trigger_coalesced_loop":
+                        lines.append(
+                            "call void @gicc_runtime_dwq_enqueue("
+                            f"ptr null, i64 {total})"
+                        )
+                (ir_dir / f"{arm['name']}.ll").write_text("\n".join(lines))
+            controls.verify_ir(graph, manifest, out, ir_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

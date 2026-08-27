@@ -1,0 +1,5 @@
+job_id	rep	order	queue
+f5sPtpNQtgHV	1	plan_pp,plan_pt,plan_cc,plan_pc,plan_ct,plan_tp,plan_cp,plan_tt,plan_tc	pdebug
+f5sPuQBcecEj	2	plan_pt,plan_pc,plan_pp,plan_tp,plan_cc,plan_tt,plan_ct,plan_tc,plan_cp	pdebug
+f5sPv6VHLAeb	3	plan_pc,plan_tp,plan_pt,plan_tt,plan_pp,plan_tc,plan_cc,plan_cp,plan_ct	pdebug
+f5sPwLZXH89M	4	plan_tp,plan_tt,plan_pc,plan_tc,plan_pt,plan_cp,plan_pp,plan_ct,plan_cc	pdebug

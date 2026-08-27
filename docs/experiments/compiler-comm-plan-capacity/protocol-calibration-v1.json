@@ -1,0 +1,122 @@
+{
+  "artifacts": {
+    "binaries": {
+      "uniform_c": "3d71f02a52c3a26998c7b78e0d455ab9c834bb662f71dbe80f137fbb1a4e48c7",
+      "uniform_p": "23efb2565208988b274cfc1f5bbf88d0ca6269467b4f309486d072ea1a586e74",
+      "uniform_t": "3ace3ceb4c9381a4f16459ffa80dfced094c410fafe721c6c958a3f46807bd68"
+    },
+    "compiler_dossier": {
+      "id": "sha256:f51ab05a3b3b31b1c4811b150cefe2ae099b3e98a625b4ebaab67504b17c64af",
+      "sha256": "6f15e0a4ec26756c23c69447472502ad93b879603478c7cd5d37fb59d9781378"
+    },
+    "control_manifest": {
+      "id": "sha256:22429d911021296ccd9a66fcc39c461b38bb74fa3465182a0bd68324cacc49bf",
+      "sha256": "c223b48605cf8a49f8995000619d2f02867e516da9f5755b279a8071d2d14fee"
+    },
+    "features_sha256": "43f112529c8491bd9c302fd65f9ba7cc13b8a7be2162bae3d0925591358a1fe0",
+    "host_lto_ir": {
+      "uniform_c": "c4353920c43ab91a9937ec609ca1e032cc1a940ec2f21b3be0396d5f1a9c0a5e",
+      "uniform_p": "4349fca18be03d51ef75de5c96867ea9763067e98e6ba3a84697bf379efd552a",
+      "uniform_t": "16ff7452c808968fd9948808b8b8b6f0356d3fb648775d8013a933785ec570c7"
+    },
+    "opportunity_graph": {
+      "id": "sha256:5fbd7e5161a8c2de9381ae33c5662bb3a138e106be491bde78c8c393c864ebc7",
+      "sha256": "1e6db711fd65858ac7b00b9b5fc6b8400675462e44e98829e4dd3f0a1d640aa1"
+    },
+    "pass_plugin_sha256": "ffd2167b0db33d302d675fa6d710c15486e4ebb3597b96c5ff2a0e7c8c5b7989",
+    "prompt_sha256": "8f0779c3847ffe13624117800410efa83609f56688696c49daa2b62586030308",
+    "source_sha256": "ac9a7f75da60dbac36f3871e1c0113ec8071b1f7d924ef3dd96e9fdb5888b37d"
+  },
+  "compiler_only_boundary": {
+    "candidate_build_prefix": "llm_",
+    "compiler_revalidates_before_materialization": true,
+    "control_artifacts_overwritable_by_candidate_build": false,
+    "model_may_generate_code": false,
+    "model_may_generate_ir": false,
+    "model_output_influence": "one compiler-generated candidate_id per opportunity_id",
+    "source_visible": false
+  },
+  "factorized_capacity": {
+    "action_count_per_opportunity": 3,
+    "exact_policy_count": 729,
+    "independence_basis": "each named opportunity scenario is timed independently",
+    "primary_metric": "geometric mean of six per-scenario median wall times",
+    "primary_reference": "uniform_t descriptor-batch baseline",
+    "replicates": 4,
+    "reported_interval": "paired bootstrap 95%",
+    "uniform_controls": [
+      "uniform_p",
+      "uniform_t",
+      "uniform_c"
+    ]
+  },
+  "llm_gate": {
+    "new_provider_call_made": false,
+    "provider_input_authorized_by_this_protocol": false,
+    "requires_new_external_send_authorization": true,
+    "run_only_after_four_valid_runtime_replicates": true
+  },
+  "opportunities": [
+    {
+      "flops_to_first_use": 704,
+      "grid_blocks": 4,
+      "kernel": "cal_far_2k_k12_i64_g4",
+      "opportunity_id": "opportunity:5323ec1d2bd9fa12f2198acd",
+      "size_bytes": 2048,
+      "trip_count": 12
+    },
+    {
+      "flops_to_first_use": 164,
+      "grid_blocks": 8,
+      "kernel": "cal_adjacent_32k_k40_g8",
+      "opportunity_id": "opportunity:7ad80144b8dbb774ad5438cd",
+      "size_bytes": 32768,
+      "trip_count": 40
+    },
+    {
+      "flops_to_first_use": 52,
+      "grid_blocks": 4,
+      "kernel": "cal_adjacent_8k_k12_g4",
+      "opportunity_id": "opportunity:8d921bb3c6e3600c85f67177",
+      "size_bytes": 8192,
+      "trip_count": 12
+    },
+    {
+      "flops_to_first_use": 10352,
+      "grid_blocks": 8,
+      "kernel": "cal_far_16k_k24_i1024_g8",
+      "opportunity_id": "opportunity:9fa38d27495ea173fef90321",
+      "size_bytes": 16384,
+      "trip_count": 24
+    },
+    {
+      "flops_to_first_use": 2768,
+      "grid_blocks": 8,
+      "kernel": "cal_far_8k_k48_i256_g8",
+      "opportunity_id": "opportunity:b725b7eb6e11fc04199a5d82",
+      "size_bytes": 8192,
+      "trip_count": 48
+    },
+    {
+      "flops_to_first_use": 28,
+      "grid_blocks": 1,
+      "kernel": "cal_adjacent_1k_k6_g1",
+      "opportunity_id": "opportunity:d42d15a9ecf08bde87bcb065",
+      "size_bytes": 1024,
+      "trip_count": 6
+    }
+  ],
+  "runtime": {
+    "allocation": "two nodes, one rank and one MI250X GCD per node",
+    "arm_timeout_seconds": 180,
+    "exact_route_counter_validation": true,
+    "queue": "pdebug",
+    "required_data_hashes_per_arm": 18,
+    "runs_per_scenario": 100,
+    "scheduler_jobs_active_at_once": 1,
+    "uniform_arms_run_sequentially_in_one_allocation": true,
+    "warmups_per_scenario": 10
+  },
+  "schema_version": "gicc-communication-plan-calibration-protocol-v1",
+  "status": "preregistered-before-first-six-opportunity-runtime-job"
+}
