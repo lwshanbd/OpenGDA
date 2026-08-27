@@ -43,6 +43,42 @@ class CompilerCollectiveEvalTests(unittest.TestCase):
                 selection = next(iter(hint["selections"].values()))
                 self.assertEqual("uniform", selection["kind"])
 
+            decision, hint = controls.canary_decision(self.graph)
+            self.assertEqual(collective.DECISION_SCHEMA,
+                             decision["schema_version"])
+            selection = next(iter(hint["selections"].values()))
+            self.assertEqual("size_policy", selection["kind"])
+            self.assertEqual(3, len({
+                rule["target_id"] for rule in selection["rules"]
+            }))
+            self.assertFalse(hint["llm_metadata"]["model_invoked"])
+
+            ir = root / "canary.ll"
+            metadata = [
+                "define void @run(i32 %count) {",
+                "  %c0 = icmp ult i32 %count, 1025",
+                "  %c1 = icmp ult i32 %count, 65537",
+                "  %c2 = icmp ult i32 %count, 2097153",
+            ]
+            for index, rule in enumerate(selection["rules"]):
+                metadata.append(
+                    f'call void @candidate{index}(), '
+                    f'!gicc.collective.candidate_id !{index * 2}, '
+                    f'!gicc.collective.target_id !{index * 2 + 1}'
+                )
+                metadata.append(
+                    f'!{index * 2} = !{{!"{selection["candidate_id"]}"}}'
+                )
+                metadata.append(
+                    f'!{index * 2 + 1} = !{{!"{rule["target_id"]}"}}'
+                )
+            metadata.append("}")
+            ir.write_text("\n".join(metadata) + "\n")
+            controls.verify_plan_ir(self.graph, hint, ir)
+            ir.write_text(ir.read_text().replace("65537", "65538"))
+            with self.assertRaisesRegex(controls.EvalError, "policy cutoffs"):
+                controls.verify_plan_ir(self.graph, hint, ir)
+
     def test_analysis_constructs_a_compiler_bin_oracle(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -88,6 +88,13 @@ runtime-guarded fallback for dynamic preconditions.
 No later gate runs unless the previous gate passes. A gate submission is one
 `pdebug` job and must finish before another is submitted.
 
+Before any model or Gate-B runtime, compile one deterministic, compiler-owned
+mixed-policy canary from the frozen graph. It must select non-anchor options in
+all four message regions, lower to a real size-policy CFG in the unchanged
+benchmark, and expose the exact composite candidate ID plus every branch target
+through IR metadata. This is an offline materializer test, not performance
+evidence and not a model output.
+
 ### Gate A: diagnostic runtime smoke
 
 - topology: 2 nodes, 8 ranks/node, one rank/GCD;

@@ -258,6 +258,86 @@ def verify_ir(manifest_value: Any, root: Path, ir_dir: Path) -> None:
             raise EvalError(f"{path}: expected one materialized collective call")
 
 
+def verify_plan_ir(graph_value: Any, hint_value: Any, path: Path) -> None:
+    graph = plans.verified_graph(graph_value)
+    if (not isinstance(hint_value, dict)
+            or hint_value.get("schema_version") != plans.HINT_SCHEMA
+            or hint_value.get("llm_metadata", {}).get("compiler_only_output")
+            is not True):
+        raise EvalError("expected a compiler-only collective hint")
+    selections = hint_value.get("selections")
+    if (not isinstance(selections, dict) or len(selections) != 1
+            or len(graph["opportunities"]) != 1):
+        raise EvalError("plan-IR audit v1 requires one collective selection")
+    opportunity = graph["opportunities"][0]
+    opportunity_id = opportunity["opportunity_id"]
+    if (set(selections) != {opportunity_id}
+            or hint_value["llm_metadata"].get("graph_id") != graph["graph_id"]):
+        raise EvalError("collective hint does not match compiler graph")
+    selection = selections[opportunity_id]
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        raise EvalError(f"cannot read materialized IR {path}: {exc}") from exc
+    candidate_id = selection.get("candidate_id")
+    if not isinstance(candidate_id, str):
+        raise EvalError("collective hint lacks candidate_id")
+    candidate_marker = f'!{{!"{candidate_id}"}}'
+    if candidate_marker not in text:
+        raise EvalError(f"{path}: missing compiler plan candidate metadata")
+    if selection.get("kind") == "uniform":
+        target_ids = [selection.get("target_id")]
+    elif selection.get("kind") == "size_policy":
+        rules = selection.get("rules")
+        if not isinstance(rules, list) or not rules:
+            raise EvalError("size policy has no rules")
+        target_ids = [rule.get("target_id") for rule in rules]
+    else:
+        raise EvalError("unknown collective materializer kind")
+    if any(not isinstance(target_id, str) for target_id in target_ids):
+        raise EvalError("collective plan lacks target IDs")
+    for target_id in target_ids:
+        if f'!{{!"{target_id}"}}' not in text:
+            raise EvalError(f"{path}: missing target metadata {target_id}")
+    expected_calls = len(target_ids)
+    if text.count("!gicc.collective.candidate_id") != expected_calls:
+        raise EvalError(
+            f"{path}: expected {expected_calls} materialized collective calls"
+        )
+    if text.count("!gicc.collective.target_id") != expected_calls:
+        raise EvalError(f"{path}: target metadata count does not match plan")
+    functions = [
+        match.group(0)
+        for match in re.finditer(
+            r"^define\b.*?^}\s*$", text, flags=re.MULTILINE | re.DOTALL
+        )
+        if "!gicc.collective.candidate_id" in match.group(0)
+    ]
+    if len(functions) != 1:
+        raise EvalError(f"{path}: expected one compiler-policy function body")
+    if selection.get("kind") == "size_policy":
+        expected_bounds = [
+            slot["message_bytes"]["max"]
+            for slot in opportunity["decision_slots"]
+        ]
+        if [rule.get("max_bytes") for rule in selection["rules"]] != expected_bounds:
+            raise EvalError("size-policy bounds do not match compiler graph")
+        element_bytes = opportunity["compiler_facts"]["call"]["element_bytes"]
+        expected_cutoffs = [
+            maximum // element_bytes + 1
+            for maximum in expected_bounds if maximum is not None
+        ]
+        actual_cutoffs = [
+            int(value) for value in re.findall(
+                r"icmp ult i32 [^,\n]+, ([0-9]+)", functions[0]
+            )
+        ]
+        if actual_cutoffs != expected_cutoffs:
+            raise EvalError(
+                f"{path}: policy cutoffs {actual_cutoffs}, expected {expected_cutoffs}"
+            )
+
+
 def _int_field(fields: dict[str, str], name: str, path: Path) -> int:
     try:
         return int(fields[name])
@@ -607,6 +687,48 @@ def oracle_decision(graph_value: Any, analysis_value: Any) -> tuple[dict, dict]:
     return decision, hint
 
 
+def canary_decision(graph_value: Any) -> tuple[dict, dict]:
+    graph = plans.verified_graph(graph_value)
+    if len(graph["opportunities"]) != 1:
+        raise EvalError("mixed-policy canary v1 requires one opportunity")
+    opportunity = graph["opportunities"][0]
+    selected = {}
+    for index, slot in enumerate(opportunity["decision_slots"]):
+        candidates = sorted(
+            (option for option in slot["options"] if option["role"] != "anchor"),
+            key=lambda option: (option["algorithm"], option["option_id"]),
+        )
+        if not candidates:
+            raise EvalError("mixed-policy canary has no non-anchor candidate")
+        selected[slot["slot_id"]] = candidates[index % len(candidates)][
+            "option_id"
+        ]
+    decision = {
+        "schema_version": plans.DECISION_SCHEMA,
+        "graph_id": graph["graph_id"],
+        "selections": {
+            opportunity["opportunity_id"]: {
+                "slot_candidate_ids": selected,
+                "confidence": 1.0,
+                "rationale": (
+                    "compiler-generated mixed-policy materialization canary"
+                ),
+            }
+        },
+    }
+    hint, accepted, errors = plans.decision_to_hint(graph, decision)
+    if not accepted:
+        raise EvalError(f"mixed-policy canary rejected: {errors}")
+    selection = hint["selections"][opportunity["opportunity_id"]]
+    if selection.get("kind") != "size_policy":
+        raise EvalError("mixed-policy canary unexpectedly collapsed to uniform")
+    hint["llm_metadata"].update({
+        "producer": "compiler-generated mixed-policy canary",
+        "model_invoked": False,
+    })
+    return decision, hint
+
+
 def score_decisions(
     graph_value: Any,
     analysis_value: Any,
@@ -791,6 +913,10 @@ def main() -> int:
     verify_ir_parser = sub.add_parser("verify-ir")
     verify_ir_parser.add_argument("--manifest", type=Path, required=True)
     verify_ir_parser.add_argument("--ir", type=Path, required=True)
+    verify_plan = sub.add_parser("verify-plan-ir")
+    verify_plan.add_argument("--graph", type=Path, required=True)
+    verify_plan.add_argument("--hint", type=Path, required=True)
+    verify_plan.add_argument("--ir", type=Path, required=True)
     qualify = sub.add_parser("qualify")
     qualify.add_argument("--manifest", type=Path, required=True)
     qualify.add_argument("--gate", choices=sorted(GATE_SPECS), required=True)
@@ -806,6 +932,10 @@ def main() -> int:
     oracle.add_argument("--analysis", type=Path, required=True)
     oracle.add_argument("--decision", type=Path, required=True)
     oracle.add_argument("--hint", type=Path, required=True)
+    canary = sub.add_parser("canary")
+    canary.add_argument("--graph", type=Path, required=True)
+    canary.add_argument("--decision", type=Path, required=True)
+    canary.add_argument("--hint", type=Path, required=True)
     score = sub.add_parser("score")
     score.add_argument("--graph", type=Path, required=True)
     score.add_argument("--analysis", type=Path, required=True)
@@ -834,6 +964,9 @@ def main() -> int:
         elif args.command == "verify-ir":
             verify_ir(_read_json(args.manifest), args.manifest.parent, args.ir)
             print("compiler-collective-eval: verified compiler plan metadata in IR")
+        elif args.command == "verify-plan-ir":
+            verify_plan_ir(_read_json(args.graph), _read_json(args.hint), args.ir)
+            print("compiler-collective-eval: verified one materialized plan in IR")
         elif args.command == "qualify":
             summary = qualify_logs(
                 _read_json(args.manifest), args.logs, args.gate
@@ -860,6 +993,14 @@ def main() -> int:
             bridge._write_json_atomic(args.hint, hint)
             print(
                 "compiler-collective-eval: wrote measured compiler-bin oracle; "
+                "model_invoked=false"
+            )
+        elif args.command == "canary":
+            decision, hint = canary_decision(_read_json(args.graph))
+            bridge._write_json_atomic(args.decision, decision)
+            bridge._write_json_atomic(args.hint, hint)
+            print(
+                "compiler-collective-eval: wrote mixed-policy canary; "
                 "model_invoked=false"
             )
         else:
