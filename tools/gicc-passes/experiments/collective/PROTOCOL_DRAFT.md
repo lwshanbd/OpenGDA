@@ -177,6 +177,14 @@ schema. This ablation tests the value of compiler semantic/relational context;
 it does not grant any view additional transformation authority and is not a
 general model-family ranking.
 
+Before scheduling any model-selected plan, score all raw responses through the
+strict bridge against the frozen compiler controls. Record response/prompt
+hashes, invalid-output rate, exact-oracle rate, mean bin accuracy, policy
+stability, and distance to the compiler-bin oracle. This is explicitly a
+counterfactual screen used to deduplicate policies; it is never reported as
+runtime speedup. Every unique policy used for a performance claim must still
+be compiled, IR-audited, and measured on the matching pdebug topology.
+
 ## Stop conditions
 
 - Any source/catalog hash mismatch.

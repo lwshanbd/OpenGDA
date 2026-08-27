@@ -93,6 +93,24 @@ class CompilerCollectiveEvalTests(unittest.TestCase):
                 "size_policy", next(iter(hint["selections"].values()))["kind"]
             )
 
+            prompt = root / "relational.txt"
+            prompt.write_text(collective.render_prompt(self.graph))
+            oracle_response = root / "oracle-response.json"
+            oracle_response.write_text(json.dumps(decision))
+            invalid_response = root / "invalid-response.json"
+            invalid_response.write_text("not JSON\n")
+            scores = controls.score_decisions(
+                self.graph, summary, prompt, "relational",
+                [oracle_response, invalid_response],
+            )
+            self.assertEqual(1, scores["aggregate"]["accepted_count"])
+            self.assertEqual(0.5, scores["aggregate"]["invalid_output_rate"])
+            self.assertTrue(scores["responses"][0][
+                "exact_compiler_bin_oracle_policy"
+            ])
+            self.assertFalse(scores["responses"][1]["accepted"])
+            self.assertTrue(scores["runtime_confirmation_required"])
+
     def test_gate_a_qualification_requires_exact_runtime_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

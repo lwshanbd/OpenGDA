@@ -17,7 +17,7 @@ import math
 import re
 import statistics
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -607,6 +607,176 @@ def oracle_decision(graph_value: Any, analysis_value: Any) -> tuple[dict, dict]:
     return decision, hint
 
 
+def score_decisions(
+    graph_value: Any,
+    analysis_value: Any,
+    prompt: Path,
+    prompt_view: str,
+    responses: list[Path],
+) -> dict[str, Any]:
+    graph = plans.verified_graph(graph_value)
+    if len(graph["opportunities"]) != 1:
+        raise EvalError("decision scoring v1 requires one collective opportunity")
+    if prompt_view not in plans.MODEL_VIEW_KINDS:
+        raise EvalError(f"unknown prompt view {prompt_view}")
+    try:
+        prompt_text = prompt.read_text()
+    except OSError as exc:
+        raise EvalError(f"cannot read prompt {prompt}: {exc}") from exc
+    expected_prompt = plans.render_prompt(graph, prompt_view)
+    if prompt_text != expected_prompt:
+        raise EvalError("prompt does not match the graph and declared view")
+    if (not isinstance(analysis_value, dict)
+            or analysis_value.get("schema_version")
+            != "gicc-collective-control-analysis-v1"
+            or analysis_value.get("graph_id") != graph["graph_id"]):
+        raise EvalError("control analysis does not match the compiler graph")
+    if not responses:
+        raise EvalError("decision scoring requires at least one response")
+
+    opportunity = graph["opportunities"][0]
+    opportunity_id = opportunity["opportunity_id"]
+    slots = {slot["slot_id"]: slot
+             for slot in opportunity["decision_slots"]}
+    oracle_rows = analysis_value.get("compiler_bin_oracle")
+    if not isinstance(oracle_rows, list):
+        raise EvalError("control analysis has no compiler-bin oracle")
+    try:
+        oracle_options = {
+            row["slot_id"]: row["option_id"] for row in oracle_rows
+        }
+    except (KeyError, TypeError) as exc:
+        raise EvalError("invalid compiler-bin oracle") from exc
+    if set(oracle_options) != set(slots):
+        raise EvalError("compiler-bin oracle slots do not match graph")
+    per_size = analysis_value.get("per_size")
+    aggregate = analysis_value.get("aggregate")
+    if not isinstance(per_size, dict) or not isinstance(aggregate, dict):
+        raise EvalError("control analysis lacks timing aggregates")
+    try:
+        baseline_geomean = float(aggregate["baseline_geomean_us"])
+        bin_oracle_geomean = float(
+            aggregate["compiler_bin_oracle_geomean_us"]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EvalError("control analysis lacks compiler-bin timing") from exc
+    _geomean([baseline_geomean, bin_oracle_geomean])
+
+    scored = []
+    policy_counts: Counter[str] = Counter()
+    for response_path in responses:
+        parse_error = None
+        try:
+            response = json.loads(response_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            response = None
+            parse_error = f"cannot parse response: {exc}"
+        hint, accepted, errors = plans.decision_to_hint(graph, response)
+        if parse_error is not None:
+            errors = [parse_error, *errors]
+        selected = hint["llm_metadata"]["selected_option_ids"][opportunity_id]
+        selected_algorithms = {}
+        for slot_id, option_id in selected.items():
+            option = next(
+                (item for item in slots[slot_id]["options"]
+                 if item["option_id"] == option_id), None
+            )
+            if option is None:
+                raise EvalError("validated hint contains an unknown option")
+            selected_algorithms[slot_id] = option["algorithm"]
+        selected_latencies = []
+        for size_text, row in sorted(
+                per_size.items(), key=lambda item: int(item[0])):
+            size = int(size_text)
+            slot = next(
+                (item for item in opportunity["decision_slots"]
+                 if (item["message_bytes"]["min"] is None
+                     or size >= item["message_bytes"]["min"])
+                 and (item["message_bytes"]["max"] is None
+                      or size <= item["message_bytes"]["max"])),
+                None,
+            )
+            if slot is None:
+                raise EvalError(f"measured size {size} has no compiler slot")
+            algorithm = selected_algorithms[slot["slot_id"]]
+            try:
+                selected_latencies.append(
+                    float(row["algorithm_median_us"][algorithm])
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise EvalError(
+                    f"control analysis lacks {algorithm} timing at {size} B"
+                ) from exc
+        screen_geomean = _geomean(selected_latencies)
+        policy_key = bridge._fingerprint({
+            "opportunity_id": opportunity_id,
+            "slot_option_ids": selected,
+        })
+        policy_counts[policy_key] += 1
+        exact_choices = sum(
+            selected[slot_id] == oracle_options[slot_id] for slot_id in slots
+        )
+        materializer = hint["selections"][opportunity_id]
+        scored.append({
+            "response": str(response_path),
+            "response_sha256": _sha256(response_path),
+            "accepted": accepted,
+            "errors": errors,
+            "policy_key": policy_key,
+            "candidate_id": materializer["candidate_id"],
+            "materializer_kind": materializer["kind"],
+            "selected_option_ids": selected,
+            "selected_algorithms": selected_algorithms,
+            "exact_compiler_bin_oracle_policy": exact_choices == len(slots),
+            "bin_choice_accuracy": exact_choices / len(slots),
+            "control_screen_geomean_us": screen_geomean,
+            "baseline_speedup_screen": baseline_geomean / screen_geomean,
+            "distance_to_compiler_bin_oracle": (
+                screen_geomean / bin_oracle_geomean
+            ),
+        })
+
+    modal_policy, modal_count = min(
+        policy_counts.items(), key=lambda item: (-item[1], item[0])
+    )
+    return {
+        "schema_version": "gicc-collective-decision-score-v1",
+        "graph_id": graph["graph_id"],
+        "prompt_view": prompt_view,
+        "prompt_sha256": _sha256(prompt),
+        "response_count": len(scored),
+        "aggregate": {
+            "accepted_count": sum(item["accepted"] for item in scored),
+            "invalid_output_rate": (
+                sum(not item["accepted"] for item in scored) / len(scored)
+            ),
+            "exact_oracle_policy_rate": (
+                sum(item["exact_compiler_bin_oracle_policy"] for item in scored)
+                / len(scored)
+            ),
+            "mean_bin_choice_accuracy": statistics.mean(
+                item["bin_choice_accuracy"] for item in scored
+            ),
+            "median_baseline_speedup_screen": statistics.median(
+                item["baseline_speedup_screen"] for item in scored
+            ),
+            "median_distance_to_compiler_bin_oracle": statistics.median(
+                item["distance_to_compiler_bin_oracle"] for item in scored
+            ),
+            "unique_materialized_policy_count": len(policy_counts),
+            "modal_policy_key": modal_policy,
+            "modal_policy_rate": modal_count / len(scored),
+        },
+        "responses": scored,
+        "scope": (
+            "Counterfactual screen from frozen uniform compiler controls. "
+            "It is not a runtime measurement of the materialized size policy; "
+            "paper performance requires pdebug confirmation."
+        ),
+        "runtime_confirmation_required": True,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -636,6 +806,14 @@ def main() -> int:
     oracle.add_argument("--analysis", type=Path, required=True)
     oracle.add_argument("--decision", type=Path, required=True)
     oracle.add_argument("--hint", type=Path, required=True)
+    score = sub.add_parser("score")
+    score.add_argument("--graph", type=Path, required=True)
+    score.add_argument("--analysis", type=Path, required=True)
+    score.add_argument("--prompt", type=Path, required=True)
+    score.add_argument("--prompt-view", choices=plans.MODEL_VIEW_KINDS,
+                       required=True)
+    score.add_argument("--out", type=Path, required=True)
+    score.add_argument("responses", type=Path, nargs="+")
     args = parser.parse_args()
     try:
         if args.command == "controls":
@@ -674,7 +852,7 @@ def main() -> int:
                 "aggregate": summary["aggregate"],
                 "gate_c": summary["gate_c"],
             }, indent=2, sort_keys=True))
-        else:
+        elif args.command == "oracle":
             decision, hint = oracle_decision(
                 _read_json(args.graph), _read_json(args.analysis)
             )
@@ -684,6 +862,13 @@ def main() -> int:
                 "compiler-collective-eval: wrote measured compiler-bin oracle; "
                 "model_invoked=false"
             )
+        else:
+            summary = score_decisions(
+                _read_json(args.graph), _read_json(args.analysis),
+                args.prompt, args.prompt_view, args.responses,
+            )
+            bridge._write_json_atomic(args.out, summary)
+            print(json.dumps(summary["aggregate"], indent=2, sort_keys=True))
         return 0
     except (EvalError, plans.CollectivePlanError, OSError, ValueError) as exc:
         print(f"compiler-collective-eval: ERROR: {exc}", file=sys.stderr)
