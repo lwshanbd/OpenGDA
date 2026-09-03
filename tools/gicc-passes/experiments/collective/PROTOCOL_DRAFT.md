@@ -234,6 +234,12 @@ compiler-bin policy has a positive speedup and its paired 95% interval excludes
 one. `prepare_compiler_collective_gate_e.py` regenerates Gate D from all three
 raw allocation monitors before freezing an authorization request; it has no
 provider or scheduler call path.
+`run_compiler_collective_model_trials.py` additionally requires a
+content-addressed authorization that binds the request, every prompt, the
+system prompt and response schema, provider executable/version/model/effort,
+and bounded transport retries. It runs calls sequentially with no tools or
+session persistence, archives each raw envelope before bridge validation, and
+cannot be launched by the Gate-A-through-D controllers.
 
 Requires separate explicit authorization before sending the new collective
 graph to any external provider. The previous authorization for cleaned

@@ -291,8 +291,11 @@ def build_request(inputs: dict[str, Any], response_schema_path: Path,
             "granted": False,
             "must_bind_exactly": [
                 "request_id", "system_prompt_sha256", "prompt_sha256",
-                "provider", "exact_model_or_alias", "provider_cli_version",
-                "decoding_settings", "independent_responses",
+                "provider.kind", "provider.executable",
+                "provider.cli_version", "provider.requested_model",
+                "provider.effort", "provider.fresh_session_per_trial",
+                "provider.structured_output", "transport_retry",
+                "independent_responses",
             ],
             "note": (
                 "Earlier Minimod/Jacobi authorization does not cover these "
@@ -326,6 +329,22 @@ def build_request(inputs: dict[str, Any], response_schema_path: Path,
                 "ineligible until a disjoint collective-algorithm training "
                 "dataset exists; old path-selection labels are not reusable"
             ),
+        },
+        "implementation": {
+            "gate_e_preparer": {
+                "path": (HERE / "prepare_compiler_collective_gate_e.py")
+                .relative_to(ROOT).as_posix(),
+                "sha256": sha256_file(
+                    HERE / "prepare_compiler_collective_gate_e.py"
+                ),
+            },
+            "model_trial_runner": {
+                "path": (HERE / "run_compiler_collective_model_trials.py")
+                .relative_to(ROOT).as_posix(),
+                "sha256": sha256_file(
+                    HERE / "run_compiler_collective_model_trials.py"
+                ),
+            },
         },
         "files": files,
     }
