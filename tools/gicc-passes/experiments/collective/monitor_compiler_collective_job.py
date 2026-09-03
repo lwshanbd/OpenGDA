@@ -301,17 +301,52 @@ def summarize_jobspec(value: Any) -> dict[str, Any]:
     command = None
     if isinstance(tasks, list) and tasks and isinstance(tasks[0], dict):
         command = tasks[0].get("command")
+    embedded_script_sha256 = None
+    files = system.get("files")
+    if isinstance(files, dict):
+        script = files.get("script")
+        script_data = script.get("data") if isinstance(script, dict) else None
+        if isinstance(script_data, str):
+            embedded_script_sha256 = hashlib.sha256(
+                script_data.encode()
+            ).hexdigest()
     return {
         "queue": queue,
         "cwd": system.get("cwd"),
         "duration_seconds": system.get("duration"),
         "command": command,
+        "embedded_script_sha256": embedded_script_sha256,
         "resources": value.get("resources"),
         "environment": {
             key: environment[key]
             for key in sorted(environment)
             if SAFE_ENV_RE.fullmatch(key)
         },
+    }
+
+
+def summarize_resources(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise MonitorError("resource set is not Flux R version 1")
+    execution = value.get("execution")
+    if not isinstance(execution, dict):
+        raise MonitorError("resource set lacks execution details")
+    nodelist = execution.get("nodelist")
+    if (not isinstance(nodelist, list) or not nodelist
+            or any(not isinstance(item, str) or not item for item in nodelist)):
+        raise MonitorError("resource set lacks a node list")
+    properties = execution.get("properties")
+    if not isinstance(properties, dict) or "pdebug" not in properties:
+        raise MonitorError("resource set is not a pdebug allocation")
+    lite = execution.get("R_lite")
+    if not isinstance(lite, list) or not lite:
+        raise MonitorError("resource set lacks R_lite")
+    return {
+        "nodelist": nodelist,
+        "ranks": [item.get("rank") for item in lite],
+        "starttime": execution.get("starttime"),
+        "expiration": execution.get("expiration"),
+        "pdebug_ranks": properties["pdebug"],
     }
 
 
@@ -361,10 +396,12 @@ def main() -> int:
         run_flux("job", "wait-event", args.job_id, "clean")
         eventlog_text = run_flux("job", "info", args.job_id, "eventlog")
         jobspec_text = run_flux("job", "info", "-o", args.job_id, "jobspec")
+        resources_text = run_flux("job", "info", args.job_id, "R")
         events = parse_json_lines(eventlog_text, "eventlog")
         scheduler = scheduler_result(events)
         state["scheduler"] = scheduler
         state["jobspec"] = summarize_jobspec(json.loads(jobspec_text))
+        state["resource_set"] = summarize_resources(json.loads(resources_text))
         state["stderr_summary"] = summarize_stderr(args.stderr)
         state["stderr_bytes"] = state["stderr_summary"]["bytes"]
         state["stdout_bytes"] = args.stdout.stat().st_size if args.stdout.exists() else 0

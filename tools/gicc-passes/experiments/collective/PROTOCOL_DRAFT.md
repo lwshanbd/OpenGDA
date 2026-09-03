@@ -203,16 +203,26 @@ result for these four criteria; a narrative judgment is not sufficient.
 
 Only after Gate C passes:
 
-- three paired replicates per surviving uniform arm;
-- one arm per pdebug job, sequentially submitted;
-- rotate arm order between replicates before submission;
+- three paired allocation blocks covering every surviving uniform arm;
+- one two-node `pdebug` batch allocation at a time; within that allocation,
+  execute all arms sequentially on the exact same nodes;
+- rotate arm order by one position between allocation blocks;
 - warmup 2, timed calls 7 per size;
 - report rank-max median latency per job;
 - analyze per-size winners, best uniform target, pointwise oracle, and the
   compiler-bin oracle restricted to the four frozen regions;
-- paired bootstrap confidence intervals over replicate-level log ratios;
+- exact paired bootstrap confidence intervals over the three complete
+  same-allocation replicate-block log ratios;
 - freeze graph, manifest, hints, source/catalog hashes, materialized-IR hashes,
   binary hashes, job IDs, node lists, and raw logs.
+
+This same-allocation design is the meaning of "paired": merely assigning arm
+jobs the same replicate number while allowing different nodes would not
+support a paired confidence interval. `continue_compiler_collective_gate_d.sh`
+waits for the machine-readable Gate-C pass, submits only three sequential
+batch allocations, audits every per-arm log and exact Flux resource set, and
+stops after `gicc-collective-confirmatory-analysis-v1`. It cannot invoke a
+provider or enter Gate E.
 
 The paper's action-space headroom is the compiler-bin oracle relative to the
 semantic baseline and best uniform target, not an unconstrained source oracle.

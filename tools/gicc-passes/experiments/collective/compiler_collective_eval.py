@@ -1322,6 +1322,196 @@ def _geomean(values: list[float]) -> float:
     return math.exp(sum(math.log(value) for value in values) / len(values))
 
 
+def _percentile(values: list[float], fraction: float) -> float:
+    if not values or fraction < 0.0 or fraction > 1.0:
+        raise EvalError("percentile requires values and a fraction in [0, 1]")
+    ordered = sorted(values)
+    position = fraction * (len(ordered) - 1)
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def paired_block_bootstrap(ratios: list[float]) -> dict[str, Any]:
+    """Exact n-out-of-n bootstrap over complete allocation blocks."""
+    if not ratios or any(value <= 0 or not math.isfinite(value)
+                         for value in ratios):
+        raise EvalError("paired bootstrap requires positive finite ratios")
+    samples = itertools.product(range(len(ratios)), repeat=len(ratios))
+    estimates = [
+        _geomean([ratios[index] for index in sample]) for sample in samples
+    ]
+    return {
+        "estimate": _geomean(ratios),
+        "replicate_block_ratios": ratios,
+        "method": (
+            "exact n-out-of-n paired bootstrap over same-allocation "
+            "replicate blocks"
+        ),
+        "bootstrap_samples": len(estimates),
+        "lower_2_5_percent": _percentile(estimates, 0.025),
+        "upper_97_5_percent": _percentile(estimates, 0.975),
+    }
+
+
+def _verify_confirmatory_artifacts(
+    monitor_value: dict[str, Any], *, replicate: int,
+    graph: dict[str, Any], manifest: dict[str, Any], screen: dict[str, Any],
+    arm_names: set[str], arm_order: list[str], output_dir: Path,
+) -> dict[str, Any]:
+    """Re-hash the exact compiler bundle consumed by one Gate-D block."""
+    artifacts = monitor_value.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise EvalError(f"replicate {replicate} lacks frozen artifacts")
+    records: dict[Path, str] = {}
+    for record in artifacts:
+        if not isinstance(record, dict):
+            raise EvalError(f"replicate {replicate} has an invalid artifact")
+        path_value = record.get("path")
+        digest = record.get("sha256")
+        if not isinstance(path_value, str) or not Path(path_value).is_absolute():
+            raise EvalError(
+                f"replicate {replicate} has a non-absolute artifact path"
+            )
+        if (not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise EvalError(
+                f"replicate {replicate} has an invalid artifact hash"
+            )
+        path = Path(path_value).resolve()
+        if path in records:
+            raise EvalError(f"replicate {replicate} has duplicate artifacts")
+        if not path.is_file() or _sha256(path) != digest:
+            raise EvalError(
+                f"replicate {replicate} artifact changed: {path}"
+            )
+        records[path] = digest
+
+    freezes = [
+        path for path in records if path.name == "FROZEN_V3_MANIFEST.json"
+    ]
+    if len(freezes) != 1:
+        raise EvalError(
+            f"replicate {replicate} lacks one FROZEN_V3_MANIFEST.json"
+        )
+    freeze_path = freezes[0]
+    bundle_root = freeze_path.parent
+    script_root = Path(__file__).resolve().parent
+    runner_path = script_root / "run_compiler_collective_replicate.sh"
+    multi_monitor_path = (
+        script_root / "monitor_compiler_collective_replicate.py"
+    )
+    graph_path = bundle_root / "discovery/graph.json"
+    manifest_path = bundle_root / "controls/manifest.json"
+    screen_path = bundle_root / "gate-b/analysis.json"
+    required = {
+        freeze_path,
+        graph_path.resolve(),
+        manifest_path.resolve(),
+        screen_path.resolve(),
+        runner_path.resolve(),
+        multi_monitor_path.resolve(),
+    }
+    for name in arm_names:
+        required.update({
+            (bundle_root / f"binaries/{name}/compiler_collective_eval").resolve(),
+            (bundle_root / f"binaries/{name}/build-provenance.json").resolve(),
+            (bundle_root / f"controls/{name}-hint.json").resolve(),
+        })
+    if set(records) != required:
+        missing = sorted(str(path) for path in required - set(records))
+        extra = sorted(str(path) for path in set(records) - required)
+        raise EvalError(
+            f"replicate {replicate} artifact set mismatch: "
+            f"missing={missing}, extra={extra}"
+        )
+
+    if (_read_json(graph_path) != graph
+            or _read_json(manifest_path) != manifest
+            or _read_json(screen_path) != screen):
+        raise EvalError(
+            f"replicate {replicate} artifacts disagree with analysis inputs"
+        )
+    verify_manifest(graph, manifest, manifest_path.parent)
+    freeze = _read_json(freeze_path)
+    if not isinstance(freeze, dict):
+        raise EvalError(
+            f"replicate {replicate} has an invalid offline freeze"
+        )
+    freeze_payload = dict(freeze)
+    freeze_id = freeze_payload.pop("manifest_id", None)
+    if (freeze.get("schema_version") != OFFLINE_FREEZE_SCHEMA
+            or freeze.get("bundle_version") != 3
+            or freeze_id != bridge._fingerprint(freeze_payload)
+            or freeze.get("graph", {}).get("graph_id") != graph["graph_id"]
+            or freeze.get("uniform_controls", {}).get("manifest_id")
+            != manifest["manifest_id"]):
+        raise EvalError(
+            f"replicate {replicate} has an invalid offline freeze"
+        )
+    embedded = monitor_value.get("jobspec", {}).get(
+        "embedded_script_sha256"
+    )
+    if embedded != records[runner_path.resolve()]:
+        raise EvalError(
+            f"replicate {replicate} batch script is not the frozen runner"
+        )
+    jobspec = monitor_value.get("jobspec")
+    expected_resources = [{
+        "type": "node",
+        "count": 2,
+        "with": [{
+            "type": "slot",
+            "count": 8,
+            "with": [
+                {"type": "core", "count": 8},
+                {"type": "gpu", "count": 1},
+            ],
+            "label": "task",
+        }],
+    }]
+    if (not isinstance(jobspec, dict)
+            or jobspec.get("duration_seconds") != 2700.0
+            or jobspec.get("resources") != expected_resources):
+        raise EvalError(
+            f"replicate {replicate} has the wrong batch resource contract"
+        )
+    command = jobspec.get("command")
+    if (not isinstance(command, list)
+            or any(not isinstance(item, str) for item in command)):
+        raise EvalError(
+            f"replicate {replicate} lacks the Flux batch command"
+        )
+    try:
+        script_index = command.index("{{tmpdir}}/script")
+    except ValueError:
+        raise EvalError(
+            f"replicate {replicate} lacks the Flux batch command"
+        ) from None
+    arguments = command[script_index + 1:]
+    if (len(arguments) != len(arm_order) + 3
+            or Path(arguments[0]).resolve() != bundle_root
+            or Path(arguments[1]).resolve() != output_dir.resolve()
+            or arguments[2] != str(replicate)
+            or arguments[3:] != arm_order):
+        raise EvalError(
+            f"replicate {replicate} batch arguments disagree with its logs"
+        )
+    artifact_rows = [
+        {"path": str(path), "sha256": records[path]}
+        for path in sorted(records, key=str)
+    ]
+    return {
+        "bundle_root": str(bundle_root),
+        "artifact_count": len(artifact_rows),
+        "artifact_set_id": bridge._fingerprint(artifact_rows),
+        "runner_sha256": records[runner_path.resolve()],
+    }
+
+
 def analyze_logs(
     graph_value: Any, manifest_value: Any, logs: list[Path]
 ) -> dict[str, Any]:
@@ -1492,6 +1682,291 @@ def analyze_logs(
             "Compiler-generated controls only; no LLM result. The oracle is "
             "restricted to the exact source-free catalog and compiler-owned "
             "message thresholds."
+        ),
+    }
+
+
+def confirmatory_analysis(
+    graph_value: Any, manifest_value: Any, screen_value: Any,
+    monitor_paths: list[Path],
+) -> dict[str, Any]:
+    """Analyze three same-allocation, rotated Gate-D replicate blocks."""
+    graph = plans.verified_graph(graph_value)
+    arms = _manifest_arms(manifest_value)
+    if manifest_value.get("graph_id") != graph["graph_id"]:
+        raise EvalError("confirmatory manifest does not match graph")
+    if (not isinstance(screen_value, dict)
+            or screen_value.get("schema_version")
+            != "gicc-collective-control-analysis-v1"
+            or screen_value.get("graph_id") != graph["graph_id"]
+            or screen_value.get("gate_c", {}).get("passed") is not True):
+        raise EvalError("confirmatory analysis requires a passed Gate-C screen")
+    by_name = {arm["name"]: arm["algorithm"] for arm in arms}
+    if len(by_name) != len(arms):
+        raise EvalError("confirmatory manifest has duplicate arm names")
+
+    monitors = {}
+    replicate_logs: dict[int, dict[str, Path]] = {}
+    node_lists = {}
+    orders = {}
+    monitor_records = []
+    for path in monitor_paths:
+        value = _read_json(path)
+        if (not isinstance(value, dict)
+                or value.get("schema_version")
+                != "gicc-collective-replicate-job-monitor-v1"
+                or value.get("state") != "passed"):
+            raise EvalError(f"confirmatory monitor did not pass: {path}")
+        replicate = value.get("replicate")
+        if (not isinstance(replicate, int) or replicate in monitors):
+            raise EvalError("invalid or duplicate confirmatory replicate")
+        if value.get("jobspec", {}).get("queue") != "pdebug":
+            raise EvalError(f"replicate {replicate} is not a pdebug job")
+        if (value.get("scheduler", {}).get("exit_code") != 0
+                or value.get("scheduler", {}).get("exception_types") != []):
+            raise EvalError(f"replicate {replicate} did not finish cleanly")
+        expected = value.get("expected")
+        contract = {
+            "nodes": 2, "ranks": 16, "ppn": 8,
+            "runs": 7, "warmup": 2, "sizes": GATE_B_SIZES,
+        }
+        if expected != contract:
+            raise EvalError(f"replicate {replicate} has the wrong contract")
+        resources = value.get("resource_set")
+        nodelist = resources.get("nodelist") if isinstance(resources, dict) else None
+        if not isinstance(nodelist, list) or not nodelist:
+            raise EvalError(f"replicate {replicate} lacks an exact node list")
+        benchmarks = value.get("benchmarks")
+        if not isinstance(benchmarks, dict) or set(benchmarks) != set(by_name):
+            raise EvalError(f"replicate {replicate} lacks complete arm coverage")
+        driver_record = value.get("driver_stdout")
+        if not isinstance(driver_record, dict):
+            raise EvalError(f"replicate {replicate} lacks a driver log")
+        driver_path = Path(driver_record.get("path", ""))
+        if (not driver_path.is_file()
+                or _sha256(driver_path) != driver_record.get("sha256")
+                or driver_path.stat().st_size != driver_record.get("bytes")):
+            raise EvalError(f"replicate {replicate} driver log changed")
+        driver_lines = driver_path.read_text().splitlines()
+        config_prefix = f"REPLICATE_CONFIG replicate={replicate} arms="
+        if (not driver_lines or not driver_lines[0].startswith(config_prefix)
+                or driver_lines[-1] != f"REPLICATE_DONE replicate={replicate}"):
+            raise EvalError(f"replicate {replicate} has an invalid driver log")
+        order = driver_lines[0][len(config_prefix):].split()
+        starts = [
+            line.rsplit("=", 1)[1] for line in driver_lines
+            if line.startswith(
+                f"REPLICATE_ARM_START replicate={replicate} arm="
+            )
+        ]
+        dones = [
+            line.rsplit("=", 1)[1] for line in driver_lines
+            if line.startswith(
+                f"REPLICATE_ARM_DONE replicate={replicate} arm="
+            )
+        ]
+        if starts != order or dones != order:
+            raise EvalError(f"replicate {replicate} driver did not finish its order")
+        if len(order) != len(by_name) or set(order) != set(by_name):
+            raise EvalError(f"replicate {replicate} driver order is incomplete")
+        artifact_summary = _verify_confirmatory_artifacts(
+            value, replicate=replicate, graph=graph,
+            manifest=manifest_value, screen=screen_value,
+            arm_names=set(by_name), arm_order=order,
+            output_dir=driver_path.parent,
+        )
+        orders[replicate] = order
+        node_lists[replicate] = nodelist
+
+        logs = {}
+        for name, record in benchmarks.items():
+            if not isinstance(record, dict):
+                raise EvalError(f"replicate {replicate}/{name} is invalid")
+            stdout_record = record.get("stdout")
+            benchmark = record.get("benchmark")
+            if not isinstance(stdout_record, dict) or not isinstance(benchmark, dict):
+                raise EvalError(f"replicate {replicate}/{name} is incomplete")
+            stdout = Path(stdout_record.get("path", ""))
+            if (not stdout.is_file()
+                    or _sha256(stdout) != stdout_record.get("sha256")
+                    or stdout.stat().st_size != stdout_record.get("bytes")):
+                raise EvalError(f"replicate {replicate}/{name} log changed")
+            parsed = _parse_log_record(stdout)
+            expected_config = {key: contract[key] for key in (
+                "nodes", "ranks", "ppn", "runs", "warmup"
+            )}
+            if (parsed["label"] != name
+                    or any(parsed[key] != expected_config[key]
+                           for key in expected_config)
+                    or sorted(parsed["rows"]) != GATE_B_SIZES
+                    or benchmark.get("results") != {
+                        str(size): parsed["rows"][size]
+                        for size in GATE_B_SIZES
+                    }):
+                raise EvalError(
+                    f"replicate {replicate}/{name} log disagrees with monitor"
+                )
+            logs[name] = stdout
+        monitors[replicate] = value
+        replicate_logs[replicate] = logs
+        monitor_records.append({
+            "replicate": replicate,
+            "job_id": value.get("job_id"),
+            "monitor": str(path),
+            "monitor_sha256": _sha256(path),
+            "nodelist": nodelist,
+            "arm_order": order,
+            **artifact_summary,
+        })
+
+    if set(monitors) != {1, 2, 3}:
+        raise EvalError("Gate D requires exactly replicate blocks 1, 2, and 3")
+    base_order = orders[1]
+    for replicate in (1, 2, 3):
+        shift = replicate - 1
+        expected_order = base_order[shift:] + base_order[:shift]
+        if orders[replicate] != expected_order:
+            raise EvalError("Gate-D arm order is not rotated by replicate")
+    job_ids = {monitors[replicate].get("job_id") for replicate in monitors}
+    if None in job_ids or len(job_ids) != 3:
+        raise EvalError("Gate-D replicate jobs are not distinct")
+
+    all_logs = [
+        replicate_logs[replicate][name]
+        for replicate in sorted(replicate_logs)
+        for name in by_name
+    ]
+    combined = analyze_logs(graph, manifest_value, all_logs)
+    screen_best_uniform = screen_value["aggregate"]["best_uniform_algorithm"]
+    screen_pointwise = {
+        int(size): row["winner"]
+        for size, row in screen_value["per_size"].items()
+    }
+    screen_bin_by_slot = {
+        row["slot_id"]: row["algorithm"]
+        for row in screen_value["compiler_bin_oracle"]
+    }
+    slots = graph["opportunities"][0]["decision_slots"]
+    if set(screen_pointwise) != set(GATE_B_SIZES):
+        raise EvalError("Gate-C pointwise oracle lacks the frozen size sweep")
+    if set(screen_bin_by_slot) != {slot["slot_id"] for slot in slots}:
+        raise EvalError("Gate-C compiler-bin policy lacks graph slots")
+    declared_algorithms = set(by_name.values())
+    if (not set(screen_pointwise.values()).issubset(declared_algorithms)
+            or not set(screen_bin_by_slot.values()).issubset(
+                declared_algorithms
+            )
+            or screen_best_uniform not in declared_algorithms):
+        raise EvalError("Gate-C screen names an undeclared compiler control")
+
+    def bin_algorithm(size: int) -> str:
+        slot = next(
+            item for item in slots
+            if (item["message_bytes"]["min"] is None
+                or size >= item["message_bytes"]["min"])
+            and (item["message_bytes"]["max"] is None
+                 or size <= item["message_bytes"]["max"])
+        )
+        return screen_bin_by_slot[slot["slot_id"]]
+
+    confirm_pointwise = {
+        int(size): row["winner"] for size, row in combined["per_size"].items()
+    }
+    confirm_best_uniform = combined["aggregate"]["best_uniform_algorithm"]
+    policy_algorithms = {
+        "screen_frozen_best_uniform": {
+            size: screen_best_uniform for size in GATE_B_SIZES
+        },
+        "screen_frozen_pointwise_oracle": screen_pointwise,
+        "screen_frozen_compiler_bin_oracle": {
+            size: bin_algorithm(size) for size in GATE_B_SIZES
+        },
+        "confirmatory_best_uniform_posthoc": {
+            size: confirm_best_uniform for size in GATE_B_SIZES
+        },
+        "confirmatory_pointwise_capacity_oracle_posthoc": confirm_pointwise,
+    }
+    ratios_by_policy: dict[str, list[float]] = {
+        name: [] for name in policy_algorithms
+    }
+    per_size_ratios: dict[str, dict[int, list[float]]] = {
+        name: {size: [] for size in GATE_B_SIZES}
+        for name in policy_algorithms
+    }
+    replicate_latencies = {}
+    for replicate in (1, 2, 3):
+        by_algorithm = {
+            by_name[name]: _parse_log_record(path)["rows"]
+            for name, path in replicate_logs[replicate].items()
+        }
+        baseline = by_algorithm["baseline_auto"]
+        replicate_latencies[str(replicate)] = {}
+        for policy_name, selection in policy_algorithms.items():
+            selected = [
+                by_algorithm[selection[size]][size] for size in GATE_B_SIZES
+            ]
+            baseline_values = [baseline[size] for size in GATE_B_SIZES]
+            speedup = _geomean(baseline_values) / _geomean(selected)
+            ratios_by_policy[policy_name].append(speedup)
+            replicate_latencies[str(replicate)][policy_name] = {
+                "geomean_us": _geomean(selected),
+                "baseline_speedup": speedup,
+            }
+            for size, latency in zip(GATE_B_SIZES, selected, strict=True):
+                per_size_ratios[policy_name][size].append(
+                    baseline[size] / latency
+                )
+
+    paired = {
+        policy_name: {
+            "aggregate": paired_block_bootstrap(ratios),
+            "per_size": {
+                str(size): paired_block_bootstrap(
+                    per_size_ratios[policy_name][size]
+                )
+                for size in GATE_B_SIZES
+            },
+            "selection": {
+                str(size): algorithm
+                for size, algorithm in policy_algorithms[policy_name].items()
+            },
+            "selection_scope": (
+                "frozen from Gate C"
+                if policy_name.startswith("screen_frozen_")
+                else "post-hoc confirmatory capacity description"
+            ),
+        }
+        for policy_name, ratios in ratios_by_policy.items()
+    }
+    primary = paired["screen_frozen_compiler_bin_oracle"]["aggregate"]
+    return {
+        "schema_version": "gicc-collective-confirmatory-analysis-v1",
+        "graph_id": graph["graph_id"],
+        "manifest_id": manifest_value["manifest_id"],
+        "screen_analysis_id": bridge._fingerprint(screen_value),
+        "replicate_monitors": sorted(
+            monitor_records, key=lambda item: item["replicate"]
+        ),
+        "replicate_latencies": replicate_latencies,
+        "combined_control_analysis": combined,
+        "paired_baseline_speedups": paired,
+        "primary_headroom_confirmation": {
+            "estimand": (
+                "baseline_auto over the Gate-C-frozen compiler-bin policy"
+            ),
+            "point_estimate": primary["estimate"],
+            "lower_95_percent": primary["lower_2_5_percent"],
+            "upper_95_percent": primary["upper_97_5_percent"],
+            "positive_point_estimate": primary["estimate"] > 1.0,
+            "confidence_interval_excludes_one": (
+                primary["lower_2_5_percent"] > 1.0
+            ),
+        },
+        "scope": (
+            "Compiler-generated controls only. Every arm within a replicate "
+            "ran sequentially on the same frozen pdebug allocation; Gate-C "
+            "selections are primary and confirmatory winners are post-hoc "
+            "capacity descriptions. No model output is evaluated here."
         ),
     }
 
@@ -1826,6 +2301,13 @@ def main() -> int:
     analyze.add_argument("--manifest", type=Path, required=True)
     analyze.add_argument("--out", type=Path, required=True)
     analyze.add_argument("logs", type=Path, nargs="+")
+    confirm = sub.add_parser("confirm")
+    confirm.add_argument("--graph", type=Path, required=True)
+    confirm.add_argument("--manifest", type=Path, required=True)
+    confirm.add_argument("--screen-analysis", type=Path, required=True)
+    confirm.add_argument("--replicate-monitor", type=Path, action="append",
+                         required=True)
+    confirm.add_argument("--out", type=Path, required=True)
     oracle = sub.add_parser("oracle")
     oracle.add_argument("--graph", type=Path, required=True)
     oracle.add_argument("--analysis", type=Path, required=True)
@@ -1928,6 +2410,17 @@ def main() -> int:
                 "aggregate": summary["aggregate"],
                 "gate_c": summary["gate_c"],
             }, indent=2, sort_keys=True))
+        elif args.command == "confirm":
+            summary = confirmatory_analysis(
+                _read_json(args.graph), _read_json(args.manifest),
+                _read_json(args.screen_analysis), args.replicate_monitor,
+            )
+            summary["screen_analysis_sha256"] = _sha256(args.screen_analysis)
+            bridge._write_json_atomic(args.out, summary)
+            print(json.dumps(
+                summary["primary_headroom_confirmation"],
+                indent=2, sort_keys=True,
+            ))
         elif args.command == "oracle":
             decision, hint = oracle_decision(
                 _read_json(args.graph), _read_json(args.analysis)
@@ -2025,7 +2518,8 @@ def main() -> int:
                 "compiler-collective-eval: verified passed pdebug Gate-A monitor"
             )
         return 0
-    except (EvalError, plans.CollectivePlanError, OSError, ValueError) as exc:
+    except (EvalError, plans.CollectivePlanError, OSError, ValueError,
+            KeyError) as exc:
         print(f"compiler-collective-eval: ERROR: {exc}", file=sys.stderr)
         return 2
 

@@ -1,3 +1,4 @@
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ PASS_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PASS_ROOT / "experiments" / "collective"))
 
 import monitor_compiler_collective_job as monitor
+import monitor_compiler_collective_replicate as replicate_monitor
 
 
 class CompilerCollectiveJobMonitorTests(unittest.TestCase):
@@ -80,14 +82,52 @@ class CompilerCollectiveJobMonitorTests(unittest.TestCase):
                     "GICC_COLL_SIZES": "4096",
                     "SECRET_TOKEN": "must-not-be-recorded",
                 },
+                "files": {"script": {"data": "#!/bin/sh\necho batch\n"}},
             }},
         }
         summary = monitor.summarize_jobspec(jobspec)
         self.assertEqual("pdebug", summary["queue"])
         self.assertEqual({"GICC_COLL_SIZES": "4096"}, summary["environment"])
+        self.assertEqual(
+            hashlib.sha256(b"#!/bin/sh\necho batch\n").hexdigest(),
+            summary["embedded_script_sha256"],
+        )
         jobspec["attributes"]["system"]["queue"] = "pci"
         with self.assertRaisesRegex(monitor.MonitorError, "expected 'pdebug'"):
             monitor.summarize_jobspec(jobspec)
+
+    def test_resource_summary_freezes_exact_pdebug_nodes(self):
+        resources = {
+            "version": 1,
+            "execution": {
+                "R_lite": [{
+                    "rank": "29-30",
+                    "children": {"core": "0-63", "gpu": "0-7"},
+                }],
+                "nodelist": ["tioga[38-39]"],
+                "properties": {"pall": "29-30", "pdebug": "29-30"},
+                "starttime": 10,
+                "expiration": 20,
+            },
+        }
+        summary = monitor.summarize_resources(resources)
+        self.assertEqual(["tioga[38-39]"], summary["nodelist"])
+        self.assertEqual(["29-30"], summary["ranks"])
+        resources["execution"]["properties"].pop("pdebug")
+        with self.assertRaisesRegex(monitor.MonitorError, "pdebug allocation"):
+            monitor.summarize_resources(resources)
+
+    def test_replicate_monitor_requires_unique_named_log_paths(self):
+        values = [
+            replicate_monitor.named_path("baseline_auto=/tmp/base.out"),
+            replicate_monitor.named_path("hierarchical_ring=/tmp/hier.out"),
+        ]
+        result = replicate_monitor.unique_paths(values, "benchmark")
+        self.assertEqual(
+            {"baseline_auto", "hierarchical_ring"}, set(result)
+        )
+        with self.assertRaisesRegex(monitor.MonitorError, "duplicate"):
+            replicate_monitor.unique_paths([values[0], values[0]], "benchmark")
 
 
 if __name__ == "__main__":

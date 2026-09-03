@@ -326,6 +326,245 @@ class CompilerCollectiveEvalTests(unittest.TestCase):
             self.assertFalse(scores["responses"][1]["accepted"])
             self.assertTrue(scores["runtime_confirmation_required"])
 
+    def test_confirmatory_analysis_pairs_same_allocation_blocks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = controls.generate_controls(
+                self.graph, root / "controls", "1" * 64, "2" * 64
+            )
+            arms = {arm["name"]: arm["algorithm"] for arm in manifest["arms"]}
+            alternatives = sorted(
+                algorithm for algorithm in arms.values()
+                if algorithm != "baseline_auto"
+            )
+            slots = self.graph["opportunities"][0]["decision_slots"]
+            preferred = {}
+            for size in controls.GATE_B_SIZES:
+                slot_index = next(
+                    index for index, slot in enumerate(slots)
+                    if (slot["message_bytes"]["min"] is None
+                        or size >= slot["message_bytes"]["min"])
+                    and (slot["message_bytes"]["max"] is None
+                         or size <= slot["message_bytes"]["max"])
+                )
+                preferred[size] = alternatives[slot_index % 2]
+
+            def write_log(path, label, algorithm, runs, warmup):
+                lines = [
+                    f"COLLECTIVE_CONFIG plan={label} ranks=16 ppn=8 "
+                    f"runs={runs} warmup={warmup}"
+                ]
+                rows = {}
+                for size in controls.GATE_B_SIZES:
+                    latency = 10.0 if algorithm == preferred[size] else 20.0
+                    rows[size] = latency
+                    lines.append(
+                        f"RESULT plan={label} nodes=2 ranks=16 ppn=8 "
+                        f"bytes={size} median_us={latency} errors=0"
+                    )
+                lines.append(f"COLLECTIVE_DONE plan={label} total_errors=0")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("\n".join(lines) + "\n")
+                return rows
+
+            screen_logs = []
+            for name, algorithm in arms.items():
+                path = root / "screen" / f"{name}.out"
+                write_log(path, name, algorithm, 3, 1)
+                screen_logs.append(path)
+            screen = controls.analyze_logs(self.graph, manifest, screen_logs)
+            self.assertTrue(screen["gate_c"]["passed"])
+
+            graph_path = root / "discovery/graph.json"
+            graph_path.parent.mkdir(parents=True)
+            graph_path.write_text(json.dumps(self.graph))
+            screen_path = root / "gate-b/analysis.json"
+            screen_path.parent.mkdir(parents=True)
+            screen_path.write_text(json.dumps(screen))
+            script_root = Path(controls.__file__).resolve().parent
+            runner = script_root / "run_compiler_collective_replicate.sh"
+            multi_monitor = (
+                script_root / "monitor_compiler_collective_replicate.py"
+            )
+            artifact_paths = [
+                root / "FROZEN_V3_MANIFEST.json",
+                root / "controls/manifest.json",
+                graph_path,
+                screen_path,
+                runner,
+                multi_monitor,
+            ]
+            frozen_arms = []
+            for name, algorithm in arms.items():
+                binary = root / f"binaries/{name}/compiler_collective_eval"
+                provenance = root / f"binaries/{name}/build-provenance.json"
+                binary.parent.mkdir(parents=True)
+                binary.write_text(f"binary for {algorithm}\n")
+                provenance.write_text(json.dumps({"arm": name}))
+                hint = root / f"controls/{name}-hint.json"
+                artifact_paths.extend([binary, provenance, hint])
+                frozen_arms.append({
+                    "name": name,
+                    "binary_sha256": controls._sha256(binary),
+                    "hint_sha256": controls._sha256(hint),
+                })
+            freeze_payload = {
+                "schema_version": controls.OFFLINE_FREEZE_SCHEMA,
+                "bundle_version": 3,
+                "graph": {"graph_id": self.graph["graph_id"]},
+                "uniform_controls": {
+                    "manifest_id": manifest["manifest_id"],
+                    "arms": frozen_arms,
+                },
+            }
+            freeze = dict(freeze_payload)
+            freeze["manifest_id"] = controls.bridge._fingerprint(freeze_payload)
+            artifact_paths[0].write_text(json.dumps(freeze))
+            artifact_records = [
+                {
+                    "path": str(path.resolve()),
+                    "sha256": controls._sha256(path),
+                }
+                for path in artifact_paths
+            ]
+            runner_sha256 = controls._sha256(runner)
+
+            base_order = list(arms)
+            monitor_paths = []
+            for replicate in (1, 2, 3):
+                shift = replicate - 1
+                order = base_order[shift:] + base_order[:shift]
+                benchmarks = {}
+                for name, algorithm in arms.items():
+                    path = root / f"rep{replicate}" / f"{name}.out"
+                    rows = write_log(path, name, algorithm, 7, 2)
+                    benchmarks[name] = {
+                        "benchmark": {
+                            "config": {
+                                "label": name, "nodes": 2, "ranks": 16,
+                                "ppn": 8, "runs": 7, "warmup": 2,
+                            },
+                            "results": {
+                                str(size): rows[size]
+                                for size in controls.GATE_B_SIZES
+                            },
+                            "total_errors": 0,
+                        },
+                        "stdout": {
+                            "path": str(path),
+                            "bytes": path.stat().st_size,
+                            "sha256": controls._sha256(path),
+                        },
+                        "stderr": {},
+                    }
+                driver = root / f"rep{replicate}" / "driver.out"
+                driver.write_text(
+                    f"REPLICATE_CONFIG replicate={replicate} "
+                    f"arms={' '.join(order)}\n"
+                    + "".join(
+                        f"REPLICATE_ARM_START replicate={replicate} arm={name}\n"
+                        f"REPLICATE_ARM_DONE replicate={replicate} arm={name}\n"
+                        for name in order
+                    )
+                    + f"REPLICATE_DONE replicate={replicate}\n"
+                )
+                monitor = {
+                    "schema_version": (
+                        "gicc-collective-replicate-job-monitor-v1"
+                    ),
+                    "state": "passed",
+                    "replicate": replicate,
+                    "job_id": f"job-{replicate}",
+                    "expected": {
+                        "nodes": 2, "ranks": 16, "ppn": 8,
+                        "runs": 7, "warmup": 2,
+                        "sizes": controls.GATE_B_SIZES,
+                    },
+                    "scheduler": {"exit_code": 0, "exception_types": []},
+                    "jobspec": {
+                        "queue": "pdebug",
+                        "duration_seconds": 2700.0,
+                        "embedded_script_sha256": runner_sha256,
+                        "resources": [{
+                            "type": "node",
+                            "count": 2,
+                            "with": [{
+                                "type": "slot",
+                                "count": 8,
+                                "with": [
+                                    {"type": "core", "count": 8},
+                                    {"type": "gpu", "count": 1},
+                                ],
+                                "label": "task",
+                            }],
+                        }],
+                        "command": [
+                            "flux", "broker", "-c{{tmpdir}}/conf.json",
+                            "{{tmpdir}}/script", str(root.resolve()),
+                            str((root / f"rep{replicate}").resolve()),
+                            str(replicate), *order,
+                        ],
+                    },
+                    "resource_set": {
+                        "nodelist": [f"tioga[{replicate}-{replicate + 1}]"],
+                    },
+                    "driver_stdout": {
+                        "path": str(driver),
+                        "bytes": driver.stat().st_size,
+                        "sha256": controls._sha256(driver),
+                    },
+                    "benchmarks": benchmarks,
+                    "artifacts": artifact_records,
+                }
+                monitor_path = root / f"rep{replicate}.monitor.json"
+                monitor_path.write_text(json.dumps(monitor))
+                monitor_paths.append(monitor_path)
+
+            result = controls.confirmatory_analysis(
+                self.graph, manifest, screen, monitor_paths
+            )
+            primary = result["primary_headroom_confirmation"]
+            self.assertAlmostEqual(2.0, primary["point_estimate"])
+            self.assertTrue(primary["confidence_interval_excludes_one"])
+            self.assertEqual(
+                27,
+                result["paired_baseline_speedups"][
+                    "screen_frozen_compiler_bin_oracle"
+                ]["aggregate"]["bootstrap_samples"],
+            )
+
+            binary = root / f"binaries/{base_order[0]}/compiler_collective_eval"
+            binary_bytes = binary.read_bytes()
+            binary.write_bytes(binary_bytes + b"tampered\n")
+            with self.assertRaisesRegex(controls.EvalError, "artifact changed"):
+                controls.confirmatory_analysis(
+                    self.graph, manifest, screen, monitor_paths
+                )
+            binary.write_bytes(binary_bytes)
+
+            invalid = json.loads(monitor_paths[1].read_text())
+            invalid_driver = Path(invalid["driver_stdout"]["path"])
+            invalid_driver.write_text(
+                "REPLICATE_CONFIG replicate=2 "
+                f"arms={' '.join(base_order)}\n"
+                + "".join(
+                    f"REPLICATE_ARM_START replicate=2 arm={name}\n"
+                    f"REPLICATE_ARM_DONE replicate=2 arm={name}\n"
+                    for name in base_order
+                )
+                + "REPLICATE_DONE replicate=2\n"
+            )
+            invalid["driver_stdout"].update({
+                "bytes": invalid_driver.stat().st_size,
+                "sha256": controls._sha256(invalid_driver),
+            })
+            invalid["jobspec"]["command"][-len(base_order):] = base_order
+            monitor_paths[1].write_text(json.dumps(invalid))
+            with self.assertRaisesRegex(controls.EvalError, "not rotated"):
+                controls.confirmatory_analysis(
+                    self.graph, manifest, screen, monitor_paths
+                )
+
     def test_gate_a_qualification_requires_exact_runtime_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
