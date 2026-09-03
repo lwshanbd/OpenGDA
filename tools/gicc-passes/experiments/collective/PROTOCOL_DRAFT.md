@@ -292,6 +292,23 @@ and the best control-screen policy among its 20 responses as an explicitly
 post-hoc capability upper bound. Deduplicate these representatives across
 views before compilation and runtime measurement.
 
+### Post-v3 exploratory topology scout
+
+The completed two-node v3 screen is closed as a negative capacity result; its
+thresholds are not relaxed and its Gate D/E remain stopped. Compiler source
+inspection gives a separate, preregistered hypothesis: `baseline_auto` already
+uses the strongest two-node direct/ring path, while `hierarchical_double_tree`
+is designed to gain its logarithmic node-level advantage only at four or more
+nodes. Test that hypothesis with exactly one four-node `pdebug` batch allocation
+running the two existing frozen binaries sequentially on the same nodes, over
+the nine frozen sizes, with one warmup and three timed calls.
+
+This scout deliberately uses a two-node graph's binaries at four nodes, so it
+is exploratory evidence only. A topology-matched v4 graph is warranted only if
+both the baseline-to-pointwise geomean is at least `1.05` and one size has at
+least `1.10x` headroom, with both arms winning at least one size. Otherwise no
+four-node v4 or provider call is launched.
+
 ## Stop conditions
 
 - Any source/catalog hash mismatch.
