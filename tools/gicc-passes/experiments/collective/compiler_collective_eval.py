@@ -36,6 +36,7 @@ import gicc_llm_bridge as bridge  # noqa: E402
 
 MANIFEST_SCHEMA = "gicc-collective-uniform-controls-v1"
 BUILD_PROVENANCE_SCHEMA = "gicc-collective-build-provenance-v1"
+OFFLINE_FREEZE_SCHEMA = "gicc-collective-offline-freeze-v2"
 RESULT_RE = re.compile(r"([a-z_]+)=([^ ]+)")
 HDIR_DEVICE_KERNEL = (
     "_ZN9gicc_coll27hier_direct_rs_cross_kernelEPN4gicc9DeviceCtxE"
@@ -470,6 +471,410 @@ def verify_build_provenance(
             or commands.get("argv") != parsed_commands
             or commands.get("log_sha256") != _sha256(command_path)):
         raise EvalError("recorded build commands do not match the command log")
+
+
+def _provenance_roles(value: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    records = [*value.get("inputs", []), *value.get("artifacts", [])]
+    if any(not isinstance(record, dict) for record in records):
+        raise EvalError("invalid nested build-provenance records")
+    result = {record.get("role"): record for record in records}
+    if (None in result or len(result) != len(records)
+            or any(not isinstance(role, str) for role in result)):
+        raise EvalError("duplicate or invalid nested provenance role")
+    return result
+
+
+def _nested_role_path(
+    value: dict[str, Any], manifest_path: Path, repo_root: Path, role: str,
+) -> Path:
+    roles = _provenance_roles(value)
+    if role not in roles:
+        raise EvalError(f"nested build provenance lacks {role}")
+    return _record_path(
+        roles[role], repo_root=repo_root,
+        build_root=_lexical_absolute(manifest_path).parent,
+    )
+
+
+def _validate_gate_a_monitor(value: Any) -> None:
+    if (not isinstance(value, dict)
+            or value.get("schema_version") != "gicc-collective-job-monitor-v1"
+            or value.get("state") != "passed"):
+        raise EvalError("v3 freeze requires a passed Gate-A monitor")
+    expected = value.get("expected")
+    benchmark = value.get("benchmark")
+    scheduler = value.get("scheduler")
+    jobspec = value.get("jobspec")
+    if (not isinstance(expected, dict) or not isinstance(benchmark, dict)
+            or not isinstance(scheduler, dict) or not isinstance(jobspec, dict)):
+        raise EvalError("Gate-A monitor is incomplete")
+    contract = {
+        "nodes": 2, "ranks": 16, "ppn": 8, "runs": 1, "warmup": 0,
+    }
+    if any(expected.get(name) != expected_value
+           for name, expected_value in contract.items()):
+        raise EvalError("Gate-A monitor has the wrong runtime contract")
+    if expected.get("sizes") != GATE_A_SIZES:
+        raise EvalError("Gate-A monitor has the wrong message sizes")
+    if benchmark.get("config") != {
+        "label": expected.get("label"), **contract,
+    }:
+        raise EvalError("Gate-A benchmark config does not match its contract")
+    if (set(benchmark.get("results", {}))
+            != {str(size) for size in GATE_A_SIZES}
+            or benchmark.get("total_errors") != 0):
+        raise EvalError("Gate-A monitor lacks complete correct results")
+    if (scheduler.get("exit_code") != 0
+            or scheduler.get("exceptions") != []
+            or jobspec.get("queue") != "pdebug"):
+        raise EvalError("Gate-A monitor is not a clean pdebug completion")
+
+
+def _validate_gate_a_logs(value: dict[str, Any], stdout: Path, stderr: Path) -> None:
+    record = _parse_log_record(stdout)
+    expected = value["expected"]
+    contract = {
+        "label": expected["label"],
+        "nodes": expected["nodes"],
+        "ranks": expected["ranks"],
+        "ppn": expected["ppn"],
+        "runs": expected["runs"],
+        "warmup": expected["warmup"],
+    }
+    if any(record[name] != expected_value
+           for name, expected_value in contract.items()):
+        raise EvalError("Gate-A stdout does not match the frozen monitor")
+    observed_rows = {
+        str(size): latency for size, latency in sorted(record["rows"].items())
+    }
+    if observed_rows != value["benchmark"]["results"]:
+        raise EvalError("Gate-A stdout timings do not match the monitor")
+    try:
+        stdout_bytes = stdout.stat().st_size
+        stderr_bytes = stderr.stat().st_size
+    except OSError as exc:
+        raise EvalError(f"cannot stat Gate-A logs: {exc}") from exc
+    if (stdout_bytes != value.get("stdout_bytes")
+            or stderr_bytes != value.get("stderr_bytes")):
+        raise EvalError("Gate-A raw-log sizes do not match the monitor")
+
+
+def _compare_generated_hint(stored_value: Any, generated_value: Any) -> None:
+    if not isinstance(stored_value, dict) or not isinstance(generated_value, dict):
+        raise EvalError("compiler hint is not an object")
+    stored = json.loads(json.dumps(stored_value))
+    generated = json.loads(json.dumps(generated_value))
+    for value in (stored, generated):
+        metadata = value.get("llm_metadata")
+        if not isinstance(metadata, dict):
+            raise EvalError("compiler hint lacks llm_metadata")
+        metadata.pop("producer", None)
+        metadata.pop("model_invoked", None)
+    if stored != generated:
+        raise EvalError("stored compiler hint does not match its decision")
+
+
+def generate_offline_freeze(
+    *, bundle_root: Path, repo_root: Path, platform_path: Path,
+    calibration_paths: list[Path], gate_a_monitor_path: Path,
+    gate_a_stdout_path: Path, gate_a_stderr_path: Path,
+    preparation_script: Path,
+) -> dict[str, Any]:
+    """Validate and content-address a complete v3 offline bundle."""
+    bundle_root = _lexical_absolute(bundle_root)
+    repo_root = _lexical_absolute(repo_root)
+    graph_path = bundle_root / "discovery/graph.json"
+    controls_path = bundle_root / "controls/manifest.json"
+    capacity_path = bundle_root / "capacity-audit.json"
+    discovery_provenance_path = (
+        bundle_root / "discovery/build/build-provenance.json"
+    )
+    canary_decision_path = bundle_root / "canary/decision.json"
+    canary_hint_path = bundle_root / "canary/hint.json"
+    canary_provenance_path = bundle_root / "canary/build/build-provenance.json"
+
+    gate_a = _read_json(gate_a_monitor_path)
+    _validate_gate_a_monitor(gate_a)
+    _validate_gate_a_logs(gate_a, gate_a_stdout_path, gate_a_stderr_path)
+    profile = plans._verified_profile(_read_json(platform_path))
+    plans._verify_calibration_artifacts(profile, calibration_paths)
+
+    discovery_provenance = _read_json(discovery_provenance_path)
+    verify_build_provenance(
+        discovery_provenance, manifest_path=discovery_provenance_path,
+        repo_root=repo_root,
+    )
+    if discovery_provenance.get("build_mode") != "discover":
+        raise EvalError("discovery provenance is not a discover build")
+    inventory_path = _nested_role_path(
+        discovery_provenance, discovery_provenance_path, repo_root, "inventory"
+    )
+    expected_graph = plans.make_graph(_read_json(inventory_path), profile)
+    graph = plans.verified_graph(_read_json(graph_path))
+    if graph != expected_graph:
+        raise EvalError("graph does not match frozen inventory and platform")
+
+    prompt_paths = {
+        view: bundle_root / f"prompts/{view}.txt"
+        for view in plans.MODEL_VIEW_KINDS
+    }
+    for view, path in prompt_paths.items():
+        try:
+            prompt = path.read_text()
+        except OSError as exc:
+            raise EvalError(f"cannot read {view} prompt: {exc}") from exc
+        if prompt != plans.render_prompt(graph, view):
+            raise EvalError(f"{view} prompt does not match the frozen graph")
+
+    controls_manifest = _read_json(controls_path)
+    verify_manifest(graph, controls_manifest, controls_path.parent)
+    benchmark_path = _nested_role_path(
+        discovery_provenance, discovery_provenance_path, repo_root,
+        "benchmark_source",
+    )
+    catalog_path = _nested_role_path(
+        discovery_provenance, discovery_provenance_path, repo_root,
+        "catalog_source",
+    )
+    if (controls_manifest.get("source_sha256") != _sha256(benchmark_path)
+            or controls_manifest.get("catalog_sha256") != _sha256(catalog_path)):
+        raise EvalError("control manifest source hashes do not match discovery")
+
+    capacity = _read_json(capacity_path)
+    if capacity != audit_capacity(graph):
+        raise EvalError("capacity audit does not match the frozen graph")
+
+    freeze_files: dict[str, Path] = {
+        "preparation_script": preparation_script,
+        "platform_profile": platform_path,
+        "gate_a_monitor": gate_a_monitor_path,
+        "gate_a_stdout": gate_a_stdout_path,
+        "gate_a_stderr": gate_a_stderr_path,
+        "discovery_build_provenance": discovery_provenance_path,
+        "graph": graph_path,
+        "controls_manifest": controls_path,
+        "capacity_audit": capacity_path,
+        "canary_decision": canary_decision_path,
+        "canary_hint": canary_hint_path,
+        "canary_build_provenance": canary_provenance_path,
+    }
+    for index, path in enumerate(calibration_paths):
+        freeze_files[f"calibration_artifact_{index}"] = path
+    for view, path in prompt_paths.items():
+        freeze_files[f"prompt_{view}"] = path
+
+    provenances = [discovery_provenance]
+    arms_summary = []
+    for arm in controls_manifest["arms"]:
+        name = arm["name"]
+        response_path = controls_path.parent / arm["response"]
+        hint_path = controls_path.parent / arm["hint"]
+        provenance_path = bundle_root / f"binaries/{name}/build-provenance.json"
+        provenance = _read_json(provenance_path)
+        verify_build_provenance(
+            provenance, manifest_path=provenance_path, repo_root=repo_root
+        )
+        if provenance.get("build_mode") != "lower":
+            raise EvalError(f"{name}: build provenance is not lower mode")
+        roles = _provenance_roles(provenance)
+        if (roles["benchmark_source"].get("sha256")
+                != controls_manifest["source_sha256"]
+                or roles["catalog_source"].get("sha256")
+                != controls_manifest["catalog_sha256"]
+                or roles["collective_hint"].get("sha256")
+                != arm["hint_sha256"]):
+            raise EvalError(f"{name}: build inputs do not match controls")
+        hint = _read_json(hint_path)
+        host_ir = _nested_role_path(
+            provenance, provenance_path, repo_root, "host_ir"
+        )
+        device_ir = _nested_role_path(
+            provenance, provenance_path, repo_root, "device_ir"
+        )
+        verify_plan_ir(graph, hint, host_ir)
+        verify_device_ir(device_ir)
+        freeze_files[f"control_response_{name}"] = response_path
+        freeze_files[f"control_hint_{name}"] = hint_path
+        freeze_files[f"control_build_provenance_{name}"] = provenance_path
+        arms_summary.append({
+            "name": name,
+            "algorithm": arm["algorithm"],
+            "hint_sha256": arm["hint_sha256"],
+            "build_provenance_manifest_id": provenance["manifest_id"],
+            "binary_sha256": roles["binary"]["sha256"],
+            "host_ir_sha256": roles["host_ir"]["sha256"],
+            "device_ir_sha256": roles["device_ir"]["sha256"],
+        })
+        provenances.append(provenance)
+    verify_ir(controls_manifest, controls_path.parent, bundle_root / "binaries")
+
+    canary_decision_value = _read_json(canary_decision_path)
+    canary_hint_value = _read_json(canary_hint_path)
+    generated_hint, accepted, errors = plans.decision_to_hint(
+        graph, canary_decision_value
+    )
+    if not accepted:
+        raise EvalError(f"mixed-policy canary decision rejected: {errors}")
+    _compare_generated_hint(canary_hint_value, generated_hint)
+    if canary_hint_value.get("llm_metadata", {}).get("model_invoked") is not False:
+        raise EvalError("mixed-policy canary must record model_invoked=false")
+    canary_provenance = _read_json(canary_provenance_path)
+    verify_build_provenance(
+        canary_provenance, manifest_path=canary_provenance_path,
+        repo_root=repo_root,
+    )
+    canary_roles = _provenance_roles(canary_provenance)
+    if (canary_provenance.get("build_mode") != "lower"
+            or canary_roles["collective_hint"].get("sha256")
+            != _sha256(canary_hint_path)
+            or canary_roles["benchmark_source"].get("sha256")
+            != controls_manifest["source_sha256"]
+            or canary_roles["catalog_source"].get("sha256")
+            != controls_manifest["catalog_sha256"]):
+        raise EvalError("mixed-policy canary build inputs do not match controls")
+    verify_plan_ir(
+        graph, canary_hint_value,
+        _nested_role_path(
+            canary_provenance, canary_provenance_path, repo_root, "host_ir"
+        ),
+    )
+    verify_device_ir(_nested_role_path(
+        canary_provenance, canary_provenance_path, repo_root, "device_ir"
+    ))
+    provenances.append(canary_provenance)
+
+    repository_dependencies: dict[str, str] = {}
+    for provenance in provenances:
+        for record in provenance["dependency_closure"]["files"]:
+            locator = record["locator"]
+            if locator["scope"] != "repository":
+                continue
+            path = locator["path"]
+            previous = repository_dependencies.setdefault(path, record["sha256"])
+            if previous != record["sha256"]:
+                raise EvalError(f"inconsistent dependency hash across builds: {path}")
+    dependency_set = [
+        {"path": path, "sha256": digest}
+        for path, digest in sorted(repository_dependencies.items())
+    ]
+    file_records = [
+        _file_record(path, role=role, repo_root=repo_root,
+                     build_root=bundle_root)
+        for role, path in sorted(freeze_files.items())
+    ]
+    opportunity = graph["opportunities"][0]
+    canary_selection = next(iter(canary_hint_value["selections"].values()))
+    payload = {
+        "schema_version": OFFLINE_FREEZE_SCHEMA,
+        "bundle_version": 3,
+        "status": "offline_frozen_pending_gate_b",
+        "compiler_only": True,
+        "model_invoked": False,
+        "performance_evidence": False,
+        "application_source_modified": False,
+        "gate_a": {
+            "job_id": gate_a["job_id"],
+            "monitor_sha256": _sha256(gate_a_monitor_path),
+            "stdout_sha256": _sha256(gate_a_stdout_path),
+            "stderr_sha256": _sha256(gate_a_stderr_path),
+            "role": "diagnostic compiler-pipeline safety only",
+        },
+        "graph": {
+            "graph_id": graph["graph_id"],
+            "platform_id": graph["compiler_inputs"]["platform_id"],
+            "joint_action_space_size": opportunity["joint_action_space_size"],
+        },
+        "source_dependency_closure": {
+            "file_count": len(dependency_set),
+            "set_id": bridge._fingerprint(dependency_set),
+            "files": dependency_set,
+        },
+        "prompts": {
+            view: {"sha256": _sha256(path), "bytes": path.stat().st_size}
+            for view, path in sorted(prompt_paths.items())
+        },
+        "uniform_controls": {
+            "manifest_id": controls_manifest["manifest_id"],
+            "arm_count": len(arms_summary),
+            "arms": arms_summary,
+        },
+        "mixed_policy_canary": {
+            "candidate_id": canary_selection["candidate_id"],
+            "kind": canary_selection["kind"],
+            "build_provenance_manifest_id": canary_provenance["manifest_id"],
+            "binary_sha256": canary_roles["binary"]["sha256"],
+        },
+        "capacity_audit": {
+            "accepted_action_count": capacity["accepted_action_count"],
+            "unique_composite_candidate_id_count": capacity[
+                "unique_composite_candidate_id_count"
+            ],
+            "candidate_id_set_sha256": capacity["candidate_id_set_sha256"],
+        },
+        "files": file_records,
+    }
+    result = dict(payload)
+    result["manifest_id"] = bridge._fingerprint(payload)
+    return result
+
+
+def verify_offline_freeze(
+    value: Any, *, manifest_path: Path, repo_root: Path,
+) -> None:
+    if (not isinstance(value, dict)
+            or value.get("schema_version") != OFFLINE_FREEZE_SCHEMA):
+        raise EvalError(f"expected offline freeze schema {OFFLINE_FREEZE_SCHEMA}")
+    payload = dict(value)
+    manifest_id = payload.pop("manifest_id", None)
+    if manifest_id != bridge._fingerprint(payload):
+        raise EvalError("offline freeze manifest_id does not match content")
+    if (value.get("bundle_version") != 3
+            or value.get("compiler_only") is not True
+            or value.get("model_invoked") is not False
+            or value.get("performance_evidence") is not False
+            or value.get("application_source_modified") is not False):
+        raise EvalError("offline freeze violates the v3 compiler-only boundary")
+    bundle_root = _lexical_absolute(manifest_path).parent
+    repo_root = _lexical_absolute(repo_root)
+    records = value.get("files")
+    if not isinstance(records, list):
+        raise EvalError("offline freeze lacks file records")
+    by_role = {}
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("role"), str):
+            raise EvalError("offline freeze has an invalid file record")
+        if record["role"] in by_role:
+            raise EvalError(f"duplicate offline-freeze role: {record['role']}")
+        path = _record_path(record, repo_root=repo_root, build_root=bundle_root)
+        if not path.is_file() or _sha256(path) != record.get("sha256"):
+            raise EvalError(f"offline-freeze file mismatch: {path}")
+        by_role[record["role"]] = path
+    required = {
+        "preparation_script", "platform_profile", "gate_a_monitor",
+        "gate_a_stdout", "gate_a_stderr",
+        "discovery_build_provenance", "graph", "controls_manifest",
+        "capacity_audit", "canary_decision", "canary_hint",
+        "canary_build_provenance",
+        *{f"prompt_{view}" for view in plans.MODEL_VIEW_KINDS},
+    }
+    if not required.issubset(by_role):
+        raise EvalError("offline freeze is missing required files")
+    calibration_paths = [
+        path for role, path in sorted(by_role.items())
+        if role.startswith("calibration_artifact_")
+    ]
+    regenerated = generate_offline_freeze(
+        bundle_root=bundle_root,
+        repo_root=repo_root,
+        platform_path=by_role["platform_profile"],
+        calibration_paths=calibration_paths,
+        gate_a_monitor_path=by_role["gate_a_monitor"],
+        gate_a_stdout_path=by_role["gate_a_stdout"],
+        gate_a_stderr_path=by_role["gate_a_stderr"],
+        preparation_script=by_role["preparation_script"],
+    )
+    if regenerated != value:
+        raise EvalError("offline freeze does not match regenerated v3 bundle")
 
 
 def _read_json(path: Path) -> Any:
@@ -1460,6 +1865,22 @@ def main() -> int:
     verify_provenance = sub.add_parser("verify-build-provenance")
     verify_provenance.add_argument("--manifest", type=Path, required=True)
     verify_provenance.add_argument("--repo-root", type=Path, required=True)
+    freeze = sub.add_parser("freeze-offline")
+    freeze.add_argument("--bundle-root", type=Path, required=True)
+    freeze.add_argument("--repo-root", type=Path, required=True)
+    freeze.add_argument("--platform", type=Path, required=True)
+    freeze.add_argument("--calibration-artifact", type=Path, action="append",
+                        default=[])
+    freeze.add_argument("--gate-a-monitor", type=Path, required=True)
+    freeze.add_argument("--gate-a-stdout", type=Path, required=True)
+    freeze.add_argument("--gate-a-stderr", type=Path, required=True)
+    freeze.add_argument("--preparation-script", type=Path, required=True)
+    freeze.add_argument("--out", type=Path, required=True)
+    verify_freeze = sub.add_parser("verify-offline-freeze")
+    verify_freeze.add_argument("--manifest", type=Path, required=True)
+    verify_freeze.add_argument("--repo-root", type=Path, required=True)
+    verify_gate_a = sub.add_parser("verify-gate-a-monitor")
+    verify_gate_a.add_argument("--monitor", type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == "controls":
@@ -1565,7 +1986,7 @@ def main() -> int:
                 "compiler-collective-eval: wrote same-build provenance; "
                 f"manifest_id={summary['manifest_id']}"
             )
-        else:
+        elif args.command == "verify-build-provenance":
             verify_build_provenance(
                 _read_json(args.manifest), manifest_path=args.manifest,
                 repo_root=args.repo_root,
@@ -1573,6 +1994,35 @@ def main() -> int:
             print(
                 "compiler-collective-eval: verified build inputs, dependency "
                 "closure, commands, and artifacts"
+            )
+        elif args.command == "freeze-offline":
+            summary = generate_offline_freeze(
+                bundle_root=args.bundle_root,
+                repo_root=args.repo_root,
+                platform_path=args.platform,
+                calibration_paths=args.calibration_artifact,
+                gate_a_monitor_path=args.gate_a_monitor,
+                gate_a_stdout_path=args.gate_a_stdout,
+                gate_a_stderr_path=args.gate_a_stderr,
+                preparation_script=args.preparation_script,
+            )
+            bridge._write_json_atomic(args.out, summary)
+            print(
+                "compiler-collective-eval: froze verified v3 offline bundle; "
+                f"manifest_id={summary['manifest_id']}"
+            )
+        elif args.command == "verify-offline-freeze":
+            verify_offline_freeze(
+                _read_json(args.manifest), manifest_path=args.manifest,
+                repo_root=args.repo_root,
+            )
+            print(
+                "compiler-collective-eval: verified complete v3 offline bundle"
+            )
+        else:
+            _validate_gate_a_monitor(_read_json(args.monitor))
+            print(
+                "compiler-collective-eval: verified passed pdebug Gate-A monitor"
             )
         return 0
     except (EvalError, plans.CollectivePlanError, OSError, ValueError) as exc:

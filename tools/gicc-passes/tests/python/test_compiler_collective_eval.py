@@ -206,6 +206,58 @@ class CompilerCollectiveEvalTests(unittest.TestCase):
                     manifest, manifest_path=manifest_path, repo_root=repo
                 )
 
+    def test_v3_requires_a_complete_passed_pdebug_gate_a_monitor(self):
+        contract = {
+            "label": "baseline_auto_gate_a_scopefix",
+            "nodes": 2,
+            "ranks": 16,
+            "ppn": 8,
+            "runs": 1,
+            "warmup": 0,
+        }
+        monitor = {
+            "schema_version": "gicc-collective-job-monitor-v1",
+            "state": "passed",
+            "job_id": "test-job",
+            "expected": {**contract, "sizes": [1024, 4096]},
+            "benchmark": {
+                "config": contract,
+                "results": {"1024": 10.0, "4096": 11.0},
+                "total_errors": 0,
+            },
+            "scheduler": {"exit_code": 0, "exceptions": []},
+            "jobspec": {"queue": "pdebug"},
+        }
+        controls._validate_gate_a_monitor(monitor)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stdout = root / "gate-a.out"
+            stderr = root / "gate-a.err"
+            stdout.write_text(
+                "COLLECTIVE_CONFIG plan=baseline_auto_gate_a_scopefix "
+                "ranks=16 ppn=8 runs=1 warmup=0\n"
+                "RESULT plan=baseline_auto_gate_a_scopefix nodes=2 ranks=16 "
+                "ppn=8 bytes=1024 median_us=10.0 errors=0\n"
+                "RESULT plan=baseline_auto_gate_a_scopefix nodes=2 ranks=16 "
+                "ppn=8 bytes=4096 median_us=11.0 errors=0\n"
+                "COLLECTIVE_DONE plan=baseline_auto_gate_a_scopefix "
+                "total_errors=0\n"
+            )
+            stderr.write_text("")
+            monitor["stdout_bytes"] = stdout.stat().st_size
+            monitor["stderr_bytes"] = 0
+            controls._validate_gate_a_logs(monitor, stdout, stderr)
+            stdout.write_text(stdout.read_text().replace("11.0", "12.0"))
+            with self.assertRaisesRegex(controls.EvalError, "timings"):
+                controls._validate_gate_a_logs(monitor, stdout, stderr)
+        monitor["jobspec"]["queue"] = "pci"
+        with self.assertRaisesRegex(controls.EvalError, "clean pdebug"):
+            controls._validate_gate_a_monitor(monitor)
+        monitor["jobspec"]["queue"] = "pdebug"
+        monitor["state"] = "monitoring"
+        with self.assertRaisesRegex(controls.EvalError, "passed Gate-A"):
+            controls._validate_gate_a_monitor(monitor)
+
     def test_analysis_constructs_a_compiler_bin_oracle(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

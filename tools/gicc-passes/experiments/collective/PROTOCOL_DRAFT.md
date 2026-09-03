@@ -96,6 +96,15 @@ whose locator is not in that same build. It also requires
 collective hint for lower builds. This manifest is a prerequisite for v3
 freezing and for every Gate-B-or-later runtime result.
 
+After Gate A passes, `prepare_compiler_collective_v3.sh` performs discovery,
+three prompt-view renders, all uniform builds, the mixed-policy canary, the
+complete action-space audit, and the final freeze sequentially without calling
+Flux or a model. It refuses an existing output directory and refuses to start
+from a monitor that is not a clean `pdebug` Gate-A pass. The final
+`gicc-collective-offline-freeze-v2` manifest also preserves and cross-checks
+the raw Gate-A stdout/stderr, every nested build-provenance manifest, and the
+union of source dependencies across builds.
+
 ## Compiler action space
 
 The current source-free graph has one semantic opportunity, four fixed message
