@@ -464,7 +464,12 @@ IR, or legality. `accept` converts valid option IDs to a narrow
 to the semantic anchor unless `--strict` is requested.
 
 During the second LTO build, set
-`GICC_COLLECTIVE_HINT_IN=<collective-hint.json>`. The pass independently
+`GICC_COLLECTIVE_HINT_IN=<collective-hint.json>` and
+`GICC_COLLECTIVE_ONLY=1`. The latter restricts the automatically attached
+pipeline to collective planning: a collective-only experiment has no ordinary
+`GICC_HINT_IN` or synthesized per-transfer host trace, so running transfer
+device lowering would otherwise erase proxy operations with no replacement.
+The pass independently
 recomputes opportunity, target, and composite-plan IDs; checks catalog
 membership, exact ABI, family, contract, and the complete ordered threshold
 list; and only then retargets the call or creates the size-policy CFG. Every

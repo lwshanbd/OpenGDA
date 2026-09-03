@@ -33,6 +33,10 @@ import gicc_llm_bridge as bridge  # noqa: E402
 
 MANIFEST_SCHEMA = "gicc-collective-uniform-controls-v1"
 RESULT_RE = re.compile(r"([a-z_]+)=([^ ]+)")
+HDIR_DEVICE_KERNEL = (
+    "_ZN9gicc_coll27hier_direct_rs_cross_kernelEPN4gicc9DeviceCtxE"
+    "iiiiiiiiPfS3_PVj"
+)
 GATE_A_SIZES = [1024, 4096]
 GATE_B_SIZES = [
     1024, 4096, 8192, 65536, 262144,
@@ -337,6 +341,32 @@ def verify_plan_ir(graph_value: Any, hint_value: Any, path: Path) -> None:
             raise EvalError(
                 f"{path}: policy cutoffs {actual_cutoffs}, expected {expected_cutoffs}"
             )
+
+
+def verify_device_ir(path: Path) -> int:
+    """Prove that collective-only compilation retained proxy-ring commands."""
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        raise EvalError(f"cannot read materialized device IR {path}: {exc}") from exc
+    match = re.search(
+        rf"^define\b[^\n]*@{re.escape(HDIR_DEVICE_KERNEL)}\(.*?^\}}\s*$",
+        text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        raise EvalError(f"{path}: missing hierarchical-direct device kernel")
+    # Each of the two puts and two quiets reserves one ProxyRing slot through
+    # a cmpxchg loop after inlining. The accidentally full lowering pipeline
+    # erased all four operations, leaving zero cmpxchg instructions and a
+    # receiver that waited forever for a flag no peer could send.
+    reservations = len(re.findall(r"\bcmpxchg\b", match.group(0)))
+    if reservations < 4:
+        raise EvalError(
+            f"{path}: hierarchical-direct kernel retains only "
+            f"{reservations}/4 proxy-ring reservations"
+        )
+    return reservations
 
 
 def _int_field(fields: dict[str, str], name: str, path: Path) -> int:
@@ -975,6 +1005,8 @@ def main() -> int:
     verify_plan.add_argument("--graph", type=Path, required=True)
     verify_plan.add_argument("--hint", type=Path, required=True)
     verify_plan.add_argument("--ir", type=Path, required=True)
+    verify_device = sub.add_parser("verify-device-ir")
+    verify_device.add_argument("--ir", type=Path, required=True)
     qualify = sub.add_parser("qualify")
     qualify.add_argument("--manifest", type=Path, required=True)
     qualify.add_argument("--gate", choices=sorted(GATE_SPECS), required=True)
@@ -1028,6 +1060,12 @@ def main() -> int:
         elif args.command == "verify-plan-ir":
             verify_plan_ir(_read_json(args.graph), _read_json(args.hint), args.ir)
             print("compiler-collective-eval: verified one materialized plan in IR")
+        elif args.command == "verify-device-ir":
+            reservations = verify_device_ir(args.ir)
+            print(
+                "compiler-collective-eval: verified device proxy-ring "
+                f"operations in IR ({reservations} reservations)"
+            )
         elif args.command == "qualify":
             summary = qualify_logs(
                 _read_json(args.manifest), args.logs, args.gate

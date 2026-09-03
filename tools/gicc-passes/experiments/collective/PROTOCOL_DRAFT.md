@@ -105,6 +105,9 @@ This proves compiler-plan capacity only; it is not a performance result.
 
 ### Gate A: diagnostic runtime smoke
 
+- build preflight: `GICC_COLLECTIVE_ONLY=1`, no `GICC_HINT_IN`, compiler logs
+  report `scope=collective`, and the same-build device IR retains the
+  proxy-ring operations used by the catalog kernels;
 - topology: 2 nodes, 8 ranks/node, one rank/GCD;
 - sizes: 1 KiB and 4 KiB;
 - arm: `baseline_auto` only;

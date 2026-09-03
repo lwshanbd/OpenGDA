@@ -48,6 +48,12 @@ common=(
 
 export GICC_META_DIR="$output_dir/meta"
 export GICC_COLLECTIVE_OUT="$output_dir/inventory.json"
+# This binary evaluates only the compiler's collective-plan decision. Do not
+# run the independent per-transfer lowering pipeline without its own hint: it
+# would erase proxy put/quiet calls while this experiment has no synthesized
+# host trace to replace them.
+export GICC_COLLECTIVE_ONLY=1
+unset GICC_HINT_IN GICC_FEATURES_OUT || true
 if [[ "$mode" == discover ]]; then
     export GICC_MODE=feature-extract
     unset GICC_COLLECTIVE_HINT_IN || true
@@ -64,6 +70,16 @@ fi
 "$clang" "${common[@]}" --offload-host-only -emit-llvm -S \
     -o "$output_dir/materialized.ll" -x hip "$source_file" \
     >"$output_dir/ir.log" 2>&1
+
+# Preserve the matching device IR as evidence that collective-only planning
+# did not erase the proxy-ring communication bodies. This is emitted from the
+# same source, flags, plugin, and environment as eval.o.
+"$clang" "${common[@]}" --offload-device-only -emit-llvm -S \
+    -o "$output_dir/materialized-device.ll" -x hip "$source_file" \
+    >"$output_dir/device-ir.log" 2>&1
+python3 "$script_dir/compiler_collective_eval.py" verify-device-ir \
+    --ir "$output_dir/materialized-device.ll" \
+    >"$output_dir/device-ir-audit.log" 2>&1
 
 if [[ "$mode" == discover ]]; then
     exit 0

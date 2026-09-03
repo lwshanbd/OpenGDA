@@ -43,6 +43,7 @@ struct GICCSentinelPass : PassInfoMixin<GICCSentinelPass> {
         // it uses Triple's Twine ctor, in ≥20 it uses the copy ctor.
         errs() << "[gicc-pass] mode=" << modeName(cfg.mode)
                << " target=" << targetName(cfg.target)
+               << " scope=" << (cfg.collectiveOnly ? "collective" : "full")
                << " triple=" << Triple(M.getTargetTriple()).str()
                << " meta-dir=" << cfg.metaDir
                << " module=" << M.getName()
@@ -74,8 +75,11 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
             // OptimizerLast is too late (inliner has consumed the calls).
             PB.registerPipelineEarlySimplificationEPCallback(
                 GICC_EP_LAMBDA_HEAD(MPM) {
-                    MPM.addPass(GICCDeviceDiscoveryPass());
-                    MPM.addPass(GICCHKAnalysisPass());
+                    const auto &cfg = getConfig();
+                    if (!cfg.collectiveOnly) {
+                        MPM.addPass(GICCDeviceDiscoveryPass());
+                        MPM.addPass(GICCHKAnalysisPass());
+                    }
                     // CRITICAL: order matters — DeviceLowering reads
                     // proxy_aware (set by DispatchLowering) from the
                     // kernel JSON. Within an LTO invocation that
@@ -87,13 +91,17 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     // invocations, the JSON is only consistent on a
                     // SECOND rebuild — document this limitation in the
                     // build instructions.)
-                    MPM.addPass(GICCHostDiscoveryPass());
-                    MPM.addPass(GICCFeatureExtractionPass());
-                    MPM.addPass(GICCTraceSynthesisPass());
+                    if (!cfg.collectiveOnly) {
+                        MPM.addPass(GICCHostDiscoveryPass());
+                        MPM.addPass(GICCFeatureExtractionPass());
+                        MPM.addPass(GICCTraceSynthesisPass());
+                    }
                     MPM.addPass(GICCCollectivePlanningPass());
 #ifndef GICC_PASSES_ANALYZE_ONLY
-                    MPM.addPass(GICCDispatchLoweringPass());
-                    MPM.addPass(GICCDeviceLoweringPass());
+                    if (!cfg.collectiveOnly) {
+                        MPM.addPass(GICCDispatchLoweringPass());
+                        MPM.addPass(GICCDeviceLoweringPass());
+                    }
 #endif
                 });
             // Sentinel stays at OptimizerLast — it's just a debug probe

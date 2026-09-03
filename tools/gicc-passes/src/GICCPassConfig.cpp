@@ -30,6 +30,14 @@ std::string envOr(const char *name, const char *fallback) {
     return v ? std::string(v) : std::string(fallback);
 }
 
+bool envFlag(const char *name) {
+    const char *value = std::getenv(name);
+    if (!value) return false;
+    const std::string_view text(value);
+    return text == "1" || text == "true" || text == "TRUE" ||
+           text == "yes" || text == "YES" || text == "on" || text == "ON";
+}
+
 Config buildConfig() {
     Config c;
     c.mode        = parseMode(std::getenv("GICC_MODE"));
@@ -39,6 +47,7 @@ Config buildConfig() {
     c.hintIn      = envOr("GICC_HINT_IN", "");
     c.collectiveOut = envOr("GICC_COLLECTIVE_OUT", "");
     c.collectiveHintIn = envOr("GICC_COLLECTIVE_HINT_IN", "");
+    c.collectiveOnly = envFlag("GICC_COLLECTIVE_ONLY");
     return c;
 }
 

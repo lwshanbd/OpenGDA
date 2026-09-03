@@ -90,6 +90,25 @@ class CompilerCollectiveEvalTests(unittest.TestCase):
             )
             self.assertFalse(audit["model_invoked"])
 
+    def test_device_ir_requires_all_proxy_ring_reservations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "device.ll"
+            kernel = controls.HDIR_DEVICE_KERNEL
+            path.write_text(
+                f"define protected amdgpu_kernel void @{kernel}() {{\n"
+                "  %a = cmpxchg ptr null, i64 0, i64 1 monotonic monotonic\n"
+                "  %b = cmpxchg ptr null, i64 0, i64 1 monotonic monotonic\n"
+                "  %c = cmpxchg ptr null, i64 0, i64 1 monotonic monotonic\n"
+                "  %d = cmpxchg ptr null, i64 0, i64 1 monotonic monotonic\n"
+                "  ret void\n}\n"
+            )
+            self.assertEqual(4, controls.verify_device_ir(path))
+            path.write_text(
+                path.read_text().replace("  %d = cmpxchg", "  %d = add")
+            )
+            with self.assertRaisesRegex(controls.EvalError, "3/4"):
+                controls.verify_device_ir(path)
+
     def test_analysis_constructs_a_compiler_bin_oracle(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -31,6 +31,7 @@ enum class Target {
 //   GICC_HINT_IN       ("")
 //   GICC_COLLECTIVE_OUT     ("")
 //   GICC_COLLECTIVE_HINT_IN ("")
+//   GICC_COLLECTIVE_ONLY    (false)
 struct Config {
     Mode        mode           = Mode::Passthrough;
     Target      target         = Target::Auto;
@@ -39,6 +40,12 @@ struct Config {
     std::string hintIn;
     std::string collectiveOut;
     std::string collectiveHintIn;
+    // Restrict the automatically attached pipeline to collective planning.
+    // Collective-policy experiments intentionally have no ordinary
+    // communication hint or synthesized host trace; running device lowering
+    // in that situation would erase proxy put/quiet calls without replacing
+    // them. Named passes remain available for focused tests.
+    bool        collectiveOnly = false;
 };
 
 // Returns a singleton Config, lazily populated from getenv() on first call.
