@@ -1,5 +1,6 @@
 import copy
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -102,6 +103,18 @@ class RunCompilerLtoLlmCalibratedTrialsTests(unittest.TestCase):
         self.assertEqual("", command[command.index("--tools") + 1])
         self.assertIn("--safe-mode", command)
         self.assertIn("--no-session-persistence", command)
+
+    def test_authorization_archive_is_idempotent_and_immutable(self):
+        value = authorization(request())
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            path = trials.archive_authorization(value, output)
+            self.assertEqual(value, trials.read_json(path))
+            self.assertEqual(path, trials.archive_authorization(value, output))
+            changed = copy.deepcopy(value)
+            changed["authorization_id"] = "sha256:" + "0" * 64
+            with self.assertRaisesRegex(trials.TrialError, "differs"):
+                trials.archive_authorization(changed, output)
 
 
 if __name__ == "__main__":

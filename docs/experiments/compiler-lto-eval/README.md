@@ -258,7 +258,7 @@ message sizes are disjoint, and the only permitted outputs are existing legal
 LTO action labels that the compiler revalidates and lowers.
 
 The package is frozen at request ID
-`sha256:67011bb827972110220af63934b3db7984e8fc3f865e53aa6aa14d1e32f4f353`.
+`sha256:46c8b36f36322e7a67b56917fd7cd679ed03e43893c20c6958ea4bfb6ea2a033`.
 The prompt SHA-256 is
 `1fb2cff4de4bdf885c356666468a5919fe736f9fb41c60d66b6b5d9878d3fb91`;
 the response-schema SHA-256 is
@@ -266,7 +266,9 @@ the response-schema SHA-256 is
 Twenty calls are preregistered and the runner enforces fresh sessions,
 sequential execution, no tools, no session persistence, transport-only retry,
 raw-response archival, and deterministic compiler fallback on semantic
-failure. This request is **not authorized**: earlier zero-shot or collective
+failure. The frozen analyzer counts every fallback as an oracle nonmatch, so
+invalid outputs cannot disappear from the primary rate. This request is
+**not authorized**: earlier zero-shot or collective
 authorization does not cover these hashes, and no provider call has been made
 for `llm-calibrated-v2`.
 

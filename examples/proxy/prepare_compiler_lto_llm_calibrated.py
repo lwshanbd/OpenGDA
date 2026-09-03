@@ -33,6 +33,7 @@ REQUEST_SCHEMA = "gicc-compiler-lto-llm-calibrated-request-v1"
 PACK_SCHEMA = "gicc-compiler-lto-in-context-calibration-v1"
 TRIALS = 20
 RUNNER = HERE / "run_compiler_lto_llm_calibrated_trials.py"
+ANALYZER = HERE / "analyze_compiler_lto_llm_calibrated.py"
 SYSTEM_PROMPT = (
     "You are a constrained decision component inside an LTO communication "
     "pipeline, not a coding agent. Use only the compiler-derived evaluation "
@@ -401,6 +402,8 @@ def build_request(*, calibration_dossier_path: Path,
             ),
             "provider_runner": source_record(RUNNER, "provider_runner"),
             "provider_runner_frozen": True,
+            "analyzer": source_record(ANALYZER, "post_call_analyzer"),
+            "analysis_implementation_frozen": True,
         },
     }
     request = dict(payload)

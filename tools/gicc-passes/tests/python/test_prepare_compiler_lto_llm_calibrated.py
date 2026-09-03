@@ -64,6 +64,13 @@ class PrepareCompilerLtoLlmCalibratedTests(unittest.TestCase):
             )
             self.assertFalse(request["authorization"]["granted"])
             self.assertTrue(request["implementation"]["provider_runner_frozen"])
+            self.assertTrue(
+                request["implementation"]["analysis_implementation_frozen"]
+            )
+            self.assertEqual(
+                "post_call_analyzer",
+                request["implementation"]["analyzer"]["role"],
+            )
             control = request["matched_evidence_control"]
             self.assertTrue(control["calibration_scalar_facts_match_comparator"])
             self.assertIn(

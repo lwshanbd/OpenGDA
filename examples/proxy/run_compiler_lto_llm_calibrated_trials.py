@@ -158,6 +158,16 @@ def verify_authorization(value: Any,
     return payload
 
 
+def archive_authorization(value: Any, output_dir: Path) -> Path:
+    path = output_dir / "authorization.json"
+    if path.exists():
+        if read_json(path) != value:
+            raise TrialError("archived authorization differs from requested run")
+    else:
+        write_json_atomic(path, value)
+    return path
+
+
 def provider_command(provider: dict[str, Any], system_prompt: str,
                      response_schema: dict[str, Any]) -> list[str]:
     return [
@@ -338,6 +348,8 @@ def run_trials(*, request_path: Path, authorization_path: Path,
     authorization_value = read_json(authorization_path)
     authorization = verify_authorization(authorization_value, request)
     authorization_id = authorization_value["authorization_id"]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    archive_authorization(authorization_value, output_dir)
     provider = authorization["provider"]
     observed_version = cli_version(provider["executable"])
     if observed_version != provider["cli_version"]:
@@ -349,7 +361,6 @@ def run_trials(*, request_path: Path, authorization_path: Path,
     prompt = (package / "prompt.txt").read_text()
     system_prompt = (package / "system-prompt.txt").read_text()
     response_schema = read_json(package / "response-schema.json")
-    output_dir.mkdir(parents=True, exist_ok=True)
     index_path = output_dir / "run-index.json"
     if index_path.exists():
         index = read_json(index_path)
