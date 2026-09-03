@@ -1,0 +1,1245 @@
+You are the decision component of an LTO communication pass.
+The calibration cases were measured on the same real compiler/LTO path and platform family, with evaluation sizes and all evaluation results held out. Use their interactions as evidence; do not assume a one-dimensional size threshold. The evaluation relations are compiler-derived group structure, not source. Choose exactly one legal action for every site. A default action is an abstention and may be used only where it is listed. Do not invent actions, code, IR, legality, or site IDs.
+
+Return only the JSON object enforced by the supplied response schema.
+
+COMPILER_EVIDENCE:
+{
+  "calibration": {
+    "action_semantics": {
+      "proxy": "preserve the device operation and enqueue CPU proxy work",
+      "trigger": "host-stage the descriptor and release it through DWQ"
+    },
+    "cases": [
+      {
+        "case_id": "calibration:01dad3f59d61ef90390e86b4",
+        "compiler_facts": {
+          "batch_size": 12,
+          "coalescable": true,
+          "descriptor_reusable": false,
+          "distance_exact": true,
+          "flops_to_first_use": 704,
+          "grid_blocks": 4,
+          "in_loop": true,
+          "site_count": 1,
+          "size_bytes": 2048,
+          "total_bytes": 24576
+        },
+        "measured_end_to_end_us": {
+          "proxy": 131.08779001143898,
+          "trigger": 141.68522983336916
+        }
+      },
+      {
+        "case_id": "calibration:0a25871a39d78aae9fa29261",
+        "compiler_facts": {
+          "batch_size": 48,
+          "coalescable": false,
+          "descriptor_reusable": true,
+          "distance_exact": true,
+          "flops_to_first_use": 98,
+          "grid_blocks": 4,
+          "in_loop": true,
+          "site_count": 1,
+          "size_bytes": 8192,
+          "total_bytes": 393216
+        },
+        "measured_end_to_end_us": {
+          "proxy": 482.560919515228,
+          "trigger": 521.0029993634756
+        }
+      },
+      {
+        "case_id": "calibration:1a883dfeb6f71233ca8f80f8",
+        "compiler_facts": {
+          "batch_size": 1,
+          "coalescable": false,
+          "descriptor_reusable": false,
+          "distance_exact": true,
+          "flops_to_first_use": 0,
+          "grid_blocks": 8,
+          "in_loop": false,
+          "site_count": 1,
+          "size_bytes": 65536,
+          "total_bytes": 65536
+        },
+        "measured_end_to_end_us": {
+          "proxy": 31.255699788010073,
+          "trigger": 28.871899289461638
+        }
+      },
+      {
+        "case_id": "calibration:1b20912432e5ea02c6b7ddca",
+        "compiler_facts": {
+          "batch_size": 24,
+          "coalescable": false,
+          "descriptor_reusable": true,
+          "distance_exact": true,
+          "flops_to_first_use": 50,
+          "grid_blocks": 1,
+          "in_loop": true,
+          "site_count": 1,
+          "size_bytes": 2048,
+          "total_bytes": 49152
+        },
+        "measured_end_to_end_us": {
+          "proxy": 246.87981044548363,
+          "trigger": 261.71074563695396
+        }
+      },
+      {
+        "case_id": "calibration:3d494d76b945d1dc608a2ddd",
+        "compiler_facts": {
+          "batch_size": 40,
+          "coalescable": true,
+          "descriptor_reusable": false,
+          "distance_exact": true,
+          "flops_to_first_use": 164,
+          "grid_blocks": 8,
+          "in_loop": true,
+          "site_count": 1,
+          "size_bytes": 32768,
+          "total_bytes": 1310720
+        },
+        "measured_end_to_end_us": {
+          "proxy": 409.70536188329305,
+          "trigger": 444.9204405536457
+        }
+      },
+      {
+        "case_id": "calibration:51d9353a74ce8c4ae614de3a",
+        "compiler_facts": {
+          "batch_size": 24,
+          "coalescable": true,
+          "descriptor_reusable": false,
+          "distance_exact": true,
+          "flops_to_first_use": 10352,
+          "grid_blocks": 8,
+          "in_loop": true,
+          "site_count": 1,
+          "size_bytes": 16384,
+          "total_bytes": 393216
+        },
+        "measured_end_to_end_us": {
+          "proxy": 248.70342088463752,
+          "trigger": 286.35916668462505
+        }
+      },
+      {
+        "case_id": "calibration:7756ee2ad034cf923b87a1e4",
+        "compiler_facts": {
+          "batch_size": 1,
+          "coalescable": false,
+          "descriptor_reusable": false,
+          "distance_exact": true,
+          "flops_to_first_use": 0,
+          "grid_blocks": 1,
+          "in_loop": false,
+          "site_count": 1,
+          "size_bytes": 512,
+          "total_bytes": 512
+        },
+        "measured_end_to_end_us": {
+          "proxy": 28.20558490429902,
+          "trigger": 25.514938338918146
+        }
+      },
+      {
+        "case_id": "calibration:7fb26e1659afed7b6af64365",
+        "compiler_facts": {
+          "batch_size": 6,
+          "coalescable": true,
+          "descriptor_reusable": false,
+          "distance_exact": true,
+          "flops_to_first_use": 28,
+          "grid_blocks": 1,
+          "in_loop": true,
+          "site_count": 1,
+          "size_bytes": 1024,
+          "total_bytes": 6144
+        },
+        "measured_end_to_end_us": {
+          "proxy": 73.76110600494356,
+          "trigger": 77.52789135534513
+        }
+      },
+      {
+        "case_id": "calibration:940cc28fc5ce9a47d8d2a142",
+        "compiler_facts": {
+          "batch_size": 3,
+          "coalescable": false,
+          "descriptor_reusable": false,
+          "distance_exact": true,
+          "flops_to_first_use": 0,
+          "grid_blocks": 4,
+          "in_loop": false,
+          "site_count": 3,
+          "size_bytes": 8192,
+          "total_bytes": 24576
+        },
+        "measured_end_to_end_us": {
+          "proxy": 37.66854871887124,
+          "trigger": 47.21361142510495
+        }
+      },
+      {
+        "case_id": "calibration:969ce545960838961c46e986",
+        "compiler_facts": {
+          "batch_size": 48,
+          "coalescable": true,
+          "descriptor_reusable": false,
+          "distance_exact": true,
+          "flops_to_first_use": 2768,
+          "grid_blocks": 8,
+          "in_loop": true,
+          "site_count": 1,
+          "size_bytes": 8192,
+          "total_bytes": 393216
+        },
+        "measured_end_to_end_us": {
+          "proxy": 482.7747965697993,
+          "trigger": 524.2320335684508
+        }
+      },
+      {
+        "case_id": "calibration:96ab4c40cf7838ad6832c888",
+        "compiler_facts": {
+          "batch_size": 1,
+          "coalescable": false,
+          "descriptor_reusable": false,
+          "distance_exact": true,
+          "flops_to_first_use": 0,
+          "grid_blocks": 1,
+          "in_loop": false,
+          "site_count": 1,
+          "size_bytes": 16384,
+          "total_bytes": 16384
+        },
+        "measured_end_to_end_us": {
+          "proxy": 29.372898527842324,
+          "trigger": 26.5872851738998
+        }
+      },
+      {
+        "case_id": "calibration:9a2031f442253e36cce3b191",
+        "compiler_facts": {
+          "batch_size": 2,
+          "coalescable": false,
+          "descriptor_reusable": false,
+          "distance_exact": true,
+          "flops_to_first_use": 0,
+          "grid_blocks": 2,
+          "in_loop": false,
+          "site_count": 2,
+          "size_bytes": 2048,
+          "total_bytes": 4096
+        },
+        "measured_end_to_end_us": {
+          "proxy": 32.904410909449666,
+          "trigger": 34.93952332545827
+        }
+      },
+      {
+        "case_id": "calibration:acc5f1d36081e16dd46e8efe",
+        "compiler_facts": {
+          "batch_size": 8,
+          "coalescable": false,
+          "descriptor_reusable": true,
+          "distance_exact": true,
+          "flops_to_first_use": 18,
+          "grid_blocks": 1,
+          "in_loop": true,
+          "site_count": 1,
+          "size_bytes": 1024,
+          "total_bytes": 8192
+        },
+        "measured_end_to_end_us": {
+          "proxy": 92.62325419149337,
+          "trigger": 99.28286847818877
+        }
+      },
+      {
+        "case_id": "calibration:b111ce90828cb01406c14ec3",
+        "compiler_facts": {
+          "batch_size": 1,
+          "coalescable": false,
+          "descriptor_reusable": false,
+          "distance_exact": true,
+          "flops_to_first_use": 0,
+          "grid_blocks": 4,
+          "in_loop": false,
+          "site_count": 1,
+          "size_bytes": 2048,
+          "total_bytes": 2048
+        },
+        "measured_end_to_end_us": {
+          "proxy": 27.683525071718368,
+          "trigger": 25.153916186463583
+        }
+      },
+      {
+        "case_id": "calibration:cb949bf75d1d93ca7a0d3098",
+        "compiler_facts": {
+          "batch_size": 1,
+          "coalescable": false,
+          "descriptor_reusable": false,
+          "distance_exact": true,
+          "flops_to_first_use": 0,
+          "grid_blocks": 8,
+          "in_loop": false,
+          "site_count": 1,
+          "size_bytes": 524288,
+          "total_bytes": 524288
+        },
+        "measured_end_to_end_us": {
+          "proxy": 53.086576684174396,
+          "trigger": 50.06246795777529
+        }
+      },
+      {
+        "case_id": "calibration:defd8d76a22a35da719e7fda",
+        "compiler_facts": {
+          "batch_size": 12,
+          "coalescable": true,
+          "descriptor_reusable": false,
+          "distance_exact": true,
+          "flops_to_first_use": 52,
+          "grid_blocks": 4,
+          "in_loop": true,
+          "site_count": 1,
+          "size_bytes": 8192,
+          "total_bytes": 98304
+        },
+        "measured_end_to_end_us": {
+          "proxy": 131.4720329822469,
+          "trigger": 141.80721953368945
+        }
+      },
+      {
+        "case_id": "calibration:f869582641bbb123858ec4bf",
+        "compiler_facts": {
+          "batch_size": 1,
+          "coalescable": false,
+          "descriptor_reusable": false,
+          "distance_exact": true,
+          "flops_to_first_use": 0,
+          "grid_blocks": 4,
+          "in_loop": false,
+          "site_count": 1,
+          "size_bytes": 262144,
+          "total_bytes": 262144
+        },
+        "measured_end_to_end_us": {
+          "proxy": 40.648548930783676,
+          "trigger": 37.85450128809461
+        }
+      }
+    ],
+    "evidence_parity": {
+      "extra_llm_input": "compiler-derived relations among evaluation sites",
+      "matched_comparator": "compiler-path calibrated GBT v2",
+      "same_action_cost_rows": true,
+      "same_scalar_compiler_facts": true,
+      "same_stable_scenarios": true
+    },
+    "excluded_unstable_case_count": 1,
+    "message_size_overlap_with_evaluation": [],
+    "pack_id": "sha256:50fc804328e0c9ec033ac47fcffac046b4b6dcb99800b78ce5d69d03f56cf76a",
+    "schema_version": "gicc-compiler-lto-in-context-calibration-v1",
+    "scope": "Independent real-LTO compiler-path calibration; evaluation runtime results, oracle labels, and source are absent."
+  },
+  "evaluation_dossier": {
+    "action_semantics": {
+      "default": "abstain; keep the pass's IPC_OR_DWQ baseline",
+      "ipc": "force same-node IPC; offered only for proven local peers",
+      "proxy": "preserve the device operation and enqueue CPU proxy work",
+      "trigger": "host-stage the descriptor and release it through DWQ"
+    },
+    "dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+    "feature_schema_version": 6,
+    "objective": {
+      "instruction": "Choose one legal action per site. Prefer default when the platform evidence does not justify pinning a lowering.",
+      "metric": "end_to_end_wall_time"
+    },
+    "platform_profile": {
+      "action_notes": {
+        "ipc": "same-node path only and unavailable under this cross-node placement contract",
+        "proxy": "device pushes commands into CPU-worker rings; independent static sites may use distinct lanes",
+        "trigger": "host stages compiler-reconstructed descriptors and releases the batch through DWQ"
+      },
+      "deployment_constraints": {
+        "note": "proxy producer concurrency is bounded by min(grid_blocks, proxy_worker_lanes); forced IPC is not legal for this deployment",
+        "peer_relation": "cross_node",
+        "proxy_worker_lanes": 8,
+        "rank_placement": "one rank per node"
+      },
+      "evaluation_contract": {
+        "candidate_budget": "one decision per compiler site; no source edits or generated code",
+        "execution": "each named kernel scenario is timed independently with equal score weight",
+        "primary_score": "geometric mean of per-scenario slowdown relative to the measured legal-action oracle",
+        "secondary_score": "sum of per-scenario median wall times",
+        "source_visibility": "none",
+        "suite": "compiler-lto-eval-v1"
+      },
+      "measurements": {
+        "link_bandwidth_GB_s": 24.0,
+        "proxy_fixed_us": 5.37,
+        "proxy_per_op_issue_us": 2.872,
+        "trigger_fixed_us": 7.88,
+        "trigger_per_op_stage_us": 1.033
+      },
+      "platform_id": "tioga-mi250x-slingshot11-compiler-lto-eval-v1",
+      "provenance": {
+        "calibration": "examples/proxy/ctx_bench --exp=distance",
+        "dataset": "docs/experiments/grid/grid_big.csv",
+        "dataset_sha256": "c28e3cb69fb78aa4cf9223fb281cf71658a58abd1def661e29351caba0466836",
+        "deployment": "one rank per node with GICC_NUM_PROXY_THREADS=8"
+      },
+      "schema_version": "gicc-platform-profile-v1",
+      "scope": "two nodes, one rank and one MI250X GCD per node, one cross-node CXI peer per rank"
+    },
+    "schema_version": "gicc-llm-dossier-v1",
+    "sites": [
+      {
+        "batch_size": 64,
+        "buffer_reusable": true,
+        "coalescable": true,
+        "compute_before_flops": 2,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "fan_out": 1,
+        "flops_to_first_use": 5392,
+        "grid_blocks": 8,
+        "guard_density": 0.5,
+        "hk_capable": true,
+        "in_loop": true,
+        "iter_estimate": null,
+        "kernel": "eval_far_batch",
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_contexts": [
+          {
+            "grid_blocks": 8,
+            "launch_block": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "launch_grid": {
+              "x": 8,
+              "y": 1,
+              "z": 1
+            },
+            "size_bytes": 4096,
+            "static_callsite_count": 1,
+            "threads_per_block": 1,
+            "trip_count": 64
+          }
+        ],
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "legal_actions": [
+          "proxy",
+          "trigger"
+        ],
+        "loop": {
+          "bound_const": 64,
+          "bound_known": true,
+          "iv_start": 0,
+          "iv_step": 1
+        },
+        "max_vector_bytes": 16,
+        "op_kind": "put_no_db",
+        "peer_kind": "param",
+        "peer_locality": null,
+        "site_id": "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0",
+        "size_bytes": 4096,
+        "size_kind": "const",
+        "size_log2": 12,
+        "static_launch_sites": 1,
+        "threads_per_block": 1,
+        "trip_count": 64
+      },
+      {
+        "batch_size": 32,
+        "buffer_reusable": true,
+        "coalescable": false,
+        "compute_before_flops": 0,
+        "descriptor_reusable": true,
+        "distance_exact": true,
+        "fan_out": 1,
+        "flops_to_first_use": 66,
+        "grid_blocks": 1,
+        "guard_density": 0.5,
+        "hk_capable": true,
+        "in_loop": true,
+        "iter_estimate": null,
+        "kernel": "eval_reuse_batch",
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_contexts": [
+          {
+            "grid_blocks": 1,
+            "launch_block": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "launch_grid": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "size_bytes": 4096,
+            "static_callsite_count": 1,
+            "threads_per_block": 1,
+            "trip_count": 32
+          }
+        ],
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "legal_actions": [
+          "proxy",
+          "trigger"
+        ],
+        "loop": {
+          "bound_const": 32,
+          "bound_known": true,
+          "iv_start": 0,
+          "iv_step": 1
+        },
+        "max_vector_bytes": 16,
+        "op_kind": "put_no_db",
+        "peer_kind": "param",
+        "peer_locality": null,
+        "site_id": "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2",
+        "size_bytes": 4096,
+        "size_kind": "const",
+        "size_log2": 12,
+        "static_launch_sites": 1,
+        "threads_per_block": 1,
+        "trip_count": 32
+      },
+      {
+        "batch_size": 1,
+        "buffer_reusable": true,
+        "coalescable": false,
+        "compute_before_flops": 0,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "fan_out": 1,
+        "flops_to_first_use": 0,
+        "grid_blocks": 1,
+        "guard_density": 1,
+        "hk_capable": true,
+        "in_loop": false,
+        "iter_estimate": null,
+        "kernel": "eval_tiny_single",
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_contexts": [
+          {
+            "grid_blocks": 1,
+            "launch_block": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "launch_grid": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "size_bytes": 256,
+            "static_callsite_count": 1,
+            "threads_per_block": 1,
+            "trip_count": null
+          }
+        ],
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "legal_actions": [
+          "proxy",
+          "trigger",
+          "default"
+        ],
+        "loop": null,
+        "max_vector_bytes": 16,
+        "op_kind": "put_no_db",
+        "peer_kind": "param",
+        "peer_locality": null,
+        "site_id": "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0",
+        "size_bytes": 256,
+        "size_kind": "const",
+        "size_log2": 8,
+        "static_launch_sites": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      },
+      {
+        "batch_size": 1,
+        "buffer_reusable": true,
+        "coalescable": false,
+        "compute_before_flops": 0,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "fan_out": 1,
+        "flops_to_first_use": 0,
+        "grid_blocks": 8,
+        "guard_density": 1,
+        "hk_capable": true,
+        "in_loop": false,
+        "iter_estimate": null,
+        "kernel": "eval_large_single",
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_contexts": [
+          {
+            "grid_blocks": 8,
+            "launch_block": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "launch_grid": {
+              "x": 8,
+              "y": 1,
+              "z": 1
+            },
+            "size_bytes": 1048576,
+            "static_callsite_count": 1,
+            "threads_per_block": 1,
+            "trip_count": null
+          }
+        ],
+        "launch_grid": {
+          "x": 8,
+          "y": 1,
+          "z": 1
+        },
+        "legal_actions": [
+          "proxy",
+          "trigger",
+          "default"
+        ],
+        "loop": null,
+        "max_vector_bytes": 16,
+        "op_kind": "put_no_db",
+        "peer_kind": "param",
+        "peer_locality": null,
+        "site_id": "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0",
+        "size_bytes": 1048576,
+        "size_kind": "const",
+        "size_log2": 20,
+        "static_launch_sites": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      },
+      {
+        "batch_size": 16,
+        "buffer_reusable": true,
+        "coalescable": true,
+        "compute_before_flops": 2,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "fan_out": 1,
+        "flops_to_first_use": 68,
+        "grid_blocks": 1,
+        "guard_density": 0.5,
+        "hk_capable": true,
+        "in_loop": true,
+        "iter_estimate": null,
+        "kernel": "eval_adjacent_batch",
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_contexts": [
+          {
+            "grid_blocks": 1,
+            "launch_block": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "launch_grid": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "size_bytes": 4096,
+            "static_callsite_count": 1,
+            "threads_per_block": 1,
+            "trip_count": 16
+          }
+        ],
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "legal_actions": [
+          "proxy",
+          "trigger"
+        ],
+        "loop": {
+          "bound_const": 16,
+          "bound_known": true,
+          "iv_start": 0,
+          "iv_step": 1
+        },
+        "max_vector_bytes": 16,
+        "op_kind": "put_no_db",
+        "peer_kind": "param",
+        "peer_locality": null,
+        "site_id": "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2",
+        "size_bytes": 4096,
+        "size_kind": "const",
+        "size_log2": 12,
+        "static_launch_sites": 1,
+        "threads_per_block": 1,
+        "trip_count": 16
+      },
+      {
+        "batch_size": 1,
+        "buffer_reusable": true,
+        "coalescable": false,
+        "compute_before_flops": 0,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "fan_out": 1,
+        "flops_to_first_use": 0,
+        "grid_blocks": 1,
+        "guard_density": 1,
+        "hk_capable": false,
+        "in_loop": false,
+        "iter_estimate": null,
+        "kernel": "eval_dynamic_offset",
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_contexts": [
+          {
+            "grid_blocks": 1,
+            "launch_block": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "launch_grid": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "size_bytes": 4096,
+            "static_callsite_count": 1,
+            "threads_per_block": 1,
+            "trip_count": null
+          }
+        ],
+        "launch_grid": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "legal_actions": [
+          "proxy"
+        ],
+        "loop": null,
+        "max_vector_bytes": 1,
+        "op_kind": "put_no_db",
+        "peer_kind": "param",
+        "peer_locality": null,
+        "site_id": "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0",
+        "size_bytes": 4096,
+        "size_kind": "const",
+        "size_log2": 12,
+        "static_launch_sites": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      },
+      {
+        "batch_size": 4,
+        "buffer_reusable": true,
+        "coalescable": false,
+        "compute_before_flops": 0,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "fan_out": 1,
+        "flops_to_first_use": 0,
+        "grid_blocks": 4,
+        "guard_density": 1,
+        "hk_capable": true,
+        "in_loop": false,
+        "iter_estimate": null,
+        "kernel": "eval_static4_parallel",
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_contexts": [
+          {
+            "grid_blocks": 4,
+            "launch_block": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "launch_grid": {
+              "x": 4,
+              "y": 1,
+              "z": 1
+            },
+            "size_bytes": 4096,
+            "static_callsite_count": 1,
+            "threads_per_block": 1,
+            "trip_count": null
+          }
+        ],
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "legal_actions": [
+          "proxy",
+          "trigger",
+          "default"
+        ],
+        "loop": null,
+        "max_vector_bytes": 16,
+        "op_kind": "put_no_db",
+        "peer_kind": "param",
+        "peer_locality": null,
+        "site_id": "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0",
+        "size_bytes": 4096,
+        "size_kind": "const",
+        "size_log2": 12,
+        "static_launch_sites": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      },
+      {
+        "batch_size": 4,
+        "buffer_reusable": true,
+        "coalescable": false,
+        "compute_before_flops": 0,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "fan_out": 1,
+        "flops_to_first_use": 0,
+        "grid_blocks": 4,
+        "guard_density": 1,
+        "hk_capable": true,
+        "in_loop": false,
+        "iter_estimate": null,
+        "kernel": "eval_static4_parallel",
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_contexts": [
+          {
+            "grid_blocks": 4,
+            "launch_block": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "launch_grid": {
+              "x": 4,
+              "y": 1,
+              "z": 1
+            },
+            "size_bytes": 4096,
+            "static_callsite_count": 1,
+            "threads_per_block": 1,
+            "trip_count": null
+          }
+        ],
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "legal_actions": [
+          "proxy",
+          "trigger",
+          "default"
+        ],
+        "loop": null,
+        "max_vector_bytes": 16,
+        "op_kind": "put_no_db",
+        "peer_kind": "param",
+        "peer_locality": null,
+        "site_id": "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1",
+        "size_bytes": 4096,
+        "size_kind": "const",
+        "size_log2": 12,
+        "static_launch_sites": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      },
+      {
+        "batch_size": 4,
+        "buffer_reusable": true,
+        "coalescable": false,
+        "compute_before_flops": 0,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "fan_out": 1,
+        "flops_to_first_use": 0,
+        "grid_blocks": 4,
+        "guard_density": 1,
+        "hk_capable": true,
+        "in_loop": false,
+        "iter_estimate": null,
+        "kernel": "eval_static4_parallel",
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_contexts": [
+          {
+            "grid_blocks": 4,
+            "launch_block": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "launch_grid": {
+              "x": 4,
+              "y": 1,
+              "z": 1
+            },
+            "size_bytes": 4096,
+            "static_callsite_count": 1,
+            "threads_per_block": 1,
+            "trip_count": null
+          }
+        ],
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "legal_actions": [
+          "proxy",
+          "trigger",
+          "default"
+        ],
+        "loop": null,
+        "max_vector_bytes": 16,
+        "op_kind": "put_no_db",
+        "peer_kind": "param",
+        "peer_locality": null,
+        "site_id": "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2",
+        "size_bytes": 4096,
+        "size_kind": "const",
+        "size_log2": 12,
+        "static_launch_sites": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      },
+      {
+        "batch_size": 4,
+        "buffer_reusable": true,
+        "coalescable": false,
+        "compute_before_flops": 0,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "fan_out": 1,
+        "flops_to_first_use": 0,
+        "grid_blocks": 4,
+        "guard_density": 1,
+        "hk_capable": true,
+        "in_loop": false,
+        "iter_estimate": null,
+        "kernel": "eval_static4_parallel",
+        "launch_block": {
+          "x": 1,
+          "y": 1,
+          "z": 1
+        },
+        "launch_contexts": [
+          {
+            "grid_blocks": 4,
+            "launch_block": {
+              "x": 1,
+              "y": 1,
+              "z": 1
+            },
+            "launch_grid": {
+              "x": 4,
+              "y": 1,
+              "z": 1
+            },
+            "size_bytes": 4096,
+            "static_callsite_count": 1,
+            "threads_per_block": 1,
+            "trip_count": null
+          }
+        ],
+        "launch_grid": {
+          "x": 4,
+          "y": 1,
+          "z": 1
+        },
+        "legal_actions": [
+          "proxy",
+          "trigger",
+          "default"
+        ],
+        "loop": null,
+        "max_vector_bytes": 16,
+        "op_kind": "put_no_db",
+        "peer_kind": "param",
+        "peer_locality": null,
+        "site_id": "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3",
+        "size_bytes": 4096,
+        "size_kind": "const",
+        "size_log2": 12,
+        "static_launch_sites": 1,
+        "threads_per_block": 1,
+        "trip_count": null
+      }
+    ]
+  },
+  "evaluation_relations": [
+    {
+      "compiler_facts": {
+        "batch_size": 16,
+        "coalescable": true,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "flops_to_first_use": 68,
+        "grid_blocks": 1,
+        "in_loop": true,
+        "site_count": 1,
+        "size_bytes": 4096,
+        "total_bytes": 65536
+      },
+      "kernel": "eval_adjacent_batch",
+      "legal_physical_actions_shared_by_all_sites": [
+        "proxy",
+        "trigger"
+      ],
+      "relation": "sites execute in one named scenario and share its measured end-to-end objective; concurrent proxy producers share the finite worker-lane budget",
+      "resource_relations": {
+        "group_site_count": 1,
+        "max_concurrent_proxy_producers": 1,
+        "proxy_worker_lanes": 8
+      },
+      "shared_decision_context": false,
+      "site_ids": [
+        "?:?:_Z19eval_adjacent_batchPN4gicc9DeviceCtxEii::2"
+      ]
+    },
+    {
+      "compiler_facts": {
+        "batch_size": 1,
+        "coalescable": false,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "flops_to_first_use": 0,
+        "grid_blocks": 1,
+        "in_loop": false,
+        "site_count": 1,
+        "size_bytes": 4096,
+        "total_bytes": 4096
+      },
+      "kernel": "eval_dynamic_offset",
+      "legal_physical_actions_shared_by_all_sites": [
+        "proxy"
+      ],
+      "relation": "sites execute in one named scenario and share its measured end-to-end objective; concurrent proxy producers share the finite worker-lane budget",
+      "resource_relations": {
+        "group_site_count": 1,
+        "max_concurrent_proxy_producers": 1,
+        "proxy_worker_lanes": 8
+      },
+      "shared_decision_context": false,
+      "site_ids": [
+        "?:?:_Z19eval_dynamic_offsetPN4gicc9DeviceCtxEiiPKm::0"
+      ]
+    },
+    {
+      "compiler_facts": {
+        "batch_size": 64,
+        "coalescable": true,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "flops_to_first_use": 5392,
+        "grid_blocks": 8,
+        "in_loop": true,
+        "site_count": 1,
+        "size_bytes": 4096,
+        "total_bytes": 262144
+      },
+      "kernel": "eval_far_batch",
+      "legal_physical_actions_shared_by_all_sites": [
+        "proxy",
+        "trigger"
+      ],
+      "relation": "sites execute in one named scenario and share its measured end-to-end objective; concurrent proxy producers share the finite worker-lane budget",
+      "resource_relations": {
+        "group_site_count": 1,
+        "max_concurrent_proxy_producers": 8,
+        "proxy_worker_lanes": 8
+      },
+      "shared_decision_context": false,
+      "site_ids": [
+        "?:?:_Z14eval_far_batchPN4gicc9DeviceCtxEiiPVf::0"
+      ]
+    },
+    {
+      "compiler_facts": {
+        "batch_size": 1,
+        "coalescable": false,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "flops_to_first_use": 0,
+        "grid_blocks": 8,
+        "in_loop": false,
+        "site_count": 1,
+        "size_bytes": 1048576,
+        "total_bytes": 1048576
+      },
+      "kernel": "eval_large_single",
+      "legal_physical_actions_shared_by_all_sites": [
+        "default",
+        "proxy",
+        "trigger"
+      ],
+      "relation": "sites execute in one named scenario and share its measured end-to-end objective; concurrent proxy producers share the finite worker-lane budget",
+      "resource_relations": {
+        "group_site_count": 1,
+        "max_concurrent_proxy_producers": 8,
+        "proxy_worker_lanes": 8
+      },
+      "shared_decision_context": false,
+      "site_ids": [
+        "?:?:_Z17eval_large_singlePN4gicc9DeviceCtxEii::0"
+      ]
+    },
+    {
+      "compiler_facts": {
+        "batch_size": 32,
+        "coalescable": false,
+        "descriptor_reusable": true,
+        "distance_exact": true,
+        "flops_to_first_use": 66,
+        "grid_blocks": 1,
+        "in_loop": true,
+        "site_count": 1,
+        "size_bytes": 4096,
+        "total_bytes": 131072
+      },
+      "kernel": "eval_reuse_batch",
+      "legal_physical_actions_shared_by_all_sites": [
+        "proxy",
+        "trigger"
+      ],
+      "relation": "sites execute in one named scenario and share its measured end-to-end objective; concurrent proxy producers share the finite worker-lane budget",
+      "resource_relations": {
+        "group_site_count": 1,
+        "max_concurrent_proxy_producers": 1,
+        "proxy_worker_lanes": 8
+      },
+      "shared_decision_context": false,
+      "site_ids": [
+        "?:?:_Z16eval_reuse_batchPN4gicc9DeviceCtxEii::2"
+      ]
+    },
+    {
+      "compiler_facts": {
+        "batch_size": 4,
+        "coalescable": false,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "flops_to_first_use": 0,
+        "grid_blocks": 4,
+        "in_loop": false,
+        "site_count": 4,
+        "size_bytes": 4096,
+        "total_bytes": 16384
+      },
+      "kernel": "eval_static4_parallel",
+      "legal_physical_actions_shared_by_all_sites": [
+        "default",
+        "proxy",
+        "trigger"
+      ],
+      "relation": "sites execute in one named scenario and share its measured end-to-end objective; concurrent proxy producers share the finite worker-lane budget",
+      "resource_relations": {
+        "group_site_count": 4,
+        "max_concurrent_proxy_producers": 4,
+        "proxy_worker_lanes": 8
+      },
+      "shared_decision_context": true,
+      "site_ids": [
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::0",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::1",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::2",
+        "?:?:_Z21eval_static4_parallelPN4gicc9DeviceCtxEii::3"
+      ]
+    },
+    {
+      "compiler_facts": {
+        "batch_size": 1,
+        "coalescable": false,
+        "descriptor_reusable": false,
+        "distance_exact": true,
+        "flops_to_first_use": 0,
+        "grid_blocks": 1,
+        "in_loop": false,
+        "site_count": 1,
+        "size_bytes": 256,
+        "total_bytes": 256
+      },
+      "kernel": "eval_tiny_single",
+      "legal_physical_actions_shared_by_all_sites": [
+        "default",
+        "proxy",
+        "trigger"
+      ],
+      "relation": "sites execute in one named scenario and share its measured end-to-end objective; concurrent proxy producers share the finite worker-lane budget",
+      "resource_relations": {
+        "group_site_count": 1,
+        "max_concurrent_proxy_producers": 1,
+        "proxy_worker_lanes": 8
+      },
+      "shared_decision_context": false,
+      "site_ids": [
+        "?:?:_Z16eval_tiny_singlePN4gicc9DeviceCtxEii::0"
+      ]
+    }
+  ]
+}

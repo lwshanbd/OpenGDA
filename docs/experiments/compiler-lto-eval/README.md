@@ -30,8 +30,8 @@ facts plus the hash-bound deployment profile:
 The bridge requires a response bound to that dossier ID, exact coverage of
 all sites, and an action from each compiler-provided legal set. The LTO pass,
 not the model, implements the lowering. Malformed, stale, incomplete, or
-illegal responses fail closed. No provider was called and no LLM result is
-reported here.
+illegal responses fail closed. Freezing the workload does not invoke a
+provider; separately authorized compiler-fact LLM results are reported below.
 
 ## Frozen workload
 
@@ -224,6 +224,52 @@ the accepted pass hint is
 and the final run summary is
 `6fb8af459c0320b212d303572afe03cac95695cae807595b9437fe164c53174e`.
 
+## Zero-shot compiler-fact LLM result
+
+The authorized `llm-zero-shot-v1` study sent the frozen source-free compiler
+dossier—not source, IR, runtime labels, or oracle labels—to Claude Opus in 20
+independent fresh sessions. All 20 responses passed the strict compiler bridge,
+with no fallback or retry, but produced five distinct action policies. The
+modal policy appeared in 10/20 trials, matched only 2/6 decision-bearing
+scenario winners and 5/9 decision-bearing sites, and none of the five policies
+matched the calibrated GBT assignment. Reported provider cost totaled
+$2.849265.
+
+All five distinct policies were then materialized through the compiler/LTO
+path and benchmarked without changing application source. The modal policy
+was 1.0216x faster than compiler default, but its paired 95% interval
+[0.9808, 1.0486] included parity. Relative to that policy, calibrated GBT was
+1.0658x faster; equivalently, calibrated-GBT time divided by LLM-policy time
+was 0.9383 with interval [0.8976, 0.9651]. This is useful negative evidence:
+an uncalibrated LLM can emit legal compiler decisions and sometimes improve
+the default, but language reasoning alone did not recover the best measured
+policy on this suite.
+
+## Calibration-enriched LLM upper-bound protocol
+
+`llm-calibrated-v2` freezes the next test. It gives the LLM exactly the same
+17 stable independent compiler-path calibration cases and 34 proxy/trigger
+action-cost rows used by calibrated GBT, while deliberately allowing richer
+evaluation-side compiler input: the full source-free dossier plus explicit
+group and finite-worker-lane relations. This is an LLM compiler-stage
+capability upper-bound test, not a same-input model contest. Evaluation
+runtime results and oracle labels remain hidden, exact calibration/evaluation
+message sizes are disjoint, and the only permitted outputs are existing legal
+LTO action labels that the compiler revalidates and lowers.
+
+The package is frozen at request ID
+`sha256:67011bb827972110220af63934b3db7984e8fc3f865e53aa6aa14d1e32f4f353`.
+The prompt SHA-256 is
+`1fb2cff4de4bdf885c356666468a5919fe736f9fb41c60d66b6b5d9878d3fb91`;
+the response-schema SHA-256 is
+`b56248196b37985dcbc70fbec4a4a93279208ce55dbfa6fb1d4b10695966690a`.
+Twenty calls are preregistered and the runner enforces fresh sessions,
+sequential execution, no tools, no session persistence, transport-only retry,
+raw-response archival, and deterministic compiler fallback on semantic
+failure. This request is **not authorized**: earlier zero-shot or collective
+authorization does not cover these hashes, and no provider call has been made
+for `llm-calibrated-v2`.
+
 ## Reproduction and gates
 
 ```bash
@@ -277,6 +323,12 @@ python3 examples/proxy/analyze_compiler_lto_transfer.py \
   --oracle-response docs/experiments/compiler-lto-eval/models/measured-oracle-v1/measured-oracle-response.json \
   --expected-reps 1,2,3,4,5,6,7,8,9,10 \
   --json docs/experiments/compiler-lto-eval/runs/compiler-lto-gbt-calibrated-balanced-v3/summary.json
+
+python3 examples/proxy/prepare_compiler_lto_llm_calibrated.py verify \
+  --calibration-dossier docs/experiments/compiler-lto-calibration/frozen-v1/dossier.json \
+  --calibration-results docs/experiments/compiler-lto-calibration/runs/compiler-lto-calibration-cuid-v2/summary.json \
+  --evaluation-dossier docs/experiments/compiler-lto-eval/frozen-v1/dossier.json \
+  --request docs/experiments/compiler-lto-eval/llm-calibrated-v2/request.json
 ```
 
 Candidate model responses use

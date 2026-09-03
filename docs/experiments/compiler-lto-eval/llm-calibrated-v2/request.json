@@ -1,0 +1,132 @@
+{
+  "authorization": {
+    "granted": false,
+    "must_bind_exactly": [
+      "request_id",
+      "system_prompt_sha256",
+      "prompt_sha256",
+      "response_schema_sha256",
+      "independent_responses",
+      "provider.kind",
+      "provider.executable",
+      "provider.cli_version",
+      "provider.requested_model",
+      "provider.effort",
+      "provider.fresh_session_per_trial",
+      "provider.structured_output",
+      "transport_retry"
+    ],
+    "note": "Previous zero-shot or collective authorization does not bind this prompt hash and cannot be reused.",
+    "required": true
+  },
+  "compiler_only": true,
+  "data_boundary": {
+    "calibration_and_evaluation_sizes_disjoint": true,
+    "calibration_labels_visible": true,
+    "compiler_revalidates_every_response": true,
+    "evaluation_oracle_visible": false,
+    "evaluation_runtime_labels_visible": false,
+    "llvm_ir_visible": false,
+    "model_may_generate_code": false,
+    "model_may_generate_ir": false,
+    "model_tools": [],
+    "source_visible": false
+  },
+  "evaluation_dossier_id": "sha256:2299725094d5d805e6f8732227a2b11c28c57ff3ea194cf32d8e66c65c3a1aa5",
+  "implementation": {
+    "preparer": {
+      "bytes": 19888,
+      "path": "examples/proxy/prepare_compiler_lto_llm_calibrated.py",
+      "role": "preparer",
+      "sha256": "2f08529fd9e07bc99fabecb2ae26797d574edd81f6e9aa9e955beea7eda3f8ca"
+    },
+    "provider_runner": {
+      "bytes": 18065,
+      "path": "examples/proxy/run_compiler_lto_llm_calibrated_trials.py",
+      "role": "provider_runner",
+      "sha256": "1497293b8ed66ec5b48696749cec5b01953654f3eda5a5e499cfb735348bccc5"
+    },
+    "provider_runner_frozen": true
+  },
+  "matched_evidence_control": {
+    "action_cost_rows": 34,
+    "calibration_action_cost_rows_match_comparator": true,
+    "calibration_cases_match_comparator": true,
+    "calibration_scalar_facts_match_comparator": true,
+    "comparator": "compiler-path calibrated GBT v2",
+    "llm_additional_evidence": [
+      "full source-free compiler evaluation dossier",
+      "compiler-derived relational grouping of evaluation sites"
+    ],
+    "purpose": "LLM compiler-stage capability upper bound, not a same-input model contest",
+    "training_scenarios": 17
+  },
+  "model_output_scope": "legal LTO action labels only",
+  "preregistered_analysis": {
+    "invalid_response": "one semantic failure and deterministic compiler fallback; no semantic retry",
+    "primary": "exact evaluation action-oracle agreement",
+    "runtime_protocol": "reuse an existing byte-identical policy result when exact; otherwise compile through LTO and run at most one pdebug job at a time under a separately frozen protocol",
+    "secondary": [
+      "accepted_response_rate",
+      "unique_policy_count",
+      "modal_policy_frequency",
+      "agreement_with_calibrated_gbt",
+      "runtime only for distinct accepted policies"
+    ]
+  },
+  "provider_delivery": {
+    "calibration_pack": {
+      "bytes": 9564,
+      "path": "calibration-pack.json",
+      "role": "prompt_embedded_calibration",
+      "sha256": "2087bbb3331f4b91a43006582ad1c24d815936858684a550a66ec625ea847fcf"
+    },
+    "calls_are_sequential": true,
+    "files": [
+      {
+        "bytes": 409,
+        "path": "system-prompt.txt",
+        "role": "system_prompt",
+        "sha256": "ab73a88aac8df09e6a71eb3cf26ba633a3e84910f303ed1eed5ffb2f084dc8e3"
+      },
+      {
+        "bytes": 36195,
+        "path": "prompt.txt",
+        "role": "user_prompt",
+        "sha256": "1fb2cff4de4bdf885c356666468a5919fe736f9fb41c60d66b6b5d9878d3fb91"
+      },
+      {
+        "bytes": 8151,
+        "path": "response-schema.json",
+        "role": "response_schema",
+        "sha256": "b56248196b37985dcbc70fbec4a4a93279208ce55dbfa6fb1d4b10695966690a"
+      }
+    ],
+    "independent_responses": 20,
+    "one_user_prompt_per_call": true
+  },
+  "question": "Can an LLM use matched compiler-path calibration and relational compiler facts to choose compiler-owned LTO communication actions?",
+  "request_id": "sha256:67011bb827972110220af63934b3db7984e8fc3f865e53aa6aa14d1e32f4f353",
+  "schema_version": "gicc-compiler-lto-llm-calibrated-request-v1",
+  "source_inputs": [
+    {
+      "bytes": 41385,
+      "path": "docs/experiments/compiler-lto-calibration/frozen-v1/dossier.json",
+      "role": "calibration_compiler_dossier",
+      "sha256": "7b8c38fe4ce49de979172458830a400e27256c9ca56aa9b55cfaad89f53319d1"
+    },
+    {
+      "bytes": 8167,
+      "path": "docs/experiments/compiler-lto-calibration/runs/compiler-lto-calibration-cuid-v2/summary.json",
+      "role": "independent_calibration_labels",
+      "sha256": "e3e28e60127ae491d570a6743cd04acb46a40cb42d9d51da6013e260d9f6f8f2"
+    },
+    {
+      "bytes": 17218,
+      "path": "docs/experiments/compiler-lto-eval/frozen-v1/dossier.json",
+      "role": "evaluation_compiler_dossier",
+      "sha256": "c77f4cff5e14552491c7a8cf8129724885c2f9a933898460375f7cadaca32274"
+    }
+  ],
+  "status": "awaiting_explicit_provider_authorization"
+}
