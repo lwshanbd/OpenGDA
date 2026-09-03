@@ -1408,10 +1408,11 @@ inline void allreduce_double_tree_pipe(gicc::Runtime& rt,
 // At K=2 the inter-node tree degenerates to a single balanced exchange (each
 // node is root of one half, leaf of the other) -> same result as hier_direct,
 // no real tree depth. The tree only earns its log(K) advantage at K>=4 nodes.
-// NOTE: like the flat tree, phase 2 is NOT pipelined, so at K>=4 it pays a
-// depth*slice critical-path cost on large messages (chunk phase 2 to fix).
-// Requires count % P == 0 and (count/P) even. flag host-pinned >= 6 uints
-// (memset once); recv >= count floats.
+// The fused path accepts S pipeline chunks for phase 2. S=1 preserves the
+// original whole-half tree; S>1 streams each half through successive tree
+// levels using disjoint receive/flag slots. Requires count % P == 0 and
+// (count/P) even. flag host-pinned >= 6*S uints (memset once); recv >= count
+// floats.
 //
 // STABILITY: the caller MUST rt.set_ipc_fastpath(false) (the same-node flag
 // gicc::put otherwise routes through the IPC/SDMA fast path and contends with
@@ -1546,6 +1547,7 @@ __global__ void dtree_hier_fused_kernel(gicc::DeviceCtx* ctx,
                                         int data_idx, int recv_idx, int flag_idx,
                                         int one_idx, int nbar_idx, int rank,
                                         int P, int count, unsigned int gen,
+                                        int chunks,
                                         int up0, int c0a, int c0b, int ct0,
                                         int up1, int c1a, int c1b, int ct1,
                                         float* data, float* recv,
@@ -1561,6 +1563,8 @@ __global__ void dtree_hier_fused_kernel(gicc::DeviceCtx* ctx,
     const int    node_base = rank - lp;
     const int    slice     = count / P;
     const int    hh        = slice / 2;
+    const int    S         = chunks;
+    const int    ce        = hh / S;
     const size_t sbase     = (size_t)lp * slice;
     const int    up[2] = {up0, up1};
     const int    ca[2] = {c0a, c1a};
@@ -1580,47 +1584,58 @@ __global__ void dtree_hier_fused_kernel(gicc::DeviceCtx* ctx,
     }
     grid.sync();
 
-    // ---- phase 2: inter-node double tree REDUCE (leaf node -> root node) ----
+    // ---- phase 2: pipelined inter-node double tree REDUCE ----
     for (int t = 0; t < 2; ++t) {
         const size_t base = sbase + (size_t)t * hh;
         const int    kid[2] = {ca[t], cb[t]};
-        for (int k = 0; k < 2; ++k) {
-            if (kid[k] < 0) continue;
-            if (lead) {
-                while (flag[t * 2 + k] == 0u) { __builtin_amdgcn_s_sleep(1); }
-                flag[t * 2 + k] = 0u;
-                __threadfence_system();
+        for (int chunk = 0; chunk < S; ++chunk) {
+            const int co = chunk * ce;
+            const int ne = (chunk == S - 1) ? (hh - co) : ce;
+            for (int k = 0; k < 2; ++k) {
+                if (kid[k] < 0) continue;
+                const int fr = (t * 2 + k) * S + chunk;
+                if (lead) {
+                    while (flag[fr] == 0u) { __builtin_amdgcn_s_sleep(1); }
+                    flag[fr] = 0u;
+                    __threadfence_system();
+                }
+                grid.sync();
+                for (size_t i = gtid; i < (size_t)ne; i += nthr)
+                    data[base + co + i] += recv[(size_t)k * hh + co + i];
+                grid.sync();
             }
-            grid.sync();
-            for (size_t i = gtid; i < (size_t)hh; i += nthr)
-                data[base + i] += recv[(size_t)k * hh + i];
-            grid.sync();
-        }
-        if (up[t] >= 0) {
-            grid.sync();
-            dt_send_half(ctx, grid, up[t] * P + lp, recv_idx, (size_t)ct[t] * hh,
-                         data_idx, data, base, hh,
-                         flag_idx, (size_t)(t * 2 + ct[t]), one_idx,
-                         lead, gtid, nthr);
+            if (up[t] >= 0) {
+                grid.sync();
+                dt_send_half(
+                    ctx, grid, up[t] * P + lp, recv_idx,
+                    (size_t)ct[t] * hh + co, data_idx, data, base + co, ne,
+                    flag_idx, (size_t)((t * 2 + ct[t]) * S + chunk),
+                    one_idx, lead, gtid, nthr);
+            }
         }
     }
 
-    // ---- phase 2: BROADCAST (root node -> leaf node) ----
+    // ---- phase 2: pipelined BROADCAST (root node -> leaf node) ----
     for (int t = 0; t < 2; ++t) {
         const size_t base = sbase + (size_t)t * hh;
-        if (up[t] >= 0 && lead) {
-            while (flag[4 + t] == 0u) { __builtin_amdgcn_s_sleep(1); }
-            flag[4 + t] = 0u;
-            __threadfence_system();
-        }
-        grid.sync();
         const int kid[2] = {ca[t], cb[t]};
-        for (int k = 0; k < 2; ++k) {
-            if (kid[k] < 0) continue;
-            dt_send_half(ctx, grid, kid[k] * P + lp, data_idx, base,
-                         data_idx, data, base, hh,
-                         flag_idx, (size_t)(4 + t), one_idx,
-                         lead, gtid, nthr);
+        for (int chunk = 0; chunk < S; ++chunk) {
+            const int co = chunk * ce;
+            const int ne = (chunk == S - 1) ? (hh - co) : ce;
+            const int fb = 4 * S + t * S + chunk;
+            if (up[t] >= 0 && lead) {
+                while (flag[fb] == 0u) { __builtin_amdgcn_s_sleep(1); }
+                flag[fb] = 0u;
+                __threadfence_system();
+            }
+            grid.sync();
+            for (int k = 0; k < 2; ++k) {
+                if (kid[k] < 0) continue;
+                dt_send_half(ctx, grid, kid[k] * P + lp, data_idx, base + co,
+                             data_idx, data, base + co, ne,
+                             flag_idx, (size_t)fb, one_idx,
+                             lead, gtid, nthr);
+            }
         }
     }
 
@@ -1676,11 +1691,15 @@ inline void allreduce_double_tree_hier(gicc::Runtime& rt,
                                        const gicc::Buffer& flag_buf, unsigned int* d_flag,
                                        const gicc::Buffer& one_buf, int count, int P,
                                        const gicc::Buffer& nbar_buf = gicc::Buffer{},
-                                       unsigned int* d_nbar = nullptr) {
+                                       unsigned int* d_nbar = nullptr,
+                                       int nchunks = 1) {
     const int N    = rt.size();
     const int rank = rt.rank();
     const int K    = N / P;                           // number of nodes
     const int nid  = rank / P;                        // my node id (virtual rank)
+    const int hh   = (count / P) / 2;
+    int S = nchunks < 1 ? 1 : nchunks;
+    if (S > hh) S = hh;
 
     static int gb_tree = 0;
     const int  bt = 256;
@@ -1761,7 +1780,7 @@ inline void allreduce_double_tree_hier(gicc::Runtime& rt,
         DTH_CKPT("1-fused-launch");
         gicc::DeviceCtx* d = rt.prepare();
         void* pf[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx, &nbar_idx,
-                      &rk, &Px, &c, &gen,
+                      &rk, &Px, &c, &gen, &S,
                       &up0, &c0a, &c0b, &ct0, &up1, &c1a, &c1b, &ct1,
                       &d_data, &d_recv, &fp, &np};
         DTH_T0();

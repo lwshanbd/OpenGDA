@@ -331,6 +331,50 @@ from an LLM. A follow-up must add a genuinely richer compiler action/context
 space or held-out topology generalization, and must be preregistered
 independently before any new runtime or model evaluation.
 
+### Preregistered n4 hierarchy-pipeline scout
+
+The next compiler-owned action-space extension keeps the application and its
+ABI unchanged.  The catalog adds two manually implemented, compiler-visible
+variants of `hierarchical_double_tree` whose inter-node reduce and broadcast
+phases use four or eight disjoint pipeline chunks.  A future model may select
+only opaque catalog option IDs; it cannot emit code, alter a kernel, or modify
+application source.  This scout invokes no model and makes no provider call.
+
+The topology-matched four-node graph is
+`sha256:3fb97464580740c0a65e74ee0bdb66880a4dc3527bfcd5455ce94d2bceab9df8`.
+It exposes ten ABI-identical catalog options in each of four exact message
+regions, for `10^4 = 10,000` compiler policies.  All 10,000 policies were
+accepted by the strict bridge with unique composite candidate IDs, every
+uniform binary and a mixed-policy canary were materialized and IR-audited, and
+the complete offline bundle is frozen as
+`sha256:2121d327c81a5b9874b8f5bc64f118b3571fce0773583d36f5a432e82490a181`.
+These checks establish action-space capacity only, not performance.
+
+Submit exactly one `pdebug` batch allocation with four nodes, 32 ranks, eight
+ranks per node (one rank per GCD), eight CPU cores and one GPU per rank.  Within that same
+allocation, execute the following frozen controls sequentially in this order:
+
+1. `hierarchical_double_tree` (one chunk);
+2. `hierarchical_double_tree_pipe4`;
+3. `hierarchical_double_tree_pipe8`.
+
+Measure the nine frozen sizes from 1 KiB through 16 MiB, with one warmup and
+three timed calls per size.  Every arm must exit zero and report zero errors at
+every size.  The scout is promising only if all three preregistered conditions
+hold:
+
+- at least two distinct arms win different sizes;
+- the best-uniform-to-pointwise-oracle geometric-mean ratio is at least `1.05`;
+- at least one size has best-uniform-to-pointwise headroom of at least `1.10`.
+
+The detached controller submits only that one allocation, monitors it to a
+terminal state, freezes the exact jobspec, node list, binaries, provenance,
+compiler hints and raw logs, and then runs the content-addressed analysis
+without waiting for user intervention.  A failed correctness or headroom gate
+stops this branch.  Passing only warrants preparation of a separately frozen
+model experiment; it does not authorize sending any graph or prompt to an
+external provider or scheduling a model-selected policy.
+
 ## Stop conditions
 
 - Any source/catalog hash mismatch.

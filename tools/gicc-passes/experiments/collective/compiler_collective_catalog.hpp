@@ -270,6 +270,60 @@ static void compiler_allreduce_hierarchical_tree(
                             count, ppn);
 }
 
+GICC_COLLECTIVE_ENTRY(
+    "gicc.collective.candidate.v1;" GICC_CANDIDATE_COMMON
+    "algorithm=hierarchical_double_tree_pipe4;communication_graph=node_double_tree;"
+    "step_complexity=O_log_nodes_plus_ppn;topology=two_level_node_hierarchy;"
+    "cross_node_pattern=chunked_parallel_node_tree_edges;pipeline_chunks=4;"
+    "resource_model=xgmi_scatter_all_nics_tree_pipeline")
+static void compiler_allreduce_hierarchical_tree_pipe4(
+    gicc::Runtime &rt,
+    const gicc::Buffer &data_buf, float *d_data,
+    const gicc::Buffer &recv_buf, float *d_recv,
+    const gicc::Buffer &flag_buf, unsigned int *d_flag,
+    const gicc::Buffer &one_buf,
+    const gicc::Buffer &nbar_buf, unsigned int *d_nbar,
+    int count, int ppn) {
+    const int nodes = ppn > 0 ? rt.size() / ppn : 0;
+    if (ppn > 0 && rt.size() % ppn == 0 && power_of_two(nodes) &&
+        count % ppn == 0 && count / ppn >= 8 && d_nbar != nullptr) {
+        gicc_coll::allreduce_double_tree_hier(
+            rt, data_buf, d_data, recv_buf, d_recv,
+            flag_buf, d_flag, one_buf, count, ppn, nbar_buf, d_nbar, 4);
+        return;
+    }
+    baseline_implementation(rt, data_buf, d_data, recv_buf, d_recv,
+                            flag_buf, d_flag, one_buf, nbar_buf, d_nbar,
+                            count, ppn);
+}
+
+GICC_COLLECTIVE_ENTRY(
+    "gicc.collective.candidate.v1;" GICC_CANDIDATE_COMMON
+    "algorithm=hierarchical_double_tree_pipe8;communication_graph=node_double_tree;"
+    "step_complexity=O_log_nodes_plus_ppn;topology=two_level_node_hierarchy;"
+    "cross_node_pattern=chunked_parallel_node_tree_edges;pipeline_chunks=8;"
+    "resource_model=xgmi_scatter_all_nics_tree_pipeline")
+static void compiler_allreduce_hierarchical_tree_pipe8(
+    gicc::Runtime &rt,
+    const gicc::Buffer &data_buf, float *d_data,
+    const gicc::Buffer &recv_buf, float *d_recv,
+    const gicc::Buffer &flag_buf, unsigned int *d_flag,
+    const gicc::Buffer &one_buf,
+    const gicc::Buffer &nbar_buf, unsigned int *d_nbar,
+    int count, int ppn) {
+    const int nodes = ppn > 0 ? rt.size() / ppn : 0;
+    if (ppn > 0 && rt.size() % ppn == 0 && power_of_two(nodes) &&
+        count % ppn == 0 && count / ppn >= 16 && d_nbar != nullptr) {
+        gicc_coll::allreduce_double_tree_hier(
+            rt, data_buf, d_data, recv_buf, d_recv,
+            flag_buf, d_flag, one_buf, count, ppn, nbar_buf, d_nbar, 8);
+        return;
+    }
+    baseline_implementation(rt, data_buf, d_data, recv_buf, d_recv,
+                            flag_buf, d_flag, one_buf, nbar_buf, d_nbar,
+                            count, ppn);
+}
+
 static_assert(__is_same(decltype(compiler_allreduce_anchor), CollectiveFn));
 static_assert(__is_same(decltype(compiler_allreduce_flat_tree), CollectiveFn));
 static_assert(__is_same(decltype(compiler_allreduce_flat_tree_pipe4), CollectiveFn));
@@ -278,6 +332,8 @@ static_assert(__is_same(decltype(compiler_allreduce_locality_ring), CollectiveFn
 static_assert(__is_same(decltype(compiler_allreduce_hierarchical_ring), CollectiveFn));
 static_assert(__is_same(decltype(compiler_allreduce_hierarchical_direct), CollectiveFn));
 static_assert(__is_same(decltype(compiler_allreduce_hierarchical_tree), CollectiveFn));
+static_assert(__is_same(decltype(compiler_allreduce_hierarchical_tree_pipe4), CollectiveFn));
+static_assert(__is_same(decltype(compiler_allreduce_hierarchical_tree_pipe8), CollectiveFn));
 
 #undef GICC_CANDIDATE_COMMON
 #undef GICC_COLLECTIVE_ENTRY
