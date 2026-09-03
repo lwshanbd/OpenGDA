@@ -49,6 +49,25 @@ class CompilerCollectiveJobMonitorTests(unittest.TestCase):
         self.assertEqual(142, result["exit_code"])
         self.assertEqual(["timeout"], result["exception_types"])
 
+    def test_stderr_summary_keeps_last_hdir_checkpoint_per_rank(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "job.err"
+            path.write_text(
+                "[gicc] CPU proxy: 1 worker thread(s) per rank\n"
+                "[hdir r1 call0 4096 B] 2-launch-k1\n"
+                "[hdir r0 call0 4096 B] 3-sync-k1-enter\n"
+                "[hdir r1 call0 4096 B] 3-sync-k1-enter\n"
+            )
+            summary = monitor.summarize_stderr(path, tail_lines=2)
+            self.assertEqual(4, summary["line_count"])
+            self.assertEqual(2, len(summary["tail"]))
+            self.assertEqual(
+                "3-sync-k1-enter", summary["hdir_last_by_rank"]["0"]["stage"]
+            )
+            self.assertEqual(
+                "3-sync-k1-enter", summary["hdir_last_by_rank"]["1"]["stage"]
+            )
+
     def test_jobspec_requires_pdebug_and_redacts_environment(self):
         jobspec = {
             "tasks": [{"command": ["/tmp/program", "1", "0"]}],

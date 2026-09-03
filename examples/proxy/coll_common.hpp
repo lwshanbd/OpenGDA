@@ -850,6 +850,8 @@ inline void ring_allreduce_hier_direct(gicc::Runtime& rt,
     const int N = rt.size();
     const int rank = rt.rank();
     static int gb1 = 0;
+    static int gb1_per_sm = 0;
+    static int gb1_sms = 0;
     const int bt = 256;
     if (gb1 == 0) {
         int per_sm = 0, n_sm = 0;
@@ -857,9 +859,25 @@ inline void ring_allreduce_hier_direct(gicc::Runtime& rt,
             &per_sm, (const void*)hier_direct_rs_cross_kernel, bt, 0);
         (void)hipDeviceGetAttribute(&n_sm, hipDeviceAttributeMultiprocessorCount, rt.gpu_id());
         gb1 = (per_sm > 0 && n_sm > 0) ? per_sm * n_sm : 1;
+        gb1_per_sm = per_sm;
+        gb1_sms = n_sm;
     }
 
     static int prof = (std::getenv("GICC_HDIR_PROF") != nullptr) ? 1 : 0;
+    static int dbg = (std::getenv("GICC_HDIR_DBG") != nullptr) ? 1 : 0;
+    static int call_seq = 0;
+    const int my_seq = call_seq++;
+    #define HDIR_CKPT(msg) do { if (dbg) { \
+        fprintf(stderr, "[hdir r%d call%d %d B] " msg "\n", \
+                rank, my_seq, count * 4); \
+        fflush(stderr); \
+    } } while (0)
+    if (dbg) {
+        fprintf(stderr,
+                "[hdir r%d call%d %d B] 0-enter grid=%d per_sm=%d sms=%d\n",
+                rank, my_seq, count * 4, gb1, gb1_per_sm, gb1_sms);
+        fflush(stderr);
+    }
     using clk = std::chrono::high_resolution_clock;
     auto us = [](clk::time_point a, clk::time_point b) {
         return std::chrono::duration<double, std::micro>(b - a).count();
@@ -873,6 +891,7 @@ inline void ring_allreduce_hier_direct(gicc::Runtime& rt,
     if (prof) t1 = clk::now();
 
     // kernel 1: direct RS + inter-node exchange (cooperative)
+    HDIR_CKPT("1-prepare-k1");
     gicc::DeviceCtx* d = rt.prepare();
     int data_idx = data_buf.index, recv_idx = recv_buf.index;
     int flag_idx = flag_buf.index, one_idx = one_buf.index;
@@ -880,23 +899,55 @@ inline void ring_allreduce_hier_direct(gicc::Runtime& rt,
     volatile unsigned int* fp = (volatile unsigned int*)d_flag;
     void* p1[] = {&d, &data_idx, &recv_idx, &flag_idx, &one_idx,
                   &n, &r, &c, &p, &d_data, &d_recv, &fp};
-    (void)hipLaunchCooperativeKernel((const void*)hier_direct_rs_cross_kernel,
-                                     dim3(gb1), dim3(bt), p1, 0, 0);
-    (void)hipDeviceSynchronize();
+    HDIR_CKPT("2-launch-k1");
+    hipError_t launch1 = hipLaunchCooperativeKernel(
+        (const void*)hier_direct_rs_cross_kernel,
+        dim3(gb1), dim3(bt), p1, 0, 0);
+    if (dbg && launch1 != hipSuccess) {
+        fprintf(stderr, "[hdir r%d call%d %d B] k1-launch-error=%d:%s\n",
+                rank, my_seq, count * 4, (int)launch1,
+                hipGetErrorString(launch1));
+        fflush(stderr);
+    }
+    HDIR_CKPT("3-sync-k1-enter");
+    hipError_t sync1 = hipDeviceSynchronize();
+    if (dbg && sync1 != hipSuccess) {
+        fprintf(stderr, "[hdir r%d call%d %d B] k1-sync-error=%d:%s\n",
+                rank, my_seq, count * 4, (int)sync1,
+                hipGetErrorString(sync1));
+        fflush(stderr);
+    }
+    HDIR_CKPT("4-sync-k1-exit");
     if (prof) t2 = clk::now();   // K1 (RS+cross) done
+    HDIR_CKPT("5-reset-k1-enter");
     rt.reset();
+    HDIR_CKPT("6-reset-k1-exit-barrier-enter");
     rt.barrier();                       // all ranks' global slices ready
+    HDIR_CKPT("7-barrier-k1-exit");
     if (prof) t3 = clk::now();   // inter-kernel ceremony done
 
     // kernel 2: direct all-gather (plain kernel, no flags/sync)
+    HDIR_CKPT("8-prepare-k2");
     d = rt.prepare();
     const int blk = 512;
+    HDIR_CKPT("9-launch-k2");
     hipLaunchKernelGGL(hier_direct_ag_kernel, dim3(blk), dim3(bt), 0, 0,
                        d, data_idx, n, r, c, p, d_data);
-    (void)hipDeviceSynchronize();
+    HDIR_CKPT("10-sync-k2-enter");
+    hipError_t sync2 = hipDeviceSynchronize();
+    if (dbg && sync2 != hipSuccess) {
+        fprintf(stderr, "[hdir r%d call%d %d B] k2-sync-error=%d:%s\n",
+                rank, my_seq, count * 4, (int)sync2,
+                hipGetErrorString(sync2));
+        fflush(stderr);
+    }
+    HDIR_CKPT("11-sync-k2-exit");
     if (prof) t4 = clk::now();   // K2 (AG) done
+    HDIR_CKPT("12-reset-k2-enter");
     rt.reset();
+    HDIR_CKPT("13-reset-k2-exit-barrier-enter");
     rt.barrier();
+    HDIR_CKPT("14-done");
     if (prof) {
         t5 = clk::now();
         if (rank == 0)
@@ -905,6 +956,7 @@ inline void ring_allreduce_hier_direct(gicc::Runtime& rt,
                     count * 4, us(t0, t1), us(t1, t2), us(t2, t3),
                     us(t3, t4), us(t4, t5), us(t0, t5));
     }
+    #undef HDIR_CKPT
 }
 
 // Size-selected hierarchical all-reduce: DIRECT (latency-optimal) for small/mid,

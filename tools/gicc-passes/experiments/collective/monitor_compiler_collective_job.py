@@ -30,6 +30,10 @@ SAFE_ENV_RE = re.compile(
     r"GICC_NUM_PROXY_THREADS|GICC_PROXY_ENABLED|HSA_ENABLE_IPC_MODE_LEGACY|"
     r"MPICH_GPU_SUPPORT_ENABLED)$"
 )
+HDIR_CHECKPOINT_RE = re.compile(
+    r"^\[hdir r(?P<rank>[0-9]+) call(?P<call>[0-9]+) "
+    r"(?P<bytes>[0-9]+) B\] (?P<stage>.*)$"
+)
 
 
 class MonitorError(RuntimeError):
@@ -244,6 +248,32 @@ def verify_artifacts(items: list[tuple[Path, str]]) -> list[dict[str, str]]:
     return verified
 
 
+def summarize_stderr(path: Path, tail_lines: int = 40) -> dict[str, Any]:
+    if not path.exists():
+        return {"exists": False, "bytes": 0, "tail": [], "hdir_last_by_rank": {}}
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    last_by_rank: dict[str, dict[str, Any]] = {}
+    for line in lines:
+        match = HDIR_CHECKPOINT_RE.match(line)
+        if not match:
+            continue
+        last_by_rank[match.group("rank")] = {
+            "call": int(match.group("call")),
+            "bytes": int(match.group("bytes")),
+            "stage": match.group("stage"),
+        }
+    return {
+        "exists": True,
+        "bytes": path.stat().st_size,
+        "line_count": len(lines),
+        "tail": lines[-tail_lines:],
+        "hdir_last_by_rank": {
+            rank: last_by_rank[rank]
+            for rank in sorted(last_by_rank, key=int)
+        },
+    }
+
+
 def parse_artifact(value: str) -> tuple[Path, str]:
     try:
         name, expected = value.rsplit("=", 1)
@@ -335,7 +365,8 @@ def main() -> int:
         scheduler = scheduler_result(events)
         state["scheduler"] = scheduler
         state["jobspec"] = summarize_jobspec(json.loads(jobspec_text))
-        state["stderr_bytes"] = args.stderr.stat().st_size if args.stderr.exists() else 0
+        state["stderr_summary"] = summarize_stderr(args.stderr)
+        state["stderr_bytes"] = state["stderr_summary"]["bytes"]
         state["stdout_bytes"] = args.stdout.stat().st_size if args.stdout.exists() else 0
 
         if scheduler["exit_code"] != 0 or scheduler["exception_types"]:
