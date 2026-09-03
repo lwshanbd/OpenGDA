@@ -105,6 +105,13 @@ from a monitor that is not a clean `pdebug` Gate-A pass. The final
 the raw Gate-A stdout/stderr, every nested build-provenance manifest, and the
 union of source dependencies across builds.
 
+`continue_compiler_collective_through_gate_c.sh` may wait on that Gate-A
+monitor and execute the deterministic continuation. It has no provider path:
+after the offline freeze it submits one `pdebug` Gate-B arm, waits for its
+clean audited completion, and only then submits the next. It stops immediately
+on any failed or stale monitor and stops unconditionally after writing the
+Gate-C analysis; it cannot enter confirmatory or model evaluation.
+
 ## Compiler action space
 
 The current source-free graph has one semantic opportunity, four fixed message

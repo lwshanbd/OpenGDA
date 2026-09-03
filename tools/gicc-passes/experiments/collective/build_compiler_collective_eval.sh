@@ -39,22 +39,22 @@ run_recorded() {
 }
 
 common=(
-    -DGICC_BOOTSTRAP_MPI=1
-    -DGICC_CPU_PROXY=1
-    -DGICC_GPU_HIP=1
+    "-DGICC_BOOTSTRAP_MPI=1"
+    "-DGICC_CPU_PROXY=1"
+    "-DGICC_GPU_HIP=1"
     -DGICC_PLATFORM_OFI
-    -DUSE_PROF_API=1
-    -D__HIP_PLATFORM_AMD__=1
-    -D__HIP_ROCclr__=1
+    "-DUSE_PROF_API=1"
+    "-D__HIP_PLATFORM_AMD__=1"
+    "-D__HIP_ROCclr__=1"
     "-I$repo_root/src"
     "-I$repo_root/src/gicc/platform/ofi/internal"
     -isystem /opt/cray/pe/mpich/9.0.1/ofi/cray/20.0/include
-    --offload-arch=gfx90a
+    "--offload-arch=gfx90a"
     -O3
     -gline-tables-only
     -fno-exceptions
     -flto
-    -std=gnu++17
+    "-std=gnu++17"
     "-fpass-plugin=$plugin"
 )
 
@@ -62,22 +62,22 @@ common=(
 # from an unrelated CMake target.  It deliberately does not load compiler
 # planning passes: those passes own the benchmark collective call only.
 runtime_common=(
-    -DGICC_BOOTSTRAP_MPI=1
-    -DGICC_CPU_PROXY=1
-    -DGICC_GPU_HIP=1
+    "-DGICC_BOOTSTRAP_MPI=1"
+    "-DGICC_CPU_PROXY=1"
+    "-DGICC_GPU_HIP=1"
     -DGICC_PLATFORM_OFI
-    -DUSE_PROF_API=1
-    -D__HIP_PLATFORM_AMD__=1
-    -D__HIP_ROCclr__=1
+    "-DUSE_PROF_API=1"
+    "-D__HIP_PLATFORM_AMD__=1"
+    "-D__HIP_ROCclr__=1"
     "-I$repo_root/src"
     "-I$repo_root/src/gicc/platform/ofi/internal"
     -isystem /opt/cray/pe/mpich/9.0.1/ofi/cray/20.0/include
-    --offload-arch=gfx90a
+    "--offload-arch=gfx90a"
     -O3
     -gline-tables-only
     -fno-exceptions
     -flto
-    -std=gnu++17
+    "-std=gnu++17"
 )
 
 runtime_names=(runtime_helpers proxy_thread proxy_libfabric)
@@ -109,7 +109,8 @@ if [[ "$mode" == discover ]]; then
     unset GICC_COLLECTIVE_HINT_IN || true
 else
     export GICC_MODE=lower
-    export GICC_COLLECTIVE_HINT_IN=$(cd -- "$(dirname -- "$hint")" && pwd)/$(basename -- "$hint")
+    GICC_COLLECTIVE_HINT_IN=$(cd -- "$(dirname -- "$hint")" && pwd)/$(basename -- "$hint")
+    export GICC_COLLECTIVE_HINT_IN
 fi
 
 source_before=$(sha256sum "$source_file" "$catalog_file" "$common_header")
