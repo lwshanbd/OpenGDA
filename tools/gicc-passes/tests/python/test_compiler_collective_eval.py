@@ -109,6 +109,103 @@ class CompilerCollectiveEvalTests(unittest.TestCase):
             with self.assertRaisesRegex(controls.EvalError, "3/4"):
                 controls.verify_device_ir(path)
 
+    def test_build_provenance_freezes_same_build_dependency_closure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "repo"
+            build = repo / "build" / "arm"
+            source = (repo / "tools/gicc-passes/experiments/collective" /
+                      "compiler_collective_eval.cpp")
+            catalog = source.with_name("compiler_collective_catalog.hpp")
+            common = repo / "examples/proxy/coll_common.hpp"
+            for path in (source, catalog, common):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"// {path.name}\n")
+            build.mkdir(parents=True)
+
+            def materialize(name, text="artifact\n"):
+                path = build / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+                return path
+
+            build_script = materialize("build.sh")
+            evaluator = materialize("eval.py")
+            plugin = materialize("passes.so")
+            hint = materialize("hint.json", "{}\n")
+            commands = materialize("commands.jsonl", "")
+            controls.record_build_command(commands, [], reset=True)
+            controls.record_build_command(
+                commands, [sys.executable, "--version"], reset=False
+            )
+            depfile = materialize(
+                "eval.d",
+                f"{build / 'eval.o'}: {source} {catalog} \\\n {common}\n",
+            )
+            inputs = {
+                "benchmark_source": source,
+                "catalog_source": catalog,
+                "build_script": build_script,
+                "evaluator": evaluator,
+                "compiler": Path(sys.executable),
+                "pass_plugin": plugin,
+                "collective_hint": hint,
+            }
+            artifact_names = {
+                "eval_object": "eval.o",
+                "inventory": "inventory.json",
+                "host_ir": "materialized.ll",
+                "device_ir": "materialized-device.ll",
+                "device_ir_audit": "device-ir-audit.log",
+                "compile_log": "compile.log",
+                "host_ir_log": "ir.log",
+                "device_ir_log": "device-ir.log",
+                "command_log": "commands.jsonl",
+                "binary": "compiler_collective_eval",
+                "link_log": "link.log",
+                "runtime_helpers_object": "obj/runtime_helpers.o",
+                "proxy_thread_object": "obj/proxy_thread.o",
+                "proxy_libfabric_object": "obj/proxy_libfabric.o",
+            }
+            artifacts = {
+                role: commands if role == "command_log" else materialize(name)
+                for role, name in artifact_names.items()
+            }
+            environment = {
+                "GICC_MODE": "lower",
+                "GICC_COLLECTIVE_ONLY": "1",
+                "GICC_COLLECTIVE_HINT_IN": str(hint),
+                "GICC_HINT_IN": None,
+                "GICC_FEATURES_OUT": None,
+            }
+            manifest = controls.generate_build_provenance(
+                mode="lower", repo_root=repo, build_root=build,
+                inputs=inputs, artifacts=artifacts,
+                dependency_files=[depfile], environment=environment,
+                commands_path=commands,
+            )
+            manifest_path = build / "build-provenance.json"
+            manifest_path.write_text(json.dumps(manifest))
+            controls.verify_build_provenance(
+                manifest, manifest_path=manifest_path, repo_root=repo
+            )
+            closure = manifest["dependency_closure"]
+            self.assertEqual(3, closure["file_count"])
+            runtime_records = {
+                item["role"]: item for item in manifest["artifacts"]
+                if item["role"].endswith("_object")
+            }
+            self.assertEqual(
+                {"build"},
+                {item["locator"]["scope"]
+                 for item in runtime_records.values()},
+            )
+
+            artifacts["runtime_helpers_object"].write_text("tampered\n")
+            with self.assertRaisesRegex(controls.EvalError, "hash mismatch"):
+                controls.verify_build_provenance(
+                    manifest, manifest_path=manifest_path, repo_root=repo
+                )
+
     def test_analysis_constructs_a_compiler_bin_oracle(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

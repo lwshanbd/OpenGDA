@@ -15,8 +15,11 @@ import hashlib
 import itertools
 import json
 import math
+import os
 import re
+import shlex
 import statistics
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -32,6 +35,7 @@ import gicc_llm_bridge as bridge  # noqa: E402
 
 
 MANIFEST_SCHEMA = "gicc-collective-uniform-controls-v1"
+BUILD_PROVENANCE_SCHEMA = "gicc-collective-build-provenance-v1"
 RESULT_RE = re.compile(r"([a-z_]+)=([^ ]+)")
 HDIR_DEVICE_KERNEL = (
     "_ZN9gicc_coll27hier_direct_rs_cross_kernelEPN4gicc9DeviceCtxE"
@@ -66,6 +70,406 @@ GATE_SPECS = {
 
 class EvalError(ValueError):
     """A compiler control or runtime result is incomplete or inconsistent."""
+
+
+def _parse_assignments(
+    values: list[str], *, kind: str, allow_unset: bool = False,
+) -> dict[str, str | None]:
+    result: dict[str, str | None] = {}
+    for value in values:
+        if "=" in value:
+            name, payload = value.split("=", 1)
+        elif allow_unset:
+            name, payload = value, None
+        else:
+            raise EvalError(f"{kind} must use NAME=VALUE: {value}")
+        if not name or name in result:
+            raise EvalError(f"invalid or duplicate {kind} name: {name!r}")
+        if payload == "" and not allow_unset:
+            raise EvalError(f"{kind} has an empty value: {name}")
+        result[name] = payload
+    return result
+
+
+def _lexical_absolute(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _file_record(
+    path: Path, *, role: str, repo_root: Path, build_root: Path,
+) -> dict[str, Any]:
+    absolute = _lexical_absolute(path)
+    if not absolute.is_file():
+        raise EvalError(f"missing provenance file for {role}: {absolute}")
+    try:
+        relative = absolute.relative_to(build_root)
+        scope = "build"
+        locator = relative.as_posix()
+    except ValueError:
+        try:
+            relative = absolute.relative_to(repo_root)
+            scope = "repository"
+            locator = relative.as_posix()
+        except ValueError:
+            scope = "external"
+            locator = os.fspath(absolute)
+    resolved = absolute.resolve()
+    record = {
+        "role": role,
+        "locator": {"scope": scope, "path": locator},
+        "size_bytes": absolute.stat().st_size,
+        "sha256": _sha256(absolute),
+    }
+    if resolved != absolute:
+        record["resolved_path"] = os.fspath(resolved)
+    return record
+
+
+def _record_path(
+    record: dict[str, Any], *, repo_root: Path, build_root: Path,
+) -> Path:
+    locator = record.get("locator")
+    if not isinstance(locator, dict):
+        raise EvalError("provenance record lacks a locator")
+    scope = locator.get("scope")
+    path = locator.get("path")
+    if not isinstance(path, str) or not path:
+        raise EvalError("provenance locator has no path")
+    if scope == "build":
+        if Path(path).is_absolute() or ".." in Path(path).parts:
+            raise EvalError("build provenance locator escapes its root")
+        result = build_root / path
+    elif scope == "repository":
+        if Path(path).is_absolute() or ".." in Path(path).parts:
+            raise EvalError("repository provenance locator escapes its root")
+        result = repo_root / path
+    elif scope == "external":
+        result = Path(path)
+        if not result.is_absolute():
+            raise EvalError("external provenance path must be absolute")
+    else:
+        raise EvalError(f"unknown provenance locator scope: {scope}")
+    return _lexical_absolute(result)
+
+
+def _dependency_paths(path: Path, *, compile_root: Path) -> list[Path]:
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        raise EvalError(f"cannot read dependency file {path}: {exc}") from exc
+    logical = text.replace("\\\n", " ")
+    if ":" not in logical:
+        raise EvalError(f"invalid compiler dependency file: {path}")
+    payload = logical.split(":", 1)[1]
+    try:
+        tokens = shlex.split(payload, posix=True)
+    except ValueError as exc:
+        raise EvalError(f"cannot parse dependency file {path}: {exc}") from exc
+    if not tokens:
+        raise EvalError(f"compiler dependency file is empty: {path}")
+    result = []
+    for token in tokens:
+        dependency = Path(token)
+        if not dependency.is_absolute():
+            dependency = compile_root / dependency
+        result.append(_lexical_absolute(dependency))
+    return result
+
+
+def record_build_command(path: Path, argv: list[str], *, reset: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if reset:
+        path.write_text("")
+        if argv:
+            raise EvalError("record-command --reset does not accept a command")
+        return
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if not argv:
+        raise EvalError("record-command requires a command after --")
+    with path.open("a") as stream:
+        stream.write(json.dumps({"argv": argv}, sort_keys=True) + "\n")
+
+
+def _read_command_log(path: Path) -> list[list[str]]:
+    commands = []
+    try:
+        lines = path.read_text().splitlines()
+    except OSError as exc:
+        raise EvalError(f"cannot read build command log {path}: {exc}") from exc
+    for number, line in enumerate(lines, 1):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise EvalError(
+                f"invalid command-log JSON at {path}:{number}: {exc}"
+            ) from exc
+        argv = value.get("argv") if isinstance(value, dict) else None
+        if (not isinstance(argv, list) or not argv
+                or any(not isinstance(item, str) for item in argv)):
+            raise EvalError(f"invalid argv at {path}:{number}")
+        commands.append(argv)
+    if not commands:
+        raise EvalError(f"build command log has no commands: {path}")
+    return commands
+
+
+def generate_build_provenance(
+    *, mode: str, repo_root: Path, build_root: Path,
+    inputs: dict[str, Path], artifacts: dict[str, Path],
+    dependency_files: list[Path], environment: dict[str, str | None],
+    commands_path: Path,
+) -> dict[str, Any]:
+    if mode not in {"discover", "lower"}:
+        raise EvalError(f"unknown collective build mode: {mode}")
+    repo_root = _lexical_absolute(repo_root)
+    build_root = _lexical_absolute(build_root)
+    required_inputs = {
+        "benchmark_source", "catalog_source", "build_script", "evaluator",
+        "compiler", "pass_plugin",
+    }
+    required_artifacts = {
+        "eval_object", "inventory", "host_ir", "device_ir",
+        "device_ir_audit", "compile_log", "host_ir_log", "device_ir_log",
+        "command_log",
+    }
+    if mode == "lower":
+        required_inputs.add("collective_hint")
+        required_artifacts.update({
+            "binary", "link_log", "runtime_helpers_object",
+            "proxy_thread_object", "proxy_libfabric_object",
+        })
+    missing_inputs = required_inputs - set(inputs)
+    missing_artifacts = required_artifacts - set(artifacts)
+    if missing_inputs:
+        raise EvalError(
+            f"build provenance lacks inputs: {sorted(missing_inputs)}"
+        )
+    if missing_artifacts:
+        raise EvalError(
+            f"build provenance lacks artifacts: {sorted(missing_artifacts)}"
+        )
+    if environment.get("GICC_COLLECTIVE_ONLY") != "1":
+        raise EvalError("collective build must record GICC_COLLECTIVE_ONLY=1")
+    if environment.get("GICC_HINT_IN") is not None:
+        raise EvalError("collective-only build must record GICC_HINT_IN unset")
+    if mode == "lower" and not environment.get("GICC_COLLECTIVE_HINT_IN"):
+        raise EvalError("lower build lacks GICC_COLLECTIVE_HINT_IN")
+    if mode == "discover" and environment.get("GICC_COLLECTIVE_HINT_IN") is not None:
+        raise EvalError("discover build must not use GICC_COLLECTIVE_HINT_IN")
+
+    input_records = [
+        _file_record(path, role=role, repo_root=repo_root,
+                     build_root=build_root)
+        for role, path in sorted(inputs.items())
+    ]
+    artifact_records = [
+        _file_record(path, role=role, repo_root=repo_root,
+                     build_root=build_root)
+        for role, path in sorted(artifacts.items())
+    ]
+    dependencies: dict[str, Path] = {}
+    depfile_records = []
+    for index, depfile in enumerate(dependency_files):
+        depfile_records.append(_file_record(
+            depfile, role=f"compiler_dependency_file_{index}",
+            repo_root=repo_root, build_root=build_root,
+        ))
+        for dependency in _dependency_paths(depfile, compile_root=repo_root):
+            dependencies[os.fspath(dependency)] = dependency
+    dependency_records = [
+        _file_record(path, role="translation_unit_dependency",
+                     repo_root=repo_root, build_root=build_root)
+        for path in sorted(dependencies.values(), key=os.fspath)
+    ]
+    dependency_locators = {
+        (item["locator"]["scope"], item["locator"]["path"])
+        for item in dependency_records
+    }
+    required_dependencies = {
+        ("repository", "examples/proxy/coll_common.hpp"),
+        ("repository", "tools/gicc-passes/experiments/collective/"
+                       "compiler_collective_catalog.hpp"),
+        ("repository", "tools/gicc-passes/experiments/collective/"
+                       "compiler_collective_eval.cpp"),
+    }
+    missing_dependencies = required_dependencies - dependency_locators
+    if missing_dependencies:
+        raise EvalError(
+            "compiler dependency closure lacks required sources: "
+            f"{sorted(missing_dependencies)}"
+        )
+    commands = _read_command_log(commands_path)
+    compiler = inputs["compiler"]
+    try:
+        completed = subprocess.run(
+            [os.fspath(compiler), "--version"], check=True,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise EvalError(f"cannot identify compiler {compiler}: {exc}") from exc
+    payload = {
+        "schema_version": BUILD_PROVENANCE_SCHEMA,
+        "build_mode": mode,
+        "compiler_only": True,
+        "collective_only": True,
+        "model_invoked": False,
+        "application_source_modified": False,
+        "environment": dict(sorted(environment.items())),
+        "compiler_version": completed.stdout.strip(),
+        "inputs": input_records,
+        "dependency_closure": {
+            "compile_root": ".",
+            "dependency_files": depfile_records,
+            "file_count": len(dependency_records),
+            "files": dependency_records,
+        },
+        "commands": {
+            "count": len(commands),
+            "log_sha256": _sha256(commands_path),
+            "argv": commands,
+        },
+        "artifacts": artifact_records,
+    }
+    manifest = dict(payload)
+    manifest["manifest_id"] = bridge._fingerprint(payload)
+    return manifest
+
+
+def verify_build_provenance(
+    value: Any, *, manifest_path: Path, repo_root: Path,
+) -> None:
+    if (not isinstance(value, dict)
+            or value.get("schema_version") != BUILD_PROVENANCE_SCHEMA):
+        raise EvalError(f"expected provenance schema {BUILD_PROVENANCE_SCHEMA}")
+    payload = dict(value)
+    manifest_id = payload.pop("manifest_id", None)
+    if manifest_id != bridge._fingerprint(payload):
+        raise EvalError("build provenance manifest_id does not match content")
+    if (value.get("compiler_only") is not True
+            or value.get("collective_only") is not True
+            or value.get("model_invoked") is not False
+            or value.get("application_source_modified") is not False):
+        raise EvalError("build provenance violates the compiler-only boundary")
+    mode = value.get("build_mode")
+    if mode not in {"discover", "lower"}:
+        raise EvalError("build provenance has an invalid mode")
+    environment = value.get("environment")
+    if (not isinstance(environment, dict)
+            or environment.get("GICC_COLLECTIVE_ONLY") != "1"
+            or environment.get("GICC_HINT_IN") is not None):
+        raise EvalError("build provenance has an invalid lowering scope")
+    if mode == "lower" and not environment.get("GICC_COLLECTIVE_HINT_IN"):
+        raise EvalError("lower provenance lacks a collective hint")
+    if mode == "discover" and environment.get("GICC_COLLECTIVE_HINT_IN") is not None:
+        raise EvalError("discover provenance unexpectedly records a hint")
+
+    repo_root = _lexical_absolute(repo_root)
+    build_root = _lexical_absolute(manifest_path).parent
+    all_records = []
+    roles: dict[str, dict[str, Any]] = {}
+    for section in ("inputs", "artifacts"):
+        records = value.get(section)
+        if not isinstance(records, list):
+            raise EvalError(f"build provenance lacks {section}")
+        for record in records:
+            if not isinstance(record, dict) or not isinstance(record.get("role"), str):
+                raise EvalError(f"invalid file record in {section}")
+            if record["role"] in roles:
+                raise EvalError(f"duplicate provenance role: {record['role']}")
+            roles[record["role"]] = record
+            all_records.append(record)
+    closure = value.get("dependency_closure")
+    if not isinstance(closure, dict):
+        raise EvalError("build provenance lacks dependency closure")
+    dependency_records = closure.get("files")
+    depfile_records = closure.get("dependency_files")
+    if not isinstance(dependency_records, list) or not isinstance(depfile_records, list):
+        raise EvalError("invalid provenance dependency closure")
+    if closure.get("file_count") != len(dependency_records):
+        raise EvalError("dependency-closure file count does not match")
+    all_records.extend(dependency_records)
+    all_records.extend(depfile_records)
+    for record in all_records:
+        if not isinstance(record, dict):
+            raise EvalError("invalid provenance file record")
+        path = _record_path(record, repo_root=repo_root, build_root=build_root)
+        if not path.is_file():
+            raise EvalError(f"provenance file is missing: {path}")
+        expected_hash = record.get("sha256")
+        if not isinstance(expected_hash, str):
+            raise EvalError(f"provenance record lacks hash: {path}")
+        _check_sha(expected_hash, name=f"sha256 for {path}")
+        if _sha256(path) != expected_hash:
+            raise EvalError(f"provenance hash mismatch: {path}")
+        if path.stat().st_size != record.get("size_bytes"):
+            raise EvalError(f"provenance size mismatch: {path}")
+        resolved = record.get("resolved_path")
+        if resolved is not None and os.fspath(path.resolve()) != resolved:
+            raise EvalError(f"provenance symlink target mismatch: {path}")
+
+    declared_dependency_locators = {
+        (record["locator"].get("scope"), record["locator"].get("path"))
+        for record in dependency_records
+    }
+    actual_dependency_locators = set()
+    for record in depfile_records:
+        depfile = _record_path(
+            record, repo_root=repo_root, build_root=build_root
+        )
+        for dependency in _dependency_paths(depfile, compile_root=repo_root):
+            actual = _file_record(
+                dependency, role="translation_unit_dependency",
+                repo_root=repo_root, build_root=build_root,
+            )
+            actual_dependency_locators.add((
+                actual["locator"]["scope"], actual["locator"]["path"]
+            ))
+    if declared_dependency_locators != actual_dependency_locators:
+        raise EvalError(
+            "stored dependency closure does not match compiler depfiles"
+        )
+    required_dependencies = {
+        ("repository", "examples/proxy/coll_common.hpp"),
+        ("repository", "tools/gicc-passes/experiments/collective/"
+                       "compiler_collective_catalog.hpp"),
+        ("repository", "tools/gicc-passes/experiments/collective/"
+                       "compiler_collective_eval.cpp"),
+    }
+    if not required_dependencies.issubset(declared_dependency_locators):
+        raise EvalError("provenance lacks the required catalog dependency chain")
+
+    required_roles = {
+        "benchmark_source", "catalog_source", "build_script", "evaluator",
+        "compiler", "pass_plugin", "eval_object", "inventory", "host_ir",
+        "device_ir", "device_ir_audit", "command_log",
+    }
+    if mode == "lower":
+        required_roles.update({
+            "collective_hint", "binary", "runtime_helpers_object",
+            "proxy_thread_object", "proxy_libfabric_object",
+        })
+    missing_roles = required_roles - set(roles)
+    if missing_roles:
+        raise EvalError(f"build provenance lacks roles: {sorted(missing_roles)}")
+    if mode == "lower":
+        for role in (
+            "runtime_helpers_object", "proxy_thread_object",
+            "proxy_libfabric_object",
+        ):
+            if roles[role]["locator"].get("scope") != "build":
+                raise EvalError(f"{role} is not a same-build artifact")
+    command_record = roles["command_log"]
+    command_path = _record_path(
+        command_record, repo_root=repo_root, build_root=build_root
+    )
+    commands = value.get("commands")
+    parsed_commands = _read_command_log(command_path)
+    if (not isinstance(commands, dict)
+            or commands.get("count") != len(parsed_commands)
+            or commands.get("argv") != parsed_commands
+            or commands.get("log_sha256") != _sha256(command_path)):
+        raise EvalError("recorded build commands do not match the command log")
 
 
 def _read_json(path: Path) -> Any:
@@ -1037,6 +1441,25 @@ def main() -> int:
                        required=True)
     score.add_argument("--out", type=Path, required=True)
     score.add_argument("responses", type=Path, nargs="+")
+    record_command = sub.add_parser("record-command")
+    record_command.add_argument("--out", type=Path, required=True)
+    record_command.add_argument("--reset", action="store_true")
+    record_command.add_argument("argv", nargs=argparse.REMAINDER)
+    provenance = sub.add_parser("build-provenance")
+    provenance.add_argument("--mode", choices=("discover", "lower"),
+                            required=True)
+    provenance.add_argument("--repo-root", type=Path, required=True)
+    provenance.add_argument("--build-root", type=Path, required=True)
+    provenance.add_argument("--commands", type=Path, required=True)
+    provenance.add_argument("--out", type=Path, required=True)
+    provenance.add_argument("--input", action="append", default=[])
+    provenance.add_argument("--artifact", action="append", default=[])
+    provenance.add_argument("--dependency-file", type=Path, action="append",
+                            default=[])
+    provenance.add_argument("--environment", action="append", default=[])
+    verify_provenance = sub.add_parser("verify-build-provenance")
+    verify_provenance.add_argument("--manifest", type=Path, required=True)
+    verify_provenance.add_argument("--repo-root", type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == "controls":
@@ -1106,13 +1529,51 @@ def main() -> int:
             summary = audit_capacity(_read_json(args.graph))
             bridge._write_json_atomic(args.out, summary)
             print(json.dumps(summary, indent=2, sort_keys=True))
-        else:
+        elif args.command == "score":
             summary = score_decisions(
                 _read_json(args.graph), _read_json(args.analysis),
                 args.prompt, args.prompt_view, args.responses,
             )
             bridge._write_json_atomic(args.out, summary)
             print(json.dumps(summary["aggregate"], indent=2, sort_keys=True))
+        elif args.command == "record-command":
+            record_build_command(args.out, args.argv, reset=args.reset)
+        elif args.command == "build-provenance":
+            input_values = _parse_assignments(args.input, kind="input")
+            artifact_values = _parse_assignments(
+                args.artifact, kind="artifact"
+            )
+            environment = _parse_assignments(
+                args.environment, kind="environment", allow_unset=True
+            )
+            summary = generate_build_provenance(
+                mode=args.mode,
+                repo_root=args.repo_root,
+                build_root=args.build_root,
+                inputs={name: Path(path) for name, path in input_values.items()
+                        if path is not None},
+                artifacts={
+                    name: Path(path) for name, path in artifact_values.items()
+                    if path is not None
+                },
+                dependency_files=args.dependency_file,
+                environment=environment,
+                commands_path=args.commands,
+            )
+            bridge._write_json_atomic(args.out, summary)
+            print(
+                "compiler-collective-eval: wrote same-build provenance; "
+                f"manifest_id={summary['manifest_id']}"
+            )
+        else:
+            verify_build_provenance(
+                _read_json(args.manifest), manifest_path=args.manifest,
+                repo_root=args.repo_root,
+            )
+            print(
+                "compiler-collective-eval: verified build inputs, dependency "
+                "closure, commands, and artifacts"
+            )
         return 0
     except (EvalError, plans.CollectivePlanError, OSError, ValueError) as exc:
         print(f"compiler-collective-eval: ERROR: {exc}", file=sys.stderr)

@@ -3,9 +3,14 @@
 Status: **draft until the pdebug safety qualification completes**. This file
 does not authorize a provider call or a scheduler job by itself.
 
-The content-addressed v2 offline bundle is recorded in
-`FROZEN_V2_MANIFEST.json`. Its status is `offline_frozen_pending_gate_a`; it
-does not turn offline artifacts into runtime evidence or authorize model use.
+The content-addressed v2 offline bundle remains recorded, unchanged, in
+`FROZEN_V2_MANIFEST.json` as a historical diagnostic. Its lower builds ran the
+independent per-transfer lowering pipeline without a matching transfer hint;
+that pipeline erased the catalog kernels' proxy operations. It also borrowed
+three runtime LTO objects from a different CMake target. Consequently v2 is
+superseded and is ineligible for runtime or model evidence even if its stored
+top-level hashes still verify. A v3 freeze requires the collective-only scope
+and same-build provenance described below.
 
 ## Scientific question
 
@@ -47,7 +52,9 @@ different compiler-owned message regions.
   `391b4888f88039975f3d990802763b3694b185a20d2b23c2419d23d4b0ed19c8`
 - `compiler_collective_catalog.hpp`:
   `8958731e3f5b2f6fb6b2380437f62363c52dddcc8d8a32646ff6c9133ab5f77f`
-- implementation commit: `4b98393`
+- transitive catalog body `examples/proxy/coll_common.hpp`:
+  `98aff956bbc63d36b74935b21b0ac825ca78c0ae3695888a9a6d5583dc468429`
+- collective-only pipeline implementation commit: `5a47357`
 - target: Tioga MI250X GCD + Slingshot-11/CXI, CPU-proxy collective catalog
 - scheduler queue: `pdebug` only
 - submission rule: exactly one scheduler job active or queued at a time
@@ -67,6 +74,27 @@ evaluation-only and must never enter a model prompt.
 Graph generation must content-verify every declared primitive-calibration
 artifact; a hash string in the profile without the matching local artifact is
 not sufficient provenance.
+
+## Same-build provenance required for v3
+
+Every discover and lower build must emit and pass verification of a
+`gicc-collective-build-provenance-v1` manifest. The manifest freezes:
+
+- the benchmark, catalog, compiler, compiler configuration, pass plugin,
+  build/evaluation tools, and (for lower builds) the exact compiler hint;
+- compiler-generated dependency files and every repository translation-unit
+  dependency they name, including the catalog's transitive `coll_common.hpp`;
+- exact compiler/linker argument vectors and the lowering-scope environment;
+- direct linked libraries;
+- inventory, host and device IR, device-IR audit, compile/link logs, every LTO
+  object, and the final binary.
+
+The three runtime translation units are rebuilt into each arm's own output
+directory without a planning pass loaded. The verifier rejects runtime objects
+whose locator is not in that same build. It also requires
+`GICC_COLLECTIVE_ONLY=1`, an unset ordinary `GICC_HINT_IN`, and the exact
+collective hint for lower builds. This manifest is a prerequisite for v3
+freezing and for every Gate-B-or-later runtime result.
 
 ## Compiler action space
 
@@ -116,15 +144,19 @@ This proves compiler-plan capacity only; it is not a performance result.
   timeout/hang.
 
 This is diagnostic and is not paper evidence.
-The already submitted baseline smoke predates topology-specific graph freezing;
-because it exercises only the semantic anchor and invokes no model, it may
-qualify runtime safety but cannot qualify a graph or model prompt.
+The currently queued scope-fix smoke (`f5tmvdqmC5sd`) was compiled with
+`GICC_COLLECTIVE_ONLY=1` and passed the device-IR reservation audit, but it
+predates the v3 same-build provenance rule. Because it exercises only the
+semantic anchor and invokes no model, it may qualify the repaired compiler
+pipeline's runtime safety but cannot qualify a v3 graph, binary, or model
+prompt.
 
 ### Gate B: catalog safety qualification
 
 - same 2-node topology;
 - regenerate the graph, prompt, controls, manifest, and materialized IR from
   the frozen two-node profile before the first Gate-B submission;
+- require a verified same-build provenance manifest for every arm;
 - all eight uniform compiler arms, one job at a time;
 - sizes: 1 KiB, 4 KiB, 8 KiB, 64 KiB, 256 KiB, 1 MiB, 4 MiB, 8 MiB, 16 MiB;
 - one correctness call per size, one warmup, three timed calls;
@@ -217,6 +249,7 @@ be compiled, IR-audited, and measured on the matching pdebug topology.
 - More than one active or queued experiment job.
 - Any correctness error, hang, stale graph, missing compiler metadata, or
   materializer mismatch.
+- Any absent, stale, or unverifiable same-build provenance manifest.
 - Any prompt containing a source fragment, source location, function name,
   target ID, or IR.
 - Any provider call without new explicit authorization for the exact frozen
