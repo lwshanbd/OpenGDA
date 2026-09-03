@@ -1,0 +1,137 @@
+# Compiler-owned producer-frontier fission
+
+Status: implementation design; not yet a runtime protocol or performance
+claim.
+
+## Research question
+
+Can an LTO planner improve communication overlap by selecting among
+compiler-generated schedules, while its entire output remains an opaque
+candidate ID and the application source remains unchanged?
+
+The motivating real case is `examples/ofi/jacobi.cpp`. Device discovery sees
+two halo PUT descriptors, a stencil store region, one shared flush, and a
+quiet. The descriptors are issued before the stencil, but the flush occurs
+after it because the stencil produces the halo source rows. Moving the flush
+to the current post-PUT frontier sends stale halo data. The existing compiler
+therefore correctly masks `TRIGGER_GROUP_EARLY`.
+
+The missing schedule is:
+
+1. compute the two halo-producing boundary rows;
+2. stage and trigger the two halo PUTs;
+3. compute the disjoint interior rows while communication progresses;
+4. quiet before the iteration boundary.
+
+This changes the compiler schedule, not application source or communication
+semantics.
+
+## Model boundary
+
+The model may receive only a content-addressed, source-free compiler graph:
+
+- communication-group membership and operation order;
+- registered-buffer/pointer formal relations derived by host LTO;
+- symbolic source intervals for every transfer;
+- producer write regions and iteration-domain partitions;
+- dependence, dominance, post-dominance, and stream-order proofs;
+- launch geometry, topology, resource pressure, and calibrated costs;
+- existing compiler candidate IDs and their predicted effects.
+
+The response contains exactly one existing candidate ID. It cannot contain
+source, IR, a function/site name, a predicate, a legality assertion, code, or
+a new transformation. The bridge rejects the whole response on any mismatch,
+and final host and device LTO independently re-prove the selected candidate.
+
+## ABI-preserving execution mechanism
+
+Creating new device kernels during device LTO would not automatically create
+the corresponding HIP host stubs. Instead, preserve the original kernel
+symbol and ABI and launch it twice in two compiler phases.
+
+Add a schedule-phase word to the compiler/runtime-owned `DeviceCtx`. A small
+pre-authored GICC setter kernel writes that word. Host LTO rewrites the body of
+the existing annotated `gicc::launch<Kernel>` instantiation, or its exact call
+site, into the following same-stream sequence:
+
+```text
+set_schedule_phase(ctx, boundary_producer)
+launch original Kernel(ctx, original args...)
+set_schedule_phase(ctx, interior_and_communication)
+launch original Kernel(ctx, original args...)
+```
+
+The setter is a device command on the same stream, not a racing host store.
+HIP stream order therefore makes each launch observe its own phase. The
+original kernel stub, symbol, formal arguments, and application call remain
+unchanged.
+
+Device LTO rewrites the original kernel body:
+
+- boundary phase skips PUT/flush/quiet and executes only iterations whose
+  stores produce the exact transfer source intervals;
+- interior/communication phase stages the original PUTs, relocates the flush
+  immediately after them, executes only the proven-disjoint interior domain,
+  and retains quiet at the original completion frontier;
+- reductions or other side effects are partitioned across the two phases and
+  must be proven composable; otherwise the candidate is masked.
+
+## Required compiler proofs
+
+Candidate generation is fail-closed and requires all of the following:
+
+1. **One launch, one stream.** Host LTO recovers the exact launch wrapper,
+   stream operand, kernel template, and device metadata ID.
+2. **Buffer identity.** Host LTO proves that a kernel pointer formal and a
+   registered-buffer handle formal refer to the same allocation at every
+   relevant launch site.
+3. **Exact transfer intervals.** Source offset and size are host-knowable
+   affine expressions over launch operands.
+4. **Exact producer footprint.** Device LTO maps stores through the related
+   pointer formal to an affine iteration domain that produces each interval.
+5. **Disjoint remainder.** Interior-phase stores cannot overlap a triggered
+   source interval; loads and stores retain their original dependence order.
+6. **Complete partition.** Boundary and interior predicates are disjoint and
+   cover every originally active compute iteration exactly once.
+7. **Side-effect partition.** Atomics/reductions are associative and receive
+   every original contribution exactly once, or no candidate is emitted.
+8. **Communication completeness.** Every original group member is staged and
+   exactly one trigger and required quiet remain on every path.
+9. **Launch safety.** Both launches use the original grid, block, shared
+   memory, stream, and arguments; exceptions/invokes and multi-stream aliases
+   are rejected in the first implementation.
+10. **Final replay.** The lowering pass recomputes all relations from final IR
+    and checks the candidate content ID before changing either host or device
+    code.
+
+Unknown aliasing, non-affine offsets, irreducible CFGs, non-composable side
+effects, unknown stream order, or inconsistent host/device metadata masks the
+candidate. A model cannot override a mask.
+
+## Candidate space and evaluation
+
+The initial compiler catalog contains only:
+
+- `original_fused` — semantic anchor;
+- `producer_frontier_two_phase` — the exact schedule above.
+
+Additional tilings, phase counts, or runtime predicates are not introduced
+until the two-phase materializer is correct. Richness comes first from applying
+the same legal schedule decision across multiple compiler-discovered groups,
+problem sizes, topologies, compute distances, and producer footprints—not from
+inventing many unimplemented labels.
+
+Evaluation proceeds in gates:
+
+1. lit tests for host/device discovery, content IDs, materialization, and every
+   fail-closed proof above;
+2. offline host/device IR equivalence audits on Jacobi, without a model;
+3. one `pdebug` correctness smoke at a time;
+4. paired compiler controls for end-to-end time and overlap attribution;
+5. freeze a source-free relational prompt only if the compiler oracle has
+   stable headroom over `original_fused`;
+6. request separate, exact provider authorization; only then evaluate model
+   candidate-ID selections and compile them through the same verifier.
+
+Hand-edited Jacobi variants may be used only as clearly labeled engineering
+diagnostics. They cannot serve as the claimed model or compiler result.
