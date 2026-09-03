@@ -229,6 +229,12 @@ semantic baseline and best uniform target, not an unconstrained source oracle.
 
 ### Gate E: model capability evaluation
 
+Gate E stops without a provider call unless Gate D's preregistered
+compiler-bin policy has a positive speedup and its paired 95% interval excludes
+one. `prepare_compiler_collective_gate_e.py` regenerates Gate D from all three
+raw allocation monitors before freezing an authorization request; it has no
+provider or scheduler call path.
+
 Requires separate explicit authorization before sending the new collective
 graph to any external provider. The previous authorization for cleaned
 Minimod/Jacobi prompts does not cover this graph.
@@ -245,6 +251,14 @@ If authorized, use one frozen graph and prompt per evaluated topology. Compare:
 - deterministic compiler heuristic;
 - GBT over its declared scalar compiler features;
 - LLM over the richer source-free relational compiler graph.
+
+The existing path-selection GBT is not yet an eligible collective comparator:
+its labels distinguish proxy/IPC dispatch actions, not the eight collective
+algorithms in this graph. A collective GBT requires a disjoint, pre-evaluation
+training set. Gate-B or Gate-D labels must not be reused to train it; doing so
+would turn the evaluation oracle into leaked training data. Until such a
+dataset exists, report the GBT comparison as unavailable rather than fitting a
+misleading model.
 
 The goal is not to rank model families in the abstract. The capability claim
 requires the LLM policy to exploit the richer compiler input: report distance
@@ -267,6 +281,10 @@ stability, and distance to the compiler-bin oracle. This is explicitly a
 counterfactual screen used to deduplicate policies; it is never reported as
 runtime speedup. Every unique policy used for a performance claim must still
 be compiled, IR-audited, and measured on the matching pdebug topology.
+For each view, preregister the modal accepted policy as the stability estimate
+and the best control-screen policy among its 20 responses as an explicitly
+post-hoc capability upper bound. Deduplicate these representatives across
+views before compilation and runtime measurement.
 
 ## Stop conditions
 
