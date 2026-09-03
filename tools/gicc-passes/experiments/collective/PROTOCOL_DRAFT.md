@@ -309,6 +309,28 @@ both the baseline-to-pointwise geomean is at least `1.05` and one size has at
 least `1.10x` headroom, with both arms winning at least one size. Otherwise no
 four-node v4 or provider call is launched.
 
+#### Scout outcome (post-hoc record, 2026-09-03)
+
+The single `pdebug` job `f5tnWE27Tyrw` completed cleanly on `tioga[35-38]`.
+`hierarchical_double_tree` won all nine sizes: its geometric-mean latency was
+`517.425 us` versus `956.907 us` for `baseline_auto` (`1.849x`), with maximum
+single-size headroom `3.022x`. The headroom thresholds passed, but the required
+two distinct size winners did not; the topology-matched v4 and provider calls
+therefore remain stopped. The audited result ID is
+`sha256:5862614a95d52eb1c21595f2285bf451dd84d48a1d71b57b048b062f3273b820`.
+
+An exploratory equal-weight synthesis with the closed two-node screen exposes
+a topology crossover: baseline wins at two nodes by `1.623x`, while the tree
+wins at four nodes by `1.849x`. Selecting by topology has `1.274x` headroom over
+the best single algorithm across those two profiles. However, the two-case rule
+`2 nodes -> baseline`, `4 nodes -> hierarchical_double_tree` fits all 18
+observed pairwise winners. The derived analysis ID is
+`sha256:793e0819c56df5abd00b5daada570facf30874dbf5342474d42013923b0de871`.
+These data establish compiler-level performance space, but not unique value
+from an LLM. A follow-up must add a genuinely richer compiler action/context
+space or held-out topology generalization, and must be preregistered
+independently before any new runtime or model evaluation.
+
 ## Stop conditions
 
 - Any source/catalog hash mismatch.
