@@ -351,8 +351,8 @@ the complete offline bundle is frozen as
 These checks establish action-space capacity only, not performance.
 
 Submit exactly one `pdebug` batch allocation with four nodes, 32 ranks, eight
-ranks per node (one rank per GCD), eight CPU cores and one GPU per rank.  Within that same
-allocation, execute the following frozen controls sequentially in this order:
+ranks per node (one rank per GCD), eight CPU cores and one GPU per rank. Within
+that same allocation, execute the following frozen controls sequentially:
 
 1. `hierarchical_double_tree` (one chunk);
 2. `hierarchical_double_tree_pipe4`;
@@ -374,6 +374,50 @@ without waiting for user intervention.  A failed correctness or headroom gate
 stops this branch.  Passing only warrants preparation of a separately frozen
 model experiment; it does not authorize sending any graph or prompt to an
 external provider or scheduling a model-selected policy.
+
+#### Scout outcome and preregistered outlier confirmation
+
+The single scout job `f5tnqSxWMViw` completed cleanly on `tioga[36-39]` with
+zero errors for all 27 arm/size rows. Its mechanical gate passed: the
+best-uniform-to-pointwise ratio was `1.171991x`, maximum headroom was
+`4.171762x`, and two arms won at least one size. The content-addressed result
+is `sha256:450300ba9428dc645ad5827623d89894ab329197c0ade1b585be5482d9e9c2bc`.
+
+This pass is not yet accepted as stable compiler headroom. All of its gain
+comes from the unpipelined tree's 1 KiB result (`3179.296 us`) versus pipe4
+(`762.099 us`); the unpipelined tree wins every other size. An earlier
+four-node same-algorithm measurement was `332.414 us` at 1 KiB, and removing
+the anomalous 1 KiB row makes the new best-uniform-to-pointwise ratio exactly
+`1.0`. Treat this as a frozen outlier hypothesis rather than retrospectively
+discarding the row.
+
+Run one additional `pdebug` allocation with the same four-node/32-rank
+contract. Inside this one allocation, run three complete paired blocks with
+warmup 2 and seven timed calls, rotating the exact arm order:
+
+1. unpipelined, pipe4, pipe8;
+2. pipe4, pipe8, unpipelined;
+3. pipe8, unpipelined, pipe4.
+
+The primary policy is frozen from the scout: pipe4 at 1 KiB and unpipelined at
+all other measured sizes, compared with the scout's uniform unpipelined arm.
+The confirmation passes only if every condition below holds:
+
+- the frozen policy speedup across the three blocks is at least `1.05`;
+- its exact 3-out-of-3 paired-bootstrap 95% lower bound is strictly above 1;
+- every scout-selected nonuniform size beats the scout uniform arm in at
+  least two of the three rotated blocks;
+- pooled block medians still have at least two distinct size winners;
+- their best-uniform-to-pointwise geometric-mean ratio is at least `1.05`;
+- their maximum single-size headroom is at least `1.10`.
+
+The three blocks must share one job ID and exact node list. The controller
+submits exactly one job, archives three monitor records against the same
+jobspec, and stops after content-addressed analysis. A negative confirmation
+closes hierarchy pipeline depth as model-worthy evidence; it cannot be rescued
+by dropping the 1 KiB row or changing a threshold. A positive confirmation
+may justify freezing a compiler-only model prompt, but still grants no provider
+authorization.
 
 ## Stop conditions
 
