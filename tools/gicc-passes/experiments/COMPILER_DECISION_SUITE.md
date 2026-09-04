@@ -203,6 +203,9 @@ Thus the suite supports the paper's **method and action-space** claim now.  A
 performance claim about LLM-guided optimization remains gated on stable oracle
 headroom, held-out decisions, explicit content-addressed provider
 authorization, and runtime measurement of each selected compiler plan.
+The machine-derived per-entry state and fail-closed transitions are documented
+in `LLM_CAPABILITY_READINESS.md`; prompt availability is never treated as
+runtime or model evidence.
 
 ## Reproduction
 
