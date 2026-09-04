@@ -150,6 +150,13 @@ as a local successor to the existing serial campaign. Commit `06ab7fd` freezes
 its protocol and fail-closed monitor. No scout result exists yet, so the
 candidate is not present in the model-visible graph.
 
+The readiness report is now consumed by the suite-level, provider-free
+`audit_compiler_llm_capability_protocol.py` audit. That layer preregisters the
+equal-authority information ablation and regret/stability metrics but freezes
+no provider request while this report exposes zero eligible entries. See
+`LLM_CAPABILITY_EVALUATION.md` for the distinction between the modal stable
+policy, the post-hoc best-of-20 capability ceiling, and paired runtime evidence.
+
 ## Reproduction
 
 From the repository root:

@@ -220,6 +220,15 @@ The machine-derived per-entry state and fail-closed transitions are documented
 in `LLM_CAPABILITY_READINESS.md`; prompt availability is never treated as
 runtime or model evidence.
 
+The suite-level evaluation and claim-separation contract is now machine-audited
+by `audit_compiler_llm_capability_protocol.py` and documented in
+`LLM_CAPABILITY_EVALUATION.md`. It preregisters modal policies as the stable
+representatives, isolates best-of-20 as a post-hoc capability upper bound, and
+uses `relational`/`descriptors`/`opaque` as the equal-authority information
+ablation. Its current result has zero runtime-eligible entries and therefore
+permits zero provider calls; protocol ID
+`sha256:aa5d192ad718e5f30ca8e5c8311ced57b0a0455cf0b8a39e94ff88bc1c11e0c4`.
+
 ## Reproduction
 
 From the repository root, after producing the already documented private
