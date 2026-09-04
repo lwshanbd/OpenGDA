@@ -752,3 +752,14 @@ The fixed-source capacity experiment and its control generator live under
 measurable headroom before any model is evaluated; their source and catalog
 hashes, option IDs, hints, binaries, and materialized IR are auditable without
 changing the benchmark source.
+
+### Cross-family compiler decision suite
+
+`gicc_compiler_decision_suite.py` content-addresses multiple independent
+communication and collective graphs without merging their selections or
+claiming a cross-program Cartesian product. It deterministically renders all
+three information views, records graph/selectable-ID/view/prompt hashes, and
+can verify the resulting suite plus the exact prompt bytes. The suite is a
+local capability inventory only: it has no provider, scheduler, compiler, or
+source-edit path. The current frozen inventory and its scientific limits are
+documented in `experiments/COMPILER_DECISION_SUITE.md`.
