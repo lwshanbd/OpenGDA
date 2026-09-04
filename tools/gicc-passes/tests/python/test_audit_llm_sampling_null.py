@@ -91,11 +91,12 @@ class LlmSamplingNullTests(unittest.TestCase):
             "unresolved_conditional_entries": ["loop_lto", "mm_minimal"],
             "realized_current_entries": ["jacobi"],
         }}
-        unresolved, realized = audit.resolved_frontier_sets(
+        unresolved, realized, closed = audit.resolved_frontier_sets(
             authority, frontier, "current-suite",
         )
         self.assertEqual({"loop_lto", "mm_minimal"}, unresolved)
         self.assertEqual({"jacobi"}, realized)
+        self.assertEqual(set(), closed)
 
         overlapping = copy.deepcopy(authority)
         overlapping["conditional_compiler_policy_authority"][
@@ -107,6 +108,32 @@ class LlmSamplingNullTests(unittest.TestCase):
             audit.resolved_frontier_sets(
                 overlapping, frontier, "current-suite",
             )
+
+    def test_terminal_negative_frontier_is_not_sampled_as_unresolved(self):
+        frontier = {
+            "frontier_id": "frontier-id",
+            "suite_id": "ancestor-suite",
+            "conditional_frontier": [
+                {"label": "jacobi"},
+                {"label": "loop_lto"},
+                {"label": "mm_minimal"},
+            ],
+        }
+        authority = {"conditional_compiler_policy_authority": {
+            "frontier_id": "frontier-id",
+            "frontier_suite_id": "ancestor-suite",
+            "unresolved_conditional_entries": [],
+            "realized_current_entries": [],
+            "closed_terminal_entries": [
+                "jacobi", "loop_lto", "mm_minimal",
+            ],
+        }}
+        unresolved, realized, closed = audit.resolved_frontier_sets(
+            authority, frontier, "current-suite",
+        )
+        self.assertEqual(set(), unresolved)
+        self.assertEqual(set(), realized)
+        self.assertEqual({"jacobi", "loop_lto", "mm_minimal"}, closed)
 
 
 if __name__ == "__main__":

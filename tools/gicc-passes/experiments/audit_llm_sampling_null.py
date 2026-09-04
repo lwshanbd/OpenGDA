@@ -208,7 +208,7 @@ def verified_historical(value: Any) -> dict[str, Any]:
 
 def resolved_frontier_sets(
     authority: dict[str, Any], frontier: dict[str, Any], suite_id: str,
-) -> tuple[set[str], set[str]]:
+) -> tuple[set[str], set[str], set[str]]:
     """Partition old conditional candidates against the current suite audit."""
     authority_frontier = authority.get(
         "conditional_compiler_policy_authority", {}
@@ -220,24 +220,31 @@ def resolved_frontier_sets(
     }
     unresolved = authority_frontier.get("unresolved_conditional_entries")
     realized = authority_frontier.get("realized_current_entries")
-    if unresolved is None and realized is None:
+    closed = authority_frontier.get("closed_terminal_entries")
+    if unresolved is None and realized is None and closed is None:
         if frontier.get("suite_id") != suite_id:
             raise SamplingNullError("conditional frontier binds another suite")
-        return set(frontier_labels), set()
+        return set(frontier_labels), set(), set()
+    if closed is None:
+        closed = []
     if (not isinstance(unresolved, list) or not isinstance(realized, list)
+            or not isinstance(closed, list)
             or any(not isinstance(label, str)
-                   for label in [*unresolved, *realized])):
+                   for label in [*unresolved, *realized, *closed])):
         raise SamplingNullError("action authority has invalid frontier routing")
     unresolved_set = set(unresolved)
     realized_set = set(realized)
+    closed_set = set(closed)
     if (unresolved_set & realized_set
-            or unresolved_set | realized_set != frontier_labels
+            or unresolved_set & closed_set
+            or realized_set & closed_set
+            or unresolved_set | realized_set | closed_set != frontier_labels
             or authority_frontier.get("frontier_suite_id")
             != frontier.get("suite_id")):
         raise SamplingNullError(
             "action authority does not partition the frozen frontier"
         )
-    return unresolved_set, realized_set
+    return unresolved_set, realized_set, closed_set
 
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
@@ -254,7 +261,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     frontier_path = args.conditional_frontier.resolve()
     frontier = action_frontier.verify_report(read_json(frontier_path))
     action_authority.verify_recorded_evidence(frontier.get("evidence"))
-    unresolved_set, realized_set = resolved_frontier_sets(
+    unresolved_set, realized_set, closed_set = resolved_frontier_sets(
         authority, frontier, suite["suite_id"],
     )
 
@@ -330,6 +337,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "frontier_resolution": {
             "unresolved_conditional_entries": sorted(unresolved_set),
             "realized_current_entries": sorted(realized_set),
+            "closed_terminal_entries": sorted(closed_set),
             "realized_entries_are_calibrated_in_current_suite": True,
         },
         "historical_empirical_support_null": historical_null,
