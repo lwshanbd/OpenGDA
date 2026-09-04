@@ -196,6 +196,11 @@ can have large performance effects, but not yet that an LLM captures them:
   two-case rule fit both observations;
 - the four-node hierarchy-pipeline confirmation was negative after its scout
   gain proved to be a 1 KiB outlier;
+- a 40-log historical LTO-trace audit found the compiler-generated DWQ trace
+  `5.10%` slower than the handwritten trace at batch 4 but `2.98%` faster at
+  batch 64. This is descriptive feasibility and batch-sensitivity evidence,
+  not a confirmatory comparison, because binary hashes, allocation identity,
+  and order balance were not preserved;
 - the topology-matched eight-node hierarchy-pipeline scout and the guarded
   Jacobi producer-frontier A/B are the remaining preregistered headroom tests.
 

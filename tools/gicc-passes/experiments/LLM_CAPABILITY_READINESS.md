@@ -108,6 +108,32 @@ sets `current_graph_runtime_labels_complete=false`,
 the serialized report SHA-256 is
 `a02c3531a95b861042261a9a2d8587dd8217b9e52996c710bc2f3e60e3423706`.
 
+## Retrospective LTO trace feasibility evidence
+
+An independent historical campaign compared a loop of handwritten host DWQ
+enqueues with the host trace synthesized by LTO from the communication loop in
+device IR. The strict retrospective audit re-parses 40 raw logs: two batch
+sizes, ten repeated process launches per arm and batch, and sixteen message
+sizes. All LTO logs have exact enqueue counts and none of the logs contains a
+correctness-failure marker.
+
+Using the geometric mean of paired median-time ratios over message sizes and
+then trials, handwritten/LTO was `0.951514x` at batch 4 (LTO was `5.0957%`
+slower) and `1.030673x` at batch 64 (LTO was `2.9760%` faster). The reversal is
+useful engineering evidence: LTO synthesis is in the same performance regime
+as the handwritten fast path, but its overhead is workload/batch sensitive and
+must be evaluated rather than assumed away. It also motivates compiler-visible
+batch and schedule decisions beyond a static route label.
+
+This is deliberately not confirmatory evidence. The driver intended all trials
+to share one allocation, did not preserve the allocation identity, always ran
+the handwritten arm before LTO, and did not content-address the executed
+binaries. The result therefore cannot establish equivalence, populate current
+decision-graph labels, or support an LLM performance claim. Its result ID is
+`sha256:7e9be825e11ed89445a31c2fd67c14dbe73820f7b401f9e0340a59d38ecb5c0a`;
+the serialized report SHA-256 is
+`cc97f0aecff14af15786ed24546266558a5b3519270c047ab2943544f4d02a3c`.
+
 ## Reproduction
 
 From the repository root:
@@ -143,4 +169,17 @@ python3 tools/gicc-passes/experiments/analyze_minimod_route_only_retrospective.p
   --graph build_ofi/compiler_fact_coverage_20260904/portfolio/minimod/group-graph.json \
   --binary-sha256 build_ofi/minimod_paper/binary-sha256.txt \
   --out build_ofi/minimod_route_only_retrospective_20260904/report.json
+```
+
+The historical LTO trace audit is reproduced with:
+
+```sh
+python3 tools/gicc-passes/experiments/analyze_lto_trace_retrospective.py emit \
+  --input-dir build_ofi/variance_out \
+  --driver build_ofi/variance_out/run_alloc.sh \
+  --out build_ofi/lto_trace_retrospective_20260904/report.json
+python3 tools/gicc-passes/experiments/analyze_lto_trace_retrospective.py verify \
+  --input-dir build_ofi/variance_out \
+  --driver build_ofi/variance_out/run_alloc.sh \
+  --out build_ofi/lto_trace_retrospective_20260904/report.json
 ```
