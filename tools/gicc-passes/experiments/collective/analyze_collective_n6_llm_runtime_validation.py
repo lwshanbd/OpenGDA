@@ -304,6 +304,32 @@ def comparison(
     }
 
 
+def oracle_regret(
+    rows: dict[int, dict[str, dict[str, float]]],
+    subject: str, oracle: str, weights: dict[str, float],
+) -> dict[str, Any]:
+    ratios = [
+        weighted_cost(rows[index][subject], weights)
+        / weighted_cost(rows[index][oracle], weights)
+        for index in (1, 2, 3)
+    ]
+    return {
+        "subject_policy": subject,
+        "oracle_policy": oracle,
+        "subject_cost_regret_to_oracle":
+            n6_confirmation.base.paired_allocation_bootstrap(ratios),
+        "per_size_allocation_cost_regret": {
+            str(size): [
+                rows[index][subject][str(size)]
+                / rows[index][oracle][str(size)]
+                for index in (1, 2, 3)
+            ]
+            for size in SIZES
+        },
+        "used_as_a_pass_fail_gate": False,
+    }
+
+
 def analyze_rows(
     plan: dict[str, Any], rows: dict[int, dict[str, dict[str, float]]],
     weights: dict[str, float],
@@ -313,6 +339,13 @@ def analyze_rows(
     require(set(rows) == {1, 2, 3}, "runtime allocations are incomplete")
     require(all(set(value) == names for value in rows.values()),
             "runtime allocations have different policy sets")
+    weighted_costs = {
+        name: {
+            str(index): weighted_cost(rows[index][name], weights)
+            for index in (1, 2, 3)
+        }
+        for name in sorted(names)
+    }
     role_to_policy = {}
     for policy in policies:
         for role in policy["roles"]:
@@ -327,6 +360,7 @@ def analyze_rows(
             "runtime plan role coverage changed")
     anchor = role_to_policy["control:anchor"]
     deterministic = role_to_policy["control:deterministic"]
+    oracle = role_to_policy["control:oracle"]
 
     comparisons = {}
     for role in sorted(expected_roles - {
@@ -337,11 +371,17 @@ def analyze_rows(
             "over_deterministic": comparison(
                 rows, subject, deterministic, weights
             ),
+            "distance_to_runtime_oracle": oracle_regret(
+                rows, subject, oracle, weights
+            ),
         }
     relational_primary = comparisons[
         "relational:primary_modal_representative"
     ]
-    stable_gate = all(item["passed"] for item in relational_primary.values())
+    stable_gate = all(
+        relational_primary[key]["passed"]
+        for key in ("over_anchor", "over_deterministic")
+    )
 
     context = {}
     relational_policy = role_to_policy[
@@ -357,6 +397,10 @@ def analyze_rows(
         if role.endswith(":posthoc_capability_upper_bound")
     )
     return {
+        "runtime_unit_weights": {
+            key: float(value) for key, value in sorted(weights.items())
+        },
+        "weighted_runtime_cost_us_by_policy_and_allocation": weighted_costs,
         "role_to_deduplicated_policy": role_to_policy,
         "representative_comparisons": comparisons,
         "relational_modal_over_other_modal": context,

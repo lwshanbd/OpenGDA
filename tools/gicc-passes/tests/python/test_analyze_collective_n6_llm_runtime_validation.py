@@ -106,6 +106,24 @@ class AnalyzeCollectiveN6LlmRuntimeValidationTests(unittest.TestCase):
         ]["over_deterministic"]["subject_speedup"]
         self.assertEqual(27, speedup["bootstrap_samples"])
         self.assertEqual(3, speedup["allocation_wins"])
+        oracle_regret = result["representative_comparisons"][
+            "relational:primary_modal_representative"
+        ]["distance_to_runtime_oracle"]
+        self.assertAlmostEqual(
+            75.0 / 65.0,
+            oracle_regret["subject_cost_regret_to_oracle"]["estimate"],
+        )
+        self.assertFalse(oracle_regret["used_as_a_pass_fail_gate"])
+        relational_policy = result["role_to_deduplicated_policy"][
+            "relational:primary_modal_representative"
+        ]
+        self.assertAlmostEqual(
+            75.0,
+            result["weighted_runtime_cost_us_by_policy_and_allocation"][
+                relational_policy
+            ]["1"],
+        )
+        self.assertEqual(unit_weights(), result["runtime_unit_weights"])
 
     def test_posthoc_ceiling_cannot_rescue_weak_primary_policy(self):
         result = analysis.analyze_rows(
