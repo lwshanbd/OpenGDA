@@ -246,9 +246,11 @@ The post-authorization controller finishes by running
 `audit_collective_n6_llm_paper_claims.py`.  That auditor regenerates the
 capability analysis from the raw provider archive and hidden policy screen,
 regenerates the runtime analysis from the LTO bundle and three raw Flux
-monitors, and then emits a conservative claim matrix.  It also lists only
-currently eligible suite entries from a different compiler decision family as
-possible follow-ups; this list never authorizes another request.
+monitors, and then emits a conservative claim matrix.  It separately reports
+different-family entries that have a stable compiler oracle and entries that
+also have a complete hidden-screen/LTO/paired-runtime adapter.  The current
+route/schedule family has no such post-archive adapter, so eligibility alone
+does not recommend freezing another request and never authorizes one.
 
 ## Historical feasibility versus the upgraded claim
 

@@ -28,6 +28,18 @@ import gicc_llm_bridge as bridge  # noqa: E402
 
 
 AUDIT_SCHEMA = "gicc-collective-n6-llm-paper-claim-audit-v1"
+FOLLOWUP_INFRASTRUCTURE = {
+    "communication_route_or_schedule": {
+        "hidden_policy_screen_implemented": False,
+        "arbitrary_graph_policy_lto_materialization_audited": False,
+        "paired_runtime_validation_implemented": False,
+    },
+    "communication_coalescing_and_trigger_placement": {
+        "hidden_policy_screen_implemented": False,
+        "arbitrary_graph_policy_lto_materialization_audited": False,
+        "paired_runtime_validation_implemented": False,
+    },
+}
 
 
 class PaperClaimAuditError(RuntimeError):
@@ -201,7 +213,14 @@ def followup_entries(
             "independent_policy_count": count,
             "suite_entry_id": entry["entry_id"],
             "compiler_graph_id": entry["graph_id"],
+            "post_archive_infrastructure": dict(
+                FOLLOWUP_INFRASTRUCTURE.get(entry["decision_family"], {})
+            ),
         })
+        infrastructure = result[-1]["post_archive_infrastructure"]
+        result[-1]["end_to_end_execution_ready"] = bool(infrastructure) and all(
+            value is True for value in infrastructure.values()
+        )
     return sorted(
         result,
         key=lambda entry: (-entry["independent_policy_count"], entry["label"]),
@@ -255,6 +274,10 @@ def claim_summary(
         status = "no_upgraded_llm_performance_support"
     current_family = capability_report["decision_family"]
     followups = followup_entries(suite, protocol, current_family)
+    executable_followups = [
+        entry for entry in followups
+        if entry["end_to_end_execution_ready"] is True
+    ]
     relational = runtime_report.get("representative_comparisons", {}).get(
         "relational:primary_modal_representative", {}
     )
@@ -280,8 +303,12 @@ def claim_summary(
         "different_family_followup": {
             "currently_eligible": followups,
             "available": bool(followups),
+            "end_to_end_executable": executable_followups,
+            "end_to_end_execution_available": bool(executable_followups),
             "next_action": (
                 "freeze_one_separately_authorized_different-family_request"
+                if executable_followups else
+                "implement_and_audit_different-family_runtime_adapter"
                 if followups else
                 "establish_stable_compiler_oracle_in_another_family"
             ),

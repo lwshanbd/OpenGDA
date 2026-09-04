@@ -120,6 +120,18 @@ class AuditCollectiveN6LlmPaperClaimsTests(unittest.TestCase):
         self.assertFalse(
             result["different_family_followup"]["automatically_authorized"]
         )
+        self.assertFalse(result["different_family_followup"][
+            "end_to_end_execution_available"
+        ])
+        self.assertEqual(
+            "implement_and_audit_different-family_runtime_adapter",
+            result["different_family_followup"]["next_action"],
+        )
+        self.assertFalse(result["different_family_followup"][
+            "currently_eligible"
+        ][0]["post_archive_infrastructure"][
+            "hidden_policy_screen_implemented"
+        ])
 
     def test_posthoc_ceiling_is_not_promoted_to_stable_policy(self):
         capability, runtime, plan, suite, protocol, _ = evidence(
