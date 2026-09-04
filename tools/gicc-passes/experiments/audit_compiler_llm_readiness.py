@@ -1502,7 +1502,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         },
         "evidence": {
             "graph_refreeze_finalizer": evidence(
-                HERE / "continue_compiler_headroom_graph_refreezes.sh"
+                args.graph_refreeze_finalizer
             ),
             "suite": evidence(args.suite),
             "placement_summary": evidence(args.placement_summary),
@@ -1672,6 +1672,10 @@ def write_json_atomic(path: Path, value: Any) -> None:
 def add_inputs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--suite", type=Path, required=True)
     parser.add_argument("--prompt-dir", type=Path, required=True)
+    parser.add_argument(
+        "--graph-refreeze-finalizer", type=Path,
+        default=HERE / "continue_compiler_headroom_graph_refreezes.sh",
+    )
     parser.add_argument("--placement-summary", type=Path, required=True)
     parser.add_argument("--placement-historical-graph", type=Path, required=True)
     parser.add_argument("--placement-current-graph", type=Path, required=True)
