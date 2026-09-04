@@ -27,17 +27,17 @@ and fails closed at every transition. Its current output is:
 | Entry | Current status | Allowed next stage |
 |---|---|---|
 | `coalescing_placement` | `closed_negative` | no model for this graph |
-| `collective_n8` | `awaiting_scout` | wait for the existing N8 `pdebug` scout |
-| `jacobi` | `awaiting_predecessor` | wait for N8, then the one queued-by-controller scout |
+| `collective_n8` | `scout_failed` | diagnose without a model; N8 produced no data because it is unschedulable |
+| `jacobi` | `scout_failed` | the first waiter failed before submission; run the frozen recovery scout |
 | `minimod` | `runtime_labels_missing` | establish a preregistered compiler oracle first |
 | `mixed_lto` | `runtime_labels_missing` | establish a preregistered compiler oracle first |
-| `mm_minimal` | `awaiting_predecessor` | run the frozen guarded-trigger scout after the serial campaign |
-| `loop_lto` | `awaiting_predecessor` | run the frozen reused-descriptor scout after the serial campaign |
+| `mm_minimal` | `scout_failed` | the first waiter failed before submission; run the frozen recovery scout |
+| `loop_lto` | `awaiting_scout` | wait for the sole queued reused-descriptor scout |
 
 The report has readiness ID
-`sha256:c67641b1e342b5e0fd8ab94e6187cdee1b403254c4f3174c22879922169ea05c`
+`sha256:fdabae41ee37817502adf8ff29f1053881d2c74f6308bf4c12b099efdc3f326a`
 and serialized SHA-256
-`c7769e39453b4b72f92955aa79b73ceded95a78e8b8dd28f36d4c290611cfb23`.
+`676450229e8854ea190863689b94edeb7c073c7ab94fc0aa2cfda13c4212b82c`.
 It reports zero provider-protocol-permitted entries, zero authorized provider
 calls, zero measured LLM policies, and
 `paper_llm_performance_claim_ready=false`.
@@ -48,6 +48,15 @@ so compiler transformations can matter greatly. The strongest uniform arm is
 only `1.017982x` behind the factorized oracle, however, and its paired 95%
 interval crosses one. The experiment therefore supports compiler action-space
 capacity but cannot support an LLM-selection benefit.
+
+The `collective_n8` and first Jacobi/mm-minimal controller failures carry no
+performance meaning. The N8 allocation never ran because `tioga41` has been
+drained since 2026-07-21, leaving only seven usable `pdebug` nodes. The first
+Jacobi and mm-minimal waiters failed their frozen-artifact checks before job
+submission. A separate N6 graph/bundle and a single serial recovery controller
+now cover those gaps. N6 is not silently substituted into this report: it must
+pass its own runtime gate and be refrozen into a new suite before becoming
+model-visible.
 
 ## Fail-closed transitions
 
@@ -236,12 +245,12 @@ python3 tools/gicc-passes/experiments/audit_compiler_llm_readiness.py emit \
   --reused-confirmation-analysis build_ofi/reused_loop_descriptor_confirmation_aff76f9_20260904/analysis.json \
   --reused-expansion-manifest build_ofi/reused_loop_descriptor_graph_expansion_20260904/manifest.json \
   --reused-refreeze-manifest build_ofi/reused_loop_descriptor_suite_refreeze_20260904/manifest.json \
-  --out build_ofi/compiler_llm_readiness_20260904/report.json
+  --out build_ofi/compiler_llm_readiness_after_n8_cancel_20260904/report.json
 ```
 
 Use `verify` with the same inputs and
-`--report build_ofi/compiler_llm_readiness_20260904/report.json` to prove that
-the report still matches the current external state. When a monitored runtime
+`--report build_ofi/compiler_llm_readiness_after_n8_cancel_20260904/report.json`
+to prove that the report still matches the current external state. When a monitored runtime
 stage changes, `verify` deliberately rejects the stale report and `emit`
 derives a new one.
 

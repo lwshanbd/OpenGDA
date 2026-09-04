@@ -125,13 +125,13 @@ also checks every entry/graph/prompt binding and refuses any source-visible,
 already-authorized, already-measured, unequal-authority, or model-invisible
 configuration.
 
-The current report is
-`build_ofi/compiler_llm_capability_protocol_20260904/report.json`:
+The post-N8-cancellation report is
+`build_ofi/compiler_llm_capability_protocol_after_n8_cancel_20260904/report.json`:
 
 - protocol ID:
-  `sha256:5d093a0b9fe44e87542229efc3a1381610383a4fa1cadc30757dae59ee05a92d`;
+  `sha256:fa2ce44d7e41702b6ec9b3894afb2087892c46e2abb0a4d4ab074ffce0ce2956`;
 - serialized report SHA-256:
-  `97658c718018227288218eb411610c7b4c01fcf791f83710109af605bea1bced`;
+  `9ccc45d6a623b7c56e8bf54cc1e117726d1bd0d77a68fb6a47b5e4a89acaed46`;
 - frozen metrics implementation SHA-256:
   `fcc5858af4498ad39daa0efcdce4934fc7dd470e3e654189a8bb29a5d4c1250e`;
 - frozen unified bridge SHA-256:
@@ -182,7 +182,7 @@ integer hit count and reports the exact binomial tail under the frozen
 action-space-specific uniform null. Offline screen results and chance
 calibration remain explicitly distinct from paired runtime speedup evidence.
 
-For `collective_n8`,
+For the frozen `collective_n8` entry,
 `collective/prepare_collective_llm_policy_screen.py` is the concrete family
 adapter. The topology scout and three-allocation confirmation measure only the
 three preregistered hierarchy/pipeline policies, while the model-facing graph
@@ -207,10 +207,19 @@ confirmation all stop the screen. These composed costs select policies for
 later validation and are explicitly not runtime measurements of the composed
 LLM policies.
 
-This negative readiness result is important: it prevents rich prompts alone
-from being counted as LLM evidence. The existing N8 collective, Jacobi
-producer-fission, guarded early-trigger, and reused-descriptor campaigns must
-finish their serial runtime gates before the report can advance.
+That N8 path is currently unavailable: the only eighth `pdebug` node has been
+drained since 2026-07-21, so the scout was cancelled without producing runtime
+rows. The N8-specific adapter and confirmation cannot consume N6 evidence. A
+separately frozen N6/48-rank graph retains the 4096-policy compiler action
+interface and is queued last in the serial recovery campaign. Even if its
+scout passes, it requires a topology-matched N6 confirmation, policy-screen
+adapter, suite refreeze, readiness audit, and new request ID before any model
+call can be considered.
+
+This zero-eligible readiness result is important: it prevents rich prompts,
+an infrastructure failure, or an offline N6 graph from being counted as LLM
+evidence. The reused-descriptor and recovery campaigns must finish their
+serial runtime gates before the report can advance.
 
 ## Historical feasibility versus the upgraded claim
 
@@ -238,16 +247,16 @@ The audit ID is
 python3 tools/gicc-passes/experiments/audit_compiler_llm_capability_protocol.py emit \
   --suite build_ofi/compiler_decision_suite_20260904/suite.json \
   --prompt-dir build_ofi/compiler_decision_suite_20260904/prompts \
-  --readiness build_ofi/compiler_llm_readiness_20260904/report.json \
+  --readiness build_ofi/compiler_llm_readiness_after_n8_cancel_20260904/report.json \
   --input-separation build_ofi/compiler_input_separation_20260904/report.json \
   --sampling-null build_ofi/llm_sampling_null_20260904/report.json \
-  --out build_ofi/compiler_llm_capability_protocol_20260904/report.json
+  --out build_ofi/compiler_llm_capability_protocol_after_n8_cancel_20260904/report.json
 
 python3 tools/gicc-passes/experiments/audit_compiler_llm_capability_protocol.py verify \
   --suite build_ofi/compiler_decision_suite_20260904/suite.json \
   --prompt-dir build_ofi/compiler_decision_suite_20260904/prompts \
-  --readiness build_ofi/compiler_llm_readiness_20260904/report.json \
+  --readiness build_ofi/compiler_llm_readiness_after_n8_cancel_20260904/report.json \
   --input-separation build_ofi/compiler_input_separation_20260904/report.json \
   --sampling-null build_ofi/llm_sampling_null_20260904/report.json \
-  --report build_ofi/compiler_llm_capability_protocol_20260904/report.json
+  --report build_ofi/compiler_llm_capability_protocol_after_n8_cancel_20260904/report.json
 ```

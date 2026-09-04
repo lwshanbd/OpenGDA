@@ -12,12 +12,12 @@ tasks from three decision families:
 | Entry | Compiler decision | Independent policy count | Runtime status |
 |---|---|---:|---|
 | `coalescing_placement` | proxy/trigger route, loop coalescing, and early/late trigger placement over six compiler opportunities | 4096 | four-replicate runtime capacity measured; preregistered LLM gate failed |
-| `collective_n8` | collective algorithm jointly across four message regions | 4096 | topology-matched hierarchy-pipeline scout pending |
-| `jacobi` | two-transfer communication-group route | 9 | producer-frontier materializer exists, but its `+1` candidate remains masked pending serial scout/confirmation |
+| `collective_n8` | collective algorithm jointly across four message regions | 4096 | runtime unexecuted: N8 is unschedulable on the seven usable `pdebug` nodes; N6 remains outside this suite |
+| `jacobi` | two-transfer communication-group route | 9 | first waiter failed before submission; producer-frontier `+1` remains masked pending serial recovery |
 | `minimod` | two-transfer communication-group route | 9 | route capacity only |
 | `mixed_lto` | two-transfer communication-group route | 9 | route capacity only |
-| `mm_minimal` | singleton communication route | 3 | guarded early-trigger materializer exists, but its `+1` candidate remains model-invisible pending serial scout/confirmation |
-| `loop_lto` | singleton communication route | 2 | reused-loop-descriptor materializer exists, but its `+1` candidate remains model-invisible pending serial scout/confirmation |
+| `mm_minimal` | singleton communication route | 3 | first waiter failed before submission; guarded early-trigger `+1` remains model-invisible pending serial recovery |
+| `loop_lto` | singleton communication route | 2 | reused-loop-descriptor `+1` remains model-invisible while its sole N2 scout is queued |
 
 The counts above are reported per entry.  They must not be summed or
 multiplied into a fictitious joint action space: the programs execute
@@ -154,7 +154,7 @@ node, using pipeline depths `(1, 1, 4, 8)` over the four ordered message bins.
 If the topology or the complete compiler candidate cohort is unavailable, it
 falls back atomically to the semantic anchor in every bin.
 
-The control was frozen before the pending N8 runtime result:
+The control was frozen before the now-cancelled N8 runtime attempt:
 
 - graph ID:
   `sha256:ce569e2575cfdc924004631dcf96a2d81077520c3198c8f78edde3a4405cf806`;
@@ -174,9 +174,10 @@ The compiler independently revalidated the opaque option IDs and lowered the
 four-bin decision to an explicit size-dispatch CFG: tree through 4 KiB, tree
 through 256 KiB, four-way pipelined tree through 8 MiB, and eight-way
 pipelined tree above 8 MiB.  Build provenance, dependency closure, command
-records, host IR, and device proxy-ring IR all verify.  This comparator remains
-valid whether the N8 runtime gate is positive or negative; it prevents a later
-model result from being credited for a policy already expressible by a simple
+records, host IR, and device proxy-ring IR all verify. This remains valid
+compiler-materialization evidence, but it cannot become a runtime comparator
+without a topology-matched run. It still prevents a later model result on the
+same graph from being credited for a policy already expressible by a simple
 compiler rule.
 
 The five communication graphs now have the analogous, deliberately narrower
@@ -209,12 +210,17 @@ can have large performance effects, but not yet that an LLM captures them:
   batch 64. This is descriptive feasibility and batch-sensitivity evidence,
   not a confirmatory comparison, because binary hashes, allocation identity,
   and order balance were not preserved;
-- the topology-matched eight-node hierarchy-pipeline scout is the sole
-  scheduler-visible job.  Its unattended serial successor chain contains the
-  producer-frontier, guarded early-trigger, and reused-loop-descriptor
-  scout/confirmation gates; each hidden candidate remains outside the model
-  action set unless its own frozen runtime gate passes and the compiler graph
-  and suite are subsequently refrozen.
+- the N8 hierarchy-pipeline job produced no measurements because one of the
+  eight `pdebug` nodes has been drained since 2026-07-21; this is missing
+  infrastructure evidence, not a negative performance result;
+- a source-free N6/48-rank replacement has been offline-frozen with the same
+  4096-policy compiler interface, but remains outside this suite and has not
+  run;
+- the reused-loop-descriptor scout is currently the sole scheduler-visible
+  job. One recovery controller will subsequently run the producer-frontier,
+  guarded early-trigger, and N6 scouts strictly serially; hidden candidates
+  remain outside the model action set unless their own frozen runtime gates
+  pass and the compiler graph and suite are subsequently refrozen.
 
 Thus the suite supports the paper's **method and action-space** claim now.  A
 performance claim about LLM-guided optimization remains gated on stable oracle
@@ -235,9 +241,10 @@ by `audit_compiler_llm_capability_protocol.py` and documented in
 `LLM_CAPABILITY_EVALUATION.md`. It preregisters modal policies as the stable
 representatives, isolates best-of-20 as a post-hoc capability upper bound, and
 uses `relational`/`descriptors`/`opaque` as the equal-authority information
-ablation. Its current result has zero runtime-eligible entries and therefore
+ablation. The post-N8-cancellation result has zero runtime-eligible entries and
 permits zero provider calls; protocol ID
-`sha256:5d093a0b9fe44e87542229efc3a1381610383a4fa1cadc30757dae59ee05a92d`.
+`sha256:fa2ce44d7e41702b6ec9b3894afb2087892c46e2abb0a4d4ab074ffce0ce2956`
+for the post-N8-cancellation snapshot.
 
 The separate historical 20-trial LLM archive now has a machine-audited,
 strictly scoped interpretation in `HISTORICAL_COMPILER_LLM_CEILING.md`. It
