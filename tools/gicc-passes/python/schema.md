@@ -681,6 +681,42 @@ are rejected.
 the same graph: every opportunity is required, every candidate field is an
 enum of the graph's opaque IDs, and additional fields are forbidden.
 
+### Relational coalescing and trigger-placement bridge
+
+`gicc_comm_plan_bridge.py` exposes the compiler's existing communication-plan
+opportunities without exposing their source identities. Each opportunity can
+contain only compiler-generated, compiler-proved candidates such as device
+proxy, trigger descriptor batch, late loop coalescing, and early
+coalescing/trigger placement. The private
+`gicc-communication-opportunity-graph-v1` retains site IDs and materializer
+bindings for strict validation and lowering; those fields are never copied to
+the model view.
+
+The `gicc-communication-plan-model-view-v2` projection has the same
+`relational`, `descriptors`, and `opaque` information ablation used by the
+other decision families. The relational view preserves compiler facts,
+candidate proofs/effects, equal-fact groups, numeric fact order, and mappings
+between candidates with shared semantics. The descriptors view removes the
+explicit relation edges, while the opaque view retains only candidate IDs.
+All views remove source and kernel names, site IDs, paths, provenance, and
+materializer strings. They share one private graph, candidate set, exact
+response schema, validator, and second-pass LTO materializer.
+
+```bash
+python3 tools/gicc-passes/python/gicc_comm_plan_bridge.py emit \
+  --dossier build/dossier.json \
+  --graph build/communication-plan-graph.json \
+  --prompt build/communication-plan-prompt.txt \
+  --prompt-view relational
+```
+
+The response selects exactly one existing candidate ID per opportunity.
+`accept --strict` recomputes graph and candidate identity, rejects missing,
+invented, or cross-opportunity IDs, and emits only a narrow `gicc-hint-v1` for
+the compiler to revalidate. The build helper's `GICC_COMM_PLAN_OUT` override
+permits current-plugin rematerialization in a disjoint directory without
+overwriting a frozen historical runtime bundle.
+
 ### Relational collective algorithm and size-policy bridge
 
 `GICCCollectivePlanningPass` recognizes a trusted, fixed-ABI compiler catalog
@@ -767,11 +803,12 @@ changing the benchmark source.
 ### Cross-family compiler decision suite
 
 `gicc_compiler_decision_suite.py` content-addresses multiple independent
-communication and collective graphs without merging their selections or
-claiming a cross-program Cartesian product. It deterministically renders all
-three information views, records graph/selectable-ID/view/prompt hashes, and
-records the graph-derived exact response schema for each entry. It can verify
-the resulting suite plus the exact prompt and schema bytes. The suite is a
-local capability inventory only: it has no provider, scheduler, compiler, or
+communication route/schedule, communication coalescing/trigger-placement, and
+collective graphs without merging their selections or claiming a
+cross-program Cartesian product. It deterministically renders all three
+information views, records graph/selectable-ID/view/prompt hashes, and records
+the graph-derived exact response schema for each entry. It can verify the
+resulting suite plus the exact prompt and schema bytes. The suite is a local
+capability inventory only: it has no provider, scheduler, compiler, or
 source-edit path. The current frozen inventory and its scientific limits are
 documented in `experiments/COMPILER_DECISION_SUITE.md`.

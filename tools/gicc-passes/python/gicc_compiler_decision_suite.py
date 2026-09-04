@@ -2,9 +2,10 @@
 """Freeze independent compiler/LTO decision tasks into one audited suite.
 
 The suite is an index, not a joint optimizer.  It content-addresses collective
-size-policy graphs and communication route/schedule graphs, renders the same
-three information views for each graph, and records their exact prompt hashes.
-It has no provider, scheduler, compiler, or source-edit path.
+size-policy, communication route/schedule, and communication coalescing/
+trigger-placement graphs, renders the same three information views for each
+graph, and records their exact prompt hashes.  It has no provider, scheduler,
+compiler, or source-edit path.
 """
 
 from __future__ import annotations
