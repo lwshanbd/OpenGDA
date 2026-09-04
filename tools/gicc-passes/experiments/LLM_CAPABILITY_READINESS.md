@@ -35,9 +35,9 @@ and fails closed at every transition. Its current output is:
 | `loop_lto` | `awaiting_predecessor` | run the frozen reused-descriptor scout after the serial campaign |
 
 The report has readiness ID
-`sha256:dfca08a9866bb433a13aa625500f5bf07b7cbb11399c0c43d341589bb44a396b`
+`sha256:205cdb90c11962e11b0fd0cec3c541f967cbb0e1f86fec20eae9e84fdf636d0d`
 and serialized SHA-256
-`0b12758ff250adca5aa45f9ab1f902b2e7918d48df1479f0b3e4c0ee879eb462`.
+`6a130ec5a360838f4a84383472201cc27125e5196dc7e4989fbb69592cf50c28`.
 It reports zero provider-protocol-permitted entries, zero authorized provider
 calls, zero measured LLM policies, and
 `paper_llm_performance_claim_ready=false`.
@@ -79,6 +79,15 @@ capacity but cannot support an LLM-selection benefit.
   other entry. Only when the readiness audit replays both manifests and sees
   the refrozen suite does the entry reach `provider_protocol_permitted`.
   Provider-call authorization remains false at that state.
+- Guarded early trigger now has the same expansion and suite-refreeze gates.
+  Its expansion additionally binds the device-attested guard facts and
+  verifies that application source was hash-checked but never model-visible.
+  When producer and guarded candidates both pass, the audit requires the
+  exact serial suite lineage `original → producer → guarded`: the guarded
+  manifest's predecessor must be the producer manifest's output, all
+  unrelated entries must survive both transitions, and only the final suite
+  may become the readiness input. A disconnected pair of otherwise valid
+  manifests fails closed.
 - The reused-loop-descriptor scout is a graph-expansion oracle. Its candidate
   remains explicitly model-invisible even after a positive scout; only an
   independently frozen confirmation may justify rebuilding the compiler graph.
@@ -203,6 +212,8 @@ python3 tools/gicc-passes/experiments/audit_compiler_llm_readiness.py emit \
   --guarded-analysis build_ofi/guarded_early_trigger_scout_77897d9_20260904/analysis.json \
   --guarded-confirmation-state build_ofi/guarded_early_trigger_confirmation_77897d9_20260904.state \
   --guarded-confirmation-analysis build_ofi/guarded_early_trigger_confirmation_77897d9_20260904/analysis.json \
+  --guarded-expansion-manifest build_ofi/guarded_early_trigger_graph_expansion_20260904/manifest.json \
+  --guarded-refreeze-manifest build_ofi/guarded_early_trigger_suite_refreeze_20260904/manifest.json \
   --reused-state build_ofi/reused_loop_descriptor_scout_aff76f9_20260904.state \
   --reused-analysis build_ofi/reused_loop_descriptor_scout_aff76f9_20260904/analysis.json \
   --out build_ofi/compiler_llm_readiness_20260904/report.json

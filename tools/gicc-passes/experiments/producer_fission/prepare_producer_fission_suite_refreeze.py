@@ -118,6 +118,7 @@ def _spec_maps(
     communication: list[tuple[str, Path]],
     collective: list[tuple[str, Path]],
     structural: list[tuple[str, Path]],
+    *, target_label: str = "jacobi",
 ) -> dict[str, tuple[str, Path]]:
     records = {}
     for family, specs in (
@@ -128,28 +129,28 @@ def _spec_maps(
         for label, path in specs:
             if label in records:
                 raise RefreezeError(f"duplicate suite graph label: {label}")
-            if label == "jacobi":
+            if label == target_label:
                 raise RefreezeError(
-                    "the Jacobi graph must come from the verified expansion"
+                    f"the {target_label} graph must come from the verified "
+                    "expansion"
                 )
             records[label] = (family, path.resolve())
     return records
 
 
-def make_refrozen_suite(
+def make_refrozen_entry_suite(
     current_suite_path: Path, current_prompt_dir: Path,
     expansion_manifest_path: Path,
     communication: list[tuple[str, Path]],
     collective: list[tuple[str, Path]],
     structural: list[tuple[str, Path]],
-    *, prompt_dir: Path | None = None,
+    *, expansion_verifier: Any, target_label: str,
+    expected_mask_delta: int, prompt_dir: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     current = suites.verified_suite(
         read_json(current_suite_path), current_prompt_dir,
     )
-    expansion_manifest = expansion.verify_contained(
-        expansion_manifest_path
-    )
+    expansion_manifest = expansion_verifier(expansion_manifest_path)
     expanded_graph_path = _expansion_output(
         expansion_manifest_path, expansion_manifest, "expanded_graph",
     )
@@ -157,22 +158,27 @@ def make_refrozen_suite(
         expansion_manifest, "frozen_current_graph",
     )
     entries = {entry["label"]: entry for entry in current["entries"]}
-    if "jacobi" not in entries:
-        raise RefreezeError("current suite lacks the Jacobi entry")
-    jacobi = entries["jacobi"]
+    if target_label not in entries:
+        raise RefreezeError(f"current suite lacks the {target_label} entry")
+    target_entry = entries[target_label]
     transition = expansion_manifest.get("graph_transition", {})
-    if (jacobi.get("decision_family") != "communication_route_or_schedule"
-            or jacobi.get("graph_id") != transition.get("current_graph_id")
-            or jacobi.get("graph_file_sha256")
+    if (target_entry.get("decision_family")
+            != "communication_route_or_schedule"
+            or target_entry.get("graph_id")
+            != transition.get("current_graph_id")
+            or target_entry.get("graph_file_sha256")
             != current_graph_record.get("sha256")):
         raise RefreezeError(
-            "current suite does not bind the expansion's frozen Jacobi graph"
+            f"current suite does not bind the expansion's frozen "
+            f"{target_label} graph"
         )
 
-    specs = _spec_maps(communication, collective, structural)
-    if set(specs) != set(entries) - {"jacobi"}:
+    specs = _spec_maps(
+        communication, collective, structural, target_label=target_label,
+    )
+    if set(specs) != set(entries) - {target_label}:
         raise RefreezeError(
-            "refreeze must supply exactly every non-Jacobi suite graph"
+            f"refreeze must supply exactly every non-{target_label} suite graph"
         )
     expected_families = {
         "communication_route_or_schedule": "communication",
@@ -180,7 +186,7 @@ def make_refrozen_suite(
         "communication_coalescing_and_trigger_placement": "structural",
     }
     for label, entry in entries.items():
-        if label == "jacobi":
+        if label == target_label:
             continue
         family = expected_families.get(entry.get("decision_family"))
         if family is None or specs[label][0] != family:
@@ -189,7 +195,7 @@ def make_refrozen_suite(
     communication_specs = [
         (label, path) for label, (family, path) in specs.items()
         if family == "communication"
-    ] + [("jacobi", expanded_graph_path)]
+    ] + [(target_label, expanded_graph_path)]
     collective_specs = [
         (label, path) for label, (family, path) in specs.items()
         if family == "collective"
@@ -207,10 +213,10 @@ def make_refrozen_suite(
     }
     if set(refrozen_entries) != set(entries):
         raise RefreezeError("refrozen suite labels changed")
-    for label in set(entries) - {"jacobi"}:
+    for label in set(entries) - {target_label}:
         if refrozen_entries[label] != entries[label]:
             raise RefreezeError(f"refreeze changed unrelated entry {label}")
-    updated = refrozen_entries["jacobi"]
+    updated = refrozen_entries[target_label]
     expanded_graph_record = next(
         record for record in expansion_manifest["outputs"]
         if record["role"] == "expanded_graph"
@@ -219,21 +225,24 @@ def make_refrozen_suite(
             or updated["graph_file_sha256"]
             != expanded_graph_record["sha256"]):
         raise RefreezeError("refrozen suite does not bind the expanded graph")
-    old_space = jacobi["decision_space"]
+    old_space = target_entry["decision_space"]
     new_space = updated["decision_space"]
     if (new_space.get("selectable_candidate_id_count")
             != old_space.get("selectable_candidate_id_count", 0) + 1
             or new_space.get("independent_policy_count")
             != old_space.get("independent_policy_count", 0) + 1
             or new_space.get("masked_candidate_count")
-            != old_space.get("masked_candidate_count", 0) - 1
+            != old_space.get("masked_candidate_count", 0) + expected_mask_delta
             or transition.get("candidate_id") is None):
-        raise RefreezeError("Jacobi decision-space delta is not exactly +1/-1")
+        raise RefreezeError(
+            f"{target_label} decision-space delta is not exactly +1/"
+            f"{expected_mask_delta:+d} masked"
+        )
     delta = {
-        "label": "jacobi",
-        "old_entry_id": jacobi["entry_id"],
+        "label": target_label,
+        "old_entry_id": target_entry["entry_id"],
         "new_entry_id": updated["entry_id"],
-        "old_graph_id": jacobi["graph_id"],
+        "old_graph_id": target_entry["graph_id"],
         "new_graph_id": updated["graph_id"],
         "new_candidate_id": transition["candidate_id"],
         "new_candidate_kind": transition["candidate_kind"],
@@ -244,6 +253,23 @@ def make_refrozen_suite(
         "all_other_entries_preserved": True,
     }
     return refrozen, expansion_manifest, delta
+
+
+def make_refrozen_suite(
+    current_suite_path: Path, current_prompt_dir: Path,
+    expansion_manifest_path: Path,
+    communication: list[tuple[str, Path]],
+    collective: list[tuple[str, Path]],
+    structural: list[tuple[str, Path]],
+    *, prompt_dir: Path | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    return make_refrozen_entry_suite(
+        current_suite_path, current_prompt_dir, expansion_manifest_path,
+        communication, collective, structural,
+        expansion_verifier=expansion.verify_contained,
+        target_label="jacobi", expected_mask_delta=-1,
+        prompt_dir=prompt_dir,
+    )
 
 
 def materialize_bundle(

@@ -235,6 +235,37 @@ class CompilerLlmReadinessTests(unittest.TestCase):
                 "suite_refrozen",
             )
 
+    def test_guarded_expansion_and_refreeze_are_separate_gates(self):
+        scout = {
+            "schema_version": "gicc-guarded-early-trigger-analysis-v1",
+            "correctness_gate": {"passed": True},
+            "oracle_headroom_gate": {"passed": True},
+        }
+        bundled = readiness.classify_guarded_early_trigger(
+            entry(), "promising", scout, "confirmed", True,
+            "bundle_ready",
+        )
+        self.assertEqual("suite_refreeze_required", bundled["status"])
+        self.assertFalse(bundled["provider_protocol_permitted"])
+        self.assertFalse(bundled["candidate_model_visible"])
+        self.assertTrue(bundled["expanded_graph_bundle_verified"])
+
+        refrozen = readiness.classify_guarded_early_trigger(
+            entry(), "promising", scout, "confirmed", True,
+            "suite_refrozen",
+        )
+        self.assertEqual("provider_protocol_permitted", refrozen["status"])
+        self.assertTrue(refrozen["provider_protocol_permitted"])
+        self.assertTrue(refrozen["candidate_model_visible"])
+        self.assertTrue(refrozen["current_suite_graph_expanded"])
+        self.assertFalse(refrozen["provider_call_authorized"])
+
+        with self.assertRaisesRegex(readiness.ReadinessError, "negative"):
+            readiness.classify_guarded_early_trigger(
+                entry(), "promising", scout, "negative", False,
+                "suite_refrozen",
+            )
+
     def test_refreeze_must_bind_exact_suite_expansion_and_confirmation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -324,6 +355,137 @@ class CompilerLlmReadinessTests(unittest.TestCase):
                         refreeze_path, expansion_path, suite_path,
                         suite, changed,
                     )
+
+    def test_guarded_refreeze_binds_suite_expansion_and_predecessor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            suite_path = root / "suite.json"
+            expansion_path = root / "expansion.json"
+            refreeze_path = root / "refreeze.json"
+            for path in (suite_path, expansion_path, refreeze_path):
+                path.write_text("{}\n", encoding="utf-8")
+            confirmation = {"result_id": "sha256:" + "1" * 64}
+            graph_id = "sha256:" + "2" * 64
+            candidate_id = "candidate:" + "3" * 24
+            jacobi = entry("jacobi", "sha256:" + "4" * 64)
+            mm = entry("mm_minimal", graph_id)
+            suite = {
+                "suite_id": "sha256:" + "5" * 64,
+                "entries": [jacobi, mm],
+            }
+            predecessor = {
+                "suite_id": "sha256:" + "6" * 64,
+                "entries": [jacobi, entry("mm_minimal")],
+            }
+            expansion_manifest = {
+                "status": "expanded_graph_ready_for_suite_refreeze",
+                "confirmation": {
+                    "result_id": confirmation["result_id"],
+                    "confirmation_gate_passed": True,
+                    "correctness_gate_passed": True,
+                    "runtime_guard_gate_passed": True,
+                },
+                "graph_transition": {
+                    "expanded_graph_id": graph_id,
+                    "candidate_id": candidate_id,
+                },
+                "boundary": {
+                    "compiler_lto_decisions_only": True,
+                    "application_source_hash_verified": True,
+                    "application_source_visible_to_model": False,
+                    "application_source_modified": False,
+                    "model_invoked": False,
+                    "provider_call_authorized": False,
+                    "scheduler_job_submitted": False,
+                    "frozen_current_graph_modified": False,
+                    "current_decision_suite_modified": False,
+                },
+            }
+            manifest = {
+                "status": "refrozen_suite_ready_for_readiness_audit",
+                "refrozen_suite_id": suite["suite_id"],
+                "boundary": {
+                    "compiler_lto_decisions_only": True,
+                    "application_source_hash_verified": True,
+                    "application_source_visible_to_model": False,
+                    "application_source_modified": False,
+                    "model_invoked": False,
+                    "provider_call_authorized": False,
+                    "scheduler_job_submitted": False,
+                    "current_suite_modified": False,
+                },
+                "inputs": [{
+                    "role": "guarded_expansion_manifest",
+                    "path": str(expansion_path),
+                    "sha256": readiness.sha256_file(expansion_path),
+                    "bytes": expansion_path.stat().st_size,
+                }],
+                "outputs": [{
+                    "role": "refrozen_suite",
+                    "path": "suite.json",
+                    "sha256": readiness.sha256_file(suite_path),
+                    "bytes": suite_path.stat().st_size,
+                }],
+                "entry_transition": {
+                    "label": "mm_minimal",
+                    "new_graph_id": graph_id,
+                    "new_candidate_id": candidate_id,
+                    "all_other_entries_preserved": True,
+                },
+            }
+            with (
+                mock.patch.object(
+                    readiness.guarded_refreeze, "verify_contained",
+                    return_value=manifest,
+                ),
+                mock.patch.object(
+                    readiness.guarded_expansion, "verify_contained",
+                    return_value=expansion_manifest,
+                ),
+                mock.patch.object(
+                    readiness, "verified_refreeze_predecessor",
+                    return_value=(root / "old.json", root / "prompts",
+                                  predecessor),
+                ),
+            ):
+                self.assertEqual(manifest, readiness.verified_guarded_refreeze(
+                    refreeze_path, expansion_path, suite_path,
+                    suite, confirmation,
+                ))
+
+    def test_refreeze_predecessor_is_content_addressed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            suite_path = root / "suite.json"
+            prompt_dir = root / "prompts"
+            prompt_dir.mkdir()
+            suite_path.write_text("{}\n", encoding="utf-8")
+            suite = {"suite_id": "sha256:" + "7" * 64, "entries": []}
+            manifest = {
+                "current_suite_id": suite["suite_id"],
+                "current_prompt_dir": str(prompt_dir),
+                "inputs": [{
+                    "role": "current_suite",
+                    "path": str(suite_path),
+                    "sha256": readiness.sha256_file(suite_path),
+                    "bytes": suite_path.stat().st_size,
+                }],
+            }
+            with mock.patch.object(
+                readiness.decision_suite, "verified_suite", return_value=suite,
+            ) as verify:
+                result = readiness.verified_refreeze_predecessor(
+                    manifest, label="unit refreeze",
+                )
+            self.assertEqual(
+                (suite_path.resolve(), prompt_dir.resolve(), suite), result,
+            )
+            verify.assert_called_once_with({}, prompt_dir.resolve())
+            suite_path.write_text("changed\n", encoding="utf-8")
+            with self.assertRaisesRegex(readiness.ReadinessError, "changed"):
+                readiness.verified_refreeze_predecessor(
+                    manifest, label="unit refreeze",
+                )
 
     def test_hidden_confirmation_replays_before_graph_expansion(self):
         with tempfile.TemporaryDirectory() as directory:

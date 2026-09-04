@@ -63,3 +63,28 @@ and adds one compiler-owned `GUARDED_EARLY_TRIGGER` candidate. The unchanged
 application source is hash-checked by the confirmation transition but is not
 included in any model view. The bundle does not refreeze the suite, invoke a
 model, or authorize a provider call.
+
+The expanded bundle is still not a model request. Refreeze it into a separate
+suite while supplying every unchanged non-`mm_minimal` graph explicitly:
+
+```sh
+python3 tools/gicc-passes/experiments/guarded_early_trigger/prepare_guarded_early_suite_refreeze.py prepare \
+  --current-suite build_ofi/compiler_decision_suite_20260904/suite.json \
+  --current-prompt-dir build_ofi/compiler_decision_suite_20260904/prompts \
+  --expansion-manifest build_ofi/guarded_early_trigger_graph_expansion_20260904/manifest.json \
+  --communication jacobi=build_ofi/compiler_fact_coverage_20260904/portfolio/jacobi/group-graph.json \
+  --communication minimod=build_ofi/compiler_fact_coverage_20260904/portfolio/minimod/group-graph.json \
+  --communication mixed_lto=build_ofi/compiler_fact_coverage_20260904/portfolio/mixed_lto/group-graph.json \
+  --communication loop_lto=build_ofi/compiler_fact_coverage_20260904/portfolio/loop_lto/group-graph.json \
+  --collective collective_n8=build_ofi/compiler_collective_capacity_n8_hierpipe_v1_20260903/discovery/graph.json \
+  --structural coalescing_placement=build_ofi/compiler_comm_plan_placement_current_20260904/generated/opportunity-graph.json \
+  --output-dir build_ofi/guarded_early_trigger_suite_refreeze_20260904
+```
+
+The refreeze refuses a caller-supplied `mm_minimal` graph, preserves every
+other entry, and records the sole `3→4` policy-space change. If producer
+fission has already passed and been refrozen, its suite and prompt directory
+must be the guarded refreeze's current inputs, and its expanded Jacobi graph
+must be supplied above. The readiness audit verifies that exact
+`original → producer → guarded` content-addressed lineage. Neither refreeze
+authorizes a provider call.

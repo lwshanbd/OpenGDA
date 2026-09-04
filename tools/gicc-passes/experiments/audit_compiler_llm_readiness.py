@@ -32,6 +32,8 @@ import analyze_producer_fission_confirmation as producer_confirmation  # noqa: E
 import gicc_comm_plan_bridge as structural  # noqa: E402
 import gicc_compiler_decision_suite as decision_suite  # noqa: E402
 import gicc_llm_bridge as bridge  # noqa: E402
+import prepare_confirmed_guarded_early_graph as guarded_expansion  # noqa: E402
+import prepare_guarded_early_suite_refreeze as guarded_refreeze  # noqa: E402
 import prepare_confirmed_producer_fission_graph as producer_expansion  # noqa: E402
 import prepare_producer_fission_suite_refreeze as producer_refreeze  # noqa: E402
 
@@ -457,6 +459,40 @@ def _record_by_role(
     return matches[0]
 
 
+def _recorded_path(record: dict[str, Any], *, label: str) -> Path:
+    value = record.get("path")
+    if not isinstance(value, str):
+        raise ReadinessError(f"{label} lacks a recorded path")
+    path = Path(value)
+    path = path.resolve() if path.is_absolute() else (ROOT / path).resolve()
+    if (not path.is_file() or sha256_file(path) != record.get("sha256")
+            or path.stat().st_size != record.get("bytes")):
+        raise ReadinessError(f"{label} input changed")
+    return path
+
+
+def verified_refreeze_predecessor(
+    manifest: dict[str, Any], *, label: str,
+) -> tuple[Path, Path, dict[str, Any]]:
+    """Verify and return the exact suite/prompt predecessor of a refreeze."""
+    record = _record_by_role(
+        manifest.get("inputs"), "current_suite", label=label,
+    )
+    suite_path = _recorded_path(record, label=f"{label} current suite")
+    prompt_value = manifest.get("current_prompt_dir")
+    if not isinstance(prompt_value, str):
+        raise ReadinessError(f"{label} lacks its current prompt directory")
+    prompt_dir = Path(prompt_value)
+    prompt_dir = (
+        prompt_dir.resolve() if prompt_dir.is_absolute()
+        else (ROOT / prompt_dir).resolve()
+    )
+    suite = decision_suite.verified_suite(read_json(suite_path), prompt_dir)
+    if suite.get("suite_id") != manifest.get("current_suite_id"):
+        raise ReadinessError(f"{label} predecessor suite ID changed")
+    return suite_path, prompt_dir, suite
+
+
 def verified_producer_expansion(
     path: Path, confirmation_value: dict[str, Any],
 ) -> dict[str, Any]:
@@ -548,15 +584,122 @@ def verified_producer_refreeze(
     return manifest
 
 
+def verified_guarded_expansion(
+    path: Path, confirmation_value: dict[str, Any],
+) -> dict[str, Any]:
+    """Replay and bind the guarded graph to its exact confirmation."""
+    manifest = guarded_expansion.verify_contained(path)
+    confirmation = manifest.get("confirmation", {})
+    if (manifest.get("status")
+            != "expanded_graph_ready_for_suite_refreeze"
+            or confirmation.get("result_id")
+            != confirmation_value.get("result_id")
+            or confirmation.get("confirmation_gate_passed") is not True
+            or confirmation.get("correctness_gate_passed") is not True
+            or confirmation.get("runtime_guard_gate_passed") is not True):
+        raise ReadinessError(
+            "guarded-trigger expansion binds another confirmation"
+        )
+    boundary = manifest.get("boundary", {})
+    for key, expected in {
+        "compiler_lto_decisions_only": True,
+        "application_source_hash_verified": True,
+        "application_source_visible_to_model": False,
+        "application_source_modified": False,
+        "model_invoked": False,
+        "provider_call_authorized": False,
+        "scheduler_job_submitted": False,
+        "frozen_current_graph_modified": False,
+        "current_decision_suite_modified": False,
+    }.items():
+        if boundary.get(key) is not expected:
+            raise ReadinessError(
+                f"guarded-trigger expansion boundary changed: {key}"
+            )
+    return manifest
+
+
+def verified_guarded_refreeze(
+    path: Path, expansion_path: Path, suite_path: Path,
+    suite: dict[str, Any], confirmation_value: dict[str, Any],
+) -> dict[str, Any]:
+    """Replay the guarded suite transition and bind its full lineage."""
+    manifest = guarded_refreeze.verify_contained(path)
+    if (manifest.get("status")
+            != "refrozen_suite_ready_for_readiness_audit"
+            or manifest.get("refrozen_suite_id") != suite.get("suite_id")):
+        raise ReadinessError("guarded-trigger refreeze binds another suite")
+    boundary = manifest.get("boundary", {})
+    for key, expected in {
+        "compiler_lto_decisions_only": True,
+        "application_source_hash_verified": True,
+        "application_source_visible_to_model": False,
+        "application_source_modified": False,
+        "model_invoked": False,
+        "provider_call_authorized": False,
+        "scheduler_job_submitted": False,
+        "current_suite_modified": False,
+    }.items():
+        if boundary.get(key) is not expected:
+            raise ReadinessError(
+                f"guarded-trigger refreeze boundary changed: {key}"
+            )
+    expansion_record = _record_by_role(
+        manifest.get("inputs"), "guarded_expansion_manifest",
+        label="guarded-trigger refreeze",
+    )
+    recorded_expansion = _recorded_path(
+        expansion_record, label="guarded-trigger refreeze expansion",
+    )
+    if recorded_expansion != expansion_path.resolve():
+        raise ReadinessError("guarded-trigger refreeze uses another expansion")
+    expansion_manifest = verified_guarded_expansion(
+        expansion_path, confirmation_value,
+    )
+    suite_record = _record_by_role(
+        manifest.get("outputs"), "refrozen_suite",
+        label="guarded-trigger refreeze",
+    )
+    if (sha256_file(suite_path) != suite_record.get("sha256")
+            or suite_path.stat().st_size != suite_record.get("bytes")):
+        raise ReadinessError("readiness suite differs from guarded refreeze")
+    _, _, predecessor = verified_refreeze_predecessor(
+        manifest, label="guarded-trigger refreeze",
+    )
+    entries = {entry["label"]: entry for entry in suite["entries"]}
+    old_entries = {
+        entry["label"]: entry for entry in predecessor["entries"]
+    }
+    if (set(entries) != set(old_entries)
+            or any(entries[label] != old_entries[label]
+                   for label in set(entries) - {"mm_minimal"})):
+        raise ReadinessError(
+            "guarded-trigger refreeze changed an unrelated suite entry"
+        )
+    mm_entry = entries.get("mm_minimal", {})
+    transition = expansion_manifest.get("graph_transition", {})
+    delta = manifest.get("entry_transition", {})
+    if (delta.get("label") != "mm_minimal"
+            or mm_entry.get("graph_id") != transition.get("expanded_graph_id")
+            or delta.get("new_graph_id") != mm_entry.get("graph_id")
+            or delta.get("new_candidate_id") != transition.get("candidate_id")
+            or delta.get("all_other_entries_preserved") is not True):
+        raise ReadinessError(
+            "refrozen mm_minimal entry changed after guarded expansion"
+        )
+    return manifest
+
+
 def classify_guarded_early_trigger(
     entry: dict[str, Any], phase: str, analysis: Any | None,
     confirmation_phase: str = "missing",
     confirmation_passed: bool | None = None,
+    graph_expansion_phase: str = "missing",
 ) -> dict[str, Any]:
     if analysis is None:
-        if confirmation_passed is not None:
+        if confirmation_passed is not None or graph_expansion_phase != "missing":
             raise ReadinessError(
-                "guarded-trigger confirmation exists without a passed scout"
+                "guarded-trigger downstream evidence exists without a passed scout"
             )
         status = {
             "waiting_predecessor": "awaiting_predecessor",
@@ -596,6 +739,10 @@ def classify_guarded_early_trigger(
         )
     if gate["passed"]:
         if confirmation_passed is None:
+            if graph_expansion_phase != "missing":
+                raise ReadinessError(
+                    "guarded-trigger graph expanded without confirmation"
+                )
             result = _confirmation_pending_result(
                 entry, phase=confirmation_phase, label="guarded_early_trigger",
             )
@@ -607,9 +754,41 @@ def classify_guarded_early_trigger(
                 raise ReadinessError(
                     "guarded-trigger confirmation state disagrees with analysis"
                 )
-            result = _hidden_candidate_result(
-                entry, confirmation_passed=confirmation_passed,
-            )
+            if not confirmation_passed and graph_expansion_phase != "missing":
+                raise ReadinessError(
+                    "guarded-trigger graph expanded after negative confirmation"
+                )
+            if not confirmation_passed or graph_expansion_phase == "missing":
+                result = _hidden_candidate_result(
+                    entry, confirmation_passed=confirmation_passed,
+                )
+            elif graph_expansion_phase == "bundle_ready":
+                result = _base_entry(
+                    entry, "suite_refreeze_required",
+                    "refreeze_and_audit_suite_with_expanded_graph",
+                )
+                result.update({
+                    "runtime_confirmation_gate_passed": True,
+                    "candidate_model_visible": False,
+                    "expanded_graph_bundle_verified": True,
+                    "current_suite_graph_expanded": False,
+                })
+            elif graph_expansion_phase == "suite_refrozen":
+                result = _base_entry(
+                    entry, "provider_protocol_permitted",
+                    "freeze_exact_provider_request_and_request_authorization",
+                )
+                result.update({
+                    "runtime_confirmation_gate_passed": True,
+                    "candidate_model_visible": True,
+                    "expanded_graph_bundle_verified": True,
+                    "current_suite_graph_expanded": True,
+                })
+            else:
+                raise ReadinessError(
+                    f"unknown guarded-trigger graph phase "
+                    f"{graph_expansion_phase!r}"
+                )
     else:
         if confirmation_passed is not None:
             raise ReadinessError(
@@ -826,6 +1005,54 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         )
         if guarded_confirmation_analysis is not None else None
     )
+    guarded_graph_phase = "missing"
+    guarded_expansion_present = args.guarded_expansion_manifest.is_file()
+    guarded_refreeze_present = args.guarded_refreeze_manifest.is_file()
+    if guarded_refreeze_present and not guarded_expansion_present:
+        raise ReadinessError(
+            "guarded-trigger suite refreeze lacks its expansion manifest"
+        )
+    if ((guarded_expansion_present or guarded_refreeze_present)
+            and guarded_confirmation_passed is not True):
+        raise ReadinessError(
+            "guarded-trigger graph evidence exists without passed confirmation"
+        )
+
+    # Suite refreezes are serialized by the campaign controller.  If guarded
+    # trigger is the final transition, its exact predecessor is the suite that
+    # producer fission must bind.  This accepts only an A -> B hash lineage; it
+    # does not treat either final graph as proof of the missing transition.
+    producer_suite_path = args.suite
+    producer_suite = suite
+    if guarded_refreeze_present:
+        guarded_manifest = verified_guarded_refreeze(
+            args.guarded_refreeze_manifest,
+            args.guarded_expansion_manifest,
+            args.suite, suite, guarded_confirmation_analysis,
+        )
+        producer_suite_path, _, producer_suite = (
+            verified_refreeze_predecessor(
+                guarded_manifest, label="guarded-trigger refreeze",
+            )
+        )
+        guarded_graph_phase = "suite_refrozen"
+    elif guarded_expansion_present:
+        expansion_manifest = verified_guarded_expansion(
+            args.guarded_expansion_manifest,
+            guarded_confirmation_analysis,
+        )
+        if entries["mm_minimal"]["graph_id"] != expansion_manifest[
+                "graph_transition"]["current_graph_id"]:
+            raise ReadinessError(
+                "suite changed before guarded-trigger refreeze was audited"
+            )
+        guarded_graph_phase = "bundle_ready"
+
+    producer_entries = {
+        entry["label"]: entry for entry in producer_suite["entries"]
+    }
+    if set(producer_entries) != EXPECTED_LABELS:
+        raise ReadinessError("guarded refreeze predecessor labels changed")
     producer_graph_phase = "missing"
     producer_expansion_present = args.producer_expansion_manifest.is_file()
     producer_refreeze_present = args.producer_refreeze_manifest.is_file()
@@ -842,7 +1069,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         verified_producer_refreeze(
             args.producer_refreeze_manifest,
             args.producer_expansion_manifest,
-            args.suite, suite, producer_confirmation_analysis,
+            producer_suite_path, producer_suite,
+            producer_confirmation_analysis,
         )
         producer_graph_phase = "suite_refrozen"
     elif producer_expansion_present:
@@ -850,7 +1078,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             args.producer_expansion_manifest,
             producer_confirmation_analysis,
         )
-        if entries["jacobi"]["graph_id"] != expansion_manifest[
+        if producer_entries["jacobi"]["graph_id"] != expansion_manifest[
                 "graph_transition"]["current_graph_id"]:
             raise ReadinessError(
                 "suite changed before producer-fission refreeze was audited"
@@ -878,6 +1106,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             guarded_analysis,
             state_phase(args.guarded_confirmation_state),
             guarded_confirmation_passed,
+            guarded_graph_phase,
         ),
         "loop_lto": classify_reused_loop_descriptor(
             entries["loop_lto"], state_phase(args.reused_state),
@@ -977,6 +1206,22 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 / "guarded_early_trigger/"
                 "analyze_guarded_early_trigger_confirmation.py"
             ),
+            "guarded_expansion_manifest": evidence(
+                args.guarded_expansion_manifest
+            ),
+            "guarded_expansion_preparer": evidence(
+                HERE
+                / "guarded_early_trigger/"
+                "prepare_confirmed_guarded_early_graph.py"
+            ),
+            "guarded_refreeze_manifest": evidence(
+                args.guarded_refreeze_manifest
+            ),
+            "guarded_refreeze_preparer": evidence(
+                HERE
+                / "guarded_early_trigger/"
+                "prepare_guarded_early_suite_refreeze.py"
+            ),
             "reused_state": evidence(args.reused_state),
             "reused_analysis": evidence(args.reused_analysis),
         },
@@ -1073,6 +1318,20 @@ def add_inputs(parser: argparse.ArgumentParser) -> None:
             "guarded_early_trigger_confirmation_77897d9_20260904/analysis.json"
         ),
     )
+    parser.add_argument(
+        "--guarded-expansion-manifest", type=Path,
+        default=(
+            ROOT / "build_ofi/guarded_early_trigger_graph_expansion_20260904/"
+            "manifest.json"
+        ),
+    )
+    parser.add_argument(
+        "--guarded-refreeze-manifest", type=Path,
+        default=(
+            ROOT / "build_ofi/guarded_early_trigger_suite_refreeze_20260904/"
+            "manifest.json"
+        ),
+    )
     parser.add_argument("--reused-state", type=Path, required=True)
     parser.add_argument("--reused-analysis", type=Path, required=True)
 
@@ -1118,6 +1377,10 @@ def main() -> int:
         producer_refreeze.suites.SuiteError,
         producer_refreeze.suites.collective.CollectivePlanError,
         producer_refreeze.suites.structural.PlanBridgeError,
+        guarded_expansion.ExpansionError,
+        guarded_expansion.groups.GroupPlanError,
+        guarded_expansion.bridge.BridgeError,
+        guarded_refreeze.RefreezeError,
         guarded_confirmation.ConfirmError,
         guarded_confirmation.common.MonitorError,
         OSError, KeyError, TypeError, ValueError,
