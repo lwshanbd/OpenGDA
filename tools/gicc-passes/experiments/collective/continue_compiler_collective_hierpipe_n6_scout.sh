@@ -61,7 +61,7 @@ python3 "$evaluator" verify-offline-freeze \
     --manifest "$bundle_dir/FROZEN_V3_MANIFEST.json" \
     --repo-root "$repo_root"
 python3 -c \
-    'import json,sys; x=json.load(open(sys.argv[1])); assert x["manifest_id"] == "sha256:dc243d4f358d3c6b64eb9ff26ff5851ef458f9eed2f7be079424657125edc113"; assert x["graph"]["graph_id"] == "sha256:a7aa1f681a64574251aa8e2511550fb8d46b2ea08b5a4aae35fd3865b860a0c0"' \
+    'import json,sys; x=json.load(open(sys.argv[1])); assert x["manifest_id"] == "sha256:4a8e0ff4be3ccb995e7c8e3192f82a41183118bae9830b0246f9731feac5d2c9"; assert x["graph"]["graph_id"] == "sha256:a7aa1f681a64574251aa8e2511550fb8d46b2ea08b5a4aae35fd3865b860a0c0"' \
     "$bundle_dir/FROZEN_V3_MANIFEST.json"
 if [[ -e "$output_dir" ]]; then
     echo "refusing existing n6 hierarchy-pipeline output: $output_dir" >&2

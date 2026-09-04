@@ -12,7 +12,7 @@ it cannot emit code, IR, source locations, or source edits.
 The exact six-node graph is
 `sha256:a7aa1f681a64574251aa8e2511550fb8d46b2ea08b5a4aae35fd3865b860a0c0`.
 The exact offline bundle is
-`sha256:dc243d4f358d3c6b64eb9ff26ff5851ef458f9eed2f7be079424657125edc113`.
+`sha256:4a8e0ff4be3ccb995e7c8e3192f82a41183118bae9830b0246f9731feac5d2c9`.
 It contains eight topology-legal catalog options in each of four message
 regions, for `8^4 = 4096` joint compiler policies. The strict bridge accepted
 all 4096 with unique composite candidate IDs; all uniform controls and one
@@ -20,6 +20,13 @@ mixed-policy canary passed materialized host/device-IR and same-build
 provenance audits. `hierarchical_direct` and `hierarchical_ring` are masked
 because their catalog implementations support exactly two nodes and would
 fall back at six nodes.
+
+This bundle is a pre-runtime refreeze of the original N6 bundle after the
+compiler plugin received an unrelated producer-fission HIP configuration
+repair.  The graph ID, 4096 candidate IDs, benchmark source, catalog, platform
+profile, calibration, hypothesis, and runtime design are unchanged.  The old
+bundle failed provenance verification before submission, so it produced no
+N6 runtime observation.
 
 The two-node primitive calibration is only a source-free link/issue prior. It
 is not a six-node collective label or latency measurement.
