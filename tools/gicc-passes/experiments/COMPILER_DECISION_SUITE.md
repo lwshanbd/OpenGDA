@@ -13,11 +13,11 @@ tasks from three decision families:
 |---|---|---:|---|
 | `coalescing_placement` | proxy/trigger route, loop coalescing, and early/late trigger placement over six compiler opportunities | 4096 | four-replicate runtime capacity measured; preregistered LLM gate failed |
 | `collective_n8` | collective algorithm jointly across four message regions | 4096 | topology-matched hierarchy-pipeline scout pending |
-| `jacobi` | two-transfer communication-group route | 9 | producer-frontier schedule exists but remains masked pending its oracle A/B |
+| `jacobi` | two-transfer communication-group route | 9 | producer-frontier materializer exists, but its `+1` candidate remains masked pending serial scout/confirmation |
 | `minimod` | two-transfer communication-group route | 9 | route capacity only |
 | `mixed_lto` | two-transfer communication-group route | 9 | route capacity only |
-| `mm_minimal` | singleton communication route | 3 | early trigger remains illegal without allocation and side-effect-order proofs |
-| `loop_lto` | singleton communication route | 2 | loop phase scheduling remains unmaterialized |
+| `mm_minimal` | singleton communication route | 3 | guarded early-trigger materializer exists, but its `+1` candidate remains model-invisible pending serial scout/confirmation |
+| `loop_lto` | singleton communication route | 2 | reused-loop-descriptor materializer exists, but its `+1` candidate remains model-invisible pending serial scout/confirmation |
 
 The counts above are reported per entry.  They must not be summed or
 multiplied into a fictitious joint action space: the programs execute
@@ -209,13 +209,23 @@ can have large performance effects, but not yet that an LLM captures them:
   batch 64. This is descriptive feasibility and batch-sensitivity evidence,
   not a confirmatory comparison, because binary hashes, allocation identity,
   and order balance were not preserved;
-- the topology-matched eight-node hierarchy-pipeline scout and the guarded
-  Jacobi producer-frontier A/B are the remaining preregistered headroom tests.
+- the topology-matched eight-node hierarchy-pipeline scout is the sole
+  scheduler-visible job.  Its unattended serial successor chain contains the
+  producer-frontier, guarded early-trigger, and reused-loop-descriptor
+  scout/confirmation gates; each hidden candidate remains outside the model
+  action set unless its own frozen runtime gate passes and the compiler graph
+  and suite are subsequently refrozen.
 
 Thus the suite supports the paper's **method and action-space** claim now.  A
 performance claim about LLM-guided optimization remains gated on stable oracle
 headroom, held-out decisions, explicit content-addressed provider
 authorization, and runtime measurement of each selected compiler plan.
+The separate `COMPILER_ACTION_FRONTIER.md` audit additionally proves that the
+already implemented producer-fission, guarded-trigger, and descriptor-reuse
+materializers can extend their independent compiler graphs by exactly one
+candidate each (`9→10`, `3→4`, and `2→3`) without changing an existing
+candidate ID.  Those are conditional compiler-expressibility results, not
+runtime-confirmed or model-visible policies.
 The machine-derived per-entry state and fail-closed transitions are documented
 in `LLM_CAPABILITY_READINESS.md`; prompt availability is never treated as
 runtime or model evidence.
