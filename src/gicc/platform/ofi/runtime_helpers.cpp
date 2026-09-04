@@ -168,6 +168,24 @@ int gicc_runtime_kernel_arg_matches_local_buffer(
         : 0;
 }
 
+int gicc_runtime_local_buffer_contains_interval(
+        gicc::Runtime *rt, void *const *kernel_params,
+        std::uint32_t buffer_index_param, std::uint64_t offset,
+        std::uint64_t size) {
+    if (!rt || !kernel_params || !kernel_params[buffer_index_param])
+        return 0;
+    const std::int32_t bufferIndex = *static_cast<const std::int32_t *>(
+        kernel_params[buffer_index_param]);
+    if (bufferIndex < 0 ||
+        static_cast<std::size_t>(bufferIndex) >= rt->buffers_.size())
+        return 0;
+    const std::uint64_t registeredSize = static_cast<std::uint64_t>(
+        rt->buffers_[static_cast<std::size_t>(bufferIndex)].size);
+    return offset <= registeredSize && size <= registeredSize - offset
+        ? 1
+        : 0;
+}
+
 #ifdef GICC_CPU_PROXY
 void* gicc_runtime_proxy_ring_device_ptr(gicc::Runtime *rt) {
     return rt ? rt->ensure_proxy_ring() : nullptr;

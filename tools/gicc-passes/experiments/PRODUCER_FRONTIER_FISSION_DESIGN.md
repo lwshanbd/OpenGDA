@@ -87,6 +87,13 @@ compiler-proved constants; neither the model nor the runtime invents them.
 The helper is also dormant until the materializer and the remaining static
 domain proofs exist.
 
+A second dormant guard helper validates each compiler-recovered half-open
+transfer interval against the registered local buffer size. It uses
+`offset <= registered_size && size <= registered_size - offset`, so the check
+cannot itself wrap. The first materializer will require both buffer identity
+and every interval-bounds check before entering the two-phase branch; any
+failure executes the untouched fused launch.
+
 Device discovery now emits this guard shape only for the narrow case of one
 ordinary producer pointer and one shared i32 source-buffer formal across the
 whole PUT group. The unchanged Jacobi kernel satisfies that shape with fixed

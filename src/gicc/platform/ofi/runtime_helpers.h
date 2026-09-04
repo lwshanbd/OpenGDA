@@ -78,6 +78,16 @@ int gicc_runtime_kernel_arg_matches_local_buffer(
     gicc::Runtime *rt, void *const *kernel_params,
     std::uint32_t pointer_param, std::uint32_t buffer_index_param);
 
+// Runtime bounds guard for one compiler-recovered half-open transfer
+// interval. Returns 1 only when [offset, offset + size) is representable and
+// lies within the registered local buffer selected by the proven i32 kernel
+// argument slot. The subtraction form in the implementation avoids unsigned
+// addition overflow. Invalid handles and slots fail closed.
+int gicc_runtime_local_buffer_contains_interval(
+    gicc::Runtime *rt, void *const *kernel_params,
+    std::uint32_t buffer_index_param, std::uint64_t offset,
+    std::uint64_t size);
+
 // Host-mirror lookup (used by the pass-synthesized DWQ trace function when
 // a kernel formal carries a "host-mirrored" annotation: at trace time the
 // pass needs to read the array's contents to pre-stage one DWQ descriptor

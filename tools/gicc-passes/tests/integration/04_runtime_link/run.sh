@@ -4,8 +4,8 @@
 # linking would fail and minimod / examples would break silently —
 # catch it independently of any srun cycle.
 #
-# Pass criterion: nm -j of build_ofi's runtime_helpers.cpp.o lists
-# all 8 symbols below as defined (T = text section).
+# Pass criterion: llvm-nm of build_ofi's runtime_helpers.cpp.o lists every
+# symbol below as defined (T = text section).
 set -euo pipefail
 
 OBJ_PATH="${GICC_ROOT}/build_ofi/examples/ofi/CMakeFiles/test_gicc.dir/__/__/src/gicc/platform/ofi/runtime_helpers.cpp.o"
@@ -24,6 +24,7 @@ EXPECTED=(
     gicc_runtime_trigger_val
     gicc_runtime_set_schedule_phase_from_kernel_args
     gicc_runtime_kernel_arg_matches_local_buffer
+    gicc_runtime_local_buffer_contains_interval
 )
 
 PRESENT=$(/opt/rocm-6.4.0/lib/llvm/bin/llvm-nm "${OBJ_PATH}")
