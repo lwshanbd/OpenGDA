@@ -100,6 +100,7 @@ class CompilerScheduleCoverageTests(unittest.TestCase):
         frontier = {
             "ordinary_store_sites": 0,
             "atomic_write_sites": 1,
+            "atomic_write_params": [3],
             "unknown_write_sites": 0,
             "atomic_domains_known": False,
             "buffer_identity_guardable": False,
@@ -148,6 +149,40 @@ class CompilerScheduleCoverageTests(unittest.TestCase):
                              facts["schedule_class"])
             self.assertIn("atomic_producer_partition",
                           facts["missing_proof_families"])
+
+    def test_source_identity_relation_retains_disjointness_obligation(self):
+        frontier = {
+            "ordinary_store_sites": 0,
+            "atomic_write_sites": 1,
+            "atomic_write_params": [3],
+            "unknown_write_sites": 0,
+            "atomic_domains_known": False,
+            "buffer_identity_guardable": False,
+            "write_footprint_known": False,
+            "source_identity_guardable": True,
+            "source_pointer_candidates": [2, 1],
+            "source_identity_buffer_index_param": 9,
+            "overlap_partition": {"exact": False},
+            "reason": "runtime source identity candidate",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.write_case(Path(temporary), frontier=frontier)
+            internal, model = coverage.load_case("synthetic_mm", path)
+            facts = internal["facts"]
+            self.assertEqual("guarded_source_identity_candidate",
+                             facts["schedule_class"])
+            self.assertEqual([{
+                "source_buffer_formal": 9,
+                "pointer_formals": [1, 2],
+                "write_pointer_formals": [3],
+                "proof": "runtime_source_identity_candidate",
+                "required_proof": "whole_write_allocation_disjointness",
+            }], facts["source_identity_relations"])
+            self.assertIn("write_allocation_disjointness",
+                          facts["missing_proof_families"])
+            self.assertIn("guarded_early_trigger_materialization",
+                          facts["missing_proof_families"])
+            self.assertEqual(facts, model["compiler_facts"])
 
 
 if __name__ == "__main__":

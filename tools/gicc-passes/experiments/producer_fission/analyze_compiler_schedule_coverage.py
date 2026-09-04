@@ -228,6 +228,33 @@ def load_case(label: str, features_path: Path) -> tuple[dict[str, Any], dict[str
         frontier.get("write_footprint_known") is True
         for frontier in frontiers
     )
+    source_identity_guardable = bool(frontiers) and all(
+        frontier.get("source_identity_guardable") is True
+        for frontier in frontiers
+    )
+    relation_map = {}
+    for frontier in frontiers:
+        if frontier.get("source_identity_guardable") is not True:
+            continue
+        relation = {
+            "source_buffer_formal":
+                frontier.get("source_identity_buffer_index_param"),
+            "pointer_formals": unique(
+                frontier.get("source_pointer_candidates", [])
+            ),
+            "write_pointer_formals": unique(
+                frontier.get("ordinary_store_params", []) +
+                frontier.get("atomic_write_params", [])
+            ),
+            "proof": "runtime_source_identity_candidate",
+            "required_proof": "whole_write_allocation_disjointness",
+        }
+        relation_map[json.dumps(
+            relation, sort_keys=True, separators=(",", ":")
+        )] = relation
+    source_identity_relations = [
+        relation_map[key] for key in sorted(relation_map)
+    ]
     max_compute = max(
         int(row.get("flops_to_first_use") or 0) for row in transfers
     )
@@ -251,13 +278,16 @@ def load_case(label: str, features_path: Path) -> tuple[dict[str, Any], dict[str
         schedule_class = "intra_kernel_exact_partition"
     elif loop_sites:
         schedule_class = "loop_carried_communication"
+    elif unknown:
+        schedule_class = "unknown_side_effect_frontier"
+    elif (source_identity_guardable and
+          all(kind == "always" for kind in guard_kinds)):
+        schedule_class = "guarded_source_identity_candidate"
     elif (atomic and not ordinary and atomic_domains_known
           and buffer_identity_guardable):
         schedule_class = "atomic_producer_no_store_remainder"
     elif atomic and not ordinary:
         schedule_class = "unresolved_atomic_alias_frontier"
-    elif unknown:
-        schedule_class = "unknown_side_effect_frontier"
     elif all(kind != "always" for kind in guard_kinds) and max_compute == 0:
         schedule_class = "conditional_communication_only"
     else:
@@ -270,7 +300,15 @@ def load_case(label: str, features_path: Path) -> tuple[dict[str, Any], dict[str
         missing_proof_families.append("guarded_completion_region")
     if max_compute == 0 and not frontiers:
         missing_proof_families.append("cross_launch_producer_pipeline")
-    if (atomic and not ordinary and atomic_domains_known
+    if (source_identity_guardable and not exact_partition and
+            all(kind == "always" for kind in guard_kinds)):
+        missing_proof_families.append(
+            "write_allocation_disjointness"
+        )
+        missing_proof_families.append(
+            "guarded_early_trigger_materialization"
+        )
+    elif (atomic and not ordinary and atomic_domains_known
             and buffer_identity_guardable):
         missing_proof_families.append("atomic_producer_partition")
     elif atomic and not ordinary:
@@ -298,6 +336,8 @@ def load_case(label: str, features_path: Path) -> tuple[dict[str, Any], dict[str
         "atomic_domains_known": atomic_domains_known,
         "buffer_identity_guardable": buffer_identity_guardable,
         "write_footprint_known": write_footprint_known,
+        "source_identity_guardable": source_identity_guardable,
+        "source_identity_relations": source_identity_relations,
         "exact_overlap_partition": exact_partition,
         "max_flops_to_completion": max_compute,
         "compiler_blockers": {

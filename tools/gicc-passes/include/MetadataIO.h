@@ -182,6 +182,14 @@ struct ProducerFrontierFacts {
     unsigned              producer_pointer_param = 0;
     unsigned              source_buffer_index_param = 0;
     std::string           buffer_identity_guard_reason;
+    // Candidate pointer identities for a possible guarded early trigger.
+    // `noalias` alone does not prove whole-allocation disjointness, so this
+    // relation is not a legality result: host LTO must additionally prove or
+    // check that every write-root allocation misses the transfer interval.
+    bool                  source_identity_guardable = false;
+    std::vector<unsigned> source_pointer_candidates;
+    unsigned              source_identity_buffer_index_param = 0;
+    std::string           source_identity_guard_reason;
     bool                  producer_domains_known = false;
     std::vector<ProducerStoreDomainFact> producer_store_domains;
     bool                  atomic_domains_known = false;
@@ -550,6 +558,11 @@ struct ParamInfo {
     // gicc_runtime_host_mirror_of() then reads the field from the host
     // mirror.  See ArgRef::Kind::FieldLoad.
     bool        host_mirrored = false;
+    // Device-IR argument attributes used only as compiler proofs. They are
+    // serialized so final LTO and source-free schedule analysis can re-check
+    // the same pointer relation without application source text.
+    bool        noalias = false;
+    bool        readonly = false;
 };
 
 struct KernelTemplate {

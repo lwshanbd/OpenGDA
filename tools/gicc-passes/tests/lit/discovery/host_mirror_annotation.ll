@@ -105,4 +105,5 @@ loop.exit:
 ; CHECK: "host_mirrored": true
 ; CHECK-NEXT: "idx": 1
 ; CHECK-NEXT: "name": "transfers"
+; CHECK-NEXT: "readonly": true
 ; CHECK-NEXT: "type": "ptr"

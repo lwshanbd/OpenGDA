@@ -12,6 +12,8 @@
 ; RUN:     %FileCheck %s --check-prefix=WRITE
 ; RUN: cat %t.metadir/single_write.json | \
 ; RUN:     %FileCheck %s --check-prefix=SINGLE
+; RUN: cat %t.metadir/source_candidate_atomic.json | \
+; RUN:     %FileCheck %s --check-prefix=CANDIDATE
 
 target triple = "amdgcn-amd-amdhsa"
 
@@ -105,6 +107,24 @@ produce:
   br label %complete
 
 complete:
+  call void @_ZN4gicc5flushEPN4gicc9DeviceCtxE(ptr %ctx)
+  ret void
+}
+
+; The transfer's registered-buffer index has no static pointer identity, but
+; a runtime check may bind it to %source. LLVM's readonly+noalias contract
+; makes this a useful identity candidate, but does not prove that the whole
+; registered source allocation is disjoint from the atomic rooted in %out.
+; No early-trigger action is legal until that separate proof exists.
+define amdgpu_kernel void @source_candidate_atomic(
+    ptr %ctx, ptr addrspace(1) noalias readonly %source,
+    ptr addrspace(1) noalias %out, i32 %peer, i32 %buf) {
+entry:
+  call void @_ZN4gicc9put_no_dbEPN4gicc9DeviceCtxEiimimm(
+      ptr %ctx, i32 %peer, i32 %buf, i64 0,
+      i32 %buf, i64 0, i64 4096)
+  %source_value = load float, ptr addrspace(1) %source
+  %old = atomicrmw fadd ptr addrspace(1) %out, float 1.000000e+00 monotonic
   call void @_ZN4gicc5flushEPN4gicc9DeviceCtxE(ptr %ctx)
   ret void
 }
@@ -246,7 +266,22 @@ entry:
 ; SINGLE-DAG: "source_buffer_index_param": 3
 ; SINGLE-DAG: "producer_domains_known": true
 ; SINGLE-DAG: "partition_region_exact": true
+; SINGLE-DAG: "source_identity_guardable": false
 ; SINGLE: "site_id": "?:?:single_write::0"
+
+; CANDIDATE: "producer_frontier": {
+; CANDIDATE: "atomic_write_params": [
+; CANDIDATE-NEXT: 2
+; CANDIDATE: "buffer_identity_guardable": false
+; CANDIDATE: "source_identity_buffer_index_param": 4
+; CANDIDATE-NEXT: "source_identity_guard_reason": "readonly noalias pointer candidates can be matched to the shared source-buffer formal at launch; write-allocation disjointness remains unproved"
+; CANDIDATE-NEXT: "source_identity_guardable": true
+; CANDIDATE-NEXT: "source_pointer_candidates": [
+; CANDIDATE-NEXT: 1
+; CANDIDATE: "params": [
+; CANDIDATE: "idx": 1
+; CANDIDATE-DAG: "noalias": true
+; CANDIDATE-DAG: "readonly": true
 
 ; RUN: cat %t.metadir/group_multi_entry.json | \
 ; RUN:     %FileCheck %s --check-prefix=MULTI-ENTRY

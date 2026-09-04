@@ -19,19 +19,19 @@ runtime or LLM-quality result.
   headroom and a later request explicitly authorizes a provider call.
 
 The stable source-free graph ID for this snapshot is
-`sha256:8ff0050a3a1afbfe25e06cc9a68771d56c70c82f4226792f26b2cd3604e117d2`.
+`sha256:6264bb8d57dbb563c2af9f8dea30024cc4eb1102d86c013c2458cb87074b8f02`.
 The only materializable two-phase oracle is
-`sha256:a5eeadf62752ba2ce13c2c380c53a3dc731d5e4f605dc875ca828c48d2575276`;
+`sha256:dae68f7745980e8aa4f6a1fdc338898c36c66b611e97e5301636aeaf54269baf`;
 it is deliberately absent from the model-visible candidate lists.
 
 ## Coverage result
 
 | Case | Feature SHA-256 | Compiler classification | Missing compiler proof or materialization |
 |---|---|---|---|
-| Jacobi | `9ef34ae5ad60516a97c8736dfc4d263bfc4c0b958410450f0bea6e399b184539` | `intra_kernel_exact_partition` | none for the guarded two-phase oracle |
+| Jacobi | `0f94ca074a4d9c3efdf3935051ae55afaf61d1d94ce52077ea362f58ae29f332` | `intra_kernel_exact_partition` | none for the guarded two-phase oracle |
 | Minimod | `67950e39e52de4307072a3032644e23feda5beabbb14f0e997f6d8c052f34a33` | `conditional_communication_only` | guarded completion region; cross-launch producer pipeline |
-| minimal matrix multiply | `bc83a7afe5b6b69d56c954c8c66016932c882cc18d245cba714447867124f5b4` | `unresolved_atomic_alias_frontier` | registered-source alias disambiguation |
-| mixed-side-effect LTO | `934dd3c7084088ad25f357b984c9c3c336561eca718f90a7089baa0f622448e4` | `unknown_side_effect_frontier` | side-effect alias partition |
+| minimal matrix multiply | `42edd118e147a7af658cbdd7366bf60a2fd8d5114ce19079a9bcd98c6425fda3` | `guarded_source_identity_candidate` | whole-write-allocation disjointness; guarded early-trigger materialization |
+| mixed-side-effect LTO | `b45161addf18a307cc78e67e35202b0cda7f015cff2e39b653bde35267c6d879` | `unknown_side_effect_frontier` | side-effect alias partition |
 | loop-carried LTO | `c139fa05703d764d5e691611ab6ed2649b71cb973ca1025e126b3043cd43caf4` | `loop_carried_communication` | guarded loop phase schedule |
 
 This small, deliberately heterogeneous set does not estimate a population
@@ -45,11 +45,16 @@ now correctly audits the independent HIP launch inside the wrapper without
 changing the caller's normal or unwind edge.
 
 The matrix-multiply atomic is not assumed to produce the communicated
-buffer.  Device IR identifies its root as the `Cs` pointer formal, whereas
-the transfer names a registered-buffer index.  Until the compiler links that
-index to a disjoint `readonly noalias` pointer formal, the report labels this
-an unresolved alias frontier rather than inventing an atomic-producer
-relationship.
+buffer. Device IR identifies its root as the `Cs` pointer formal, whereas the
+transfer names a registered-buffer index. A conservative use-chain proof
+finds two `readonly noalias` pointer formals (`As` and `Bs`) that may name that
+registered source. The source-free relation records those identity candidates,
+the `Cs` write root, and the source-buffer formal. It deliberately makes no
+whole-allocation disjointness claim: LLVM `noalias` alone is insufficient for
+transfer bytes not otherwise accessed through the candidate pointer. A future
+host materializer must both match source identity and prove or check that the
+full transfer interval misses every write-root allocation; otherwise it must
+retain the fused schedule. No executable candidate is exposed yet.
 
 ## Reproduction
 
@@ -57,11 +62,11 @@ From the repository root, after producing the five fact directories:
 
 ```sh
 python3 tools/gicc-passes/experiments/producer_fission/analyze_compiler_schedule_coverage.py \
-  --case jacobi=build_ofi/compiler_fact_coverage_20260904/jacobi_current/meta/features.json \
-  --case minimod=build_ofi/compiler_fact_coverage_20260904/minimod_current/meta/features.json \
-  --case mm_minimal=build_ofi/compiler_fact_coverage_20260904/mm_minimal_invoke/meta/features.json \
-  --case mixed_lto=build_ofi/compiler_fact_coverage_20260904/bench_mixed_invoke/meta/features.json \
-  --case loop_lto=build_ofi/compiler_fact_coverage_20260904/bench_pingpong_invoke/meta/features.json \
+  --case jacobi=build_ofi/compiler_fact_coverage_20260904/jacobi_disjoint/meta/features.json \
+  --case minimod=build_ofi/compiler_fact_coverage_20260904/minimod_disjoint/meta/features.json \
+  --case mm_minimal=build_ofi/compiler_fact_coverage_20260904/mm_minimal_disjoint/meta/features.json \
+  --case mixed_lto=build_ofi/compiler_fact_coverage_20260904/bench_mixed_disjoint/meta/features.json \
+  --case loop_lto=build_ofi/compiler_fact_coverage_20260904/bench_pingpong_disjoint/meta/features.json \
   --out build_ofi/compiler_fact_coverage_20260904/coverage-report.json \
   --markdown build_ofi/compiler_fact_coverage_20260904/coverage-report.md
 ```

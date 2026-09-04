@@ -52,6 +52,60 @@ std::string typeStr(Type *T) {
     return "?";
 }
 
+// Prove that every use of a pointer formal is either address formation, a
+// pointer-only merge/compare, or a load. Unknown calls and captures fail
+// closed. This recovers the same local fact that later optimization may add
+// as `readonly`, while remaining valid at the early discovery extension
+// point where frontend `restrict` has already supplied `noalias` but
+// function-attribute inference has not yet run.
+bool pointerFormalOnlyReadsMemory(const Argument &argument) {
+    if (!argument.getType()->isPointerTy()) return false;
+    SmallPtrSet<const Value *, 16> visited;
+    SmallVector<const Value *, 16> work{&argument};
+    while (!work.empty()) {
+        const Value *value = work.pop_back_val();
+        if (!visited.insert(value).second) continue;
+        for (const User *user : value->users()) {
+            if (const auto *load = dyn_cast<LoadInst>(user)) {
+                if (load->getPointerOperand() == value) continue;
+                return false;
+            }
+            if (const auto *gep = dyn_cast<GetElementPtrInst>(user)) {
+                if (gep->getPointerOperand() != value) return false;
+                work.push_back(gep);
+                continue;
+            }
+            if (const auto *cast = dyn_cast<CastInst>(user)) {
+                if (cast->getOperand(0) != value ||
+                    !cast->getType()->isPointerTy())
+                    return false;
+                work.push_back(cast);
+                continue;
+            }
+            if (const auto *phi = dyn_cast<PHINode>(user)) {
+                if (!phi->getType()->isPointerTy()) return false;
+                work.push_back(phi);
+                continue;
+            }
+            if (const auto *select = dyn_cast<SelectInst>(user)) {
+                if (!select->getType()->isPointerTy() ||
+                    select->getCondition() == value)
+                    return false;
+                work.push_back(select);
+                continue;
+            }
+            if (const auto *freeze = dyn_cast<FreezeInst>(user)) {
+                if (!freeze->getType()->isPointerTy()) return false;
+                work.push_back(freeze);
+                continue;
+            }
+            if (isa<ICmpInst>(user)) continue;
+            return false;
+        }
+    }
+    return true;
+}
+
 // Canonical argument names for each GICC operation. Index matches the
 // formal index in the gicc:: signature; entry [0] is always "ctx" and
 // is skipped when emitting (callers start from index 1).
@@ -1652,6 +1706,36 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
             frontier.buffer_identity_guard_reason =
                 "requires one producer pointer and one shared i32 source-buffer formal";
         }
+
+        if (oneSourceBuffer && frontier.unknown_write_sites == 0) {
+            for (unsigned param = 0; param < t.params.size(); ++param) {
+                const ParamInfo &candidate = t.params[param];
+                if (candidate.typeStr != "ptr" || !candidate.noalias ||
+                    !candidate.readonly ||
+                    llvm::is_contained(ordinaryParams, param) ||
+                    llvm::is_contained(atomicParams, param))
+                    continue;
+                frontier.source_pointer_candidates.push_back(param);
+            }
+        }
+        frontier.source_identity_guardable =
+            oneSourceBuffer && frontier.unknown_write_sites == 0 &&
+            !frontier.source_pointer_candidates.empty();
+        if (frontier.source_identity_guardable) {
+            frontier.source_identity_buffer_index_param =
+                sourceBufferParams.front();
+            frontier.source_identity_guard_reason =
+                "readonly noalias pointer candidates can be matched to the shared source-buffer formal at launch; write-allocation disjointness remains unproved";
+        } else if (!oneSourceBuffer) {
+            frontier.source_identity_guard_reason =
+                "requires one shared i32 source-buffer formal";
+        } else if (frontier.unknown_write_sites != 0) {
+            frontier.source_identity_guard_reason =
+                "an intervening write has no kernel pointer formal";
+        } else {
+            frontier.source_identity_guard_reason =
+                "no readonly noalias pointer formal can serve as a registered-source identity candidate";
+        }
         if (frontier.unknown_write_sites != 0) {
             frontier.reason =
                 "an intervening write is not rooted in a kernel pointer formal";
@@ -1752,6 +1836,9 @@ KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
             p.typeStr = typeStr(A.getType());
             if (A.getArgNo() < hostMirrored.size())
                 p.host_mirrored = hostMirrored[A.getArgNo()];
+            p.noalias = A.hasAttribute(Attribute::NoAlias);
+            p.readonly = A.hasAttribute(Attribute::ReadOnly) ||
+                pointerFormalOnlyReadsMemory(A);
             t.params.push_back(std::move(p));
         }
     }

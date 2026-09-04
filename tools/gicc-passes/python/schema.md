@@ -127,6 +127,10 @@ for all of them.
       "producer_pointer_param": 1,
       "source_buffer_index_param": 12,
       "buffer_identity_guard_reason": "one producer pointer and one shared i32 source-buffer formal can be guarded at launch",
+      "source_identity_guardable": false,
+      "source_pointer_candidates": [],       // readonly noalias candidates
+      "source_identity_buffer_index_param": null,
+      "source_identity_guard_reason": "...",
       "producer_domains_known": true,         // every ordinary store below is exact
       "producer_store_domains": [{
         "pointer_param": 1,                   // destination pointer formal
@@ -275,6 +279,18 @@ must keep one untouched fused launch on the guard's false edge. Until that
 branch exists, `buffer_identity_guarded_fallback_materialization` remains in
 `remaining_proofs` and no fission action is legal.
 
+`source_identity_guardable` is only an identity-candidate relation, not a
+disjointness proof or an early-trigger legality result. Device discovery
+retains `noalias` and compiler-proved `readonly` bits on pointer formals, roots
+every intervening write in a formal, and lists read-only noalias pointer slots
+that host LTO could compare with the shared registered source-buffer slot.
+LLVM `noalias` constrains memory locations accessed during the invocation; it
+does not prove that the entire registered source allocation misses every
+write-root allocation. A later materializer must separately prove or check
+that whole-allocation relation, and must retain the untouched original
+schedule on every false or unknown edge. Until then, the fact neither moves a
+trigger nor adds a legal model action.
+
 `transfer_interval` is the compiler-recovered half-open source byte interval
 `[byte_offset, byte_offset + byte_size)` within `source_buffer`. Its nested
 expressions contain only formal indices, literals, operations, and modeled
@@ -287,8 +303,9 @@ adds a fission action to `legal_paths`.
 `producer_store_domains` is a device-IR slice, not source reconstruction. A
 store is represented by its pointer-formal index, byte offset/size, and the
 conjunction of controlling predicates. Expressions may contain kernel
-formals, typed constants, typed arithmetic/casts/comparisons, selects, and target builtins
-such as `block_id_y`, `block_size_y`, and `thread_id_y`. Any unmodeled leaf,
+formals, typed constants, typed arithmetic/casts/comparisons, selects, and
+target builtins such as `block_id_y`, `block_size_y`, and `thread_id_y`. Any
+unmodeled leaf,
 loop-carried store, or control terminator makes the corresponding exact flag
 false. `producer_domains_known=true` means every ordinary store was recovered
 in this local form; it still does not prove that a registered transfer buffer
@@ -336,10 +353,11 @@ both runtime fallback branches, and launch cloning remain explicit
 materialization obligations; until those exist, no fission candidate enters
 `legal_paths`.
 
-`phase_launch_supported` is also a compiler proof, not a model assertion. It
-is true only when every aggregated host call is a non-throwing direct call to
-an annotated wrapper and the compiler finds exactly one matching
-`hipLaunchKernel`, an unused return value, and a launch-owner-local parameter
+`phase_launch_supported` is also a compiler proof, not a model assertion. An
+application-side call or exception-aware `invoke` may reach the annotated
+wrapper because the materialization point is inside that wrapper and its
+caller successors remain untouched. The compiler still requires exactly one
+matching `hipLaunchKernel`, an unused return value, and a launch-owner-local parameter
 array. At the early-simplification pass point the launch may still live in an
 exclusive HIP device stub reached through the kernel's constant global; the
 compiler then additionally proves the unique push/pop configuration chain and

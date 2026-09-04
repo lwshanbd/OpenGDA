@@ -603,6 +603,20 @@ json::Value producerFrontierToJSON(const ProducerFrontierFacts &facts) {
     }
     o["buffer_identity_guard_reason"] =
         facts.buffer_identity_guard_reason;
+    o["source_identity_guardable"] =
+        facts.source_identity_guardable;
+    json::Array sourcePointers;
+    for (unsigned param : facts.source_pointer_candidates)
+        sourcePointers.push_back(static_cast<int64_t>(param));
+    o["source_pointer_candidates"] = std::move(sourcePointers);
+    if (facts.source_identity_guardable)
+        o["source_identity_buffer_index_param"] =
+            static_cast<int64_t>(
+                facts.source_identity_buffer_index_param);
+    else
+        o["source_identity_buffer_index_param"] = nullptr;
+    o["source_identity_guard_reason"] =
+        facts.source_identity_guard_reason;
     o["producer_domains_known"] = facts.producer_domains_known;
     json::Array domains;
     for (const auto &domain : facts.producer_store_domains)
@@ -708,6 +722,38 @@ bool producerFrontierFromJSON(const json::Value &v,
     }
     if (auto guardReason = o->getString("buffer_identity_guard_reason"))
         parsed.buffer_identity_guard_reason = guardReason->str();
+    if (auto guardable = o->getBoolean("source_identity_guardable")) {
+        parsed.source_identity_guardable = *guardable;
+        if (*guardable) {
+            auto buffer = o->getInteger(
+                "source_identity_buffer_index_param");
+            if (!buffer || *buffer < 0 ||
+                static_cast<uint64_t>(*buffer) >
+                    std::numeric_limits<unsigned>::max())
+                return false;
+            parsed.source_identity_buffer_index_param =
+                static_cast<unsigned>(*buffer);
+        }
+    }
+    if (const auto *pointers = o->getArray("source_pointer_candidates")) {
+        for (const json::Value &value : *pointers) {
+            auto param = value.getAsInteger();
+            if (!param || *param < 0 ||
+                static_cast<uint64_t>(*param) >
+                    std::numeric_limits<unsigned>::max())
+                return false;
+            parsed.source_pointer_candidates.push_back(
+                static_cast<unsigned>(*param));
+        }
+    }
+    if (auto guardReason = o->getString("source_identity_guard_reason"))
+        parsed.source_identity_guard_reason = guardReason->str();
+    // Fail closed on partially populated or contradictory identity facts.
+    // Older metadata omits both fields and therefore still parses as
+    // false/empty.
+    if (parsed.source_identity_guardable !=
+        !parsed.source_pointer_candidates.empty())
+        return false;
     if (auto knownDomains = o->getBoolean("producer_domains_known"))
         parsed.producer_domains_known = *knownDomains;
     if (const auto *domains = o->getArray("producer_store_domains")) {
@@ -788,6 +834,8 @@ json::Value templateToJSON(const KernelTemplate &t) {
         p["type"] = t.params[i].typeStr;
         // Only emit when set, so older fixtures stay byte-stable.
         if (t.params[i].host_mirrored) p["host_mirrored"] = true;
+        if (t.params[i].noalias) p["noalias"] = true;
+        if (t.params[i].readonly) p["readonly"] = true;
         params.push_back(std::move(p));
     }
     root["params"] = std::move(params);
@@ -868,6 +916,8 @@ bool templateFromJSON(const json::Value &v, KernelTemplate &out) {
             // Default false on absent field so older JSON round-trips.
             if (auto m = po->getBoolean("host_mirrored"))
                 info.host_mirrored = *m;
+            if (auto a = po->getBoolean("noalias")) info.noalias = *a;
+            if (auto r = po->getBoolean("readonly")) info.readonly = *r;
             out.params.push_back(std::move(info));
         }
     }

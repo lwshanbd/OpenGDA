@@ -1552,6 +1552,20 @@ json::Value producerFrontierRecord(
     }
     record["buffer_identity_guard_reason"] =
         facts.buffer_identity_guard_reason;
+    record["source_identity_guardable"] =
+        facts.source_identity_guardable;
+    json::Array sourcePointers;
+    for (unsigned param : facts.source_pointer_candidates)
+        sourcePointers.push_back(static_cast<int64_t>(param));
+    record["source_pointer_candidates"] = std::move(sourcePointers);
+    if (facts.source_identity_guardable)
+        record["source_identity_buffer_index_param"] =
+            static_cast<int64_t>(
+                facts.source_identity_buffer_index_param);
+    else
+        record["source_identity_buffer_index_param"] = nullptr;
+    record["source_identity_guard_reason"] =
+        facts.source_identity_guard_reason;
     record["producer_domains_known"] = facts.producer_domains_known;
     json::Array domains;
     for (const auto &domain : facts.producer_store_domains)

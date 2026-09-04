@@ -99,6 +99,19 @@ cannot itself wrap. The first materializer will require both buffer identity
 and every interval-bounds check before entering the two-phase branch; any
 failure executes the untouched fused launch.
 
+Discovery also records source-identity candidates for kernels whose transfer
+source may correspond to a read-only pointer formal. It carries frontend
+`noalias` and a conservative IR use-chain proof of `readonly`, roots every
+intervening write in other formals, and lists the pointer slots that host LTO
+could compare with the shared registered source-buffer slot. This is useful
+for matrix multiply, where `As` or `Bs` may name the registered source while
+atomics are rooted in `Cs`. The relation is not yet an executable candidate:
+LLVM `noalias` does not prove that the complete registered source allocation
+misses every write-root allocation. A future materializer must separately
+prove or check that whole-allocation relation, keep the original fused
+schedule on false or unknown edges, and final device LTO must re-prove the
+same identity-candidate and write-root facts before relocating the trigger.
+
 Device discovery now emits this guard shape only for the narrow case of one
 ordinary producer pointer and one shared i32 source-buffer formal across the
 whole PUT group. The unchanged Jacobi kernel satisfies that shape with fixed
