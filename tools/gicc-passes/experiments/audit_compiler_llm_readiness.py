@@ -1224,6 +1224,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "reused_state": evidence(args.reused_state),
             "reused_analysis": evidence(args.reused_analysis),
+            "reused_confirmation_protocol": evidence(
+                HERE
+                / "reused_loop_descriptor/"
+                "REUSED_LOOP_DESCRIPTOR_CONFIRMATION_TRANSITION.md"
+            ),
+            "reused_confirmation_preparer": evidence(
+                HERE
+                / "reused_loop_descriptor/"
+                "prepare_reused_loop_descriptor_confirmation.py"
+            ),
         },
     }
     result = dict(payload)

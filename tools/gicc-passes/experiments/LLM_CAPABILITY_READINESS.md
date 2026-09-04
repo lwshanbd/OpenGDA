@@ -35,9 +35,9 @@ and fails closed at every transition. Its current output is:
 | `loop_lto` | `awaiting_predecessor` | run the frozen reused-descriptor scout after the serial campaign |
 
 The report has readiness ID
-`sha256:205cdb90c11962e11b0fd0cec3c541f967cbb0e1f86fec20eae9e84fdf636d0d`
+`sha256:15a2117773f3ef5d248ae2bbdf933138c7290f18628dc495110495576e78768b`
 and serialized SHA-256
-`6a130ec5a360838f4a84383472201cc27125e5196dc7e4989fbb69592cf50c28`.
+`019aa484dc9aa1a1cc419179094159f57e7db3d1b08dbf5b8619244a399d8dc3`.
 It reports zero provider-protocol-permitted entries, zero authorized provider
 calls, zero measured LLM policies, and
 `paper_llm_performance_claim_ready=false`.
@@ -91,6 +91,10 @@ capacity but cannot support an LLM-selection benefit.
 - The reused-loop-descriptor scout is a graph-expansion oracle. Its candidate
   remains explicitly model-invisible even after a positive scout; only an
   independently frozen confirmation may justify rebuilding the compiler graph.
+  That confirmation is now preregistered as three serial N2 `pdebug`
+  allocations with an allocation-cluster bootstrap, fixed batch/size coverage,
+  and compiler-IR/enqueue-count audits. Its preparer freezes evidence but has
+  no scheduler path.
 - A graph without runtime labels remains a capability-inventory entry, not a
   performance test.
 - Only a positive confirmatory headroom result may permit preparation of an
