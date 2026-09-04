@@ -115,7 +115,7 @@ predecessor_phase=
 while [[ -z $predecessor_phase ]]; do
     predecessor_phase=$(awk 'NR == 1 {print $2}' "$predecessor_state")
     case $predecessor_phase in
-        complete|failed) ;;
+        complete|negative|failed) ;;
         *) predecessor_phase=; sleep 5 ;;
     esac
 done
