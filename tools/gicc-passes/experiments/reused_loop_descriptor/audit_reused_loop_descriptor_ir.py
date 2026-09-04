@@ -57,31 +57,45 @@ def sha256_text(value: str) -> str:
 def audit_host(ir: str, arm: str) -> dict[str, Any]:
     funcs = functions(ir)
     traces = [name for name in funcs if name.startswith("gicc_trace_dwq_loop_kernel")]
-    require(len(traces) == 1, "expected exactly one retained compiler trace")
-    trace = funcs[traces[0]]
-    calls_batched = trace.count("@gicc_runtime_dwq_enqueue_batched(")
-    calls_repeated = trace.count("@gicc_runtime_dwq_enqueue_repeated(")
-    arrays = sum(trace.count(name) for name in (
+    require(len(traces) <= 1, "expected at most one retained compiler trace")
+    # O3 may retain the larger baseline trace but inline the small reused
+    # trace into each static launch context. Audit executable call sites over
+    # the full module, excluding declarations, instead of requiring one
+    # particular inlining outcome.
+    calls_batched = len(re.findall(
+        r"\b(?:call|invoke)\b[^\n]*@gicc_runtime_dwq_enqueue_batched\(", ir
+    ))
+    calls_repeated = len(re.findall(
+        r"\b(?:call|invoke)\b[^\n]*@gicc_runtime_dwq_enqueue_repeated\(", ir
+    ))
+    arrays = sum(ir.count(name) for name in (
         "%dwq.peers", "%dwq.dst_bufs", "%dwq.dst_offs",
         "%dwq.src_bufs", "%dwq.src_offs", "%dwq.sizes",
     ))
     if arm == "baseline":
-        require(calls_batched == 1, "baseline must call batched helper once")
+        require(calls_batched >= 1, "baseline must call batched helper")
         require(calls_repeated == 0, "baseline unexpectedly calls repeated helper")
         require(arrays >= 6, "baseline descriptor-array staging is missing")
     else:
-        require(calls_repeated == 1, "reused arm must call repeated helper once")
+        require(calls_repeated >= 1, "reused arm must call repeated helper")
         require(calls_batched == 0, "reused arm unexpectedly calls batched helper")
         require(arrays == 0, "reused arm still constructs descriptor arrays")
-        require("icmp sgt i32" in trace and "select i1" in trace,
+        require(
+                ("icmp sgt i32" in ir and "select i1" in ir)
+                or "@llvm.smax.i32" in ir,
                 "reused arm is missing the non-positive-bound clamp")
-    require("@hipLaunchKernel(" in ir, "original kernel launch is missing")
+    kernel_launches = len(re.findall(
+        rf"\b(?:call|invoke)\b[^\n]*@hipLaunchKernel\([^\n]*@{re.escape(KERNEL)}",
+        ir,
+    ))
+    require(kernel_launches >= 1, "original kernel launch is missing")
     return {
-        "trace": traces[0],
+        "retained_trace": traces[0] if traces else None,
         "batched_helper_calls": calls_batched,
         "repeated_helper_calls": calls_repeated,
         "descriptor_array_name_occurrences": arrays,
-        "trace_sha256": sha256_text(trace),
+        "kernel_launch_calls": kernel_launches,
+        "module_sha256": sha256_text(ir),
     }
 
 
@@ -117,19 +131,26 @@ def main() -> int:
         device_baseline["kernel_sha256"] == device_reused["kernel_sha256"],
         "host-only transform changed the optimized device kernel",
     )
+    baseline_host = audit_host(
+        args.baseline_host.read_text(encoding="utf-8"), "baseline"
+    )
+    reused_host = audit_host(
+        args.reused_host.read_text(encoding="utf-8"), "reused"
+    )
+    require(
+        baseline_host["kernel_launch_calls"] ==
+            reused_host["kernel_launch_calls"],
+        "host-only transform changed the number of original kernel launches",
+    )
     result = {
         "schema_version": "gicc-reused-loop-descriptor-ir-audit-v1",
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "baseline": {
-            "host": audit_host(
-                args.baseline_host.read_text(encoding="utf-8"), "baseline"
-            ),
+            "host": baseline_host,
             "device": device_baseline,
         },
         "reused": {
-            "host": audit_host(
-                args.reused_host.read_text(encoding="utf-8"), "reused"
-            ),
+            "host": reused_host,
             "device": device_reused,
         },
         "host_only_device_identity": True,

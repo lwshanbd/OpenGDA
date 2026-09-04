@@ -30,7 +30,7 @@ define internal void @gicc_trace_dwq_loop_kernel(ptr %rt) {
   ret void
 }
 define void @main() {
-  call i32 @hipLaunchKernel(ptr null)
+  call i32 @hipLaunchKernel(ptr @_Z15dwq_loop_kernelPN4gicc9DeviceCtxEiimi)
   ret void
 }
 """
@@ -44,7 +44,7 @@ define internal void @gicc_trace_dwq_loop_kernel(ptr %rt, i32 %n) {
   ret void
 }
 define void @main() {
-  call i32 @hipLaunchKernel(ptr null)
+  call i32 @hipLaunchKernel(ptr @_Z15dwq_loop_kernelPN4gicc9DeviceCtxEiimi)
   ret void
 }
 """
@@ -64,6 +64,14 @@ class ReusedLoopDescriptorAuditTests(unittest.TestCase):
         self.assertEqual(1, baseline["batched_helper_calls"])
         self.assertEqual(1, reused["repeated_helper_calls"])
         self.assertEqual(0, reused["descriptor_array_name_occurrences"])
+
+    def test_reused_trace_may_be_inlined(self):
+        inlined = REUSED_HOST.replace(
+            "define internal void @gicc_trace_dwq_loop_kernel",
+            "define internal void @launch_owner",
+        )
+        result = audit.audit_host(inlined, "reused")
+        self.assertIsNone(result["retained_trace"])
 
     def test_device_shape_is_one_original_trigger(self):
         result = audit.audit_device(DEVICE)
