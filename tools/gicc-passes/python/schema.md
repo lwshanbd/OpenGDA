@@ -619,16 +619,21 @@ writing a hint.
 
 `gicc_comm_group_plan_bridge.py` augments the flat per-site dossier with the
 compiler's source-free kernel template. It groups multiple communication sites
-by `completion_site_id` and supplies the planner with operation order, shared
-completion, formal argument-expression relations, launch contexts, compute
-distance, and dependence legality. This is intentionally richer than the
-flat scalar input used by the original cost model.
+by `completion_site_id`, and represents an otherwise ungrouped transfer as a
+singleton opportunity whenever it has at least two materializable routes. The
+planner receives formal argument-expression relations, transfer intervals,
+producer-frontier facts, launch contexts, compute distance, and dependence
+legality. This is intentionally richer than the flat scalar input used by the
+original cost model.
 
 The bridge enumerates complete compiler-materializable route combinations and
 adds `group_trigger_early` only when both the platform profile enables it and
 the compiler proof above succeeds. A rejected transformation remains visible
 as a masked candidate and reason, but has no candidate ID and therefore cannot
-be selected.
+be selected. The private content-addressed graph retains site-to-materializer
+bindings for `accept`; the prompt contains a separately constructed model view
+that expresses transfers by ordinal, removes kernel/site/path identities and
+materializer strings, and omits profile provenance paths.
 
 ```bash
 python3 tools/gicc-passes/python/gicc_comm_group_plan_bridge.py emit \
@@ -636,7 +641,7 @@ python3 tools/gicc-passes/python/gicc_comm_group_plan_bridge.py emit \
   --graph build/group-graph.json --prompt build/group-prompt.txt
 ```
 
-The response contains only one existing candidate ID per group. `accept`
+The response contains only one existing candidate ID per opportunity. `accept`
 content-validates the graph and candidate, then emits `gicc-hint-v1`; source,
 model-authored code/IR, dispatch strings, site IDs, or new legality assertions
 are rejected.

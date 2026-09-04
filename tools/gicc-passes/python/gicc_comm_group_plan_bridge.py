@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Build and enforce compiler-only, multi-site communication plans.
+"""Build and enforce compiler-only communication plans.
 
-This is the relational successor to ``gicc_comm_plan_bridge.py``.  It joins a
+This is the relational successor to ``gicc_comm_plan_bridge.py``. It joins a
 content-addressed LTO dossier with the compiler's per-kernel operation
 template, groups communication sites by their compiler-discovered completion
-point, and exposes complete materializable route combinations plus any
-compiler-proved trigger-placement transform.
+point, represents eligible singleton transfers, and exposes complete
+materializable route combinations plus any compiler-proved trigger-placement
+transform.
 
 The model never sees source and cannot author code, IR, site IDs, dispatch
 names, or legality.  Its entire output is one existing opaque candidate ID per
@@ -28,6 +29,7 @@ import gicc_llm_bridge as bridge
 
 
 GRAPH_SCHEMA = "gicc-communication-group-opportunity-graph-v1"
+MODEL_VIEW_SCHEMA = "gicc-communication-opportunity-model-view-v1"
 DECISION_SCHEMA = "gicc-communication-group-plan-decision-v1"
 HINT_SCHEMA = "gicc-hint-v1"
 
@@ -187,6 +189,52 @@ def _fixed_materializer(site: dict[str, Any]) -> dict[str, str]:
     raise GroupPlanError(f"site {site.get('site_id')!r} has no materializable action")
 
 
+_SEMANTIC_FACT_FIELDS = (
+    "op_kind",
+    "hk_capable",
+    "size_kind",
+    "size_bytes",
+    "size_log2",
+    "transfer_interval",
+    "peer_kind",
+    "peer_locality",
+    "in_loop",
+    "loop",
+    "guard_kind",
+    "guard_density",
+    "fan_out",
+    "static_launch_sites",
+    "launch_contexts",
+    "launch_grid",
+    "launch_block",
+    "grid_blocks",
+    "threads_per_block",
+    "phase_launch_supported",
+    "phase_launch_stream",
+    "phase_launch_materialization",
+    "phase_launch_reason",
+    "kernel_argument_slots_exact",
+    "kernel_argument_slot_count",
+    "kernel_argument_slot_reason",
+    "compute_before_flops",
+    "flops_to_first_use",
+    "trip_count",
+    "distance_exact",
+    "iter_estimate",
+    "descriptor_reusable",
+    "buffer_reusable",
+    "coalescable",
+    "max_vector_bytes",
+    "batch_size",
+    "producer_frontier",
+)
+
+
+def _semantic_facts(site: dict[str, Any]) -> dict[str, Any]:
+    """Retain rich compiler facts while excluding compiler/source identity."""
+    return {key: site.get(key) for key in _SEMANTIC_FACT_FIELDS}
+
+
 def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
         -> dict[str, Any]:
     dossier = bridge._verified_dossier(dossier_value)
@@ -343,6 +391,10 @@ def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
                 site_id: meta_by_site[site_id]["args"] for site_id in site_ids
             },
             "site_legal_actions": legal_by_site,
+            "site_semantic_facts": {
+                site_id: _semantic_facts(dossier_by_site[site_id])
+                for site_id in site_ids
+            },
             "launch_contexts": {
                 site_id: dossier_by_site[site_id].get("launch_contexts")
                 for site_id in site_ids
@@ -381,8 +433,92 @@ def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
         })
         opportunity_sites.update(site_ids)
 
+    # A single transfer still has a real compiler-level decision whenever at
+    # least two independently materializable routes exist. Representing it as
+    # a one-member opportunity lets the same opaque-ID protocol cover both
+    # relational groups and singleton sites without exposing site IDs to the
+    # model.
+    for site_id, site in sorted(dossier_by_site.items()):
+        if site_id in opportunity_sites:
+            continue
+        actions = tuple(
+            action for action in MATERIALIZABLE_ACTION_ORDER
+            if action in site.get("legal_actions", [])
+        )
+        if len(actions) < 2:
+            continue
+        meta = meta_by_site[site_id]
+        completion = meta.get("completion_site_id")
+        completion_id = completion if isinstance(completion, str) else ""
+        candidates = [
+            _candidate(
+                f"site_{action}",
+                [site_id],
+                (action,),
+                "Materialize one compiler-advertised route for this transfer.",
+                ["the route is advertised legal for the bound compiler site"],
+                {
+                    "site_actions": {site_id: action},
+                    "trigger_placement": "original_completion",
+                    "host_descriptor_sites": int(
+                        action in {"default", "trigger", "ipc"}
+                    ),
+                    "device_proxy_sites": int(action == "proxy"),
+                },
+            )
+            for action in actions
+        ]
+        compiler_facts = {
+            "kernel": meta["kernel"],
+            "operation_order": [site_id],
+            "group_size": 1,
+            "batch_size": [site.get("batch_size")],
+            "fan_out": [site.get("fan_out")],
+            "completion": {
+                "site_id": completion_id or None,
+                "kind": meta_by_site.get(completion_id, {}).get("kind"),
+            },
+            "argument_relations": {
+                name: "single_expression" for name in (
+                    "target_rank", "dst_buf", "dst_off", "src_buf",
+                    "src_off", "size",
+                )
+            },
+            "site_argument_expressions": {site_id: meta["args"]},
+            "site_legal_actions": {site_id: actions},
+            "site_semantic_facts": {site_id: _semantic_facts(site)},
+            "launch_contexts": {site_id: site.get("launch_contexts")},
+            "compute_region": {
+                "site_flops_to_completion": {
+                    site_id: site.get("flops_to_first_use")
+                },
+                "distance_exact": site.get("distance_exact") is True,
+                "flops_after_last_site": meta.get("compute_after"),
+            },
+            "dependence_legality": {
+                "local_no_intervening_write_proof": False,
+                "final_materializer_shape_legal": True,
+                "group_early_trigger_legal": False,
+                "compiler_reasons": [
+                    "singleton route choice does not relocate communication"
+                ],
+            },
+        }
+        opportunity_id = _opportunity_id([site_id], completion_id)
+        opportunities.append({
+            "opportunity_id": opportunity_id,
+            "kind": "single_site_communication_route",
+            "site_ids": [site_id],
+            "compiler_facts": compiler_facts,
+            "masked_candidates": [],
+            "candidates": candidates,
+        })
+        opportunity_sites.add(site_id)
+
     if not opportunities:
-        raise GroupPlanError("no compiler-proved multi-site communication group")
+        raise GroupPlanError(
+            "no compiler communication opportunity with multiple routes"
+        )
     fixed_sites = []
     for site_id, site in sorted(dossier_by_site.items()):
         if site_id in opportunity_sites:
@@ -411,7 +547,7 @@ def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
         "objective": {
             "metric": "end_to_end_wall_time",
             "instruction": (
-                "Choose one compiler-generated group plan per opportunity. "
+                "Choose one compiler-generated communication plan per opportunity. "
                 "Do not invent transformations or override masked candidates."
             ),
         },
@@ -460,10 +596,10 @@ def verified_graph(value: Any) -> dict[str, Any]:
         if (not isinstance(opportunity_id, str)
                 or opportunity_id in seen_opportunities):
             raise GroupPlanError("invalid or duplicate opportunity_id")
-        if (not isinstance(site_ids, list) or len(site_ids) < 2
+        if (not isinstance(site_ids, list) or not site_ids
                 or any(not isinstance(site_id, str) for site_id in site_ids)
                 or seen_sites.intersection(site_ids)):
-            raise GroupPlanError("invalid or overlapping group sites")
+            raise GroupPlanError("invalid or overlapping opportunity sites")
         seen_opportunities.add(opportunity_id)
         seen_sites.update(site_ids)
         legal_by_site = opportunity.get("compiler_facts", {}).get(
@@ -511,8 +647,142 @@ def verified_graph(value: Any) -> dict[str, Any]:
     return value
 
 
+def model_view(graph_value: Any) -> dict[str, Any]:
+    """Build the rich, identity-free graph that is eligible for a model."""
+    graph = verified_graph(graph_value)
+    forbidden_keys = {
+        "site_id", "site_ids", "kernel", "kernel_mangled",
+        "operation_order", "materializer", "path", "source_path",
+        "completion_site_id",
+    }
+
+    def without_identity_keys(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: without_identity_keys(child)
+                for key, child in value.items()
+                if key not in forbidden_keys
+            }
+        if isinstance(value, list):
+            return [without_identity_keys(child) for child in value]
+        return value
+
+    private_fragments: set[str] = set()
+    opportunity_views = []
+    for opportunity in graph["opportunities"]:
+        site_ids = opportunity["site_ids"]
+        facts = opportunity["compiler_facts"]
+        private_fragments.update(site_ids)
+        for site_id in site_ids:
+            source_identity = site_id.split(":", 1)[0]
+            if len(source_identity) >= 3 and source_identity != "?":
+                private_fragments.add(source_identity)
+        kernel = facts.get("kernel")
+        if isinstance(kernel, str) and len(kernel) >= 3:
+            private_fragments.add(kernel)
+        completion = facts.get("completion", {})
+        completion_id = completion.get("site_id")
+        if isinstance(completion_id, str):
+            private_fragments.add(completion_id)
+
+        arguments = facts.get("site_argument_expressions", {})
+        legal_actions = facts.get("site_legal_actions", {})
+        semantic_facts = facts.get("site_semantic_facts", {})
+        launch_contexts = facts.get("launch_contexts", {})
+        compute = facts.get("compute_region", {})
+        flops = compute.get("site_flops_to_completion", {})
+        candidate_views = []
+        for candidate in opportunity["candidates"]:
+            effects = dict(candidate.get("effects", {}))
+            site_actions = effects.pop("site_actions", {})
+            effects["route_actions"] = [
+                site_actions.get(site_id) for site_id in site_ids
+            ]
+            candidate_views.append({
+                "candidate_id": candidate["candidate_id"],
+                "kind": candidate["kind"],
+                "summary": candidate["summary"],
+                "compiler_proof": candidate["compiler_proof"],
+                "effects": effects,
+            })
+        opportunity_views.append({
+            "opportunity_id": opportunity["opportunity_id"],
+            "kind": opportunity["kind"],
+            "compiler_facts": {
+                "transfer_count": len(site_ids),
+                "batch_size": facts.get("batch_size"),
+                "fan_out": facts.get("fan_out"),
+                "completion_kind": completion.get("kind"),
+                "argument_relations": facts.get("argument_relations"),
+                "transfer_argument_expressions": [
+                    arguments.get(site_id) for site_id in site_ids
+                ],
+                "transfer_legal_actions": [
+                    legal_actions.get(site_id) for site_id in site_ids
+                ],
+                "transfer_semantic_facts": [
+                    without_identity_keys(semantic_facts.get(site_id))
+                    for site_id in site_ids
+                ],
+                "launch_contexts": [
+                    launch_contexts.get(site_id) for site_id in site_ids
+                ],
+                "compute_region": {
+                    "transfer_flops_to_completion": [
+                        flops.get(site_id) for site_id in site_ids
+                    ],
+                    "distance_exact": compute.get("distance_exact"),
+                    "flops_after_last_transfer":
+                        compute.get("flops_after_last_site"),
+                },
+                "dependence_legality": facts.get("dependence_legality"),
+            },
+            "masked_candidates": opportunity.get("masked_candidates", []),
+            "candidates": candidate_views,
+        })
+
+    platform = {
+        key: value for key, value in graph["platform_profile"].items()
+        if key != "provenance"
+    }
+    view = {
+        "schema_version": MODEL_VIEW_SCHEMA,
+        "compiler_graph_id": graph["graph_id"],
+        "compiler_input_ids": graph["compiler_inputs"],
+        "boundary": graph["boundary"],
+        "objective": graph["objective"],
+        "platform_profile": platform,
+        "fixed_site_count": len(graph.get("fixed_sites", [])),
+        "opportunities": opportunity_views,
+    }
+    def validate(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in forbidden_keys:
+                    raise GroupPlanError(
+                        f"identity-bearing key {key!r} escaped into model view"
+                    )
+                validate(child)
+        elif isinstance(value, list):
+            for child in value:
+                validate(child)
+        elif isinstance(value, str):
+            if (value.startswith("/") or value.startswith("./")
+                    or value.startswith("../")):
+                raise GroupPlanError("filesystem path escaped into model view")
+            for fragment in private_fragments:
+                if len(fragment) >= 3 and fragment in value:
+                    raise GroupPlanError(
+                        "compiler/source identity escaped into model view"
+                    )
+
+    validate(view)
+    return view
+
+
 def render_prompt(graph_value: Any) -> str:
     graph = verified_graph(graph_value)
+    public_graph = model_view(graph)
     example = {
         "schema_version": DECISION_SCHEMA,
         "graph_id": graph["graph_id"],
@@ -533,15 +803,17 @@ def render_prompt(graph_value: Any) -> str:
         "candidate_id for every opportunity_id.\n\n"
         "Return ONLY one JSON object with this shape:\n"
         + json.dumps(example, indent=2, sort_keys=True)
-        + "\n\nCOMPILER-GENERATED GROUP GRAPH:\n"
-        + json.dumps(graph, indent=2, sort_keys=True)
+        + "\n\nCOMPILER-GENERATED COMMUNICATION GRAPH:\n"
+        + json.dumps(public_graph, indent=2, sort_keys=True)
         + "\n"
     )
 
 
 def _baseline_candidate(opportunity: dict[str, Any]) -> dict[str, Any]:
     preference = (
-        "group_uniform_default", "group_uniform_trigger", "group_uniform_proxy"
+        "group_uniform_default", "site_default",
+        "group_uniform_trigger", "site_trigger",
+        "group_uniform_proxy", "site_proxy",
     )
     for kind in preference:
         for candidate in opportunity["candidates"]:
@@ -560,7 +832,7 @@ def _hint_from_candidates(
         if request != ACTION_TO_MATERIALIZER["default"]:
             sites[fixed["site_id"]] = {
                 **request,
-                "reason": "compiler-fixed non-group action",
+                "reason": "compiler-fixed non-opportunity action",
             }
             if sites[fixed["site_id"]]["transform"] == "NONE":
                 del sites[fixed["site_id"]]["transform"]
@@ -574,7 +846,7 @@ def _hint_from_candidates(
                 "dispatch": request["dispatch"],
                 "reason": (
                     (rationales or {}).get(opportunity_id, "")
-                    if accepted else "deterministic compiler group fallback"
+                    if accepted else "deterministic compiler plan fallback"
                 ),
             }
             if request["transform"] != "NONE":
@@ -659,7 +931,7 @@ def plan_to_hint(
             continue
         selected[opportunity_id] = candidate
         rationales[opportunity_id] = (
-            f"compiler group plan {candidate['candidate_id']}; "
+            f"compiler communication plan {candidate['candidate_id']}; "
             f"LLM confidence={float(confidence):.3f}: {rationale}"
         )
 
@@ -677,7 +949,15 @@ def plan_to_hint(
 
 
 def _load_templates(meta_dir: Path) -> list[Any]:
-    paths = sorted(meta_dir.glob("*.json"))
+    # Feature extraction deliberately writes features.json beside the
+    # per-kernel version-1 templates. It is a schema-6 array, not a template,
+    # and must not be fed to verified_templates(). Keep rejecting every other
+    # malformed JSON file so an unexpected artifact cannot be silently
+    # treated as compiler metadata.
+    paths = sorted(
+        path for path in meta_dir.glob("*.json")
+        if path.name != "features.json"
+    )
     if not paths:
         raise GroupPlanError(f"no kernel templates under {meta_dir}")
     return [_read_json(path) for path in paths]
@@ -691,7 +971,7 @@ def _emit(args: argparse.Namespace) -> int:
     bridge._write_text_atomic(args.prompt, render_prompt(graph))
     print(
         f"gicc-comm-group-plan-bridge: wrote {len(graph['opportunities'])} "
-        f"group opportunity(s); graph_id={graph['graph_id']}",
+        f"communication opportunity(s); graph_id={graph['graph_id']}",
         file=sys.stderr,
     )
     return 0

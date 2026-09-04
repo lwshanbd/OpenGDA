@@ -1,5 +1,7 @@
 import copy
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -161,7 +163,13 @@ class CommunicationGroupPlanBridgeTests(unittest.TestCase):
         self.assertEqual(10, len(self.opportunity["candidates"]))
         prompt = groups.render_prompt(self.graph)
         self.assertNotIn("SECRET_SOURCE_SENTINEL", prompt)
+        self.assertNotIn("unit.cpp", prompt)
+        self.assertNotIn("group_kernel", prompt)
+        self.assertNotIn('"site_ids"', prompt)
+        self.assertNotIn('"materializer"', prompt)
         self.assertIn("program-dependence legality", prompt)
+        self.assertIn("transfer_semantic_facts", prompt)
+        self.assertIn("producer_frontier", prompt)
         self.assertFalse(self.graph["boundary"]["source_visible"])
         self.assertEqual("candidate IDs only", self.graph["boundary"]["model_output"])
 
@@ -230,6 +238,77 @@ class CommunicationGroupPlanBridgeTests(unittest.TestCase):
             self.graph,
             groups.make_group_graph(self.dossier, [template()]),
         )
+
+    def test_single_site_uses_same_opaque_candidate_protocol(self):
+        dossier = bridge.make_dossier(
+            [feature(self.site_ids[0])], PLATFORM
+        )
+        graph = groups.make_group_graph(dossier, [template()])
+        opportunity = graph["opportunities"][0]
+        self.assertEqual("single_site_communication_route",
+                         opportunity["kind"])
+        self.assertEqual(1, len(opportunity["site_ids"]))
+        self.assertEqual(
+            {"site_default", "site_proxy", "site_trigger"},
+            {candidate["kind"] for candidate in opportunity["candidates"]},
+        )
+        trigger = next(
+            candidate for candidate in opportunity["candidates"]
+            if candidate["kind"] == "site_trigger"
+        )
+        decision = {
+            "schema_version": groups.DECISION_SCHEMA,
+            "graph_id": graph["graph_id"],
+            "selections": {
+                opportunity["opportunity_id"]: {
+                    "candidate_id": trigger["candidate_id"],
+                    "confidence": 0.8,
+                    "rationale": "measured trigger cost is lower",
+                }
+            },
+        }
+        hint, accepted, errors = groups.plan_to_hint(graph, decision)
+        self.assertTrue(accepted, errors)
+        self.assertEqual(
+            "DWQ_TRIGGER", hint["sites"][self.site_ids[0]]["dispatch"]
+        )
+        prompt = groups.render_prompt(graph)
+        self.assertNotIn(self.site_ids[0], prompt)
+        self.assertNotIn("group_kernel", prompt)
+
+    def test_real_meta_directory_ignores_sibling_features_json(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            meta_dir = Path(temporary)
+            (meta_dir / "features.json").write_text(
+                json.dumps([feature(self.site_ids[0])]), encoding="utf-8"
+            )
+            (meta_dir / "kernel.json").write_text(
+                json.dumps(template()), encoding="utf-8"
+            )
+            self.assertEqual([template()], groups._load_templates(meta_dir))
+
+    def test_model_view_strips_nested_ids_and_rejects_identity_strings(self):
+        rows = [feature(site_id) for site_id in self.site_ids]
+        rows[0]["producer_frontier"] = {
+            "completion_site_id": "unit.cpp:20:group_kernel::2",
+            "source_identity_guardable": True,
+        }
+        dossier = bridge.make_dossier(rows, PLATFORM)
+        graph = groups.make_group_graph(dossier, [template()])
+        view = groups.model_view(graph)
+        frontier = view["opportunities"][0]["compiler_facts"][
+            "transfer_semantic_facts"
+        ][0]["producer_frontier"]
+        self.assertNotIn("completion_site_id", frontier)
+
+        platform = copy.deepcopy(PLATFORM)
+        platform["leaked_identity"] = self.site_ids[0]
+        leaked_graph = groups.make_group_graph(
+            bridge.make_dossier(rows, platform), [template()]
+        )
+        with self.assertRaisesRegex(
+                groups.GroupPlanError, "identity escaped"):
+            groups.model_view(leaked_graph)
 
 
 if __name__ == "__main__":
