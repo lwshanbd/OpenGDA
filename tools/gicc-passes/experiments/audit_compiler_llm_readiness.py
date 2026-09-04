@@ -32,6 +32,8 @@ import analyze_producer_fission_confirmation as producer_confirmation  # noqa: E
 import gicc_comm_plan_bridge as structural  # noqa: E402
 import gicc_compiler_decision_suite as decision_suite  # noqa: E402
 import gicc_llm_bridge as bridge  # noqa: E402
+import prepare_confirmed_producer_fission_graph as producer_expansion  # noqa: E402
+import prepare_producer_fission_suite_refreeze as producer_refreeze  # noqa: E402
 
 
 REPORT_SCHEMA = "gicc-compiler-llm-readiness-v1"
@@ -341,11 +343,12 @@ def classify_producer(
     entry: dict[str, Any], phase: str, analysis: Any | None,
     confirmation_phase: str = "missing",
     confirmation_passed: bool | None = None,
+    graph_expansion_phase: str = "missing",
 ) -> dict[str, Any]:
     if analysis is None:
-        if confirmation_passed is not None:
+        if confirmation_passed is not None or graph_expansion_phase != "missing":
             raise ReadinessError(
-                "producer-fission confirmation exists without a passed scout"
+                "producer-fission downstream evidence exists without a passed scout"
             )
         status = {
             "waiting_predecessor": "awaiting_predecessor",
@@ -380,6 +383,10 @@ def classify_producer(
         )
     if gate["passed"]:
         if confirmation_passed is None:
+            if graph_expansion_phase != "missing":
+                raise ReadinessError(
+                    "producer-fission graph expanded without confirmation"
+                )
             result = _confirmation_pending_result(
                 entry, phase=confirmation_phase, label="producer_fission",
             )
@@ -391,9 +398,41 @@ def classify_producer(
                 raise ReadinessError(
                     "producer-fission confirmation state disagrees with analysis"
                 )
-            result = _hidden_candidate_result(
-                entry, confirmation_passed=confirmation_passed,
-            )
+            if not confirmation_passed and graph_expansion_phase != "missing":
+                raise ReadinessError(
+                    "producer-fission graph expanded after negative confirmation"
+                )
+            if not confirmation_passed or graph_expansion_phase == "missing":
+                result = _hidden_candidate_result(
+                    entry, confirmation_passed=confirmation_passed,
+                )
+            elif graph_expansion_phase == "bundle_ready":
+                result = _base_entry(
+                    entry, "suite_refreeze_required",
+                    "refreeze_and_audit_suite_with_expanded_graph",
+                )
+                result.update({
+                    "runtime_confirmation_gate_passed": True,
+                    "candidate_model_visible": False,
+                    "expanded_graph_bundle_verified": True,
+                    "current_suite_graph_expanded": False,
+                })
+            elif graph_expansion_phase == "suite_refrozen":
+                result = _base_entry(
+                    entry, "provider_protocol_permitted",
+                    "freeze_exact_provider_request_and_request_authorization",
+                )
+                result.update({
+                    "runtime_confirmation_gate_passed": True,
+                    "candidate_model_visible": True,
+                    "expanded_graph_bundle_verified": True,
+                    "current_suite_graph_expanded": True,
+                })
+            else:
+                raise ReadinessError(
+                    f"unknown producer-fission graph phase "
+                    f"{graph_expansion_phase!r}"
+                )
     else:
         if confirmation_passed is not None:
             raise ReadinessError(
@@ -404,6 +443,109 @@ def classify_producer(
         )
     result["runtime_gate_passed"] = gate["passed"]
     return result
+
+
+def _record_by_role(
+    records: Any, role: str, *, label: str,
+) -> dict[str, Any]:
+    matches = [
+        record for record in records
+        if isinstance(record, dict) and record.get("role") == role
+    ] if isinstance(records, list) else []
+    if len(matches) != 1:
+        raise ReadinessError(f"{label} lacks exact role {role}")
+    return matches[0]
+
+
+def verified_producer_expansion(
+    path: Path, confirmation_value: dict[str, Any],
+) -> dict[str, Any]:
+    """Replay and bind the expanded graph to this exact confirmation."""
+    manifest = producer_expansion.verify_contained(path)
+    if (manifest.get("status")
+            != "expanded_graph_ready_for_suite_refreeze"
+            or manifest.get("confirmation", {}).get("result_id")
+            != confirmation_value.get("result_id")
+            or manifest.get("confirmation", {}).get(
+                "confirmation_gate_passed") is not True):
+        raise ReadinessError(
+            "producer-fission expansion binds another confirmation"
+        )
+    boundary = manifest.get("boundary", {})
+    for key, expected in {
+        "compiler_lto_decisions_only": True,
+        "application_source_input": False,
+        "application_source_modified": False,
+        "model_invoked": False,
+        "provider_call_authorized": False,
+        "scheduler_job_submitted": False,
+        "frozen_current_graph_modified": False,
+        "current_decision_suite_modified": False,
+    }.items():
+        if boundary.get(key) is not expected:
+            raise ReadinessError(
+                f"producer-fission expansion boundary changed: {key}"
+            )
+    return manifest
+
+
+def verified_producer_refreeze(
+    path: Path, expansion_path: Path, suite_path: Path,
+    suite: dict[str, Any], confirmation_value: dict[str, Any],
+) -> dict[str, Any]:
+    """Replay the suite transition and bind it to the audited suite input."""
+    manifest = producer_refreeze.verify_contained(path)
+    if (manifest.get("status")
+            != "refrozen_suite_ready_for_readiness_audit"
+            or manifest.get("refrozen_suite_id") != suite.get("suite_id")):
+        raise ReadinessError("producer-fission refreeze binds another suite")
+    boundary = manifest.get("boundary", {})
+    for key, expected in {
+        "compiler_lto_decisions_only": True,
+        "application_source_input": False,
+        "application_source_modified": False,
+        "model_invoked": False,
+        "provider_call_authorized": False,
+        "scheduler_job_submitted": False,
+        "current_suite_modified": False,
+    }.items():
+        if boundary.get(key) is not expected:
+            raise ReadinessError(
+                f"producer-fission refreeze boundary changed: {key}"
+            )
+    expansion_record = _record_by_role(
+        manifest.get("inputs"), "producer_expansion_manifest",
+        label="producer-fission refreeze",
+    )
+    recorded_expansion = Path(expansion_record.get("path", ""))
+    recorded_expansion = (
+        recorded_expansion.resolve() if recorded_expansion.is_absolute()
+        else (ROOT / recorded_expansion).resolve()
+    )
+    if (recorded_expansion != expansion_path.resolve()
+            or sha256_file(recorded_expansion)
+            != expansion_record.get("sha256")):
+        raise ReadinessError("producer-fission refreeze uses another expansion")
+    expansion_manifest = verified_producer_expansion(
+        expansion_path, confirmation_value,
+    )
+    suite_record = _record_by_role(
+        manifest.get("outputs"), "refrozen_suite",
+        label="producer-fission refreeze",
+    )
+    if (sha256_file(suite_path) != suite_record.get("sha256")
+            or suite_path.stat().st_size != suite_record.get("bytes")):
+        raise ReadinessError("readiness suite differs from refrozen suite")
+    entries = {entry["label"]: entry for entry in suite["entries"]}
+    jacobi = entries.get("jacobi", {})
+    transition = expansion_manifest.get("graph_transition", {})
+    delta = manifest.get("entry_transition", {})
+    if (jacobi.get("graph_id") != transition.get("expanded_graph_id")
+            or delta.get("new_graph_id") != jacobi.get("graph_id")
+            or delta.get("new_candidate_id") != transition.get("candidate_id")
+            or delta.get("all_other_entries_preserved") is not True):
+        raise ReadinessError("refrozen Jacobi entry changed after expansion")
+    return manifest
 
 
 def classify_guarded_early_trigger(
@@ -684,6 +826,36 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         )
         if guarded_confirmation_analysis is not None else None
     )
+    producer_graph_phase = "missing"
+    producer_expansion_present = args.producer_expansion_manifest.is_file()
+    producer_refreeze_present = args.producer_refreeze_manifest.is_file()
+    if producer_refreeze_present and not producer_expansion_present:
+        raise ReadinessError(
+            "producer-fission suite refreeze lacks its expansion manifest"
+        )
+    if ((producer_expansion_present or producer_refreeze_present)
+            and producer_confirmation_passed is not True):
+        raise ReadinessError(
+            "producer-fission graph evidence exists without passed confirmation"
+        )
+    if producer_refreeze_present:
+        verified_producer_refreeze(
+            args.producer_refreeze_manifest,
+            args.producer_expansion_manifest,
+            args.suite, suite, producer_confirmation_analysis,
+        )
+        producer_graph_phase = "suite_refrozen"
+    elif producer_expansion_present:
+        expansion_manifest = verified_producer_expansion(
+            args.producer_expansion_manifest,
+            producer_confirmation_analysis,
+        )
+        if entries["jacobi"]["graph_id"] != expansion_manifest[
+                "graph_transition"]["current_graph_id"]:
+            raise ReadinessError(
+                "suite changed before producer-fission refreeze was audited"
+            )
+        producer_graph_phase = "bundle_ready"
     records = {
         "coalescing_placement": classify_placement(
             placement_entry, placement_summary, graphs_equivalent,
@@ -699,6 +871,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             producer_analysis,
             state_phase(args.producer_confirmation_state),
             producer_confirmation_passed,
+            producer_graph_phase,
         ),
         "mm_minimal": classify_guarded_early_trigger(
             entries["mm_minimal"], state_phase(args.guarded_state),
@@ -776,6 +949,20 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "producer_confirmation_analyzer": evidence(
                 HERE / "producer_fission/analyze_producer_fission_confirmation.py"
+            ),
+            "producer_expansion_manifest": evidence(
+                args.producer_expansion_manifest
+            ),
+            "producer_expansion_preparer": evidence(
+                HERE / "producer_fission/"
+                "prepare_confirmed_producer_fission_graph.py"
+            ),
+            "producer_refreeze_manifest": evidence(
+                args.producer_refreeze_manifest
+            ),
+            "producer_refreeze_preparer": evidence(
+                HERE / "producer_fission/"
+                "prepare_producer_fission_suite_refreeze.py"
             ),
             "guarded_state": evidence(args.guarded_state),
             "guarded_analysis": evidence(args.guarded_analysis),
@@ -856,6 +1043,20 @@ def add_inputs(parser: argparse.ArgumentParser) -> None:
             "producer_fission_confirmation_7687377_20260904/analysis.json"
         ),
     )
+    parser.add_argument(
+        "--producer-expansion-manifest", type=Path,
+        default=(
+            ROOT / "build_ofi/producer_fission_graph_expansion_20260904/"
+            "manifest.json"
+        ),
+    )
+    parser.add_argument(
+        "--producer-refreeze-manifest", type=Path,
+        default=(
+            ROOT / "build_ofi/producer_fission_suite_refreeze_20260904/"
+            "manifest.json"
+        ),
+    )
     parser.add_argument("--guarded-state", type=Path, required=True)
     parser.add_argument("--guarded-analysis", type=Path, required=True)
     parser.add_argument(
@@ -910,6 +1111,13 @@ def main() -> int:
         n8_confirmation.monitor_base.MonitorError,
         producer_confirmation.ConfirmError,
         producer_confirmation.common.MonitorError,
+        producer_expansion.ExpansionError,
+        producer_expansion.groups.GroupPlanError,
+        producer_expansion.bridge.BridgeError,
+        producer_refreeze.RefreezeError,
+        producer_refreeze.suites.SuiteError,
+        producer_refreeze.suites.collective.CollectivePlanError,
+        producer_refreeze.suites.structural.PlanBridgeError,
         guarded_confirmation.ConfirmError,
         guarded_confirmation.common.MonitorError,
         OSError, KeyError, TypeError, ValueError,

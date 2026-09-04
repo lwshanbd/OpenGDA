@@ -190,3 +190,25 @@ opaque prompts plus their exact response schema, but neither refreezes the
 decision suite nor authorizes a provider call. The frozen input graph is never
 overwritten. The completed bundle can be independently checked with
 `verify-contained --manifest <bundle>/manifest.json`.
+
+That bundle still is not a model request. Refreeze a new suite in a separate
+directory while supplying every unchanged non-Jacobi graph explicitly:
+
+```sh
+python3 tools/gicc-passes/experiments/producer_fission/prepare_producer_fission_suite_refreeze.py prepare \
+  --current-suite build_ofi/compiler_decision_suite_20260904/suite.json \
+  --current-prompt-dir build_ofi/compiler_decision_suite_20260904/prompts \
+  --expansion-manifest build_ofi/producer_fission_graph_expansion_20260904/manifest.json \
+  --communication minimod=build_ofi/compiler_fact_coverage_20260904/portfolio/minimod/group-graph.json \
+  --communication mm_minimal=build_ofi/compiler_fact_coverage_20260904/portfolio/mm_minimal/group-graph.json \
+  --communication mixed_lto=build_ofi/compiler_fact_coverage_20260904/portfolio/mixed_lto/group-graph.json \
+  --communication loop_lto=build_ofi/compiler_fact_coverage_20260904/portfolio/loop_lto/group-graph.json \
+  --collective collective_n8=build_ofi/compiler_collective_capacity_n8_hierpipe_v1_20260903/discovery/graph.json \
+  --structural coalescing_placement=build_ofi/compiler_comm_plan_placement_current_20260904/generated/opportunity-graph.json \
+  --output-dir build_ofi/producer_fission_suite_refreeze_20260904
+```
+
+The refreeze refuses a caller-supplied Jacobi graph, requires every other
+entry to reproduce exactly, and records the sole `9→10` Jacobi policy-space
+change. Its manifest is an input to the readiness audit, not provider-call
+authorization.

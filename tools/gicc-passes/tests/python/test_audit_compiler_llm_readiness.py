@@ -204,6 +204,127 @@ class CompilerLlmReadinessTests(unittest.TestCase):
         self.assertEqual("graph_expansion_required", guarded["status"])
         self.assertFalse(guarded["provider_protocol_permitted"])
 
+    def test_producer_expansion_and_refreeze_are_separate_gates(self):
+        scout = {
+            "schema_version": "gicc-producer-fission-oracle-analysis-v1",
+            "correctness_gate": {"passed": True},
+            "oracle_headroom_gate": {"passed": True},
+        }
+        bundled = readiness.classify_producer(
+            entry(), "promising", scout, "confirmed", True,
+            "bundle_ready",
+        )
+        self.assertEqual("suite_refreeze_required", bundled["status"])
+        self.assertFalse(bundled["provider_protocol_permitted"])
+        self.assertFalse(bundled["candidate_model_visible"])
+        self.assertTrue(bundled["expanded_graph_bundle_verified"])
+
+        refrozen = readiness.classify_producer(
+            entry(), "promising", scout, "confirmed", True,
+            "suite_refrozen",
+        )
+        self.assertEqual("provider_protocol_permitted", refrozen["status"])
+        self.assertTrue(refrozen["provider_protocol_permitted"])
+        self.assertTrue(refrozen["candidate_model_visible"])
+        self.assertTrue(refrozen["current_suite_graph_expanded"])
+        self.assertFalse(refrozen["provider_call_authorized"])
+
+        with self.assertRaisesRegex(readiness.ReadinessError, "negative"):
+            readiness.classify_producer(
+                entry(), "promising", scout, "negative", False,
+                "suite_refrozen",
+            )
+
+    def test_refreeze_must_bind_exact_suite_expansion_and_confirmation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            suite_path = root / "suite.json"
+            expansion_path = root / "expansion.json"
+            refreeze_path = root / "refreeze.json"
+            suite_path.write_text("{}\n", encoding="utf-8")
+            expansion_path.write_text("{}\n", encoding="utf-8")
+            refreeze_path.write_text("{}\n", encoding="utf-8")
+            confirmation = {"result_id": "sha256:" + "1" * 64}
+            graph_id = "sha256:" + "2" * 64
+            candidate_id = "candidate:" + "3" * 24
+            suite = {
+                "suite_id": "sha256:" + "4" * 64,
+                "entries": [{"label": "jacobi", "graph_id": graph_id}],
+            }
+            expansion_manifest = {
+                "status": "expanded_graph_ready_for_suite_refreeze",
+                "confirmation": {
+                    "result_id": confirmation["result_id"],
+                    "confirmation_gate_passed": True,
+                },
+                "graph_transition": {
+                    "expanded_graph_id": graph_id,
+                    "candidate_id": candidate_id,
+                },
+                "boundary": {
+                    "compiler_lto_decisions_only": True,
+                    "application_source_input": False,
+                    "application_source_modified": False,
+                    "model_invoked": False,
+                    "provider_call_authorized": False,
+                    "scheduler_job_submitted": False,
+                    "frozen_current_graph_modified": False,
+                    "current_decision_suite_modified": False,
+                },
+            }
+            manifest = {
+                "status": "refrozen_suite_ready_for_readiness_audit",
+                "refrozen_suite_id": suite["suite_id"],
+                "boundary": {
+                    "compiler_lto_decisions_only": True,
+                    "application_source_input": False,
+                    "application_source_modified": False,
+                    "model_invoked": False,
+                    "provider_call_authorized": False,
+                    "scheduler_job_submitted": False,
+                    "current_suite_modified": False,
+                },
+                "inputs": [{
+                    "role": "producer_expansion_manifest",
+                    "path": str(expansion_path),
+                    "sha256": readiness.sha256_file(expansion_path),
+                }],
+                "outputs": [{
+                    "role": "refrozen_suite",
+                    "path": "suite.json",
+                    "sha256": readiness.sha256_file(suite_path),
+                    "bytes": suite_path.stat().st_size,
+                }],
+                "entry_transition": {
+                    "new_graph_id": graph_id,
+                    "new_candidate_id": candidate_id,
+                    "all_other_entries_preserved": True,
+                },
+            }
+            with (
+                mock.patch.object(
+                    readiness.producer_refreeze, "verify_contained",
+                    return_value=manifest,
+                ),
+                mock.patch.object(
+                    readiness.producer_expansion, "verify_contained",
+                    return_value=expansion_manifest,
+                ),
+            ):
+                self.assertEqual(manifest, readiness.verified_producer_refreeze(
+                    refreeze_path, expansion_path, suite_path,
+                    suite, confirmation,
+                ))
+                changed = copy.deepcopy(confirmation)
+                changed["result_id"] = "sha256:" + "9" * 64
+                with self.assertRaisesRegex(
+                    readiness.ReadinessError, "another confirmation"
+                ):
+                    readiness.verified_producer_refreeze(
+                        refreeze_path, expansion_path, suite_path,
+                        suite, changed,
+                    )
+
     def test_hidden_confirmation_replays_before_graph_expansion(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
