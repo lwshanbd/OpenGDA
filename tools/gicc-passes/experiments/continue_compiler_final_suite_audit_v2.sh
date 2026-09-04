@@ -51,6 +51,7 @@ authority_base="$script_dir/audit_compiler_action_authority.py"
 authority_auditor="$script_dir/audit_compiler_action_authority_terminal.py"
 null_auditor="$script_dir/audit_llm_sampling_null.py"
 protocol_auditor="$script_dir/audit_compiler_llm_capability_protocol.py"
+claim_auditor="$script_dir/audit_compiler_llm_mainline_claims.py"
 
 # These paths intentionally remain absent: terminal-negative candidates are
 # never materialized as graph expansions or suite refreezes.
@@ -112,7 +113,7 @@ artifacts=(
     "$terminal_auditor" "$readiness_auditor" "$n6_refreezer"
     "$script_dir/audit_compiler_llm_readiness.py"
     "$input_auditor" "$authority_base" "$authority_auditor"
-    "$null_auditor" "$protocol_auditor"
+    "$null_auditor" "$protocol_auditor" "$claim_auditor"
     "$script_dir/audit_compiler_action_frontier.py"
     "$script_dir/producer_fission/audit_producer_fission_runtime_triage.py"
     "$script_dir/guarded_early_trigger/audit_partial_negative_scout.py"
@@ -308,6 +309,19 @@ python3 "$protocol_auditor" emit \
     --sampling-null "$audit_dir/sampling-null.json" \
     --out "$audit_dir/capability-protocol.json" >>"$log_path" 2>&1
 
+claim_args=(
+    --suite "$current_suite" --prompt-dir "$current_prompts"
+    --terminal-negatives "$terminal_report"
+    --readiness "$audit_dir/readiness.json"
+    --action-authority "$audit_dir/action-authority.json"
+    --input-separation "$audit_dir/input-separation.json"
+    --sampling-null "$audit_dir/sampling-null.json"
+    --capability-protocol "$audit_dir/capability-protocol.json"
+    --n6-chain-state "$n6_chain_state"
+)
+python3 "$claim_auditor" emit "${claim_args[@]}" \
+    --out "$audit_dir/paper-mainline.json" >>"$log_path" 2>&1
+
 python3 "$input_auditor" verify \
     --suite "$current_suite" --prompt-dir "$current_prompts" \
     --gbt-report "$repo_root/build_ofi/compiler_lto_eval/generated/gbt-history-report.json" \
@@ -322,15 +336,17 @@ python3 "$protocol_auditor" verify \
     --input-separation "$audit_dir/input-separation.json" \
     --sampling-null "$audit_dir/sampling-null.json" \
     --report "$audit_dir/capability-protocol.json" >>"$log_path" 2>&1
+python3 "$claim_auditor" verify "${claim_args[@]}" \
+    --report "$audit_dir/paper-mainline.json" >>"$log_path" 2>&1
 python3 "$terminal_auditor" verify-contained \
     --report "$terminal_report" >>"$log_path" 2>&1
 verify_artifacts
 
 ids=$(python3 -c \
-    'import json,sys; specs=(("terminal_id",sys.argv[1],"terminal_negatives_id"),("readiness_id",sys.argv[2],"readiness_id"),("authority_id",sys.argv[3],"authority_id"),("null_id",sys.argv[4],"null_id"),("protocol_id",sys.argv[5],"protocol_id")); print(" ".join(name+"="+json.load(open(path))[key] for name,path,key in specs))' \
+    'import json,sys; specs=(("terminal_id",sys.argv[1],"terminal_negatives_id"),("readiness_id",sys.argv[2],"readiness_id"),("authority_id",sys.argv[3],"authority_id"),("null_id",sys.argv[4],"null_id"),("protocol_id",sys.argv[5],"protocol_id"),("claim_id",sys.argv[6],"claim_audit_id")); print(" ".join(name+"="+json.load(open(path))[key] for name,path,key in specs))' \
     "$terminal_report" "$audit_dir/readiness.json" \
     "$audit_dir/action-authority.json" "$audit_dir/sampling-null.json" \
-    "$audit_dir/capability-protocol.json")
+    "$audit_dir/capability-protocol.json" "$audit_dir/paper-mainline.json")
 set_state complete \
     "collective=$collective_label n6_chain=$n6_phase suite=$current_suite $ids"
 trap - EXIT

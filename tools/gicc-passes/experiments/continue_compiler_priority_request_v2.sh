@@ -56,6 +56,7 @@ artifacts=(
     "$script_dir/audit_compiler_llm_capability_protocol.py"
     "$script_dir/audit_compiler_llm_readiness.py"
     "$script_dir/audit_compiler_llm_readiness_terminal.py"
+    "$script_dir/audit_compiler_llm_mainline_claims.py"
     "$script_dir/audit_compiler_terminal_negatives.py"
     "$script_dir/audit_compiler_input_separation.py"
     "$script_dir/audit_compiler_action_authority.py"

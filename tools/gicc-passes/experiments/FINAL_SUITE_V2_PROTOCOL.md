@@ -19,5 +19,7 @@ no new authority.
 The ordered offline stages are terminal-negative audit, input-separation
 audit, readiness audit, action-authority audit, sampling-null audit, and
 capability-protocol audit.  All reports state that provider-call authority is
-zero.  A later successor may freeze one exact content-addressed request, but it
-also has no provider-call path.
+zero.  A final pre-inference claim audit separates the implemented compiler
+method, any confirmed compiler-oracle headroom, and still-unmeasured LLM
+performance.  A later successor may freeze one exact content-addressed
+request, but it also has no provider-call path.

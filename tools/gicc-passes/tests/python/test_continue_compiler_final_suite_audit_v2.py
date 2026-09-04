@@ -18,6 +18,7 @@ class ContinueCompilerFinalSuiteAuditV2Tests(unittest.TestCase):
         self.assertIn("audit_compiler_terminal_negatives.py", text)
         self.assertIn("audit_compiler_llm_readiness_terminal.py", text)
         self.assertIn("audit_compiler_action_authority_terminal.py", text)
+        self.assertIn("audit_compiler_llm_mainline_claims.py", text)
 
     def test_terminal_audit_precedes_optional_refreeze_and_claim_audits(self):
         text = SCRIPT.read_text(encoding="utf-8")
@@ -29,6 +30,7 @@ class ContinueCompilerFinalSuiteAuditV2Tests(unittest.TestCase):
             'python3 "$authority_auditor" emit',
             'python3 "$null_auditor"',
             'python3 "$protocol_auditor" emit',
+            'python3 "$claim_auditor" emit',
         ]
         positions = [text.index(stage) for stage in stages]
         self.assertEqual(sorted(positions), positions)
@@ -52,6 +54,14 @@ class ContinueCompilerFinalSuiteAuditV2Tests(unittest.TestCase):
         self.assertIn("compiler_collective_capacity_n6_hierpipe_v2_20260904", text)
         self.assertIn('python3 "$selector" freeze', text)
         self.assertIn('python3 "$selector" verify', text)
+
+    def test_mainline_claim_audit_is_pre_inference_only(self):
+        path = PASS_ROOT / "experiments" / "audit_compiler_llm_mainline_claims.py"
+        text = path.read_text(encoding="utf-8")
+        self.assertNotIn("subprocess", text)
+        self.assertNotIn("anthropic", text.lower())
+        self.assertIn('"provider_call_authorized": False', text)
+        self.assertIn('"model_output_can_modify_application_source": False', text)
 
 
 if __name__ == "__main__":

@@ -22,25 +22,37 @@ algorithm/size policy. It does not by itself establish levels 2 or 3.
 
 `audit_compiler_llm_readiness.py` verifies the suite and prompt bytes, binds
 each evidence file, checks the historical/current placement graph equivalence,
-and fails closed at every transition. Its current output is:
+and fails closed at every transition.  The versioned terminal adapter now
+preserves interrupted experiments as their factual state while separately
+replaying the proof that their positive gate is unusable.  The current status
+before the N6 scout completes is:
 
 | Entry | Current status | Allowed next stage |
 |---|---|---|
 | `coalescing_placement` | `closed_negative` | no model for this graph |
 | `collective_n8` | `scout_failed` | diagnose without a model; N8 produced no data because it is unschedulable |
-| `jacobi` | `scout_failed` | the first waiter failed before submission; run the frozen recovery scout |
+| `jacobi` | `closed_terminal_negative` | correctness failed after the compiler-pass repair; keep producer fission model-invisible |
 | `minimod` | `runtime_labels_missing` | establish a preregistered compiler oracle first |
 | `mixed_lto` | `runtime_labels_missing` | establish a preregistered compiler oracle first |
-| `mm_minimal` | `scout_failed` | the first waiter failed before submission; run the frozen recovery scout |
-| `loop_lto` | `awaiting_scout` | wait for the sole queued reused-descriptor scout |
+| `mm_minimal` | `closed_terminal_negative` | the frozen positive gate is mathematically unreachable from the seven completed pairs |
+| `loop_lto` | `closed_negative` | the preregistered reused-descriptor oracle-headroom gate failed |
 
-The report has readiness ID
-`sha256:fdabae41ee37817502adf8ff29f1053881d2c74f6308bf4c12b099efdc3f326a`
-and serialized SHA-256
-`676450229e8854ea190863689b94edeb7c073c7ab94fc0aa2cfda13c4212b82c`.
-It reports zero provider-protocol-permitted entries, zero authorized provider
-calls, zero measured LLM policies, and
-`paper_llm_performance_claim_ready=false`.
+The three terminal dispositions replay together as terminal-negative ID
+`sha256:49420c722a70eabacf5a16cc7e2f3277fc3a6b4e8f6167e3d39d7d54f3d14ad2`.
+The pre-N6 dry run reports zero provider-protocol-permitted entries, zero
+authorized provider calls, zero measured LLM policies, and
+`paper_llm_performance_claim_ready=false`.  The final readiness ID is
+deliberately not frozen until the N6 chain reaches a terminal state.
+
+The negative evidence is scientifically asymmetric.  Producer fission cannot
+be performance evidence because its paired final norm differs by
+`1.259e-5`, or `125.9x` the allowed absolute tolerance.  Guarded early trigger
+has zero wins in four 4096 pairs; at 8192 it can reach at most two wins and a
+maximum median of `1.001244x`, even granting the missing pair an arbitrarily
+favorable result.  Reused descriptor achieves an all-cluster small-message
+geomean of `0.987026x` and fails its frozen headroom gate.  These results close
+three proposed compiler actions; they are not evidence that an LLM selector is
+weak, because no model was run and the actions never became model-visible.
 
 The placement result remains scientifically useful even though its LLM gate
 failed. It demonstrates a `5.485628x` trigger-batch-to-factorized-oracle gap,
@@ -49,14 +61,23 @@ only `1.017982x` behind the factorized oracle, however, and its paired 95%
 interval crosses one. The experiment therefore supports compiler action-space
 capacity but cannot support an LLM-selection benefit.
 
-The `collective_n8` and first Jacobi/mm-minimal controller failures carry no
-performance meaning. The N8 allocation never ran because `tioga41` has been
-drained since 2026-07-21, leaving only seven usable `pdebug` nodes. The first
-Jacobi and mm-minimal waiters failed their frozen-artifact checks before job
-submission. A separate N6 graph/bundle and a single serial recovery controller
-now cover those gaps. N6 is not silently substituted into this report: it must
-pass its own runtime gate and be refrozen into a new suite before becoming
-model-visible.
+The `collective_n8` failure carries no performance meaning. The N8 allocation
+never ran because `tioga41` has been drained since 2026-07-21, leaving only
+seven usable `pdebug` nodes. A topology-matched N6 graph/bundle with the same
+4,096-policy compiler action capacity is now frozen under manifest ID
+`sha256:4a8e0ff4be3ccb995e7c8e3192f82a41183118bae9830b0246f9731feac5d2c9`.
+Its sole serial scout is queued on `pdebug`. N6 is not silently substituted
+into the suite: it must pass its own scout and three-allocation confirmation,
+then be refrozen and re-audited before becoming model-visible.
+
+Consequently, the upgraded paper presently supports compiler expressibility,
+strict source-free decision boundaries, and several useful negative results.
+It does not yet support new LLM performance or cross-family generalization.
+If N6 closes negative, the honest result is that none of the newly proposed
+action spaces survived the preregistered runtime gates.  If N6 confirms, it
+permits one exact collective request after separate content-addressed user
+authorization; even a positive collective result remains single-family
+evidence rather than a portfolio claim.
 
 ## Fail-closed transitions
 
@@ -194,16 +215,15 @@ decision-graph labels, or support an LLM performance claim. Its result ID is
 the serialized report SHA-256 is
 `cc97f0aecff14af15786ed24546266558a5b3519270c047ab2943544f4d02a3c`.
 
-The retrospective has now been converted into a prospective, compiler-only
-oracle. LTO proves that every descriptor field is loop invariant, replaces six
+The retrospective was converted into a prospective, compiler-only oracle. LTO
+proves that every descriptor field is loop invariant, replaces six
 runtime-sized host arrays with one scalar descriptor, and calls a runtime
 helper that still enqueues exactly the original number of ordered network
 operations. The application source and optimized device kernel are identical
-between arms. The frozen N2 `pdebug` scout uses six balanced same-allocation
-pairs at batches 4 and 64, validates all 24 enqueue counts, and is queued only
-as a local successor to the existing serial campaign. Commit `06ab7fd` freezes
-its protocol and fail-closed monitor. No scout result exists yet, so the
-candidate is not present in the model-visible graph.
+between arms. The frozen N2 `pdebug` scout completed six balanced
+same-allocation pairs at batches 4 and 64 and validated all 24 enqueue counts.
+Its `0.987026x` all-cluster small-message geomean failed the preregistered
+headroom gate, so the candidate remains absent from the model-visible graph.
 
 The readiness report is now consumed by the suite-level, provider-free
 `audit_compiler_llm_capability_protocol.py` audit. That layer preregisters the
@@ -213,6 +233,12 @@ no provider request while this report exposes zero eligible entries. See
 policy, the post-hoc best-of-20 capability ceiling, and paired runtime evidence.
 
 ## Reproduction
+
+The command below reproduces the older pre-recovery snapshot.  The canonical
+terminal result is instead produced after the N6 chain by
+`continue_compiler_final_suite_audit_v2.sh`, which first replays
+`audit_compiler_terminal_negatives.py` and conditionally performs the N8-to-N6
+suite refreeze.  It submits no job and invokes no provider.
 
 From the repository root:
 
