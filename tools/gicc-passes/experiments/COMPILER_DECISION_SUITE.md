@@ -111,6 +111,16 @@ valid whether the N8 runtime gate is positive or negative; it prevents a later
 model result from being credited for a policy already expressible by a simple
 compiler rule.
 
+The five communication graphs now have the analogous, deliberately narrower
+source-free control documented in
+`COMMUNICATION_STRUCTURAL_CONTROLS.md`.  It uses only independent platform
+calibration and compiler-derived group/launch facts to choose between uniform
+proxy and uniform trigger candidates.  It cannot select mixed routes or
+schedule transforms, and it falls back to the semantic anchor when a required
+compiler fact is dynamic.  This is the appropriate falsifier for the richer
+LLM input: relational reasoning is useful only if its validated plan improves
+on both this simple rule and the unchanged compiler anchor.
+
 ## Current scientific support
 
 Existing measurements establish that compiler-level communication decisions
