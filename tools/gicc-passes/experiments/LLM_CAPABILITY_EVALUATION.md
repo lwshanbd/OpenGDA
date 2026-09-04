@@ -108,9 +108,11 @@ The current report is
 `build_ofi/compiler_llm_capability_protocol_20260904/report.json`:
 
 - protocol ID:
-  `sha256:aa5d192ad718e5f30ca8e5c8311ced57b0a0455cf0b8a39e94ff88bc1c11e0c4`;
+  `sha256:7b699d0e0cbe2570388b9ef7b2ad1b5e1afc328e8eb8121bd1947ce00b56cfd6`;
 - serialized report SHA-256:
-  `18f091dd77d959afd53967cb47049fb9111db32e13f2a36fdaac83c85a8771d1`;
+  `83918559c2d0c1b19205906268988d7291c68f8fbb238a106f9b1ea5f4240fd5`;
+- frozen metrics implementation SHA-256:
+  `fcc5858af4498ad39daa0efcdce4934fc7dd470e3e654189a8bb29a5d4c1250e`;
 - status: `blocked_no_runtime_eligible_entries`;
 - suite entries: 7;
 - runtime-eligible entries: 0;

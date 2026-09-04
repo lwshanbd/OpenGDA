@@ -22,6 +22,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE.parent / "python"))
+METRICS_IMPLEMENTATION = HERE.parent / "python" / "gicc_llm_capability_metrics.py"
 
 import gicc_compiler_decision_suite as decision_suite  # noqa: E402
 
@@ -327,6 +328,9 @@ def build_report(suite_path: Path, prompt_dir: Path, readiness_path: Path,
                 TRIALS_PER_VIEW * len(VIEWS)
             ),
             "paper_llm_performance_claim_ready": False,
+        },
+        "implementation": {
+            "capability_metrics": evidence(METRICS_IMPLEMENTATION),
         },
         "evidence": {
             "suite": evidence(suite_path),

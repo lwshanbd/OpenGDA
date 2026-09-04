@@ -227,7 +227,7 @@ representatives, isolates best-of-20 as a post-hoc capability upper bound, and
 uses `relational`/`descriptors`/`opaque` as the equal-authority information
 ablation. Its current result has zero runtime-eligible entries and therefore
 permits zero provider calls; protocol ID
-`sha256:aa5d192ad718e5f30ca8e5c8311ced57b0a0455cf0b8a39e94ff88bc1c11e0c4`.
+`sha256:7b699d0e0cbe2570388b9ef7b2ad1b5e1afc328e8eb8121bd1947ce00b56cfd6`.
 
 ## Reproduction
 
