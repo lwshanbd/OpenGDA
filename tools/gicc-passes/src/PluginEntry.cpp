@@ -101,6 +101,8 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
 #ifndef GICC_PASSES_ANALYZE_ONLY
                     if (!cfg.collectiveOnly) {
                         MPM.addPass(GICCDispatchLoweringPass());
+                        if (cfg.producerFissionOracle)
+                            MPM.addPass(GICCProducerFissionDevicePass());
                         MPM.addPass(GICCDeviceLoweringPass());
                     }
 #endif
@@ -110,6 +112,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
             PB.registerOptimizerLastEPCallback(
                 GICC_EP_LAMBDA_HEAD(MPM) {
                     MPM.addPass(GICCSentinelPass());
+#ifndef GICC_PASSES_ANALYZE_ONLY
+                    if (getConfig().producerFissionOracle)
+                        MPM.addPass(GICCProducerFissionHostPass());
+#endif
                 });
             // Named-pass registration so tests can drive the plugin via
             // opt -passes='gicc-sentinel' / 'gicc-device-discovery'.
@@ -153,12 +159,15 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                         MPM.addPass(GICCDispatchLoweringPass());
                         return true;
                     }
-                    // Deliberately named-only until the device-body phase
-                    // partition pass is implemented and tested. Running the
-                    // host half alone is useful for IR proof tests but is not
-                    // a valid executable transformation.
+                    // Explicit names support focused proof tests. Executable
+                    // builds use both halves through the default-off oracle
+                    // switch rather than invoking only one named pass.
                     if (Name == "gicc-producer-fission-host") {
                         MPM.addPass(GICCProducerFissionHostPass());
+                        return true;
+                    }
+                    if (Name == "gicc-producer-fission-device") {
+                        MPM.addPass(GICCProducerFissionDevicePass());
                         return true;
                     }
 #endif

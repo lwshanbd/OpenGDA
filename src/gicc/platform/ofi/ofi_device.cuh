@@ -53,6 +53,7 @@
 #pragma once
 
 #include "internal/gpu_device_context.hpp"
+#include <cstddef>
 #include <cstdint>
 
 #ifdef GICC_CPU_PROXY
@@ -81,6 +82,10 @@ enum : std::uint32_t {
 struct DeviceCtx {
     volatile uint64_t* trigger_addr_;       // MMIO trigger counter
     uint64_t           trigger_val_;        // value to write to trigger_addr_
+    // Fixed compiler/runtime ABI prefix. Keeping the phase word before all
+    // optional fields gives device LTO one configuration-independent offset.
+    // The static_assert below prevents a silent layout drift.
+    std::uint32_t       schedule_phase_ = GICC_SCHEDULE_PHASE_ORIGINAL;
 #ifdef GICC_CPU_PROXY
     // Single-ring back-compat pointer (== proxy_rings_arr[0]). Used as a
     // fallback when proxy_rings_arr has not been set up.
@@ -99,12 +104,10 @@ struct DeviceCtx {
     // => not local/mapped => fall back to put/proxy. Set by prepare().
     void**             peer_ipc_base = nullptr;
     int                ipc_n_bufs    = 0;
-    // Written by a one-thread GICC-owned setter kernel on the application's
-    // launch stream. A following compiler-cloned launch therefore observes
-    // the selected phase without a racing host store or a source-level ABI
-    // change. Appended to preserve all existing field offsets.
-    std::uint32_t       schedule_phase_ = GICC_SCHEDULE_PHASE_ORIGINAL;
 };
+
+static_assert(offsetof(DeviceCtx, schedule_phase_) == 16,
+              "DeviceCtx schedule-phase compiler ABI changed");
 
 #ifdef GICC_CPU_PROXY
 namespace detail {

@@ -1,6 +1,7 @@
 # Compiler-owned producer-frontier fission
 
-Status: compiler-fact foundation in progress; not yet a runtime protocol or
+Status: a dormant end-to-end compiler oracle is implemented; runtime
+correctness and performance remain unmeasured, so this is not yet a
 performance claim.
 
 ## Research question
@@ -50,8 +51,10 @@ Creating new device kernels during device LTO would not automatically create
 the corresponding HIP host stubs. Instead, preserve the original kernel
 symbol and ABI and launch it twice in two compiler phases.
 
-Add a schedule-phase word to the compiler/runtime-owned `DeviceCtx`. A small
-pre-authored GICC setter kernel writes that word. Host LTO rewrites the body of
+Place a schedule-phase word at fixed byte offset 16 in the
+compiler/runtime-owned prefix of `DeviceCtx`. A compile-time layout assertion
+keeps that offset independent of the optional proxy fields. A small pre-authored
+GICC setter kernel writes the word. Host LTO rewrites the body of
 the existing annotated `gicc::launch<Kernel>` instantiation, or its exact call
 site, into the following same-stream sequence:
 
@@ -60,6 +63,7 @@ set_schedule_phase(ctx, boundary_producer)
 launch original Kernel(ctx, original args...)
 set_schedule_phase(ctx, interior_and_communication)
 launch original Kernel(ctx, original args...)
+set_schedule_phase(ctx, original)
 ```
 
 The setter is a device command on the same stream, not a racing host store.
@@ -67,8 +71,9 @@ HIP stream order therefore makes each launch observe its own phase. The
 original kernel stub, symbol, formal arguments, and application call remain
 unchanged.
 
-The runtime-owned mechanism is now present but dormant: `DeviceCtx` appends a
-zero-defaulted phase word, every `Runtime::prepare*` path restores
+The runtime-owned mechanism is now present but dormant: `DeviceCtx` contains a
+zero-defaulted phase word in its fixed compiler/runtime prefix, every
+`Runtime::prepare*` path restores
 `original`, and the C ABI helper
 `gicc_runtime_set_schedule_phase_from_kernel_args` launches a one-thread
 setter on the supplied stream. Host/device IR audit confirms that the helper
@@ -150,15 +155,24 @@ path only under formal 7 equal to false and retains the untouched fused launch
 when it is true. It performs no floating-point reassociation and assumes no
 subgroup law. A negative compiler test with opposite guards is rejected.
 
-These are still not an enabled schedule. A dormant, explicitly named final
-host-IR pass now re-proves the launch and parameter-array shape, checks buffer
-identity plus every interval bound at runtime, gates the optimized edge on the
-shared side-effect-disabling formal, and emits two same-stream launches with
-an untouched fused-launch fallback. It rejects dynamic/cross-block parameter
-array writes and interval casts whose bit-width semantics cannot be replayed
-from the v1 metadata. The pass is intentionally absent from the automatic LTO
-pipeline: the matching device-region materializer and end-to-end oracle must
-exist before the candidate can be enabled or exposed to a model.
+These are still not a default-enabled schedule. A dormant final host-IR pass
+re-proves the launch and parameter-array shape, checks buffer identity plus
+every interval bound at runtime, gates the optimized edge on the shared
+side-effect-disabling formal, and emits two same-stream launches followed by a
+phase reset, with an untouched fused-launch fallback. It rejects
+dynamic/cross-block parameter-array writes and interval casts whose bit-width
+semantics cannot be replayed from the v1 metadata.
+
+A matching device-IR pass now rebuilds the final producer, transfer, completion,
+and side-effect facts and exact-compares them with persisted discovery metadata.
+It materializes the overlap/complement compute partition, gates the original
+PUTs, and clones one synthetic early flush after the final PUT. The synthetic
+flush carries compiler metadata so site-ID assignment ignores it while ordinary
+device lowering still converts it to the same DWQ trigger operation. Both passes
+are available as explicitly named test pipelines. Automatic host/device LTO
+attachment requires the opt-in `GICC_PRODUCER_FISSION_ORACLE=1`; its default is
+false, and this candidate remains absent from the model-visible legal action
+set.
 
 Device LTO rewrites the original kernel body:
 
@@ -196,6 +210,7 @@ set_phase_from_kernel_args(kernel_params, boundary, stream)
 hipLaunchKernel(original symbol, original geometry, kernel_params, shmem, stream)
 set_phase_from_kernel_args(kernel_params, interior, stream)
 hipLaunchKernel(original symbol, original geometry, kernel_params, shmem, stream)
+set_phase_from_kernel_args(kernel_params, original, stream)
 ```
 
 The helper reads the already-materialized `DeviceCtx*` from kernel argument
@@ -205,11 +220,12 @@ does not require a new application-visible kernel stub. Final host LTO must
 rerun the shape proof because the optimizer may have moved ownership from the
 stub to the wrapper.
 
-Trace synthesis currently executes before the annotated wrapper. An IPC
-route may therefore enqueue a copy before boundary producers run. The first
-fission candidate must force every group member to a trigger-delayed DWQ or
-device-proxy route; `IPC_PUSH` and `IPC_OR_DWQ` are masked until trace
-synthesis itself can be phase-split.
+Trace synthesis currently executes before the annotated wrapper. An IPC route
+may therefore enqueue a copy before boundary producers run. The first fission
+candidate consequently requires a valid final hint file in which every group
+member resolves to exactly one untransformed `DWQ_TRIGGER`. `IPC_PUSH`,
+`IPC_OR_DWQ`, batching, proxy transforms, missing hints, and malformed hints
+all fail closed until trace synthesis itself can be phase-split.
 
 ## Required compiler proofs
 

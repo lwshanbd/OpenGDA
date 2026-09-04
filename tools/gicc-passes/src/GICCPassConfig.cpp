@@ -48,6 +48,8 @@ Config buildConfig() {
     c.collectiveOut = envOr("GICC_COLLECTIVE_OUT", "");
     c.collectiveHintIn = envOr("GICC_COLLECTIVE_HINT_IN", "");
     c.collectiveOnly = envFlag("GICC_COLLECTIVE_ONLY");
+    c.producerFissionOracle =
+        envFlag("GICC_PRODUCER_FISSION_ORACLE");
     return c;
 }
 

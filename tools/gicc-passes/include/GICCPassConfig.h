@@ -32,6 +32,7 @@ enum class Target {
 //   GICC_COLLECTIVE_OUT     ("")
 //   GICC_COLLECTIVE_HINT_IN ("")
 //   GICC_COLLECTIVE_ONLY    (false)
+//   GICC_PRODUCER_FISSION_ORACLE (false)
 struct Config {
     Mode        mode           = Mode::Passthrough;
     Target      target         = Target::Auto;
@@ -46,6 +47,10 @@ struct Config {
     // in that situation would erase proxy put/quiet calls without replacing
     // them. Named passes remain available for focused tests.
     bool        collectiveOnly = false;
+    // Explicit research-oracle switch. The producer-fission passes remain
+    // absent from the automatic pipeline unless this is true, and still
+    // re-prove a DWQ-only hint plus all compiler legality facts.
+    bool        producerFissionOracle = false;
 };
 
 // Returns a singleton Config, lazily populated from getenv() on first call.

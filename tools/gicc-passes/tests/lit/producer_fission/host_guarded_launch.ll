@@ -7,6 +7,7 @@
 ; RUN: cp %S/../Inputs/k_overlap_partition_meta.json \
 ; RUN:    %t.metadir/_Z11k_partition.json
 ; RUN: env GICC_MODE=lower GICC_META_DIR=%t.metadir \
+; RUN:     GICC_HINT_IN=%S/../Inputs/hint_fission_dwq.json \
 ; RUN:     %opt -load-pass-plugin=%gicc_passes_so \
 ; RUN:          -passes='gicc-producer-fission-host' -S %s 2>%t.err | \
 ; RUN:     %FileCheck %s --check-prefix=PHASED
@@ -19,10 +20,20 @@
 ; RUN:   %S/../Inputs/k_overlap_partition_meta.json \
 ; RUN:   %t.reject.metadir/_Z11k_partition.json
 ; RUN: env GICC_MODE=lower GICC_META_DIR=%t.reject.metadir \
+; RUN:     GICC_HINT_IN=%S/../Inputs/hint_fission_dwq.json \
 ; RUN:     %opt -load-pass-plugin=%gicc_passes_so \
 ; RUN:          -passes='gicc-producer-fission-host' -S %s 2>%t.reject.err | \
 ; RUN:     %FileCheck %s --check-prefix=REJECT
 ; RUN: %FileCheck %s --check-prefix=REJECT-LOG < %t.reject.err
+;
+; An eager IPC route would read the halo source before the producer phase.
+; Even otherwise-valid compiler facts must therefore keep the fused launch.
+; RUN: env GICC_MODE=lower GICC_META_DIR=%t.metadir \
+; RUN:     GICC_HINT_IN=%S/../Inputs/hint_fission_ipc.json \
+; RUN:     %opt -load-pass-plugin=%gicc_passes_so \
+; RUN:          -passes='gicc-producer-fission-host' -S %s 2>%t.route.err | \
+; RUN:     %FileCheck %s --check-prefix=ROUTE
+; RUN: %FileCheck %s --check-prefix=ROUTE-LOG < %t.route.err
 
 target triple = "x86_64-unknown-linux-gnu"
 
@@ -125,3 +136,9 @@ entry:
 ; REJECT-COUNT-1: call i32 @hipLaunchKernel(
 ; REJECT: ret void
 ; REJECT-LOG: [producer-fission-host] _Z11k_partition: rejected: non-duplicable operations have no shared disabling guard
+
+; ROUTE-LABEL: define linkonce_odr void @_ZN4gicc6launchIXadL_Z11k_partitionEEEv(
+; ROUTE-NOT: @gicc_runtime_kernel_arg_matches_local_buffer
+; ROUTE-COUNT-1: call i32 @hipLaunchKernel(
+; ROUTE: ret void
+; ROUTE-LOG: [producer-fission-host] _Z11k_partition: rejected: every fission transfer must use untransformed DWQ_TRIGGER

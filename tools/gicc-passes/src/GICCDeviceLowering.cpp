@@ -502,6 +502,25 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
     for (Function &F : M) {
         if (F.isDeclaration() || !isGPUKernel(F)) continue;
 
+        // The producer-fission pass clones one early remainder-only flush and
+        // marks it so source site numbering stays stable. It is intentionally
+        // absent from collectGICCSites(), but still needs the ordinary AMDGCN
+        // MMIO lowering here.
+        for (BasicBlock &BB : F) {
+            for (Instruction &I : BB) {
+                auto *call = dyn_cast<CallInst>(&I);
+                if (!call || !call->getMetadata(
+                                 "gicc.producer_fission.synthetic_flush"))
+                    continue;
+                GICCOpKind kind;
+                if (!classifyGICCCall(*call, kind) ||
+                    kind != GICCOpKind::Flush)
+                    report_fatal_error(
+                        "gicc: malformed producer-fission synthetic flush");
+                flushCalls.push_back(call);
+            }
+        }
+
         GICCKernelInfo info;
         collectGICCSites(F, info);
         if (info.sites.empty()) continue;

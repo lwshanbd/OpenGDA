@@ -17,4 +17,17 @@ public:
     }
 };
 
+// Early device-IR half of the same schedule. Automatic attachment is guarded
+// by the default-off research-oracle switch; named pipelines remain available
+// for focused proof tests.
+class GICCProducerFissionDevicePass
+    : public llvm::PassInfoMixin<GICCProducerFissionDevicePass> {
+public:
+    llvm::PreservedAnalyses run(llvm::Module &M,
+                                llvm::ModuleAnalysisManager &);
+    static llvm::StringRef name() {
+        return "GICCProducerFissionDevicePass";
+    }
+};
+
 }  // namespace gicc::pass

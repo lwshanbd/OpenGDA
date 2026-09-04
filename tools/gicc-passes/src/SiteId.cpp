@@ -100,6 +100,10 @@ void collectGICCSites(Function &F, GICCKernelInfo &info) {
         for (Instruction &I : BB) {
             auto *CI = dyn_cast<CallInst>(&I);
             if (!CI) continue;
+            // Compiler-synthesized early completions are lowered separately
+            // and must not renumber source-derived site IDs on a later pass.
+            if (CI->getMetadata("gicc.producer_fission.synthetic_flush"))
+                continue;
             GICCOpKind kind;
             if (!classifyGICCCall(*CI, kind)) continue;
 
