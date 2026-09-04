@@ -221,6 +221,27 @@ an infrastructure failure, or an offline N6 graph from being counted as LLM
 evidence. The reused-descriptor and recovery campaigns must finish their
 serial runtime gates before the report can advance.
 
+The topology-matched N6 post-authorization path is now implemented but not
+launched.  `collective/continue_compiler_collective_n6_after_authorization.sh`
+first requires the final priority selection to name `collective_n6`, binds its
+request ID to a separate exact authorization, and delegates the 60 stateless
+provider calls to the common strictly serial runner.  A complete archive then
+advances serially through one hidden full-catalog control allocation,
+provider-free capability analysis, deduplication and LTO materialization of at
+most nine representatives, and three independent paired `pdebug` allocations.
+At no point does a model receive source, IR, runtime labels, compiler-private
+hints, or permission to generate code.
+
+`collective/analyze_collective_n6_llm_runtime_validation.py` replays the three
+raw allocation monitors, exact jobspecs, node sets, compiler artifacts and
+rotated policy orders.  It reports each modal and post-hoc representative
+against both the semantic anchor and deterministic compiler control, plus its
+weighted runtime cost regret to the materialized compiler oracle.  Only the
+relational modal policy can satisfy the preregistered stable-policy gate; the
+best-of-20 representative remains a labeled capability ceiling.  A single N6
+family result cannot establish portfolio generalization or complete the paper
+claim, regardless of its speedup.
+
 ## Historical feasibility versus the upgraded claim
 
 The earlier `llm-zero-shot-v1` archive is now independently re-audited in

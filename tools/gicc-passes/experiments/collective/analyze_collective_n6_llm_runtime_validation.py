@@ -483,6 +483,10 @@ def main() -> int:
     parser.add_argument("--monitor", type=Path, action="append", required=True)
     parser.add_argument("--repo-root", type=Path, default=ROOT)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--verify", action="store_true",
+        help="rebuild the report and compare it with --out without writing",
+    )
     args = parser.parse_args()
     try:
         report = build_report(
@@ -490,9 +494,18 @@ def main() -> int:
             [path.resolve() for path in args.monitor],
             args.repo_root.resolve(),
         )
-        require(not args.out.exists(), f"refusing to overwrite {args.out}")
-        preparation.write_json_atomic(args.out.resolve(), report)
+        if args.verify:
+            require(
+                read_json(args.out.resolve()) == report,
+                "runtime analysis does not match current evidence",
+            )
+            action = "verified"
+        else:
+            require(not args.out.exists(), f"refusing to overwrite {args.out}")
+            preparation.write_json_atomic(args.out.resolve(), report)
+            action = "wrote"
         print(json.dumps({
+            "action": action,
             "claim_gates": report["claim_gates"],
             "result_id": report["result_id"],
         }, sort_keys=True))
