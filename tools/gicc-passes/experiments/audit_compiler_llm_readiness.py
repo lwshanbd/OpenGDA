@@ -38,7 +38,7 @@ EXPECTED_LABELS = {
     "mixed_lto",
     "mm_minimal",
 }
-CAPACITY_ONLY_LABELS = ("loop_lto", "minimod", "mixed_lto", "mm_minimal")
+CAPACITY_ONLY_LABELS = ("loop_lto", "minimod", "mixed_lto")
 
 
 class ReadinessError(RuntimeError):
@@ -229,6 +229,59 @@ def classify_producer(entry: dict[str, Any], phase: str,
     return result
 
 
+def classify_guarded_early_trigger(entry: dict[str, Any], phase: str,
+                                   analysis: Any | None) -> dict[str, Any]:
+    if analysis is None:
+        status = {
+            "waiting_predecessor": "awaiting_predecessor",
+            "submitting": "awaiting_scout",
+            "monitoring": "awaiting_scout",
+            "analyzing": "awaiting_scout",
+            "missing": "runtime_labels_missing",
+            "failed": "scout_failed",
+        }.get(phase)
+        if status is None:
+            raise ReadinessError(
+                f"guarded-early-trigger state {phase!r} requires an analysis"
+            )
+        next_stage = {
+            "awaiting_predecessor": "wait_for_serial_compiler_headroom_campaign",
+            "awaiting_scout": "wait_for_guarded_early_trigger_scout",
+            "runtime_labels_missing": (
+                "establish_preregistered_compiler_oracle_headroom_first"
+            ),
+            "scout_failed": "diagnose_without_model_call",
+        }[status]
+        return _base_entry(entry, status, next_stage)
+    if (not isinstance(analysis, dict)
+            or analysis.get("schema_version")
+            != "gicc-guarded-early-trigger-analysis-v1"
+            or analysis.get("correctness_gate", {}).get("passed") is not True):
+        raise ReadinessError(
+            "guarded-early-trigger scout violates its correctness gate"
+        )
+    gate = analysis.get("oracle_headroom_gate")
+    if not isinstance(gate, dict) or not isinstance(gate.get("passed"), bool):
+        raise ReadinessError("guarded-early-trigger scout lacks its oracle gate")
+    expected_phase = "promising" if gate["passed"] else "negative"
+    if phase != expected_phase:
+        raise ReadinessError(
+            "guarded-early-trigger controller state disagrees with scout analysis"
+        )
+    if gate["passed"]:
+        result = _base_entry(
+            entry, "confirmation_required",
+            "freeze_and_run_confirmatory_compiler_oracle",
+        )
+    else:
+        result = _base_entry(
+            entry, "closed_negative",
+            "mask_guarded_early_trigger_from_model",
+        )
+    result["runtime_gate_passed"] = gate["passed"]
+    return result
+
+
 def _normalized_structural_graph(value: Any) -> tuple[dict[str, Any], str]:
     graph = dict(structural.verified_graph(value))
     graph.pop("graph_id")
@@ -275,6 +328,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         read_json(args.producer_analysis)
         if args.producer_analysis.is_file() else None
     )
+    guarded_analysis = (
+        read_json(args.guarded_analysis)
+        if args.guarded_analysis.is_file() else None
+    )
     records = {
         "coalescing_placement": classify_placement(
             placement_entry, placement_summary, graphs_equivalent,
@@ -286,6 +343,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "jacobi": classify_producer(
             entries["jacobi"], state_phase(args.producer_state),
             producer_analysis,
+        ),
+        "mm_minimal": classify_guarded_early_trigger(
+            entries["mm_minimal"], state_phase(args.guarded_state),
+            guarded_analysis,
         ),
     }
     for label in CAPACITY_ONLY_LABELS:
@@ -336,6 +397,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "collective_analysis": evidence(args.collective_analysis),
             "producer_state": evidence(args.producer_state),
             "producer_analysis": evidence(args.producer_analysis),
+            "guarded_state": evidence(args.guarded_state),
+            "guarded_analysis": evidence(args.guarded_analysis),
         },
     }
     result = dict(payload)
@@ -373,6 +436,8 @@ def add_inputs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--collective-analysis", type=Path, required=True)
     parser.add_argument("--producer-state", type=Path, required=True)
     parser.add_argument("--producer-analysis", type=Path, required=True)
+    parser.add_argument("--guarded-state", type=Path, required=True)
+    parser.add_argument("--guarded-analysis", type=Path, required=True)
 
 
 def main() -> int:

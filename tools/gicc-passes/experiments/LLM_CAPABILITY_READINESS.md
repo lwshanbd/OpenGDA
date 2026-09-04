@@ -31,13 +31,13 @@ and fails closed at every transition. Its current output is:
 | `jacobi` | `awaiting_predecessor` | wait for N8, then the one queued-by-controller scout |
 | `minimod` | `runtime_labels_missing` | establish a preregistered compiler oracle first |
 | `mixed_lto` | `runtime_labels_missing` | establish a preregistered compiler oracle first |
-| `mm_minimal` | `runtime_labels_missing` | establish a preregistered compiler oracle first |
+| `mm_minimal` | `awaiting_predecessor` | run the frozen guarded-trigger scout after the serial campaign |
 | `loop_lto` | `runtime_labels_missing` | establish a preregistered compiler oracle first |
 
 The report has readiness ID
-`sha256:544ec38a9eee16e52a50c49c2a75a072a711893c89209e09ac05cd3abbb80325`
+`sha256:3718159ad83791d99d28bd1e3b6e9fbd497a6fce677267efd39f48ea4b64e348`
 and serialized SHA-256
-`151716c8dba1054e4bfc3c25973ff7d2d8df85039df4ffbdafe6d1e805c3c752`.
+`830332ba509ec4750640c0cfd48784ff54725a907bcf7b27f84a95e4d8308683`.
 It reports zero provider-protocol-permitted entries, zero authorized provider
 calls, zero measured LLM policies, and
 `paper_llm_performance_claim_ready=false`.
@@ -56,6 +56,8 @@ capacity but cannot support an LLM-selection benefit.
 - A positive exploratory N8 or producer-fission scout advances only to a
   separately frozen confirmatory compiler-oracle experiment. It never
   authorizes a provider request.
+- The guarded early-trigger scout is subject to the same rule and remains
+  absent from model-visible candidates while it waits or until confirmation.
 - A graph without runtime labels remains a capability-inventory entry, not a
   performance test.
 - Only a positive confirmatory headroom result may permit preparation of an
@@ -149,6 +151,8 @@ python3 tools/gicc-passes/experiments/audit_compiler_llm_readiness.py emit \
   --collective-analysis build_ofi/compiler_collective_hierpipe_n8_scout_20260903/analysis.json \
   --producer-state build_ofi/producer_fission_oracle_scout_7687377_20260904.state \
   --producer-analysis build_ofi/producer_fission_oracle_scout_7687377_20260904/analysis.json \
+  --guarded-state build_ofi/guarded_early_trigger_scout_77897d9_20260904.state \
+  --guarded-analysis build_ofi/guarded_early_trigger_scout_77897d9_20260904/analysis.json \
   --out build_ofi/compiler_llm_readiness_20260904/report.json
 ```
 
