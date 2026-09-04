@@ -82,6 +82,12 @@ struct ProducerOverlapPartitionFacts {
     unsigned sourceBufferParam = 0;
     ProducerStoreDomainFact producerStore;
     std::vector<OverlapTransferFact> transfers;
+    bool sideEffectSafetyExact = false;
+    std::string sideEffectSafetyMode = "unproved";
+    bool hasSideEffectGuard = false;
+    unsigned sideEffectGuardParam = 0;
+    bool sideEffectGuardValue = false;
+    std::string sideEffectSafetyReason;
     std::string reason;
 };
 
@@ -987,6 +993,8 @@ bool sameProducerDomain(const ProducerStoreDomainFact &left,
         left.addressExact != right.addressExact ||
         left.predicatesExact != right.predicatesExact ||
         left.domainExact != right.domainExact ||
+        left.partitionRegionExact != right.partitionRegionExact ||
+        left.partitionPredicateIndex != right.partitionPredicateIndex ||
         !sameDeviceExpr(left.byteOffset, right.byteOffset) ||
         left.predicates.size() != right.predicates.size())
         return false;
@@ -998,6 +1006,160 @@ bool sameProducerDomain(const ProducerStoreDomainFact &left,
             return false;
     }
     return true;
+}
+
+bool sameAtomicDomain(const ProducerAtomicDomainFact &left,
+                      const ProducerAtomicDomainFact &right) {
+    if (left.pointerParam != right.pointerParam ||
+        left.operation != right.operation ||
+        left.resultUnused != right.resultUnused ||
+        left.predicatesExact != right.predicatesExact ||
+        left.domainExact != right.domainExact ||
+        left.predicates.size() != right.predicates.size())
+        return false;
+    for (size_t i = 0; i < left.predicates.size(); ++i) {
+        if (left.predicates[i].requiredValue !=
+                right.predicates[i].requiredValue ||
+            !sameDeviceExpr(left.predicates[i].condition,
+                            right.predicates[i].condition))
+            return false;
+    }
+    return true;
+}
+
+bool sameAtomicDomains(const ProducerFrontierFacts &left,
+                       const ProducerFrontierFacts &right) {
+    if (left.atomic_write_sites != right.atomic_write_sites ||
+        left.atomic_domains_known != right.atomic_domains_known ||
+        left.producer_atomic_domains.size() !=
+            right.producer_atomic_domains.size())
+        return false;
+    for (size_t i = 0; i < left.producer_atomic_domains.size(); ++i)
+        if (!sameAtomicDomain(left.producer_atomic_domains[i],
+                              right.producer_atomic_domains[i]))
+            return false;
+    return true;
+}
+
+bool samePhaseSensitiveDomain(
+        const ProducerPhaseSensitiveDomainFact &left,
+        const ProducerPhaseSensitiveDomainFact &right) {
+    if (left.operation != right.operation ||
+        left.guardPredicatesExact != right.guardPredicatesExact ||
+        left.domainExact != right.domainExact ||
+        left.guardPredicates.size() != right.guardPredicates.size())
+        return false;
+    for (size_t i = 0; i < left.guardPredicates.size(); ++i) {
+        if (left.guardPredicates[i].requiredValue !=
+                right.guardPredicates[i].requiredValue ||
+            !sameDeviceExpr(left.guardPredicates[i].condition,
+                            right.guardPredicates[i].condition))
+            return false;
+    }
+    return true;
+}
+
+bool samePhaseSensitiveDomains(const ProducerFrontierFacts &left,
+                               const ProducerFrontierFacts &right) {
+    if (left.phase_sensitive_sites != right.phase_sensitive_sites ||
+        left.phase_sensitive_domains_known !=
+            right.phase_sensitive_domains_known ||
+        left.producer_phase_sensitive_domains.size() !=
+            right.producer_phase_sensitive_domains.size())
+        return false;
+    for (size_t i = 0;
+         i < left.producer_phase_sensitive_domains.size(); ++i)
+        if (!samePhaseSensitiveDomain(
+                left.producer_phase_sensitive_domains[i],
+                right.producer_phase_sensitive_domains[i]))
+            return false;
+    return true;
+}
+
+void deriveSideEffectSafety(const KernelTemplate &kernel,
+                            const ProducerFrontierFacts &frontier,
+                            ProducerOverlapPartitionFacts &result) {
+    if (frontier.atomic_write_sites == 0 &&
+        frontier.phase_sensitive_sites == 0) {
+        result.sideEffectSafetyExact = true;
+        result.sideEffectSafetyMode = "no_nonduplicable_operations";
+        result.sideEffectSafetyReason =
+            "producer frontier contains no atomic writes or phase-sensitive calls";
+        return;
+    }
+    if (frontier.atomic_write_sites != 0 &&
+        (!frontier.atomic_domains_known ||
+         frontier.producer_atomic_domains.empty())) {
+        result.sideEffectSafetyReason =
+            "atomic control domains are not exact";
+        return;
+    }
+    if (frontier.phase_sensitive_sites != 0 &&
+        (!frontier.phase_sensitive_domains_known ||
+         frontier.producer_phase_sensitive_domains.empty())) {
+        result.sideEffectSafetyReason =
+            "phase-sensitive control domains are not exact";
+        return;
+    }
+
+    // Search one site's direct i1-formal predicates for one common condition
+    // that dominates every atomic and every phase-sensitive call.
+    // Taking the opposite value at launch makes all such operations
+    // unreachable; no FP reassociation or subgroup-semantic assumption is
+    // needed.
+    const std::vector<ProducerPredicateFact> &candidates =
+        frontier.phase_sensitive_sites != 0
+            ? frontier.producer_phase_sensitive_domains.front()
+                  .guardPredicates
+            : frontier.producer_atomic_domains.front().predicates;
+    for (const auto &candidate : candidates) {
+        const DeviceExpr &condition = candidate.condition;
+        if (condition.kind != DeviceExpr::Kind::Param ||
+            condition.typeStr != "i1" ||
+            condition.paramIdx >= kernel.params.size() ||
+            kernel.params[condition.paramIdx].typeStr != "i1")
+            continue;
+        const bool commonAtomic = std::all_of(
+            frontier.producer_atomic_domains.begin(),
+            frontier.producer_atomic_domains.end(),
+            [&](const auto &domain) {
+                return domain.domainExact && domain.resultUnused &&
+                    std::any_of(domain.predicates.begin(),
+                                domain.predicates.end(),
+                                [&](const auto &predicate) {
+                                    return predicate.requiredValue ==
+                                               candidate.requiredValue &&
+                                        sameDeviceExpr(predicate.condition,
+                                                       condition);
+                                });
+            });
+        const bool commonPhaseSensitive = std::all_of(
+            frontier.producer_phase_sensitive_domains.begin(),
+            frontier.producer_phase_sensitive_domains.end(),
+            [&](const auto &domain) {
+                return domain.domainExact &&
+                    std::any_of(domain.guardPredicates.begin(),
+                                domain.guardPredicates.end(),
+                                [&](const auto &predicate) {
+                                    return predicate.requiredValue ==
+                                               candidate.requiredValue &&
+                                        sameDeviceExpr(predicate.condition,
+                                                       condition);
+                                });
+            });
+        if (!commonAtomic || !commonPhaseSensitive) continue;
+        result.sideEffectSafetyExact = true;
+        result.sideEffectSafetyMode =
+            "all_nonduplicable_operations_disabled_by_formal_guard";
+        result.hasSideEffectGuard = true;
+        result.sideEffectGuardParam = condition.paramIdx;
+        result.sideEffectGuardValue = !candidate.requiredValue;
+        result.sideEffectSafetyReason =
+            "one opposite i1 formal value makes every exact atomic and phase-sensitive domain unreachable";
+        return;
+    }
+    result.sideEffectSafetyReason =
+        "non-duplicable operations lack one shared direct i1-formal disabling predicate";
 }
 
 ProducerOverlapPartitionFacts producerOverlapPartition(
@@ -1061,6 +1223,8 @@ ProducerOverlapPartitionFacts producerOverlapPartition(
             other.producer_pointer_param != result.producerPointerParam ||
             other.source_buffer_index_param != result.sourceBufferParam ||
             other.producer_store_domains.size() != 1 ||
+            !sameAtomicDomains(frontier, other) ||
+            !samePhaseSensitiveDomains(frontier, other) ||
             !sameProducerDomain(other.producer_store_domains.front(),
                                 result.producerStore)) {
             result.reason =
@@ -1093,6 +1257,8 @@ ProducerOverlapPartitionFacts producerOverlapPartition(
         result.reason = "completion group contains no transfer intervals";
         return result;
     }
+
+    deriveSideEffectSafety(kernel, frontier, result);
 
     result.exact = true;
     result.reason =
@@ -1235,6 +1401,58 @@ json::Value producerStoreDomainRecord(
     record["predicates"] = std::move(predicates);
     record["predicates_exact"] = domain.predicatesExact;
     record["domain_exact"] = domain.domainExact;
+    record["partition_region_exact"] = domain.partitionRegionExact;
+    if (domain.partitionRegionExact) {
+        record["partition_predicate_index"] =
+            static_cast<int64_t>(domain.partitionPredicateIndex);
+        record["partition_predicate"] = deviceExprFactRecord(
+            domain.predicates[domain.partitionPredicateIndex].condition);
+        record["partition_predicate_required_value"] =
+            domain.predicates[domain.partitionPredicateIndex].requiredValue;
+    } else {
+        record["partition_predicate_index"] = nullptr;
+        record["partition_predicate"] = nullptr;
+        record["partition_predicate_required_value"] = nullptr;
+    }
+    record["partition_region_reason"] = domain.partitionRegionReason;
+    record["reason"] = domain.reason;
+    return json::Value(std::move(record));
+}
+
+json::Value producerAtomicDomainRecord(
+        const ProducerAtomicDomainFact &domain) {
+    json::Object record;
+    record["pointer_param"] = static_cast<int64_t>(domain.pointerParam);
+    record["operation"] = domain.operation;
+    record["result_unused"] = domain.resultUnused;
+    json::Array predicates;
+    for (const auto &predicate : domain.predicates) {
+        json::Object item;
+        item["condition"] = deviceExprFactRecord(predicate.condition);
+        item["required_value"] = predicate.requiredValue;
+        predicates.push_back(std::move(item));
+    }
+    record["predicates"] = std::move(predicates);
+    record["predicates_exact"] = domain.predicatesExact;
+    record["domain_exact"] = domain.domainExact;
+    record["reason"] = domain.reason;
+    return json::Value(std::move(record));
+}
+
+json::Value producerPhaseSensitiveDomainRecord(
+        const ProducerPhaseSensitiveDomainFact &domain) {
+    json::Object record;
+    record["operation"] = domain.operation;
+    json::Array predicates;
+    for (const auto &predicate : domain.guardPredicates) {
+        json::Object item;
+        item["condition"] = deviceExprFactRecord(predicate.condition);
+        item["required_value"] = predicate.requiredValue;
+        predicates.push_back(std::move(item));
+    }
+    record["guard_predicates"] = std::move(predicates);
+    record["guard_predicates_exact"] = domain.guardPredicatesExact;
+    record["domain_exact"] = domain.domainExact;
     record["reason"] = domain.reason;
     return json::Value(std::move(record));
 }
@@ -1285,7 +1503,26 @@ json::Value producerOverlapPartitionRecord(
     record["store_instance_partition_disjoint"] = partition.exact;
     record["store_instance_partition_complete"] = partition.exact;
     record["proof_scope"] = "ordinary_producer_store_instances";
-    record["full_compute_region_partition_proved"] = false;
+    record["full_compute_region_partition_proved"] =
+        partition.exact && partition.producerStore.partitionRegionExact;
+    record["side_effect_safety_exact"] =
+        partition.sideEffectSafetyExact;
+    record["side_effect_safety_mode"] =
+        partition.sideEffectSafetyMode;
+    record["side_effect_safety_reason"] =
+        partition.sideEffectSafetyReason;
+    record["side_effects_excluded_on_optimized_path"] =
+        partition.sideEffectSafetyExact;
+    if (partition.hasSideEffectGuard) {
+        json::Object guard;
+        guard["kind"] = "param_eq";
+        guard["param"] =
+            static_cast<int64_t>(partition.sideEffectGuardParam);
+        guard["value"] = partition.sideEffectGuardValue;
+        record["side_effect_free_guard"] = std::move(guard);
+    } else {
+        record["side_effect_free_guard"] = nullptr;
+    }
     record["side_effect_partition_proved"] = false;
     record["reason"] = partition.reason;
     return json::Value(std::move(record));
@@ -1324,12 +1561,27 @@ json::Value producerFrontierRecord(
     for (const auto &domain : facts.producer_store_domains)
         domains.push_back(producerStoreDomainRecord(domain));
     record["producer_store_domains"] = std::move(domains);
+    record["atomic_domains_known"] = facts.atomic_domains_known;
+    json::Array atomicDomains;
+    for (const auto &domain : facts.producer_atomic_domains)
+        atomicDomains.push_back(producerAtomicDomainRecord(domain));
+    record["producer_atomic_domains"] = std::move(atomicDomains);
+    record["phase_sensitive_domains_known"] =
+        facts.phase_sensitive_domains_known;
+    json::Array phaseSensitiveDomains;
+    for (const auto &domain : facts.producer_phase_sensitive_domains)
+        phaseSensitiveDomains.push_back(
+            producerPhaseSensitiveDomainRecord(domain));
+    record["producer_phase_sensitive_domains"] =
+        std::move(phaseSensitiveDomains);
     record["overlap_partition"] =
         producerOverlapPartitionRecord(partition);
     record["ordinary_store_sites"] =
         static_cast<int64_t>(facts.ordinary_store_sites);
     record["atomic_write_sites"] =
         static_cast<int64_t>(facts.atomic_write_sites);
+    record["phase_sensitive_sites"] =
+        static_cast<int64_t>(facts.phase_sensitive_sites);
     record["unknown_write_sites"] =
         static_cast<int64_t>(facts.unknown_write_sites);
     record["reason"] = facts.reason;
@@ -1344,10 +1596,15 @@ json::Value producerFrontierRecord(
     } else {
         remaining.push_back("checked_interval_guard_materialization");
     }
-    for (const char *proof : {
-             "complete_disjoint_partition", "side_effect_partition",
-             "launch_phase_materialization"})
-        remaining.push_back(proof);
+    if (!partition.exact || !partition.producerStore.partitionRegionExact)
+        remaining.push_back("complete_disjoint_partition");
+    else
+        remaining.push_back("device_phase_partition_materialization");
+    if (!partition.sideEffectSafetyExact)
+        remaining.push_back("side_effect_partition");
+    else if (partition.hasSideEffectGuard)
+        remaining.push_back("side_effect_guarded_fallback_materialization");
+    remaining.push_back("launch_phase_materialization");
     record["remaining_proofs"] = std::move(remaining);
     return json::Value(std::move(record));
 }

@@ -288,6 +288,13 @@ json::Value producerStoreDomainToJSON(
     o["predicates"] = std::move(predicates);
     o["predicates_exact"] = domain.predicatesExact;
     o["domain_exact"] = domain.domainExact;
+    o["partition_region_exact"] = domain.partitionRegionExact;
+    if (domain.partitionRegionExact)
+        o["partition_predicate_index"] =
+            static_cast<int64_t>(domain.partitionPredicateIndex);
+    else
+        o["partition_predicate_index"] = nullptr;
+    o["partition_region_reason"] = domain.partitionRegionReason;
     o["reason"] = domain.reason;
     return json::Value(std::move(o));
 }
@@ -317,6 +324,17 @@ bool producerStoreDomainFromJSON(const json::Value &value,
     parsed.addressExact = *addressExact;
     parsed.predicatesExact = *predicatesExact;
     parsed.domainExact = *domainExact;
+    if (auto exact = o->getBoolean("partition_region_exact"))
+        parsed.partitionRegionExact = *exact;
+    if (parsed.partitionRegionExact) {
+        auto index = o->getInteger("partition_predicate_index");
+        if (!index || *index < 0 || static_cast<uint64_t>(*index) >
+                                      std::numeric_limits<unsigned>::max())
+            return false;
+        parsed.partitionPredicateIndex = static_cast<unsigned>(*index);
+    }
+    if (auto regionReason = o->getString("partition_region_reason"))
+        parsed.partitionRegionReason = regionReason->str();
     parsed.reason = reason->str();
     for (const auto &predicateValue : *predicates) {
         const auto *predicateObject = predicateValue.getAsObject();
@@ -336,8 +354,142 @@ bool producerStoreDomainFromJSON(const json::Value &value,
         });
     if ((parsed.addressExact && !deviceExprComplete(parsed.byteOffset)) ||
         (parsed.predicatesExact && !conditionsComplete) ||
+        (parsed.partitionRegionExact &&
+         parsed.partitionPredicateIndex >= parsed.predicates.size()) ||
         parsed.domainExact !=
             (parsed.addressExact && parsed.predicatesExact))
+        return false;
+    out = std::move(parsed);
+    return true;
+}
+
+json::Value producerAtomicDomainToJSON(
+        const ProducerAtomicDomainFact &domain) {
+    json::Object o;
+    o["pointer_param"] = static_cast<int64_t>(domain.pointerParam);
+    o["operation"] = domain.operation;
+    o["result_unused"] = domain.resultUnused;
+    json::Array predicates;
+    for (const auto &predicate : domain.predicates) {
+        json::Object p;
+        p["condition"] = deviceExprToJSON(predicate.condition);
+        p["required_value"] = predicate.requiredValue;
+        predicates.push_back(std::move(p));
+    }
+    o["predicates"] = std::move(predicates);
+    o["predicates_exact"] = domain.predicatesExact;
+    o["domain_exact"] = domain.domainExact;
+    o["reason"] = domain.reason;
+    return json::Value(std::move(o));
+}
+
+bool producerAtomicDomainFromJSON(const json::Value &value,
+                                  ProducerAtomicDomainFact &out) {
+    const auto *o = value.getAsObject();
+    if (!o) return false;
+    auto pointer = o->getInteger("pointer_param");
+    auto operation = o->getString("operation");
+    auto resultUnused = o->getBoolean("result_unused");
+    const auto *predicates = o->getArray("predicates");
+    auto predicatesExact = o->getBoolean("predicates_exact");
+    auto domainExact = o->getBoolean("domain_exact");
+    auto reason = o->getString("reason");
+    if (!pointer || *pointer < 0 || static_cast<uint64_t>(*pointer) >
+                                      std::numeric_limits<unsigned>::max() ||
+        !operation || operation->empty() || !resultUnused || !predicates ||
+        !predicatesExact || !domainExact || !reason)
+        return false;
+
+    ProducerAtomicDomainFact parsed;
+    parsed.pointerParam = static_cast<unsigned>(*pointer);
+    parsed.operation = operation->str();
+    parsed.resultUnused = *resultUnused;
+    parsed.predicatesExact = *predicatesExact;
+    parsed.domainExact = *domainExact;
+    parsed.reason = reason->str();
+    for (const auto &predicateValue : *predicates) {
+        const auto *predicateObject = predicateValue.getAsObject();
+        if (!predicateObject) return false;
+        const auto *condition = predicateObject->get("condition");
+        auto required = predicateObject->getBoolean("required_value");
+        if (!condition || !required) return false;
+        ProducerPredicateFact predicate;
+        if (!deviceExprFromJSON(*condition, predicate.condition)) return false;
+        predicate.requiredValue = *required;
+        parsed.predicates.push_back(std::move(predicate));
+    }
+    const bool conditionsComplete = std::all_of(
+        parsed.predicates.begin(), parsed.predicates.end(),
+        [](const auto &predicate) {
+            return deviceExprComplete(predicate.condition) &&
+                   predicate.condition.typeStr == "i1";
+        });
+    if (parsed.domainExact &&
+        (!parsed.resultUnused || !parsed.predicatesExact ||
+         !conditionsComplete))
+        return false;
+    out = std::move(parsed);
+    return true;
+}
+
+json::Value producerPhaseSensitiveDomainToJSON(
+        const ProducerPhaseSensitiveDomainFact &domain) {
+    json::Object o;
+    o["operation"] = domain.operation;
+    json::Array predicates;
+    for (const auto &predicate : domain.guardPredicates) {
+        json::Object p;
+        p["condition"] = deviceExprToJSON(predicate.condition);
+        p["required_value"] = predicate.requiredValue;
+        predicates.push_back(std::move(p));
+    }
+    o["guard_predicates"] = std::move(predicates);
+    o["guard_predicates_exact"] = domain.guardPredicatesExact;
+    o["domain_exact"] = domain.domainExact;
+    o["reason"] = domain.reason;
+    return json::Value(std::move(o));
+}
+
+bool producerPhaseSensitiveDomainFromJSON(
+        const json::Value &value,
+        ProducerPhaseSensitiveDomainFact &out) {
+    const auto *o = value.getAsObject();
+    if (!o) return false;
+    auto operation = o->getString("operation");
+    const auto *predicates = o->getArray("guard_predicates");
+    auto predicatesExact = o->getBoolean("guard_predicates_exact");
+    auto domainExact = o->getBoolean("domain_exact");
+    auto reason = o->getString("reason");
+    if (!operation || operation->empty() || !predicates ||
+        !predicatesExact || !domainExact || !reason)
+        return false;
+
+    ProducerPhaseSensitiveDomainFact parsed;
+    parsed.operation = operation->str();
+    parsed.guardPredicatesExact = *predicatesExact;
+    parsed.domainExact = *domainExact;
+    parsed.reason = reason->str();
+    for (const auto &predicateValue : *predicates) {
+        const auto *predicateObject = predicateValue.getAsObject();
+        if (!predicateObject) return false;
+        const auto *condition = predicateObject->get("condition");
+        auto required = predicateObject->getBoolean("required_value");
+        if (!condition || !required) return false;
+        ProducerPredicateFact predicate;
+        if (!deviceExprFromJSON(*condition, predicate.condition))
+            return false;
+        predicate.requiredValue = *required;
+        parsed.guardPredicates.push_back(std::move(predicate));
+    }
+    const bool guardsComplete = std::all_of(
+        parsed.guardPredicates.begin(), parsed.guardPredicates.end(),
+        [](const auto &predicate) {
+            return deviceExprComplete(predicate.condition) &&
+                   predicate.condition.kind == DeviceExpr::Kind::Param &&
+                   predicate.condition.typeStr == "i1";
+        });
+    if (parsed.domainExact != parsed.guardPredicatesExact ||
+        (parsed.guardPredicatesExact && !guardsComplete))
         return false;
     out = std::move(parsed);
     return true;
@@ -456,10 +608,25 @@ json::Value producerFrontierToJSON(const ProducerFrontierFacts &facts) {
     for (const auto &domain : facts.producer_store_domains)
         domains.push_back(producerStoreDomainToJSON(domain));
     o["producer_store_domains"] = std::move(domains);
+    o["atomic_domains_known"] = facts.atomic_domains_known;
+    json::Array atomicDomains;
+    for (const auto &domain : facts.producer_atomic_domains)
+        atomicDomains.push_back(producerAtomicDomainToJSON(domain));
+    o["producer_atomic_domains"] = std::move(atomicDomains);
+    o["phase_sensitive_domains_known"] =
+        facts.phase_sensitive_domains_known;
+    json::Array phaseSensitiveDomains;
+    for (const auto &domain : facts.producer_phase_sensitive_domains)
+        phaseSensitiveDomains.push_back(
+            producerPhaseSensitiveDomainToJSON(domain));
+    o["producer_phase_sensitive_domains"] =
+        std::move(phaseSensitiveDomains);
     o["ordinary_store_sites"] =
         static_cast<int64_t>(facts.ordinary_store_sites);
     o["atomic_write_sites"] =
         static_cast<int64_t>(facts.atomic_write_sites);
+    o["phase_sensitive_sites"] =
+        static_cast<int64_t>(facts.phase_sensitive_sites);
     o["unknown_write_sites"] =
         static_cast<int64_t>(facts.unknown_write_sites);
     o["reason"] = facts.reason;
@@ -477,15 +644,21 @@ bool producerFrontierFromJSON(const json::Value &v,
     auto atomics = o->getArray("atomic_write_params");
     auto storeSites = o->getInteger("ordinary_store_sites");
     auto atomicSites = o->getInteger("atomic_write_sites");
+    auto phaseSensitiveSites = o->getInteger("phase_sensitive_sites");
     auto unknownSites = o->getInteger("unknown_write_sites");
     auto reason = o->getString("reason");
     if (!analyzed || !known || !completion || !stores || !atomics ||
         !storeSites || !atomicSites || !unknownSites || !reason ||
-        *storeSites < 0 || *atomicSites < 0 || *unknownSites < 0 ||
+        *storeSites < 0 || *atomicSites < 0 ||
+        (phaseSensitiveSites && *phaseSensitiveSites < 0) ||
+        *unknownSites < 0 ||
         static_cast<uint64_t>(*storeSites) >
             std::numeric_limits<unsigned>::max() ||
         static_cast<uint64_t>(*atomicSites) >
             std::numeric_limits<unsigned>::max() ||
+        (phaseSensitiveSites &&
+         static_cast<uint64_t>(*phaseSensitiveSites) >
+             std::numeric_limits<unsigned>::max()) ||
         static_cast<uint64_t>(*unknownSites) >
             std::numeric_limits<unsigned>::max())
         return false;
@@ -496,6 +669,9 @@ bool producerFrontierFromJSON(const json::Value &v,
     parsed.completion_site_id = completion->str();
     parsed.ordinary_store_sites = static_cast<unsigned>(*storeSites);
     parsed.atomic_write_sites = static_cast<unsigned>(*atomicSites);
+    if (phaseSensitiveSites)
+        parsed.phase_sensitive_sites =
+            static_cast<unsigned>(*phaseSensitiveSites);
     parsed.unknown_write_sites = static_cast<unsigned>(*unknownSites);
     parsed.reason = reason->str();
     for (const json::Value &value : *stores) {
@@ -542,11 +718,51 @@ bool producerFrontierFromJSON(const json::Value &v,
             parsed.producer_store_domains.push_back(std::move(domain));
         }
     }
+    if (auto knownDomains = o->getBoolean("atomic_domains_known"))
+        parsed.atomic_domains_known = *knownDomains;
+    if (const auto *domains = o->getArray("producer_atomic_domains")) {
+        for (const auto &domainValue : *domains) {
+            ProducerAtomicDomainFact domain;
+            if (!producerAtomicDomainFromJSON(domainValue, domain))
+                return false;
+            parsed.producer_atomic_domains.push_back(std::move(domain));
+        }
+    }
+    if (auto knownDomains =
+            o->getBoolean("phase_sensitive_domains_known"))
+        parsed.phase_sensitive_domains_known = *knownDomains;
+    if (const auto *domains =
+            o->getArray("producer_phase_sensitive_domains")) {
+        for (const auto &domainValue : *domains) {
+            ProducerPhaseSensitiveDomainFact domain;
+            if (!producerPhaseSensitiveDomainFromJSON(domainValue, domain))
+                return false;
+            parsed.producer_phase_sensitive_domains.push_back(
+                std::move(domain));
+        }
+    }
     if (parsed.producer_domains_known &&
         (parsed.producer_store_domains.empty() ||
          parsed.producer_store_domains.size() != parsed.ordinary_store_sites ||
          !std::all_of(parsed.producer_store_domains.begin(),
                       parsed.producer_store_domains.end(),
+                      [](const auto &domain) {
+                          return domain.domainExact;
+                      })))
+        return false;
+    if (parsed.atomic_domains_known &&
+        (parsed.producer_atomic_domains.size() != parsed.atomic_write_sites ||
+         !std::all_of(parsed.producer_atomic_domains.begin(),
+                      parsed.producer_atomic_domains.end(),
+                      [](const auto &domain) {
+                          return domain.domainExact;
+                      })))
+        return false;
+    if (parsed.phase_sensitive_domains_known &&
+        (parsed.producer_phase_sensitive_domains.size() !=
+             parsed.phase_sensitive_sites ||
+         !std::all_of(parsed.producer_phase_sensitive_domains.begin(),
+                      parsed.producer_phase_sensitive_domains.end(),
                       [](const auto &domain) {
                           return domain.domainExact;
                       })))

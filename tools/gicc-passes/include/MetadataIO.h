@@ -98,6 +98,43 @@ struct ProducerStoreDomainFact {
     std::vector<ProducerPredicateFact> predicates;
     bool                               predicatesExact = false;
     bool                               domainExact = false;
+    // One compiler-recovered single-entry CFG edge that gates the whole
+    // producer computation containing this store. The predicate index names
+    // the corresponding entry in `predicates`; device LTO recomputes it.
+    bool                               partitionRegionExact = false;
+    unsigned                           partitionPredicateIndex = 0;
+    std::string                        partitionRegionReason;
+    std::string                        reason;
+};
+
+// One recognized atomic write between a transfer group and its completion.
+// The first fission candidate does not reassociate atomics.  Instead it may
+// use an exact, shared kernel-formal control predicate to prove that every
+// atomic is unreachable on the optimized path, retaining the original fused
+// launch when that predicate is enabled.
+struct ProducerAtomicDomainFact {
+    unsigned                           pointerParam = 0;
+    std::string                        operation;
+    bool                               resultUnused = false;
+    std::vector<ProducerPredicateFact> predicates;
+    bool                               predicatesExact = false;
+    bool                               domainExact = false;
+    std::string                        reason;
+};
+
+// One convergent or noduplicate call between a transfer group and its
+// completion that is not a compiler-recognized, freely replicable GPU
+// identity query. Phase fission may duplicate the surrounding kernel control
+// flow, so every such call must either be preserved in one phase or be
+// unreachable on the
+// optimized path.  These predicates intentionally contain only exact direct
+// i1 kernel-formal guards; unlike a complete store domain they remain useful
+// when the call itself is nested in a loop.
+struct ProducerPhaseSensitiveDomainFact {
+    std::string                        operation;
+    std::vector<ProducerPredicateFact> guardPredicates;
+    bool                               guardPredicatesExact = false;
+    bool                               domainExact = false;
     std::string                        reason;
 };
 
@@ -147,8 +184,14 @@ struct ProducerFrontierFacts {
     std::string           buffer_identity_guard_reason;
     bool                  producer_domains_known = false;
     std::vector<ProducerStoreDomainFact> producer_store_domains;
+    bool                  atomic_domains_known = false;
+    std::vector<ProducerAtomicDomainFact> producer_atomic_domains;
+    bool                  phase_sensitive_domains_known = false;
+    std::vector<ProducerPhaseSensitiveDomainFact>
+                          producer_phase_sensitive_domains;
     unsigned              ordinary_store_sites = 0;
     unsigned              atomic_write_sites = 0;
+    unsigned              phase_sensitive_sites = 0;
     unsigned              unknown_write_sites = 0;
     std::string           reason;
 };

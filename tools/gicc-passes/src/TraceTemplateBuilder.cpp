@@ -1027,9 +1027,128 @@ PointerBytes decomposePointerBytes(const Value *pointer,
     return decomposePointerBytes(pointer, kernel, DL, visiting);
 }
 
+struct ControlPredicateDomain {
+    std::vector<ProducerPredicateFact> predicates;
+    std::vector<const BranchInst *> branches;
+    bool exact = false;
+};
+
+ControlPredicateDomain controllingPredicates(const Instruction &instruction,
+                                             const Function &kernel,
+                                             DominatorTree *DT,
+                                             LoopInfo *LI) {
+    ControlPredicateDomain result;
+    result.exact = DT && LI && !LI->getLoopFor(instruction.getParent());
+    if (!result.exact) return result;
+
+    const DataLayout &DL = kernel.getParent()->getDataLayout();
+    for (const BasicBlock &BB : kernel) {
+        if (&BB == instruction.getParent() ||
+            !DT->dominates(&BB, instruction.getParent()))
+            continue;
+        const Instruction *term = BB.getTerminator();
+        if (!term || term->getNumSuccessors() < 2) continue;
+        SmallVector<bool, 4> reachesInstruction;
+        unsigned reachable = 0;
+        for (const BasicBlock *successor : successors(&BB)) {
+            const bool reaches = blockCanReach(successor,
+                                               instruction.getParent());
+            reachesInstruction.push_back(reaches);
+            if (reaches) ++reachable;
+        }
+        if (reachable == 0 || reachable == term->getNumSuccessors())
+            continue;
+        const auto *branch = dyn_cast<BranchInst>(term);
+        if (!branch || !branch->isConditional() || reachable != 1) {
+            result.exact = false;
+            continue;
+        }
+        ProducerPredicateFact predicate;
+        predicate.condition = buildDeviceExpr(
+            branch->getCondition(), &kernel, DL);
+        predicate.requiredValue = reachesInstruction[0];
+        if (!deviceExprExact(predicate.condition)) result.exact = false;
+        result.predicates.push_back(std::move(predicate));
+        result.branches.push_back(branch);
+    }
+    return result;
+}
+
+std::optional<unsigned> partitionRegionPredicate(
+        const StoreInst &store, const ControlPredicateDomain &control,
+        DominatorTree *DT, PostDominatorTree *PDT,
+        std::string &reason) {
+    if (!control.exact || !DT || !PDT ||
+        control.predicates.size() != control.branches.size()) {
+        reason = "store control predicates are not exact";
+        return std::nullopt;
+    }
+
+    std::optional<unsigned> best;
+    unsigned bestLevel = 0;
+    for (unsigned i = 0; i < control.branches.size(); ++i) {
+        const BranchInst *branch = control.branches[i];
+        const unsigned targetIndex =
+            control.predicates[i].requiredValue ? 0 : 1;
+        const BasicBlock *target = branch->getSuccessor(targetIndex);
+        const auto *domNode = DT->getNode(branch->getParent());
+        const auto *postNode = PDT->getNode(branch->getParent());
+        if (!target->hasNPredecessors(1) ||
+            !DT->dominates(target, store.getParent()) || !domNode ||
+            !postNode || !postNode->getIDom())
+            continue;
+        const BasicBlock *merge = postNode->getIDom()->getBlock();
+        if (!merge || merge == target ||
+            !PDT->dominates(merge, target))
+            continue;
+
+        SmallPtrSet<const BasicBlock *, 16> region;
+        SmallVector<const BasicBlock *, 16> work{target};
+        bool valid = true;
+        while (!work.empty() && valid) {
+            const BasicBlock *BB = work.pop_back_val();
+            if (BB == merge || !region.insert(BB).second) continue;
+            if (!DT->dominates(target, BB) || BB == branch->getParent()) {
+                valid = false;
+                break;
+            }
+            for (const BasicBlock *successor : successors(BB))
+                work.push_back(successor);
+        }
+        if (!valid || !region.contains(store.getParent())) continue;
+        for (const BasicBlock *BB : region) {
+            for (const BasicBlock *predecessor : predecessors(BB)) {
+                if (BB == target && predecessor == branch->getParent())
+                    continue;
+                if (!region.contains(predecessor)) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (!valid) break;
+        }
+        if (!valid) continue;
+
+        const unsigned level = domNode->getLevel();
+        if (!best || level > bestLevel) {
+            best = i;
+            bestLevel = level;
+        }
+    }
+    if (!best) {
+        reason =
+            "no single-entry producer region with one post-dominating merge";
+        return std::nullopt;
+    }
+    reason =
+        "one exact controlling edge gates a single-entry producer region";
+    return best;
+}
+
 ProducerStoreDomainFact producerStoreDomain(const StoreInst &store,
                                              const Function &kernel,
                                              DominatorTree *DT,
+                                             PostDominatorTree *PDT,
                                              LoopInfo *LI) {
     ProducerStoreDomainFact domain;
     const DataLayout &DL = kernel.getParent()->getDataLayout();
@@ -1043,39 +1162,16 @@ ProducerStoreDomainFact producerStoreDomain(const StoreInst &store,
     if (!size.isScalable()) domain.byteSize = size.getFixedValue();
     else domain.addressExact = false;
 
-    domain.predicatesExact = DT && LI &&
-        !LI->getLoopFor(store.getParent());
-    if (domain.predicatesExact) {
-        for (const BasicBlock &BB : kernel) {
-            if (&BB == store.getParent() ||
-                !DT->dominates(&BB, store.getParent()))
-                continue;
-            const Instruction *term = BB.getTerminator();
-            if (!term || term->getNumSuccessors() < 2) continue;
-            SmallVector<bool, 4> reachesStore;
-            unsigned reachable = 0;
-            for (const BasicBlock *successor : successors(&BB)) {
-                const bool reaches = blockCanReach(successor,
-                                                   store.getParent());
-                reachesStore.push_back(reaches);
-                if (reaches) ++reachable;
-            }
-            if (reachable == 0 || reachable == term->getNumSuccessors())
-                continue;
-            const auto *branch = dyn_cast<BranchInst>(term);
-            if (!branch || !branch->isConditional() || reachable != 1) {
-                domain.predicatesExact = false;
-                continue;
-            }
-            ProducerPredicateFact predicate;
-            predicate.condition = buildDeviceExpr(
-                branch->getCondition(), &kernel, DL);
-            predicate.requiredValue = reachesStore[0];
-            if (!deviceExprExact(predicate.condition))
-                domain.predicatesExact = false;
-            domain.predicates.push_back(std::move(predicate));
-        }
+    ControlPredicateDomain control =
+        controllingPredicates(store, kernel, DT, LI);
+    if (auto predicate =
+            partitionRegionPredicate(store, control, DT, PDT,
+                                     domain.partitionRegionReason)) {
+        domain.partitionRegionExact = true;
+        domain.partitionPredicateIndex = *predicate;
     }
+    domain.predicates = std::move(control.predicates);
+    domain.predicatesExact = control.exact;
 
     domain.domainExact = domain.addressExact && domain.predicatesExact;
     if (!domain.addressExact)
@@ -1086,6 +1182,95 @@ ProducerStoreDomainFact producerStoreDomain(const StoreInst &store,
         domain.reason = "a controlling predicate is not exactly modeled";
     else
         domain.reason = "exact formal-rooted byte interval and controlling predicates recovered";
+    return domain;
+}
+
+ProducerAtomicDomainFact producerAtomicDomain(
+        const Instruction &atomic, const Value *pointer, StringRef operation,
+        const Function &kernel, DominatorTree *DT, LoopInfo *LI) {
+    ProducerAtomicDomainFact domain;
+    const DataLayout &DL = kernel.getParent()->getDataLayout();
+    PointerBytes address = decomposePointerBytes(pointer, &kernel, DL);
+    if (address.base) domain.pointerParam = address.base->getArgNo();
+    domain.operation = operation.str();
+    domain.resultUnused = atomic.use_empty();
+    ControlPredicateDomain control =
+        controllingPredicates(atomic, kernel, DT, LI);
+    domain.predicates = std::move(control.predicates);
+    domain.predicatesExact = control.exact;
+    domain.domainExact = address.exact && address.base &&
+        domain.resultUnused && domain.predicatesExact;
+    if (!address.exact || !address.base)
+        domain.reason =
+            "atomic pointer is not an exact formal-rooted expression";
+    else if (!domain.resultUnused)
+        domain.reason = "atomic return value is observed";
+    else if (LI && LI->getLoopFor(atomic.getParent()))
+        domain.reason = "atomic is inside an unmodeled device loop";
+    else if (!domain.predicatesExact)
+        domain.reason = "an atomic controlling predicate is not exactly modeled";
+    else
+        domain.reason =
+            "exact formal-rooted atomic and controlling predicates recovered";
+    return domain;
+}
+
+std::vector<ProducerPredicateFact> dominatingDirectI1FormalGuards(
+        const Instruction &instruction, const Function &kernel,
+        DominatorTree *DT) {
+    std::vector<ProducerPredicateFact> guards;
+    if (!DT) return guards;
+    const DataLayout &DL = kernel.getParent()->getDataLayout();
+    for (const BasicBlock &BB : kernel) {
+        if (&BB == instruction.getParent() ||
+            !DT->dominates(&BB, instruction.getParent()))
+            continue;
+        const auto *branch = dyn_cast<BranchInst>(BB.getTerminator());
+        if (!branch || !branch->isConditional()) continue;
+        const bool trueDominates =
+            DT->dominates(branch->getSuccessor(0), instruction.getParent());
+        const bool falseDominates =
+            DT->dominates(branch->getSuccessor(1), instruction.getParent());
+        if (trueDominates == falseDominates) continue;
+
+        DeviceExpr condition = buildDeviceExpr(
+            branch->getCondition(), &kernel, DL);
+        if (condition.kind != DeviceExpr::Kind::Param ||
+            condition.typeStr != "i1" ||
+            condition.paramIdx >= kernel.arg_size() ||
+            !kernel.getArg(condition.paramIdx)->getType()->isIntegerTy(1))
+            continue;
+        const bool requiredValue = trueDominates;
+        const bool duplicate = std::any_of(
+            guards.begin(), guards.end(), [&](const auto &guard) {
+                return guard.condition.paramIdx == condition.paramIdx &&
+                       guard.requiredValue == requiredValue;
+            });
+        if (!duplicate)
+            guards.push_back({std::move(condition), requiredValue});
+    }
+    return guards;
+}
+
+ProducerPhaseSensitiveDomainFact producerPhaseSensitiveDomain(
+        const CallBase &call, const Function &kernel, DominatorTree *DT) {
+    ProducerPhaseSensitiveDomainFact domain;
+    const Function *callee = call.getCalledFunction();
+    domain.operation = callee
+        ? callee->getName().str()
+        : std::string("indirect_convergent_call");
+    domain.guardPredicates =
+        dominatingDirectI1FormalGuards(call, kernel, DT);
+    domain.guardPredicatesExact = DT != nullptr;
+    domain.domainExact = domain.guardPredicatesExact;
+    if (!DT)
+        domain.reason = "dominator tree is unavailable";
+    else if (domain.guardPredicates.empty())
+        domain.reason =
+            "exact scan found no direct i1 kernel-formal disabling guard";
+    else
+        domain.reason =
+            "exact dominating direct i1 kernel-formal guards recovered";
     return domain;
 }
 
@@ -1269,6 +1454,7 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
         SmallVector<unsigned, 4> ordinaryParams;
         SmallVector<unsigned, 4> atomicParams;
         SmallPtrSet<const Instruction *, 32> classified;
+        SmallPtrSet<const Instruction *, 32> phaseSensitiveClassified;
 
         auto pointerFormal = [&](const Value *pointer)
                 -> const Argument * {
@@ -1286,6 +1472,7 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
                 return;
             const Value *pointer = nullptr;
             bool atomic = false;
+            std::string atomicOperation;
             const StoreInst *ordinaryStore = nullptr;
             if (const auto *store = dyn_cast<StoreInst>(&I)) {
                 pointer = store->getPointerOperand();
@@ -1293,9 +1480,13 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
             } else if (const auto *rmw = dyn_cast<AtomicRMWInst>(&I)) {
                 pointer = rmw->getPointerOperand();
                 atomic = true;
+                atomicOperation =
+                    ("atomicrmw_" +
+                     AtomicRMWInst::getOperationName(rmw->getOperation())).str();
             } else if (const auto *cmp = dyn_cast<AtomicCmpXchgInst>(&I)) {
                 pointer = cmp->getPointerOperand();
                 atomic = true;
+                atomicOperation = "cmpxchg";
             } else if (const auto *call = dyn_cast<CallBase>(&I)) {
                 // HIP keeps source-level atomicAdd as a small device helper
                 // until after this pre-inlining analysis point. Recognize
@@ -1311,6 +1502,7 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
                 }
                 pointer = call->getArgOperand(0);
                 atomic = true;
+                atomicOperation = "atomic_add";
             } else {
                 ++frontier.unknown_write_sites;
                 return;
@@ -1327,14 +1519,36 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
             if (atomic) {
                 ++frontier.atomic_write_sites;
                 atomicParams.push_back(arg->getArgNo());
+                frontier.producer_atomic_domains.push_back(
+                    producerAtomicDomain(I, pointer, atomicOperation,
+                                         *info.kernel, DT, LI));
             } else {
                 ++frontier.ordinary_store_sites;
                 ordinaryParams.push_back(arg->getArgNo());
                 if (ordinaryStore)
                     frontier.producer_store_domains.push_back(
                         producerStoreDomain(*ordinaryStore, *info.kernel,
-                                            DT, LI));
+                                            DT, PDT, LI));
             }
+        };
+        auto classifyPhaseSensitive = [&](const Instruction &I) {
+            const auto *call = dyn_cast<CallBase>(&I);
+            if (!call || (!call->isConvergent() &&
+                          !call->cannotDuplicate()) ||
+                !phaseSensitiveClassified.insert(&I).second)
+                return;
+            // Grid/block/thread identity queries are deterministic for a
+            // launch and may be recomputed in both phase kernels. Every
+            // other convergent or noduplicate call is conservatively
+            // non-duplicable.
+            if (gpuBuiltinName(*call)) return;
+            ++frontier.phase_sensitive_sites;
+            frontier.producer_phase_sensitive_domains.push_back(
+                producerPhaseSensitiveDomain(*call, *info.kernel, DT));
+        };
+        auto classifyFrontierInstruction = [&](const Instruction &I) {
+            classifyWrite(I);
+            classifyPhaseSensitive(I);
         };
 
         bool afterLastForFacts = false;
@@ -1344,7 +1558,7 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
                 continue;
             }
             if (&I == flush) break;
-            if (afterLastForFacts) classifyWrite(I);
+            if (afterLastForFacts) classifyFrontierInstruction(I);
         }
         if (startBB != flushBB) {
             SmallPtrSet<const BasicBlock *, 32> visited;
@@ -1355,7 +1569,7 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
                 if (!visited.insert(BB).second) continue;
                 for (const Instruction &I : *BB) {
                     if (&I == flush) break;
-                    classifyWrite(I);
+                    classifyFrontierInstruction(I);
                 }
                 if (BB != flushBB)
                     work.append(succ_begin(BB), succ_end(BB));
@@ -1381,6 +1595,21 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
             frontier.producer_store_domains.size() ==
                 frontier.ordinary_store_sites &&
             llvm::all_of(frontier.producer_store_domains,
+                         [](const auto &domain) {
+                             return domain.domainExact;
+                         });
+        frontier.atomic_domains_known =
+            frontier.unknown_write_sites == 0 &&
+            frontier.producer_atomic_domains.size() ==
+                frontier.atomic_write_sites &&
+            llvm::all_of(frontier.producer_atomic_domains,
+                         [](const auto &domain) {
+                             return domain.domainExact;
+                         });
+        frontier.phase_sensitive_domains_known =
+            frontier.producer_phase_sensitive_domains.size() ==
+                frontier.phase_sensitive_sites &&
+            llvm::all_of(frontier.producer_phase_sensitive_domains,
                          [](const auto &domain) {
                              return domain.domainExact;
                          });

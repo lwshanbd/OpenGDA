@@ -34,6 +34,7 @@ The model may receive only a content-addressed, source-free compiler graph:
 - registered-buffer/pointer formal relations derived by host LTO;
 - symbolic source intervals for every transfer;
 - producer write regions and iteration-domain partitions;
+- atomic domains and non-replicable convergent-operation guards;
 - dependence, dominance, post-dominance, and stream-order proofs;
 - launch geometry, topology, resource pressure, and calibrated costs;
 - existing compiler candidate IDs and their predicted effects.
@@ -123,10 +124,29 @@ overlap between the exact producer-store interval and either exact transfer
 interval; the interior predicate is its logical complement. This proves a
 disjoint and complete partition of ordinary store instances for unchanged
 Jacobi, including the important fact that the transferred boundary columns
-need not be producer writes. It deliberately does not yet claim a full
-compute-region or atomic/reduction partition, so the candidate remains
-masked. Checked interval-end and buffer-identity guards must retain an
-untouched fused-launch fallback.
+need not be producer writes.
+
+Device discovery now separately proves that one exact controlling edge gates
+a single-entry stencil region with a post-dominating merge. On unchanged
+Jacobi this is the `global_x + 1 < nx - 1` edge, so the checked-overlap
+predicate has a compiler-proved whole-region insertion point rather than only
+a store-instance interpretation.
+
+Fission must also preserve operations whose meaning depends on participation
+or execution count. Discovery inventories exact atomic domains and every
+convergent or `noduplicate` call other than compiler-recognized, replicable
+GPU identity query. It retains dominating direct-`i1` kernel-formal guards
+even for a call inside a loop. Real Jacobi contains one `atomicAdd` site and one
+`__shfl_down` site (the latter executes repeatedly); both require formal 7,
+`calculate_norm`, to be true. The compiler therefore permits the optimized
+path only under formal 7 equal to false and retains the untouched fused launch
+when it is true. It performs no floating-point reassociation and assumes no
+subgroup law. A negative compiler test with opposite guards is rejected.
+
+These are still facts, not an enabled schedule. Checked interval-end,
+buffer-identity, side-effect-guard, device-region, and launch materializers
+must all retain an untouched fused-launch fallback where applicable. Until
+they exist, the candidate remains masked.
 
 Device LTO rewrites the original kernel body:
 
@@ -135,8 +155,9 @@ Device LTO rewrites the original kernel body:
 - interior/communication phase stages the original PUTs, relocates the flush
   immediately after them, executes only the proven-disjoint interior domain,
   and retains quiet at the original completion frontier;
-- reductions or other side effects are partitioned across the two phases and
-  must be proven composable; otherwise the candidate is masked.
+- atomics, reductions, and non-replicable convergent operations are either
+  disabled by the shared compiler-proved launch guard or separately proven
+  safe; otherwise the candidate is masked.
 
 ### Audited host-IR materialization shape
 
@@ -196,8 +217,10 @@ Candidate generation is fail-closed and requires all of the following:
    source interval; loads and stores retain their original dependence order.
 6. **Complete partition.** Boundary and interior predicates are disjoint and
    cover every originally active compute iteration exactly once.
-7. **Side-effect partition.** Atomics/reductions are associative and receive
-   every original contribution exactly once, or no candidate is emitted.
+7. **Non-duplicable-operation safety.** Atomics/reductions and subgroup or
+   other non-replicable convergent operations receive every original effect
+   exactly once, or one compiler-proved formal guard makes all of them
+   unreachable on the optimized path. No candidate is emitted otherwise.
 8. **Communication completeness.** Every original group member is staged and
    exactly one trigger and required quiet remain on every path.
 9. **Launch safety.** Both launches use the original grid, block, shared
@@ -208,8 +231,9 @@ Candidate generation is fail-closed and requires all of the following:
     code.
 
 Unknown aliasing, non-affine offsets, irreducible CFGs, non-composable side
-effects, unknown stream order, or inconsistent host/device metadata masks the
-candidate. A model cannot override a mask.
+effects, unmatched convergent-operation guards, unknown stream order, or
+inconsistent host/device metadata masks the candidate. A model cannot
+override a mask.
 
 ## Candidate space and evaluation
 

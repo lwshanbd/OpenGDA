@@ -127,6 +127,44 @@ def feature(site_id, *, hk=True, locality=None, batched_loop=False):
                     "reason": "compiler-recovered local store domain",
                 }
             ],
+            "atomic_domains_known": True,
+            "producer_atomic_domains": [
+                {
+                    "pointer_param": 3,
+                    "operation": "atomic_add",
+                    "result_unused": True,
+                    "predicates": [
+                        {
+                            "condition": {
+                                "kind": "param", "param": 7,
+                                "type": "i1",
+                            },
+                            "required_value": True,
+                        }
+                    ],
+                    "predicates_exact": True,
+                    "domain_exact": True,
+                    "reason": "compiler-recovered atomic domain",
+                }
+            ],
+            "phase_sensitive_domains_known": True,
+            "producer_phase_sensitive_domains": [
+                {
+                    "operation": "_Z11__shfl_downfji",
+                    "guard_predicates": [
+                        {
+                            "condition": {
+                                "kind": "param", "param": 7,
+                                "type": "i1",
+                            },
+                            "required_value": True,
+                        }
+                    ],
+                    "guard_predicates_exact": True,
+                    "domain_exact": True,
+                    "reason": "compiler-recovered convergent guard",
+                }
+            ],
             "overlap_partition": {
                 "analyzed": True,
                 "exact": True,
@@ -136,9 +174,17 @@ def feature(site_id, *, hk=True, locality=None, batched_loop=False):
                 "store_instance_partition_complete": True,
                 "full_compute_region_partition_proved": False,
                 "side_effect_partition_proved": False,
+                "side_effect_safety_exact": True,
+                "side_effect_safety_mode":
+                    "all_nonduplicable_operations_disabled_by_formal_guard",
+                "side_effect_free_guard": {
+                    "kind": "param_eq", "param": 7, "value": False,
+                },
+                "side_effects_excluded_on_optimized_path": True,
             },
             "ordinary_store_sites": 1,
             "atomic_write_sites": 1,
+            "phase_sensitive_sites": 1,
             "unknown_write_sites": 0,
             "reason": "compiler fact only",
             "remaining_proofs": ["registered_buffer_identity"],
@@ -242,6 +288,11 @@ class LlmBridgeTests(unittest.TestCase):
             self.dossier["sites"][0]["producer_frontier"]
                         ["overlap_partition"]
                         ["store_instance_partition_complete"]
+        )
+        self.assertEqual(
+            {"kind": "param_eq", "param": 7, "value": False},
+            self.dossier["sites"][0]["producer_frontier"]
+                        ["overlap_partition"]["side_effect_free_guard"],
         )
 
     def test_unknown_locality_removes_forced_ipc_but_keeps_safe_default(self):

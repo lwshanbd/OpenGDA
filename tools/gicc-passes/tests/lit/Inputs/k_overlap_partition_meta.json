@@ -9,7 +9,8 @@
     {"idx": 3, "name": "top", "type": "i64"},
     {"idx": 4, "name": "bottom", "type": "i64"},
     {"idx": 5, "name": "size", "type": "i64"},
-    {"idx": 6, "name": "stride", "type": "i64"}
+    {"idx": 6, "name": "stride", "type": "i64"},
+    {"idx": 7, "name": "calculate_norm", "type": "i1"}
   ],
   "ops": [
     {
@@ -30,7 +31,7 @@
         "write_footprint_known": true,
         "completion_site_id": "unit.cpp:20:k_partition::2",
         "ordinary_store_params": [1],
-        "atomic_write_params": [],
+        "atomic_write_params": [1],
         "buffer_identity_guardable": true,
         "producer_pointer_param": 1,
         "source_buffer_index_param": 2,
@@ -47,13 +48,50 @@
           },
           "byte_size": 4,
           "address_exact": true,
-          "predicates": [],
+          "predicates": [{
+            "condition": {
+              "kind": "compare", "op": "ult", "type": "i1",
+              "children": [
+                {"kind": "builtin", "name": "thread_id_x", "type": "i64"},
+                {"kind": "param", "param": 6, "type": "i64"}
+              ]
+            },
+            "required_value": true
+          }],
           "predicates_exact": true,
           "domain_exact": true,
+          "partition_region_exact": true,
+          "partition_predicate_index": 0,
+          "partition_region_reason": "unit single-entry region",
           "reason": "unit exact store"
         }],
+        "atomic_domains_known": true,
+        "producer_atomic_domains": [{
+          "pointer_param": 1,
+          "operation": "atomic_add",
+          "result_unused": true,
+          "predicates": [{
+            "condition": {"kind": "param", "param": 7, "type": "i1"},
+            "required_value": true
+          }],
+          "predicates_exact": true,
+          "domain_exact": true,
+          "reason": "unit exact atomic"
+        }],
+        "phase_sensitive_domains_known": true,
+        "producer_phase_sensitive_domains": [{
+          "operation": "_Z11__shfl_downfji",
+          "guard_predicates": [{
+            "condition": {"kind": "param", "param": 7, "type": "i1"},
+            "required_value": true
+          }],
+          "guard_predicates_exact": true,
+          "domain_exact": true,
+          "reason": "unit exact phase-sensitive guard"
+        }],
         "ordinary_store_sites": 1,
-        "atomic_write_sites": 0,
+        "atomic_write_sites": 1,
+        "phase_sensitive_sites": 1,
         "unknown_write_sites": 0,
         "reason": "unit exact frontier"
       }
@@ -76,7 +114,7 @@
         "write_footprint_known": true,
         "completion_site_id": "unit.cpp:20:k_partition::2",
         "ordinary_store_params": [1],
-        "atomic_write_params": [],
+        "atomic_write_params": [1],
         "buffer_identity_guardable": true,
         "producer_pointer_param": 1,
         "source_buffer_index_param": 2,
@@ -93,13 +131,50 @@
           },
           "byte_size": 4,
           "address_exact": true,
-          "predicates": [],
+          "predicates": [{
+            "condition": {
+              "kind": "compare", "op": "ult", "type": "i1",
+              "children": [
+                {"kind": "builtin", "name": "thread_id_x", "type": "i64"},
+                {"kind": "param", "param": 6, "type": "i64"}
+              ]
+            },
+            "required_value": true
+          }],
           "predicates_exact": true,
           "domain_exact": true,
+          "partition_region_exact": true,
+          "partition_predicate_index": 0,
+          "partition_region_reason": "unit single-entry region",
           "reason": "unit exact store"
         }],
+        "atomic_domains_known": true,
+        "producer_atomic_domains": [{
+          "pointer_param": 1,
+          "operation": "atomic_add",
+          "result_unused": true,
+          "predicates": [{
+            "condition": {"kind": "param", "param": 7, "type": "i1"},
+            "required_value": true
+          }],
+          "predicates_exact": true,
+          "domain_exact": true,
+          "reason": "unit exact atomic"
+        }],
+        "phase_sensitive_domains_known": true,
+        "producer_phase_sensitive_domains": [{
+          "operation": "_Z11__shfl_downfji",
+          "guard_predicates": [{
+            "condition": {"kind": "param", "param": 7, "type": "i1"},
+            "required_value": true
+          }],
+          "guard_predicates_exact": true,
+          "domain_exact": true,
+          "reason": "unit exact phase-sensitive guard"
+        }],
         "ordinary_store_sites": 1,
-        "atomic_write_sites": 0,
+        "atomic_write_sites": 1,
+        "phase_sensitive_sites": 1,
         "unknown_write_sites": 0,
         "reason": "unit exact frontier"
       }

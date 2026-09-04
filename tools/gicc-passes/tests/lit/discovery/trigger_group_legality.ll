@@ -19,6 +19,7 @@ declare void @_ZN4gicc5flushEPN4gicc9DeviceCtxE(ptr)
 declare i32 @_ZN24__hip_builtin_blockIdx_t7__get_xEv() nounwind readnone
 declare i32 @_ZN24__hip_builtin_blockDim_t7__get_xEv() nounwind readnone
 declare i32 @_ZN25__hip_builtin_threadIdx_t7__get_xEv() nounwind readnone
+declare void @lane_collective() convergent readnone
 
 @unknown_state = addrspace(1) global i32 0
 
@@ -46,7 +47,7 @@ entry:
 
 define amdgpu_kernel void @group_write(
     ptr %ctx, ptr addrspace(1) %out, ptr addrspace(1) %sum,
-    i32 %top, i32 %bottom, i32 %buf, i64 %limit) {
+    i32 %top, i32 %bottom, i32 %buf, i64 %limit, i1 %norm) {
 entry:
   call void @_ZN4gicc9put_no_dbEPN4gicc9DeviceCtxEiimimm(
       ptr %ctx, i32 %top, i32 %buf, i64 0,
@@ -66,7 +67,41 @@ entry:
 produce:
   %slot = getelementptr i32, ptr addrspace(1) %out, i64 %element
   store volatile i32 1, ptr addrspace(1) %slot
+  br i1 %norm, label %reduce, label %complete
+
+reduce:
+  call void @lane_collective()
   %old = atomicrmw fadd ptr addrspace(1) %sum, float 1.000000e+00 monotonic
+  br label %complete
+
+complete:
+  call void @_ZN4gicc5flushEPN4gicc9DeviceCtxE(ptr %ctx)
+  ret void
+}
+
+; The ordinary store is exact, but both arms enter it. There is no existing
+; single-entry controlling edge where the first phase predicate can be
+; inserted, so the narrow partition-region proof must fail closed.
+define amdgpu_kernel void @group_multi_entry(
+    ptr %ctx, ptr addrspace(1) %out,
+    i32 %top, i32 %bottom, i32 %buf, i1 %choose) {
+entry:
+  call void @_ZN4gicc9put_no_dbEPN4gicc9DeviceCtxEiimimm(
+      ptr %ctx, i32 %top, i32 %buf, i64 0,
+      i32 %buf, i64 0, i64 4096)
+  call void @_ZN4gicc9put_no_dbEPN4gicc9DeviceCtxEiimimm(
+      ptr %ctx, i32 %bottom, i32 %buf, i64 4096,
+      i32 %buf, i64 4096, i64 4096)
+  br i1 %choose, label %left, label %right
+
+left:
+  br label %produce
+
+right:
+  br label %produce
+
+produce:
+  store volatile i32 1, ptr addrspace(1) %out
   br label %complete
 
 complete:
@@ -122,9 +157,7 @@ entry:
 ; WRITE: "group_early_trigger_reason": "intervening instruction may write a registered source buffer"
 ; WRITE: "producer_frontier": {
 ; WRITE-DAG: "ordinary_store_params": [
-; WRITE-NEXT: 1
 ; WRITE-DAG: "atomic_write_params": [
-; WRITE-NEXT: 2
 ; WRITE-DAG: "atomic_write_sites": 1
 ; WRITE-DAG: "ordinary_store_sites": 1
 ; WRITE-DAG: "unknown_write_sites": 0
@@ -152,7 +185,33 @@ entry:
 ; WRITE-DAG: "param": 6
 ; WRITE-DAG: "required_value": true
 ; WRITE-DAG: "predicates_exact": true
+; WRITE-DAG: "partition_region_exact": true
+; WRITE-DAG: "partition_predicate_index": 0
+; WRITE-DAG: "partition_region_reason": "one exact controlling edge gates a single-entry producer region"
+; WRITE-DAG: "atomic_domains_known": true
+; WRITE-DAG: "producer_atomic_domains": [
+; WRITE-DAG: "operation": "atomicrmw_fadd"
+; WRITE-DAG: "pointer_param": 2
+; WRITE-DAG: "result_unused": true
+; WRITE-DAG: "domain_exact": true
+; WRITE-DAG: "phase_sensitive_domains_known": true
+; WRITE-DAG: "phase_sensitive_sites": 1
+; WRITE-DAG: "producer_phase_sensitive_domains": [
+; WRITE-DAG: "operation": "lane_collective"
+; WRITE-DAG: "guard_predicates": [
+; WRITE-DAG: "kind": "param"
+; WRITE-DAG: "param": 7
+; WRITE-DAG: "required_value": true
+; WRITE-DAG: "guard_predicates_exact": true
 ; WRITE-DAG: "reason": "formal-rooted writes and exact local store domains recovered; transfer matching and side-effect partition remain unproved"
+
+; RUN: cat %t.metadir/group_multi_entry.json | \
+; RUN:     %FileCheck %s --check-prefix=MULTI-ENTRY
+; MULTI-ENTRY: "producer_store_domains": [
+; MULTI-ENTRY-DAG: "domain_exact": true
+; MULTI-ENTRY-DAG: "partition_predicate_index": null
+; MULTI-ENTRY-DAG: "partition_region_exact": false
+; MULTI-ENTRY-DAG: "partition_region_reason": "no single-entry producer region with one post-dominating merge"
 
 ; RUN: cat %t.metadir/group_unknown.json | \
 ; RUN:     %FileCheck %s --check-prefix=UNKNOWN
@@ -163,6 +222,11 @@ entry:
 ; UNKNOWN-DAG: "buffer_identity_guardable": false
 ; UNKNOWN-DAG: "producer_domains_known": false
 ; UNKNOWN-DAG: "producer_store_domains": []
+; UNKNOWN-DAG: "atomic_domains_known": false
+; UNKNOWN-DAG: "producer_atomic_domains": []
+; UNKNOWN-DAG: "phase_sensitive_domains_known": true
+; UNKNOWN-DAG: "phase_sensitive_sites": 0
+; UNKNOWN-DAG: "producer_phase_sensitive_domains": []
 ; UNKNOWN-DAG: "reason": "an intervening write is not rooted in a kernel pointer formal"
 
 ; RUN: cat %t.metadir/group_multi_buffer.json | \
@@ -175,6 +239,7 @@ entry:
 ; MULTI-DAG: "source_buffer_index_param": null
 ; MULTI-DAG: "buffer_identity_guard_reason": "requires one producer pointer and one shared i32 source-buffer formal"
 ; MULTI-DAG: "producer_domains_known": false
+; MULTI-DAG: "atomic_domains_known": true
 ; MULTI-DAG: "address_exact": false
 ; MULTI-DAG: "byte_offset": {
 ; MULTI-DAG: "kind": "unknown"

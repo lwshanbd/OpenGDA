@@ -151,7 +151,34 @@ for all of them.
         }],
         "predicates_exact": true,
         "domain_exact": true,                 // local IR recovery only
+        "partition_region_exact": true,       // one single-entry CFG region
+        "partition_predicate_index": 0,       // entry in predicates above
+        "partition_region_reason": "one exact controlling edge gates a single-entry producer region",
         "reason": "exact formal-rooted byte interval and controlling predicates recovered"
+      }],
+      "atomic_domains_known": true,
+      "producer_atomic_domains": [{
+        "pointer_param": 3,
+        "operation": "atomic_add",
+        "result_unused": true,
+        "predicates": [{
+          "condition": {"kind": "param", "param": 7, "type": "i1"},
+          "required_value": true
+        }],
+        "predicates_exact": true,
+        "domain_exact": true,
+        "reason": "exact formal-rooted atomic and controlling predicates recovered"
+      }],
+      "phase_sensitive_domains_known": true,
+      "producer_phase_sensitive_domains": [{
+        "operation": "_Z11__shfl_downfji",
+        "guard_predicates": [{
+          "condition": {"kind": "param", "param": 7, "type": "i1"},
+          "required_value": true
+        }],
+        "guard_predicates_exact": true,
+        "domain_exact": true,
+        "reason": "exact dominating direct i1 kernel-formal guards recovered"
       }],
       "overlap_partition": {
         "analyzed": true,
@@ -176,18 +203,25 @@ for all of them.
         "store_instance_partition_disjoint": true,
         "store_instance_partition_complete": true,
         "proof_scope": "ordinary_producer_store_instances",
-        "full_compute_region_partition_proved": false,
+        "full_compute_region_partition_proved": true,
+        "side_effect_safety_exact": true,
+        "side_effect_safety_mode": "all_nonduplicable_operations_disabled_by_formal_guard",
+        "side_effect_free_guard": {
+          "kind": "param_eq", "param": 7, "value": false
+        },
+        "side_effects_excluded_on_optimized_path": true,
         "side_effect_partition_proved": false
       },
       "ordinary_store_sites": 1,
       "atomic_write_sites": 1,
+      "phase_sensitive_sites": 2,
       "unknown_write_sites": 0,
       "reason": "formal-rooted writes recovered; ...",
       "remaining_proofs": [
         "buffer_identity_guarded_fallback_materialization",
         "checked_interval_guard_materialization",
-        "complete_disjoint_partition",
-        "side_effect_partition",
+        "device_phase_partition_materialization",
+        "side_effect_guarded_fallback_materialization",
         "launch_phase_materialization"
       ]
     },
@@ -261,6 +295,22 @@ in this local form; it still does not prove that a registered transfer buffer
 is the pointer, that its interval equals a producer subset, or that the
 boundary/remainder partition is complete.
 
+`partition_region_exact` is a separate CFG proof. The named controlling edge
+enters a single-entry region with a post-dominating merge and contains the
+producer store. It identifies where device LTO can materialize a whole-region
+phase predicate; it does not claim that the rewrite already exists.
+
+`producer_atomic_domains` records exact formal-rooted atomics and their full
+control domains. `producer_phase_sensitive_domains` records convergent or
+`noduplicate` calls that are not compiler-recognized, freely replicable GPU
+identity queries. The latter retains exact dominating direct-`i1`-formal
+guards even when the call is inside a loop. The first guarded candidate
+requires one formal condition
+shared by every atomic and every phase-sensitive call. On unchanged Jacobi,
+both `atomicAdd` and `__shfl_down` require formal 7 to be true, so only formal
+7 equal to false may enter the optimized path; the true edge must retain the
+original fused launch. Opposite or unmatched guards fail closed.
+
 `kernel_argument_slots_exact` closes the host/device formal-namespace gap
 without reverse-engineering source expressions or lambda captures. It is true
 only when every metadata formal has a distinct launch-owner-local value cell
@@ -277,9 +327,14 @@ identity such as `offset = row * stride`, device LTO can classify a store
 instance with checked half-open byte-interval overlap against the exact
 transfer intervals. The boundary predicate and its logical complement are
 therefore disjoint and complete for ordinary producer-store instances by
-construction. This does not yet prove that the whole compute region follows
-the store's control domain or that atomics/reductions partition safely; both
-remain explicit false fields and legality obligations.
+construction. A separate single-entry-region proof now establishes where that
+predicate can gate the full Jacobi stencil region. Atomic and subgroup
+behavior is not reassociated: the first candidate is restricted by a shared
+compiler-proved formal guard that makes all atomics and non-replicable
+convergent calls unreachable. Checked arithmetic, device-phase rewriting,
+both runtime fallback branches, and launch cloning remain explicit
+materialization obligations; until those exist, no fission candidate enters
+`legal_paths`.
 
 `phase_launch_supported` is also a compiler proof, not a model assertion. It
 is true only when every aggregated host call is a non-throwing direct call to
