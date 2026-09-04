@@ -108,12 +108,16 @@ for all of them.
       "completion_site_id": "<site_id>",
       "ordinary_store_params": [1],          // kernel formal indices only
       "atomic_write_params": [3],
+      "buffer_identity_guardable": true,     // compiler fixed both argument slots
+      "producer_pointer_param": 1,
+      "source_buffer_index_param": 12,
+      "buffer_identity_guard_reason": "one producer pointer and one shared i32 source-buffer formal can be guarded at launch",
       "ordinary_store_sites": 1,
       "atomic_write_sites": 1,
       "unknown_write_sites": 0,
       "reason": "formal-rooted writes recovered; ...",
       "remaining_proofs": [
-        "registered_buffer_identity",
+        "buffer_identity_guarded_fallback_materialization",
         "exact_transfer_intervals",
         "exact_producer_domains",
         "complete_disjoint_partition",
@@ -162,6 +166,14 @@ its mandatory flush. `write_footprint_known` means those writes are rooted in
 named kernel pointer formals; it does **not** authorize fission. The listed
 remaining proofs must all be discharged by later host/device LTO before a
 candidate may enter the model-visible legal set.
+
+`buffer_identity_guardable` does not claim that the pointer and registered
+buffer are equal. It says the compiler found exactly one producer pointer
+formal and one shared i32 `src_buf` formal, so it can call the fixed runtime
+identity helper using those two constant slot indices. A future materializer
+must keep one untouched fused launch on the guard's false edge. Until that
+branch exists, `buffer_identity_guarded_fallback_materialization` remains in
+`remaining_proofs` and no fission action is legal.
 
 `phase_launch_supported` is also a compiler proof, not a model assertion. It
 is true only when every aggregated host call is a non-throwing direct call to

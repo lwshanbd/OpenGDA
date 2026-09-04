@@ -86,6 +86,13 @@ compiler-proved constants; neither the model nor the runtime invents them.
 The helper is also dormant until the materializer and the remaining static
 domain proofs exist.
 
+Device discovery now emits this guard shape only for the narrow case of one
+ordinary producer pointer and one shared i32 source-buffer formal across the
+whole PUT group. The unchanged Jacobi kernel satisfies that shape with fixed
+kernel slots `(pointer=1, buffer-index=12)`. A synthetic group whose members
+use different source-buffer formals is rejected. These are compiler facts;
+the fission action remains absent from the legal action set.
+
 Device LTO rewrites the original kernel body:
 
 - boundary phase skips PUT/flush/quiet and executes only iterations whose

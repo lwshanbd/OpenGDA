@@ -253,6 +253,18 @@ json::Value producerFrontierToJSON(const ProducerFrontierFacts &facts) {
     for (unsigned param : facts.atomic_write_params)
         atomics.push_back(static_cast<int64_t>(param));
     o["atomic_write_params"] = std::move(atomics);
+    o["buffer_identity_guardable"] = facts.buffer_identity_guardable;
+    if (facts.buffer_identity_guardable) {
+        o["producer_pointer_param"] =
+            static_cast<int64_t>(facts.producer_pointer_param);
+        o["source_buffer_index_param"] =
+            static_cast<int64_t>(facts.source_buffer_index_param);
+    } else {
+        o["producer_pointer_param"] = nullptr;
+        o["source_buffer_index_param"] = nullptr;
+    }
+    o["buffer_identity_guard_reason"] =
+        facts.buffer_identity_guard_reason;
     o["ordinary_store_sites"] =
         static_cast<int64_t>(facts.ordinary_store_sites);
     o["atomic_write_sites"] =
@@ -311,6 +323,24 @@ bool producerFrontierFromJSON(const json::Value &v,
         parsed.atomic_write_params.push_back(
             static_cast<unsigned>(*param));
     }
+    if (auto guardable = o->getBoolean("buffer_identity_guardable")) {
+        parsed.buffer_identity_guardable = *guardable;
+        if (*guardable) {
+            auto pointer = o->getInteger("producer_pointer_param");
+            auto buffer = o->getInteger("source_buffer_index_param");
+            if (!pointer || !buffer || *pointer < 0 || *buffer < 0 ||
+                static_cast<uint64_t>(*pointer) >
+                    std::numeric_limits<unsigned>::max() ||
+                static_cast<uint64_t>(*buffer) >
+                    std::numeric_limits<unsigned>::max())
+                return false;
+            parsed.producer_pointer_param = static_cast<unsigned>(*pointer);
+            parsed.source_buffer_index_param =
+                static_cast<unsigned>(*buffer);
+        }
+    }
+    if (auto guardReason = o->getString("buffer_identity_guard_reason"))
+        parsed.buffer_identity_guard_reason = guardReason->str();
     out = std::move(parsed);
     return true;
 }

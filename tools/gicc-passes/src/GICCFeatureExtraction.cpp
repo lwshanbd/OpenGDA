@@ -707,6 +707,19 @@ json::Value producerFrontierRecord(const ProducerFrontierFacts &facts) {
     for (unsigned param : facts.atomic_write_params)
         atomics.push_back(static_cast<int64_t>(param));
     record["atomic_write_params"] = std::move(atomics);
+    record["buffer_identity_guardable"] =
+        facts.buffer_identity_guardable;
+    if (facts.buffer_identity_guardable) {
+        record["producer_pointer_param"] =
+            static_cast<int64_t>(facts.producer_pointer_param);
+        record["source_buffer_index_param"] =
+            static_cast<int64_t>(facts.source_buffer_index_param);
+    } else {
+        record["producer_pointer_param"] = nullptr;
+        record["source_buffer_index_param"] = nullptr;
+    }
+    record["buffer_identity_guard_reason"] =
+        facts.buffer_identity_guard_reason;
     record["ordinary_store_sites"] =
         static_cast<int64_t>(facts.ordinary_store_sites);
     record["atomic_write_sites"] =
@@ -715,8 +728,11 @@ json::Value producerFrontierRecord(const ProducerFrontierFacts &facts) {
         static_cast<int64_t>(facts.unknown_write_sites);
     record["reason"] = facts.reason;
     json::Array remaining;
+    const char *identityProof = facts.buffer_identity_guardable
+        ? "buffer_identity_guarded_fallback_materialization"
+        : "registered_buffer_identity";
     for (const char *proof : {
-             "registered_buffer_identity", "exact_transfer_intervals",
+             identityProof, "exact_transfer_intervals",
              "exact_producer_domains", "complete_disjoint_partition",
              "side_effect_partition", "launch_phase_materialization"})
         remaining.push_back(proof);

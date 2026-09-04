@@ -72,6 +72,10 @@ def feature(site_id, *, hk=True, locality=None, batched_loop=False):
             "completion_site_id": "unit.cpp:12:kernel_from_ir::2",
             "ordinary_store_params": [1],
             "atomic_write_params": [3],
+            "buffer_identity_guardable": True,
+            "producer_pointer_param": 1,
+            "source_buffer_index_param": 12,
+            "buffer_identity_guard_reason": "compiler guard shape",
             "ordinary_store_sites": 1,
             "atomic_write_sites": 1,
             "unknown_write_sites": 0,
@@ -136,6 +140,19 @@ class LlmBridgeTests(unittest.TestCase):
         self.assertTrue(
             self.dossier["sites"][0]["producer_frontier"]
                         ["write_footprint_known"]
+        )
+        self.assertTrue(
+            self.dossier["sites"][0]["producer_frontier"]
+                        ["buffer_identity_guardable"]
+        )
+        self.assertEqual(
+            (1, 12),
+            (
+                self.dossier["sites"][0]["producer_frontier"]
+                            ["producer_pointer_param"],
+                self.dossier["sites"][0]["producer_frontier"]
+                            ["source_buffer_index_param"],
+            ),
         )
         self.assertTrue(
             self.dossier["sites"][0]["phase_launch_supported"]

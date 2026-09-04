@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <array>
+#include <optional>
 
 using namespace llvm;
 
@@ -97,6 +98,13 @@ const char *castName(unsigned op) {
         case Instruction::BitCast:  return "bitcast";
         default: return "cast";
     }
+}
+
+std::optional<unsigned> directParamRef(const ArgRef &ref) {
+    if (ref.kind == ArgRef::Kind::Param) return ref.paramIdx;
+    if (ref.kind == ArgRef::Kind::Cast && ref.children.size() == 1)
+        return directParamRef(ref.children.front());
+    return std::nullopt;
 }
 
 // `ivPhi` (optional): if non-null, walking encounters this PHI we emit
@@ -963,6 +971,42 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
         frontier.write_footprint_known =
             frontier.ordinary_store_sites > 0 &&
             frontier.unknown_write_sites == 0;
+        SmallVector<unsigned, 4> sourceBufferParams;
+        bool sourceBufferShapeKnown = true;
+        for (unsigned i : members) {
+            auto source = t.ops[i].args.find("src_buf");
+            if (source == t.ops[i].args.end()) {
+                sourceBufferShapeKnown = false;
+                break;
+            }
+            auto param = directParamRef(source->second);
+            if (!param || *param >= t.params.size() ||
+                t.params[*param].typeStr != "i32") {
+                sourceBufferShapeKnown = false;
+                break;
+            }
+            sourceBufferParams.push_back(*param);
+        }
+        llvm::sort(sourceBufferParams);
+        sourceBufferParams.erase(
+            std::unique(sourceBufferParams.begin(), sourceBufferParams.end()),
+            sourceBufferParams.end());
+        const bool onePointer = ordinaryParams.size() == 1 &&
+            ordinaryParams.front() < t.params.size() &&
+            t.params[ordinaryParams.front()].typeStr == "ptr";
+        const bool oneSourceBuffer = sourceBufferShapeKnown &&
+            sourceBufferParams.size() == 1;
+        frontier.buffer_identity_guardable =
+            frontier.write_footprint_known && onePointer && oneSourceBuffer;
+        if (frontier.buffer_identity_guardable) {
+            frontier.producer_pointer_param = ordinaryParams.front();
+            frontier.source_buffer_index_param = sourceBufferParams.front();
+            frontier.buffer_identity_guard_reason =
+                "one producer pointer and one shared i32 source-buffer formal can be guarded at launch";
+        } else {
+            frontier.buffer_identity_guard_reason =
+                "requires one producer pointer and one shared i32 source-buffer formal";
+        }
         if (frontier.unknown_write_sites != 0) {
             frontier.reason =
                 "an intervening write is not rooted in a kernel pointer formal";

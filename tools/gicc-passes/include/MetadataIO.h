@@ -92,6 +92,15 @@ struct ProducerFrontierFacts {
     std::string           completion_site_id;
     std::vector<unsigned> ordinary_store_params;
     std::vector<unsigned> atomic_write_params;
+    // Narrow runtime-guard shape for the first fission candidate. True only
+    // when every transfer in the group uses one shared i32 source-buffer
+    // formal and all ordinary producer stores use one pointer formal. Host
+    // LTO may compare these two kernel argument slots at runtime and retain
+    // the untouched fused launch on the false edge.
+    bool                  buffer_identity_guardable = false;
+    unsigned              producer_pointer_param = 0;
+    unsigned              source_buffer_index_param = 0;
+    std::string           buffer_identity_guard_reason;
     unsigned              ordinary_store_sites = 0;
     unsigned              atomic_write_sites = 0;
     unsigned              unknown_write_sites = 0;

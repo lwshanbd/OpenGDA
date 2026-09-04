@@ -72,6 +72,21 @@ entry:
   ret void
 }
 
+define amdgpu_kernel void @group_multi_buffer(
+    ptr %ctx, ptr addrspace(1) %out,
+    i32 %top, i32 %bottom, i32 %buf0, i32 %buf1) {
+entry:
+  call void @_ZN4gicc9put_no_dbEPN4gicc9DeviceCtxEiimimm(
+      ptr %ctx, i32 %top, i32 %buf0, i64 0,
+      i32 %buf0, i64 0, i64 4096)
+  call void @_ZN4gicc9put_no_dbEPN4gicc9DeviceCtxEiimimm(
+      ptr %ctx, i32 %bottom, i32 %buf1, i64 4096,
+      i32 %buf1, i64 4096, i64 4096)
+  store volatile i32 1, ptr addrspace(1) %out
+  call void @_ZN4gicc5flushEPN4gicc9DeviceCtxE(ptr %ctx)
+  ret void
+}
+
 ; SAFE: "completion_site_id": "?:?:group_safe::2"
 ; SAFE: "group_early_trigger_legal": true
 ; SAFE: "group_early_trigger_reason": "proved mandatory flush and no intervening memory writes"
@@ -96,6 +111,10 @@ entry:
 ; WRITE-DAG: "ordinary_store_sites": 1
 ; WRITE-DAG: "unknown_write_sites": 0
 ; WRITE-DAG: "write_footprint_known": true
+; WRITE-DAG: "buffer_identity_guardable": true
+; WRITE-DAG: "producer_pointer_param": 1
+; WRITE-DAG: "source_buffer_index_param": 5
+; WRITE-DAG: "buffer_identity_guard_reason": "one producer pointer and one shared i32 source-buffer formal can be guarded at launch"
 ; WRITE-DAG: "reason": "formal-rooted writes recovered; exact domains and host buffer identity remain unproved"
 
 ; RUN: cat %t.metadir/group_unknown.json | \
@@ -104,4 +123,15 @@ entry:
 ; UNKNOWN-DAG: "ordinary_store_sites": 0
 ; UNKNOWN-DAG: "unknown_write_sites": 1
 ; UNKNOWN-DAG: "write_footprint_known": false
+; UNKNOWN-DAG: "buffer_identity_guardable": false
 ; UNKNOWN-DAG: "reason": "an intervening write is not rooted in a kernel pointer formal"
+
+; RUN: cat %t.metadir/group_multi_buffer.json | \
+; RUN:     %FileCheck %s --check-prefix=MULTI
+; MULTI: "producer_frontier": {
+; MULTI-DAG: "ordinary_store_params": [
+; MULTI-NEXT: 1
+; MULTI-DAG: "buffer_identity_guardable": false
+; MULTI-DAG: "producer_pointer_param": null
+; MULTI-DAG: "source_buffer_index_param": null
+; MULTI-DAG: "buffer_identity_guard_reason": "requires one producer pointer and one shared i32 source-buffer formal"
