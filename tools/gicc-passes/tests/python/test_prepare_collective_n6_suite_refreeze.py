@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -198,6 +199,19 @@ class CollectiveN6SuiteRefreezeTests(unittest.TestCase):
             refreeze.verify_confirmation(
                 self.confirmation_path, self.n6_path
             )
+
+    def test_successor_is_offline_conditional_and_never_submits(self):
+        script = (
+            COLLECTIVE / "continue_compiler_collective_n6_suite_refreeze.sh"
+        )
+        subprocess.run(["bash", "-n", script], check=True)
+        text = script.read_text(encoding="utf-8")
+        self.assertNotIn("flux ", text)
+        self.assertNotIn("provider", text.lower())
+        self.assertIn("waiting_n6_confirmation", text)
+        self.assertIn("waiting_headroom_refreeze", text)
+        self.assertIn("skipped_no_incremental_policy", text)
+        self.assertIn("verify-contained", text)
 
 
 if __name__ == "__main__":
