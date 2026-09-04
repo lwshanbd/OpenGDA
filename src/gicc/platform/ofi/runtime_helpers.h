@@ -88,6 +88,16 @@ int gicc_runtime_local_buffer_contains_interval(
     std::uint32_t buffer_index_param, std::uint64_t offset,
     std::uint64_t size);
 
+// Runtime alias guard for compiler-owned communication scheduling. Returns 1
+// only when the complete registered local-buffer interval selected by the i32
+// argument slot is disjoint from the GPU allocation containing the pointer in
+// `write_pointer_param`. The compiler must separately prove that all writes it
+// crosses are rooted in such guarded pointer formals. Invalid handles, null
+// pointers, allocation-query failures, and address overflow all fail closed.
+int gicc_runtime_local_buffer_disjoint_from_kernel_arg_allocation(
+    gicc::Runtime *rt, void *const *kernel_params,
+    std::uint32_t buffer_index_param, std::uint32_t write_pointer_param);
+
 // Host-mirror lookup (used by the pass-synthesized DWQ trace function when
 // a kernel formal carries a "host-mirrored" annotation: at trace time the
 // pass needs to read the array's contents to pre-stage one DWQ descriptor

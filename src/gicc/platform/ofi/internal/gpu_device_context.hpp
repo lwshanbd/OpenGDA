@@ -40,6 +40,7 @@ using GpuIpcMemHandle_t = hipIpcMemHandle_t;
 #define gpuDeviceSynchronize     hipDeviceSynchronize
 #define gpuDeviceCanAccessPeer   hipDeviceCanAccessPeer
 #define gpuDeviceEnablePeerAccess hipDeviceEnablePeerAccess
+#define gpuMemGetAddressRange    hipMemGetAddressRange
 
 // Host-pinned memory (mapped into the device address space).
 #define gpuHostMalloc            hipHostMalloc

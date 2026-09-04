@@ -88,6 +88,8 @@ class Runtime {
     friend int (::gicc_runtime_local_buffer_contains_interval)(
         Runtime *, void *const *, std::uint32_t, std::uint64_t,
         std::uint64_t);
+    friend int (::gicc_runtime_local_buffer_disjoint_from_kernel_arg_allocation)(
+        Runtime *, void *const *, std::uint32_t, std::uint32_t);
 
 public:
     static constexpr int POOL_SIZE = 32;   // max ops per batch

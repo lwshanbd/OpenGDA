@@ -7,7 +7,31 @@
 #include "gicc/platform/ofi/runtime_helpers.h"
 #include "gicc/platform/ofi/ofi_runtime.hpp"
 
+#include <limits>
+
 namespace {
+
+constexpr bool disjointHalfOpenRanges(std::uintptr_t leftBegin,
+                                      std::size_t leftSize,
+                                      std::uintptr_t rightBegin,
+                                      std::size_t rightSize) {
+    constexpr std::uintptr_t limit =
+        std::numeric_limits<std::uintptr_t>::max();
+    if (leftSize == 0 || rightSize == 0 ||
+        leftSize > limit - leftBegin || rightSize > limit - rightBegin)
+        return false;
+    const std::uintptr_t leftEnd = leftBegin + leftSize;
+    const std::uintptr_t rightEnd = rightBegin + rightSize;
+    return leftEnd <= rightBegin || rightEnd <= leftBegin;
+}
+
+static_assert(disjointHalfOpenRanges(0, 4, 4, 8));
+static_assert(disjointHalfOpenRanges(12, 4, 0, 12));
+static_assert(!disjointHalfOpenRanges(0, 5, 4, 8));
+static_assert(!disjointHalfOpenRanges(0, 16, 4, 4));
+static_assert(!disjointHalfOpenRanges(0, 0, 4, 4));
+static_assert(!disjointHalfOpenRanges(
+    std::numeric_limits<std::uintptr_t>::max() - 1, 2, 0, 1));
 
 __global__ void gicc_set_schedule_phase_kernel(gicc::DeviceCtx *ctx,
                                                 std::uint32_t phase) {
@@ -184,6 +208,50 @@ int gicc_runtime_local_buffer_contains_interval(
     return offset <= registeredSize && size <= registeredSize - offset
         ? 1
         : 0;
+}
+
+int gicc_runtime_local_buffer_disjoint_from_kernel_arg_allocation(
+        gicc::Runtime *rt, void *const *kernel_params,
+        std::uint32_t buffer_index_param,
+        std::uint32_t write_pointer_param) {
+    if (!rt || !kernel_params || !kernel_params[buffer_index_param] ||
+        !kernel_params[write_pointer_param])
+        return 0;
+    const std::int32_t bufferIndex = *static_cast<const std::int32_t *>(
+        kernel_params[buffer_index_param]);
+    void *writePointer =
+        *static_cast<void *const *>(kernel_params[write_pointer_param]);
+    if (bufferIndex < 0 || !writePointer ||
+        static_cast<std::size_t>(bufferIndex) >= rt->buffers_.size())
+        return 0;
+
+    const gicc::Buffer &source =
+        rt->buffers_[static_cast<std::size_t>(bufferIndex)];
+    if (!source.ptr || source.size == 0) return 0;
+
+    void *writeBase = nullptr;
+    std::size_t writeSize = 0;
+#if defined(GICC_GPU_HIP)
+    hipDeviceptr_t queriedBase = nullptr;
+    if (gpuMemGetAddressRange(
+            &queriedBase, &writeSize,
+            reinterpret_cast<hipDeviceptr_t>(writePointer)) != GPU_SUCCESS)
+        return 0;
+    writeBase = reinterpret_cast<void *>(queriedBase);
+#else
+    // The first guarded scheduler is an OFI/HIP candidate. Other GPU APIs
+    // retain the original schedule until they provide an audited allocation
+    // range query with identical semantics.
+    return 0;
+#endif
+    if (!writeBase || writeSize == 0) return 0;
+
+    const std::uintptr_t sourceBegin =
+        reinterpret_cast<std::uintptr_t>(source.ptr);
+    const std::uintptr_t writeBegin =
+        reinterpret_cast<std::uintptr_t>(writeBase);
+    return disjointHalfOpenRanges(
+        sourceBegin, source.size, writeBegin, writeSize) ? 1 : 0;
 }
 
 #ifdef GICC_CPU_PROXY
