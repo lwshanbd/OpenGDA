@@ -223,6 +223,7 @@ def main() -> int:
     require("STUB-NEXT: call i32 @__hipPushCallConfiguration" in test_text,
             "lit regression does not require the second HIP configuration push")
 
+    job = completed_job(args.paired_job_id, args.paired_job_name)
     pair = compare_pair(args.paired_baseline, args.paired_fission)
     require(pair["correctness_gate"]["passed"] is False,
             "negative triage requires a failed frozen correctness gate")
@@ -260,7 +261,7 @@ def main() -> int:
             "fixed_build_compiler": headers["compiler"],
         },
         "same_allocation_validation": {
-            "job": completed_job(args.paired_job_id, args.paired_job_name),
+            "job": job,
             **pair,
             "runtime_values_are_performance_evidence": False,
             "interpretation": "diagnostic only because numerical equivalence failed",

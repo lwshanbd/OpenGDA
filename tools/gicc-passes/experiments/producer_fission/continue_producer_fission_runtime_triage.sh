@@ -78,25 +78,35 @@ verify_artifacts() {
 }
 
 if [[ -e $output_dir ]]; then
-    echo "refusing existing triage output: $output_dir" >&2
-    exit 2
+    prior_phase=$(awk 'NR == 1 {print $2}' "$state_path" 2>/dev/null || true)
+    if [[ $prior_phase != failed || ! -f $output_dir/job-id || \
+          -e $output_dir/report.json ]]; then
+        echo "refusing non-recoverable triage output: $output_dir" >&2
+        exit 2
+    fi
+    job_id=$(sed -n '1p' "$output_dir/job-id")
+    if [[ -z $job_id || $job_id == *$'\n'* ]]; then
+        echo "stored triage job ID is invalid" >&2
+        exit 2
+    fi
+    set_state recovering "audit existing job=$job_id without submission"
+else
+    active_jobs=$(flux jobs --filter=active -n -o '{id.f58} {name}')
+    if [[ -n $active_jobs ]]; then
+        echo "refusing to submit while another user job is active" >&2
+        exit 2
+    fi
+    mkdir -p "$output_dir"
+    set_state submitting "one N2 pdebug baseline/fission pair"
+    job_id=$(flux batch -q pdebug -N2 -n16 -c8 -g1 -t 8m -u \
+        --job-name="$job_name" --cwd="$output_dir" \
+        "$runner" "$baseline" "$fission" "$output_dir")
+    if [[ -z $job_id || $job_id == *$'\n'* ]]; then
+        echo "Flux returned an invalid triage job ID: $job_id" >&2
+        exit 2
+    fi
+    printf '%s\n' "$job_id" >"$output_dir/job-id"
 fi
-active_jobs=$(flux jobs --filter=active -n -o '{id.f58} {name}')
-if [[ -n $active_jobs ]]; then
-    echo "refusing to submit while another user job is active" >&2
-    exit 2
-fi
-
-mkdir -p "$output_dir"
-set_state submitting "one N2 pdebug baseline/fission pair"
-job_id=$(flux batch -q pdebug -N2 -n16 -c8 -g1 -t 8m -u \
-    --job-name="$job_name" --cwd="$output_dir" \
-    "$runner" "$baseline" "$fission" "$output_dir")
-if [[ -z $job_id || $job_id == *$'\n'* ]]; then
-    echo "Flux returned an invalid triage job ID: $job_id" >&2
-    exit 2
-fi
-printf '%s\n' "$job_id" >"$output_dir/job-id"
 
 set_state monitoring "$job_id"
 python3 "$auditor" \

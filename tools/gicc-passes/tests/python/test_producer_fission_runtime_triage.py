@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -35,6 +36,46 @@ class ProducerFissionRuntimeTriageTests(unittest.TestCase):
         self.assertEqual(1e-6, gate["relative_tolerance"])
         self.assertEqual(1e-7, gate["absolute_tolerance"])
         self.assertGreater(gate["excess_over_allowed"], 1000)
+
+    def test_completed_job_waits_before_reading_scheduler_records(self):
+        jobspec = {
+            "resources": [{
+                "type": "node", "count": 2,
+                "with": [{
+                    "type": "slot", "count": 8,
+                    "with": [
+                        {"type": "core", "count": 8},
+                        {"type": "gpu", "count": 1},
+                    ],
+                }],
+            }],
+            "tasks": [{"command": ["runner"]}],
+            "attributes": {"system": {
+                "queue": "pdebug",
+                "job": {"name": "producer-fission-triage"},
+            }},
+        }
+        resources = {
+            "version": 1,
+            "execution": {
+                "nodelist": ["node[1-2]"],
+                "properties": {"pdebug": "0-1"},
+                "R_lite": [{"rank": "0-1"}],
+            },
+        }
+        eventlog = "\n".join((
+            '{"name":"finish","context":{"status":0}}',
+            '{"name":"clean"}',
+        ))
+        responses = ["", eventlog, __import__("json").dumps(jobspec),
+                     __import__("json").dumps(resources)]
+        with mock.patch.object(triage.common, "run_flux",
+                               side_effect=responses) as run_flux:
+            result = triage.completed_job(
+                "jobid", "producer-fission-triage")
+        self.assertEqual(0, result["scheduler"]["exit_code"])
+        self.assertEqual(("job", "wait-event", "jobid", "clean"),
+                         run_flux.call_args_list[0].args)
 
 
 if __name__ == "__main__":
