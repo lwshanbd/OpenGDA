@@ -121,7 +121,7 @@ class CompilerScheduleCoverageTests(unittest.TestCase):
             facts = report["cases"]["atomic"]["facts"]
             self.assertEqual("atomic_producer_no_store_remainder",
                              facts["schedule_class"])
-            self.assertIn("invoke_preserving_host_materialization",
+            self.assertIn("host_phase_materialization",
                           facts["missing_proof_families"])
             self.assertIn("atomic_producer_partition",
                           markdown.read_text(encoding="utf-8"))

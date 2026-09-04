@@ -19,7 +19,7 @@ runtime or LLM-quality result.
   headroom and a later request explicitly authorizes a provider call.
 
 The stable source-free graph ID for this snapshot is
-`sha256:4ebc2d36ee251950bc6af7a3360c9a75516989fb46c863f3d54cb02074b9e712`.
+`sha256:4ec6b7d42622988f57c4b740b38fd872fd4d8a8e18cf49b209a993c1ea0c8f4f`.
 The only materializable two-phase oracle is
 `sha256:be6d9caef2578ca61bd623eca44e590533cf0fd347d739b8ad35c5b2cb33aa53`;
 it is deliberately absent from the model-visible candidate lists.
@@ -30,15 +30,19 @@ it is deliberately absent from the model-visible candidate lists.
 |---|---|---|---|
 | Jacobi | `9ef34ae5ad60516a97c8736dfc4d263bfc4c0b958410450f0bea6e399b184539` | `intra_kernel_exact_partition` | none for the guarded two-phase oracle |
 | Minimod | `67950e39e52de4307072a3032644e23feda5beabbb14f0e997f6d8c052f34a33` | `conditional_communication_only` | guarded completion region; cross-launch producer pipeline |
-| minimal matrix multiply | `3d5b0a86eb3023c1186ef51455d83598e5c9295c2218d82eb154983700d6f5e5` | `atomic_producer_no_store_remainder` | atomic producer partition; invoke-preserving host materialization |
-| mixed-side-effect LTO | `02c67cb5768c71a7461afecbd9e4831fefc2f36fcc7532e8132630b85ad82105` | `unknown_side_effect_frontier` | side-effect alias partition; invoke-preserving host materialization |
-| loop-carried LTO | `f2b377ac1adce656897dca7c6a6841a3aa1c71d08df7347e20fb2d1139fb61a1` | `loop_carried_communication` | guarded loop phase schedule; invoke-preserving host materialization |
+| minimal matrix multiply | `bc83a7afe5b6b69d56c954c8c66016932c882cc18d245cba714447867124f5b4` | `atomic_producer_no_store_remainder` | atomic producer partition |
+| mixed-side-effect LTO | `934dd3c7084088ad25f357b984c9c3c336561eca718f90a7089baa0f622448e4` | `unknown_side_effect_frontier` | side-effect alias partition |
+| loop-carried LTO | `c139fa05703d764d5e691611ab6ed2649b71cb973ca1025e126b3043cd43caf4` | `loop_carried_communication` | guarded loop phase schedule |
 
 This small, deliberately heterogeneous set does not estimate a population
 rate.  It does show that the compiler-level search space is larger than a
 single transfer-policy classifier: multiple distinct proof families block
 otherwise plausible scheduling transformations, while one case already has a
-fully materializable compiler-only oracle.
+fully materializable compiler-only oracle.  All five cases now pass the host
+phase-materialization shape audit.  Three had previously been rejected solely
+because the application-side wrapper call used LLVM `invoke`; the compiler
+now correctly audits the independent HIP launch inside the wrapper without
+changing the caller's normal or unwind edge.
 
 ## Reproduction
 
@@ -48,9 +52,9 @@ From the repository root, after producing the five fact directories:
 python3 tools/gicc-passes/experiments/producer_fission/analyze_compiler_schedule_coverage.py \
   --case jacobi=build_ofi/compiler_fact_coverage_20260904/jacobi_current/meta/features.json \
   --case minimod=build_ofi/compiler_fact_coverage_20260904/minimod_current/meta/features.json \
-  --case mm_minimal=build_ofi/compiler_fact_coverage_20260904/mm_minimal_singlefrontier/meta/features.json \
-  --case mixed_lto=build_ofi/compiler_fact_coverage_20260904/bench_mixed_lto/meta/features.json \
-  --case loop_lto=build_ofi/compiler_fact_coverage_20260904/bench_pingpong_lto/meta/features.json \
+  --case mm_minimal=build_ofi/compiler_fact_coverage_20260904/mm_minimal_invoke/meta/features.json \
+  --case mixed_lto=build_ofi/compiler_fact_coverage_20260904/bench_mixed_invoke/meta/features.json \
+  --case loop_lto=build_ofi/compiler_fact_coverage_20260904/bench_pingpong_invoke/meta/features.json \
   --out build_ofi/compiler_fact_coverage_20260904/coverage-report.json \
   --markdown build_ofi/compiler_fact_coverage_20260904/coverage-report.md
 ```

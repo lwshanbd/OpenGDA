@@ -428,10 +428,6 @@ PhaseLaunchShape phaseLaunchShape(const GICCLaunchSite &site) {
         result.reason = "missing launch call or annotated wrapper";
         return result;
     }
-    if (!isa<CallInst>(site.callsite)) {
-        result.reason = "invoke launch sites are not supported";
-        return result;
-    }
     if (site.kernelTemplate.params.empty()) {
         result.reason = "kernel parameter metadata is empty";
         return result;

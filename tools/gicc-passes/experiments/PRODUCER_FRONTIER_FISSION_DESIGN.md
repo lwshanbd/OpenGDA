@@ -252,8 +252,11 @@ Candidate generation is fail-closed and requires all of the following:
 8. **Communication completeness.** Every original group member is staged and
    exactly one trigger and required quiet remain on every path.
 9. **Launch safety.** Both launches use the original grid, block, shared
-   memory, stream, and arguments; exceptions/invokes and multi-stream aliases
-   are rejected in the first implementation.
+   memory, stream, and arguments. An exception-aware `invoke` of the annotated
+   wrapper is accepted because materialization changes only the separately
+   audited `hipLaunchKernel` call inside that wrapper and leaves the caller's
+   normal and unwind successors untouched. Invoke-form HIP launches and
+   multi-stream aliases remain rejected in the first implementation.
 10. **Final replay.** The lowering pass recomputes all relations from final IR
     and checks the candidate content ID before changing either host or device
     code.

@@ -260,7 +260,7 @@ def load_case(label: str, features_path: Path) -> tuple[dict[str, Any], dict[str
     if unknown:
         missing_proof_families.append("side_effect_alias_partition")
     if not phase_supported:
-        missing_proof_families.append("invoke_preserving_host_materialization")
+        missing_proof_families.append("host_phase_materialization")
 
     facts = {
         "transfer_count": len(transfers),
