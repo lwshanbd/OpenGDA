@@ -232,6 +232,14 @@ most nine representatives, and three independent paired `pdebug` allocations.
 At no point does a model receive source, IR, runtime labels, compiler-private
 hints, or permission to generate code.
 
+Before the first inference,
+`preflight_compiler_llm_capability_authorization.py` independently regenerates
+the request from the final suite/readiness/protocol evidence, validates the
+authorization's exact 60-call delivery and no-source/no-tools boundary, and
+checks the authorized provider CLI version.  It emits a content-addressed
+record with `provider_inference_invoked=false`; only after that record is
+frozen does the post-authorization controller enter the model archive stage.
+
 `collective/analyze_collective_n6_llm_runtime_validation.py` replays the three
 raw allocation monitors, exact jobspecs, node sets, compiler artifacts and
 rotated policy orders.  It reports each modal and post-hoc representative

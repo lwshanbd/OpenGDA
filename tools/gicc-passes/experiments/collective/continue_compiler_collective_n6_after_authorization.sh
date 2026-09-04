@@ -18,6 +18,7 @@ case $5 in /*) output_root=$5 ;; *) output_root="$repo_root/$5" ;; esac
 selection="$priority_root/selection.json"
 request_dir="$priority_root/request"
 request_json="$request_dir/request.json"
+authorization_preflight="$output_root/authorization-preflight.json"
 archive_dir="$output_root/archive"
 control_dir="$output_root/hidden-controls"
 analysis_path="$output_root/capability-analysis.json"
@@ -28,6 +29,7 @@ state_path="$output_root.chain.state"
 events_path="$output_root.chain.events"
 lock_path="$output_root.chain.lock"
 trial_runner="$experiment_dir/run_compiler_llm_capability_trials.py"
+preflight="$experiment_dir/preflight_compiler_llm_capability_authorization.py"
 capability_analyzer="$experiment_dir/analyze_compiler_llm_capability_trials.py"
 selector="$experiment_dir/freeze_compiler_llm_priority_request.py"
 screen_controller="$script_dir/continue_compiler_collective_n6_llm_controls.sh"
@@ -118,7 +120,7 @@ artifacts=(
     "$n6_bundle/FROZEN_V3_MANIFEST.json"
     "$n6_bundle/discovery/graph.json"
     "$n6_bundle/controls/manifest.json"
-    "$trial_runner" "$capability_analyzer"
+    "$preflight" "$trial_runner" "$capability_analyzer"
     "$screen_controller" "$screen_adapter"
     "$runtime_preparer" "$runtime_builder"
     "$runtime_controller" "$runtime_analyzer" "$paper_auditor"
@@ -152,6 +154,20 @@ common_args=(
     --label collective_n6 --graph "$graph"
     --request-dir "$request_dir" --authorization "$authorization"
 )
+
+preflight_args=("${common_args[@]}" --out "$authorization_preflight")
+if [[ -f $authorization_preflight ]]; then
+    set_state verifying_exact_authorization "$authorization_preflight"
+    python3 "$preflight" verify "${preflight_args[@]}"
+else
+    set_state preflighting_exact_authorization \
+        "request, delivery, boundary, provider version; inference=false"
+    python3 "$preflight" emit "${preflight_args[@]}"
+fi
+digest=$(sha256sum "$authorization_preflight")
+artifacts+=("$authorization_preflight")
+hashes+=("${digest%% *}")
+verify_artifacts
 
 set_state running_model_archive \
     "request_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["request_id"])' "$request_json") calls=strictly_serial"

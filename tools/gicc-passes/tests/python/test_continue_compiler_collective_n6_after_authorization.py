@@ -22,13 +22,19 @@ class ContinueCollectiveN6AfterAuthorizationTests(unittest.TestCase):
         self.assertNotIn("flux cancel", text)
         self.assertIn('entry.get("label") != "collective_n6"', text)
         self.assertIn("priority selection and request ID differ", text)
+        self.assertIn('python3 "$preflight"', text)
         self.assertIn('python3 "$trial_runner"', text)
+        self.assertEqual(1, text.count('python3 "$trial_runner"'))
         self.assertIn('"$screen_controller"', text)
         self.assertIn('"$runtime_builder"', text)
         self.assertIn('"$runtime_controller"', text)
         self.assertIn('python3 "$paper_auditor"', text)
         self.assertLess(
             text.index('entry.get("label") != "collective_n6"'),
+            text.index('python3 "$preflight"'),
+        )
+        self.assertLess(
+            text.index('python3 "$preflight"'),
             text.index('python3 "$trial_runner"'),
         )
         self.assertLess(
