@@ -35,9 +35,9 @@ and fails closed at every transition. Its current output is:
 | `loop_lto` | `awaiting_predecessor` | run the frozen reused-descriptor scout after the serial campaign |
 
 The report has readiness ID
-`sha256:13507a04131c82bd25c8a15e301aded5590e92e3106c051b502d87d9ce35454d`
+`sha256:46a9612de918f063830d3ea422da993650c23a8603b66f4daaa04e4cec777ba7`
 and serialized SHA-256
-`f8b8f99c826574a738692c930d5a48990659ed96d2fdd6a860ba8fd56cabe88c`.
+`94097e1862c9b4dd823cc6fd01cfaa44522240eda8f7c8cbc199df9d46162510`.
 It reports zero provider-protocol-permitted entries, zero authorized provider
 calls, zero measured LLM policies, and
 `paper_llm_performance_claim_ready=false`.
@@ -64,6 +64,12 @@ capacity but cannot support an LLM-selection benefit.
   until a separate content-addressed authorization exists.
 - The guarded early-trigger scout is subject to the same rule and remains
   absent from model-visible candidates while it waits or until confirmation.
+- A positive producer-fission or guarded-trigger confirmation is also replayed
+  from its three raw `pdebug` allocation monitors. Because both candidates are
+  absent from the current frozen suite, a pass advances only to
+  `graph_expansion_required`; it cannot make the current request eligible.
+  The compiler graph, prompts, suite, and readiness evidence must all be
+  regenerated and content-addressed before either candidate reaches a model.
 - The reused-loop-descriptor scout is a graph-expansion oracle. Its candidate
   remains explicitly model-invisible even after a positive scout; only an
   independently frozen confirmation may justify rebuilding the compiler graph.
@@ -180,8 +186,12 @@ python3 tools/gicc-passes/experiments/audit_compiler_llm_readiness.py emit \
   --collective-confirmation-analysis build_ofi/compiler_collective_n8_confirmation_20260904/analysis.json \
   --producer-state build_ofi/producer_fission_oracle_scout_7687377_20260904.state \
   --producer-analysis build_ofi/producer_fission_oracle_scout_7687377_20260904/analysis.json \
+  --producer-confirmation-state build_ofi/producer_fission_confirmation_7687377_20260904.state \
+  --producer-confirmation-analysis build_ofi/producer_fission_confirmation_7687377_20260904/analysis.json \
   --guarded-state build_ofi/guarded_early_trigger_scout_77897d9_20260904.state \
   --guarded-analysis build_ofi/guarded_early_trigger_scout_77897d9_20260904/analysis.json \
+  --guarded-confirmation-state build_ofi/guarded_early_trigger_confirmation_77897d9_20260904.state \
+  --guarded-confirmation-analysis build_ofi/guarded_early_trigger_confirmation_77897d9_20260904/analysis.json \
   --reused-state build_ofi/reused_loop_descriptor_scout_aff76f9_20260904.state \
   --reused-analysis build_ofi/reused_loop_descriptor_scout_aff76f9_20260904/analysis.json \
   --out build_ofi/compiler_llm_readiness_20260904/report.json

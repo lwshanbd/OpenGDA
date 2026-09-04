@@ -179,6 +179,68 @@ class CompilerLlmReadinessTests(unittest.TestCase):
         self.assertFalse(result["provider_protocol_permitted"])
         self.assertFalse(result["provider_call_authorized"])
 
+    def test_hidden_candidate_confirmation_requires_graph_expansion(self):
+        producer_scout = {
+            "schema_version": "gicc-producer-fission-oracle-analysis-v1",
+            "correctness_gate": {"passed": True},
+            "oracle_headroom_gate": {"passed": True},
+        }
+        producer = readiness.classify_producer(
+            entry(), "promising", producer_scout, "confirmed", True,
+        )
+        self.assertEqual("graph_expansion_required", producer["status"])
+        self.assertFalse(producer["provider_protocol_permitted"])
+        self.assertFalse(producer["candidate_model_visible"])
+        self.assertFalse(producer["current_suite_graph_expanded"])
+
+        guarded_scout = {
+            "schema_version": "gicc-guarded-early-trigger-analysis-v1",
+            "correctness_gate": {"passed": True},
+            "oracle_headroom_gate": {"passed": True},
+        }
+        guarded = readiness.classify_guarded_early_trigger(
+            entry(), "promising", guarded_scout, "confirmed", True,
+        )
+        self.assertEqual("graph_expansion_required", guarded["status"])
+        self.assertFalse(guarded["provider_protocol_permitted"])
+
+    def test_hidden_confirmation_replays_before_graph_expansion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transition = root / "transition.json"
+            transition.write_text("{}\n", encoding="utf-8")
+            monitors = [root / f"monitor{number}.json" for number in (1, 2, 3)]
+            for path in monitors:
+                path.write_text("{}\n", encoding="utf-8")
+            payload = {
+                "schema_version": "unit-hidden-confirmation-v1",
+                "model_invoked": False,
+                "application_source_modified": False,
+                "provider_call_authorized": False,
+                "transition": str(transition),
+                "transition_sha256": readiness.sha256_file(transition),
+                "allocation_monitors": [
+                    {"monitor": str(path)} for path in monitors
+                ],
+                "correctness_gate": {"passed": True},
+                "runtime_guard_gate": {"passed": True},
+                "confirmation_gate": {"passed": True},
+            }
+            confirmation = {
+                **payload, "result_id": bridge._fingerprint(payload),
+            }
+            path = root / "confirmation.json"
+            path.write_text(json.dumps(confirmation) + "\n", encoding="utf-8")
+            analyzer = mock.Mock()
+            analyzer.analyze_monitors.return_value = confirmation
+            self.assertTrue(readiness.verified_hidden_candidate_confirmation(
+                path, schema=payload["schema_version"], analyzer=analyzer,
+                label="unit-hidden", require_runtime_guard=True,
+            ))
+            analyzer.analyze_monitors.assert_called_once_with(
+                transition, monitors,
+            )
+
     def test_guarded_scout_waits_and_then_requires_confirmation(self):
         waiting = readiness.classify_guarded_early_trigger(
             entry(), "waiting_predecessor", None,

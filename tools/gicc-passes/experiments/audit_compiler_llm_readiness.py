@@ -23,8 +23,12 @@ ROOT = HERE.parents[2]
 PASS_PYTHON = HERE.parent / "python"
 sys.path.insert(0, str(PASS_PYTHON))
 sys.path.insert(0, str(HERE / "collective"))
+sys.path.insert(0, str(HERE / "producer_fission"))
+sys.path.insert(0, str(HERE / "guarded_early_trigger"))
 
 import analyze_compiler_collective_n8_confirmation as n8_confirmation  # noqa: E402
+import analyze_guarded_early_trigger_confirmation as guarded_confirmation  # noqa: E402
+import analyze_producer_fission_confirmation as producer_confirmation  # noqa: E402
 import gicc_comm_plan_bridge as structural  # noqa: E402
 import gicc_compiler_decision_suite as decision_suite  # noqa: E402
 import gicc_llm_bridge as bridge  # noqa: E402
@@ -288,9 +292,61 @@ def verified_collective_confirmation(
     return gate["passed"]
 
 
-def classify_producer(entry: dict[str, Any], phase: str,
-                      analysis: Any | None) -> dict[str, Any]:
+def _hidden_candidate_result(
+    entry: dict[str, Any], *, confirmation_passed: bool,
+) -> dict[str, Any]:
+    if confirmation_passed:
+        result = _base_entry(
+            entry, "graph_expansion_required",
+            "regenerate_and_refreeze_graph_before_provider_request",
+        )
+    else:
+        result = _base_entry(
+            entry, "closed_negative", "keep_candidate_model_invisible",
+        )
+    result.update({
+        "runtime_confirmation_gate_passed": confirmation_passed,
+        "candidate_model_visible": False,
+        "current_suite_graph_expanded": False,
+    })
+    return result
+
+
+def _confirmation_pending_result(
+    entry: dict[str, Any], *, phase: str, label: str,
+) -> dict[str, Any]:
+    status = {
+        "missing": "confirmation_required",
+        "submitting": "awaiting_confirmation",
+        "monitoring": "awaiting_confirmation",
+        "analyzing": "awaiting_confirmation",
+        "failed": "confirmation_failed",
+    }.get(phase)
+    if status is None:
+        raise ReadinessError(f"{label} confirmation state requires an analysis")
+    next_stage = {
+        "confirmation_required": "freeze_and_run_confirmatory_compiler_oracle",
+        "awaiting_confirmation": f"wait_for_existing_{label}_confirmation",
+        "confirmation_failed": "diagnose_without_model_call",
+    }[status]
+    result = _base_entry(entry, status, next_stage)
+    result.update({
+        "candidate_model_visible": False,
+        "current_suite_graph_expanded": False,
+    })
+    return result
+
+
+def classify_producer(
+    entry: dict[str, Any], phase: str, analysis: Any | None,
+    confirmation_phase: str = "missing",
+    confirmation_passed: bool | None = None,
+) -> dict[str, Any]:
     if analysis is None:
+        if confirmation_passed is not None:
+            raise ReadinessError(
+                "producer-fission confirmation exists without a passed scout"
+            )
         status = {
             "waiting_predecessor": "awaiting_predecessor",
             "submitting": "awaiting_scout",
@@ -323,11 +379,26 @@ def classify_producer(entry: dict[str, Any], phase: str,
             "producer-fission controller state disagrees with scout analysis"
         )
     if gate["passed"]:
-        result = _base_entry(
-            entry, "confirmation_required",
-            "freeze_and_run_confirmatory_compiler_oracle",
-        )
+        if confirmation_passed is None:
+            result = _confirmation_pending_result(
+                entry, phase=confirmation_phase, label="producer_fission",
+            )
+        else:
+            expected_confirmation_phase = (
+                "confirmed" if confirmation_passed else "negative"
+            )
+            if confirmation_phase != expected_confirmation_phase:
+                raise ReadinessError(
+                    "producer-fission confirmation state disagrees with analysis"
+                )
+            result = _hidden_candidate_result(
+                entry, confirmation_passed=confirmation_passed,
+            )
     else:
+        if confirmation_passed is not None:
+            raise ReadinessError(
+                "producer-fission confirmation exists after a negative scout"
+            )
         result = _base_entry(
             entry, "closed_negative", "mask_producer_fission_from_model",
         )
@@ -335,9 +406,16 @@ def classify_producer(entry: dict[str, Any], phase: str,
     return result
 
 
-def classify_guarded_early_trigger(entry: dict[str, Any], phase: str,
-                                   analysis: Any | None) -> dict[str, Any]:
+def classify_guarded_early_trigger(
+    entry: dict[str, Any], phase: str, analysis: Any | None,
+    confirmation_phase: str = "missing",
+    confirmation_passed: bool | None = None,
+) -> dict[str, Any]:
     if analysis is None:
+        if confirmation_passed is not None:
+            raise ReadinessError(
+                "guarded-trigger confirmation exists without a passed scout"
+            )
         status = {
             "waiting_predecessor": "awaiting_predecessor",
             "submitting": "awaiting_scout",
@@ -375,17 +453,77 @@ def classify_guarded_early_trigger(entry: dict[str, Any], phase: str,
             "guarded-early-trigger controller state disagrees with scout analysis"
         )
     if gate["passed"]:
-        result = _base_entry(
-            entry, "confirmation_required",
-            "freeze_and_run_confirmatory_compiler_oracle",
-        )
+        if confirmation_passed is None:
+            result = _confirmation_pending_result(
+                entry, phase=confirmation_phase, label="guarded_early_trigger",
+            )
+        else:
+            expected_confirmation_phase = (
+                "confirmed" if confirmation_passed else "negative"
+            )
+            if confirmation_phase != expected_confirmation_phase:
+                raise ReadinessError(
+                    "guarded-trigger confirmation state disagrees with analysis"
+                )
+            result = _hidden_candidate_result(
+                entry, confirmation_passed=confirmation_passed,
+            )
     else:
+        if confirmation_passed is not None:
+            raise ReadinessError(
+                "guarded-trigger confirmation exists after a negative scout"
+            )
         result = _base_entry(
             entry, "closed_negative",
             "mask_guarded_early_trigger_from_model",
         )
     result["runtime_gate_passed"] = gate["passed"]
     return result
+
+
+def verified_hidden_candidate_confirmation(
+    path: Path, *, schema: str, analyzer: Any, label: str,
+    require_runtime_guard: bool = False,
+) -> bool:
+    """Replay a model-invisible candidate's three confirmation allocations."""
+    value = read_json(path)
+    if not isinstance(value, dict) or value.get("schema_version") != schema:
+        raise ReadinessError(f"wrong {label} confirmation schema")
+    payload = dict(value)
+    result_id = payload.pop("result_id", None)
+    if result_id != bridge._fingerprint(payload):
+        raise ReadinessError(f"{label} confirmation result ID changed")
+    for key, expected in {
+        "model_invoked": False,
+        "application_source_modified": False,
+        "provider_call_authorized": False,
+    }.items():
+        if value.get(key) is not expected:
+            raise ReadinessError(f"{label} confirmation boundary changed: {key}")
+    if value.get("correctness_gate", {}).get("passed") is not True:
+        raise ReadinessError(f"{label} confirmation correctness gate failed")
+    if (require_runtime_guard
+            and value.get("runtime_guard_gate", {}).get("passed") is not True):
+        raise ReadinessError(f"{label} runtime guard gate failed")
+    transition_path = Path(value.get("transition", ""))
+    if (not transition_path.is_absolute() or not transition_path.is_file()
+            or sha256_file(transition_path) != value.get("transition_sha256")):
+        raise ReadinessError(f"{label} confirmation transition changed")
+    summaries = value.get("allocation_monitors")
+    if not isinstance(summaries, list) or len(summaries) != 3:
+        raise ReadinessError(f"{label} confirmation lacks three monitors")
+    monitors = [Path(item.get("monitor", "")) for item in summaries]
+    if any(not monitor.is_absolute() for monitor in monitors):
+        raise ReadinessError(f"{label} confirmation monitor is not absolute")
+    regenerated = analyzer.analyze_monitors(transition_path, monitors)
+    if regenerated != value:
+        raise ReadinessError(
+            f"{label} confirmation does not replay from raw evidence"
+        )
+    gate = value.get("confirmation_gate")
+    if not isinstance(gate, dict) or not isinstance(gate.get("passed"), bool):
+        raise ReadinessError(f"{label} confirmation lacks its gate")
+    return gate["passed"]
 
 
 def classify_reused_loop_descriptor(entry: dict[str, Any], phase: str,
@@ -506,9 +644,17 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         read_json(args.producer_analysis)
         if args.producer_analysis.is_file() else None
     )
+    producer_confirmation_analysis = (
+        read_json(args.producer_confirmation_analysis)
+        if args.producer_confirmation_analysis.is_file() else None
+    )
     guarded_analysis = (
         read_json(args.guarded_analysis)
         if args.guarded_analysis.is_file() else None
+    )
+    guarded_confirmation_analysis = (
+        read_json(args.guarded_confirmation_analysis)
+        if args.guarded_confirmation_analysis.is_file() else None
     )
     reused_analysis = (
         read_json(args.reused_analysis)
@@ -520,6 +666,23 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             entries["collective_n8"]["graph_id"],
         )
         if collective_confirmation_analysis is not None else None
+    )
+    producer_confirmation_passed = (
+        verified_hidden_candidate_confirmation(
+            args.producer_confirmation_analysis,
+            schema="gicc-producer-fission-confirmation-v1",
+            analyzer=producer_confirmation, label="producer-fission",
+        )
+        if producer_confirmation_analysis is not None else None
+    )
+    guarded_confirmation_passed = (
+        verified_hidden_candidate_confirmation(
+            args.guarded_confirmation_analysis,
+            schema="gicc-guarded-early-trigger-confirmation-v1",
+            analyzer=guarded_confirmation, label="guarded-trigger",
+            require_runtime_guard=True,
+        )
+        if guarded_confirmation_analysis is not None else None
     )
     records = {
         "coalescing_placement": classify_placement(
@@ -534,10 +697,14 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "jacobi": classify_producer(
             entries["jacobi"], state_phase(args.producer_state),
             producer_analysis,
+            state_phase(args.producer_confirmation_state),
+            producer_confirmation_passed,
         ),
         "mm_minimal": classify_guarded_early_trigger(
             entries["mm_minimal"], state_phase(args.guarded_state),
             guarded_analysis,
+            state_phase(args.guarded_confirmation_state),
+            guarded_confirmation_passed,
         ),
         "loop_lto": classify_reused_loop_descriptor(
             entries["loop_lto"], state_phase(args.reused_state),
@@ -601,8 +768,28 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "producer_state": evidence(args.producer_state),
             "producer_analysis": evidence(args.producer_analysis),
+            "producer_confirmation_state": evidence(
+                args.producer_confirmation_state
+            ),
+            "producer_confirmation_analysis": evidence(
+                args.producer_confirmation_analysis
+            ),
+            "producer_confirmation_analyzer": evidence(
+                HERE / "producer_fission/analyze_producer_fission_confirmation.py"
+            ),
             "guarded_state": evidence(args.guarded_state),
             "guarded_analysis": evidence(args.guarded_analysis),
+            "guarded_confirmation_state": evidence(
+                args.guarded_confirmation_state
+            ),
+            "guarded_confirmation_analysis": evidence(
+                args.guarded_confirmation_analysis
+            ),
+            "guarded_confirmation_analyzer": evidence(
+                HERE
+                / "guarded_early_trigger/"
+                "analyze_guarded_early_trigger_confirmation.py"
+            ),
             "reused_state": evidence(args.reused_state),
             "reused_analysis": evidence(args.reused_analysis),
         },
@@ -655,8 +842,36 @@ def add_inputs(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--producer-state", type=Path, required=True)
     parser.add_argument("--producer-analysis", type=Path, required=True)
+    parser.add_argument(
+        "--producer-confirmation-state", type=Path,
+        default=(
+            ROOT / "build_ofi/"
+            "producer_fission_confirmation_7687377_20260904.state"
+        ),
+    )
+    parser.add_argument(
+        "--producer-confirmation-analysis", type=Path,
+        default=(
+            ROOT / "build_ofi/"
+            "producer_fission_confirmation_7687377_20260904/analysis.json"
+        ),
+    )
     parser.add_argument("--guarded-state", type=Path, required=True)
     parser.add_argument("--guarded-analysis", type=Path, required=True)
+    parser.add_argument(
+        "--guarded-confirmation-state", type=Path,
+        default=(
+            ROOT / "build_ofi/"
+            "guarded_early_trigger_confirmation_77897d9_20260904.state"
+        ),
+    )
+    parser.add_argument(
+        "--guarded-confirmation-analysis", type=Path,
+        default=(
+            ROOT / "build_ofi/"
+            "guarded_early_trigger_confirmation_77897d9_20260904/analysis.json"
+        ),
+    )
     parser.add_argument("--reused-state", type=Path, required=True)
     parser.add_argument("--reused-analysis", type=Path, required=True)
 
@@ -693,6 +908,10 @@ def main() -> int:
         ReadinessError, decision_suite.SuiteError,
         structural.PlanBridgeError, n8_confirmation.ConfirmError,
         n8_confirmation.monitor_base.MonitorError,
+        producer_confirmation.ConfirmError,
+        producer_confirmation.common.MonitorError,
+        guarded_confirmation.ConfirmError,
+        guarded_confirmation.common.MonitorError,
         OSError, KeyError, TypeError, ValueError,
     ) as exc:
         print(f"compiler-llm-readiness: ERROR: {exc}", file=sys.stderr)

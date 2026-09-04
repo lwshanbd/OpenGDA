@@ -118,9 +118,9 @@ The current report is
 `build_ofi/compiler_llm_capability_protocol_20260904/report.json`:
 
 - protocol ID:
-  `sha256:51569f21509c1446bfc1ab7f820eda7e27e2636edc4f08cbcca416b66f42bb56`;
+  `sha256:eea09d325ae91805353067e9151bd8b827a225e3133f130f00841aae1f44ebeb`;
 - serialized report SHA-256:
-  `604712fb4fd559d3f713a4539cd4db1dcea5134e506dc175737bc3180ea52833`;
+  `51efc4e64ed6499d124cd3e63e41bf97174691de753dea3d71bf772d23dc5ac3`;
 - frozen metrics implementation SHA-256:
   `fcc5858af4498ad39daa0efcdce4934fc7dd470e3e654189a8bb29a5d4c1250e`;
 - frozen unified bridge SHA-256:
