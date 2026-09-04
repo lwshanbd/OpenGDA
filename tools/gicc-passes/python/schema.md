@@ -56,6 +56,10 @@ for all of them.
       "trip_count":       64,
       "grid_blocks":      8,
       "threads_per_block": 1,
+      "phase_launch_supported": true,
+      "phase_launch_stream": "explicit",
+      "phase_launch_materialization": "device_stub",
+      "phase_launch_reason": "one original kernel launch with reusable parameters and unchanged stream",
       "launch_grid":      {"x": 8, "y": 1, "z": 1},
       "launch_block":     {"x": 1, "y": 1, "z": 1}
     }],
@@ -68,6 +72,10 @@ for all of them.
     "grid_blocks":        8,                 // x*y*z; null if any dimension
                                              //   is dynamic or product overflows
     "threads_per_block":  1,                 // same rule for launch_block
+    "phase_launch_supported": true,           // host LTO proved that the
+    "phase_launch_stream": "explicit",        //   wrapper launch is cloneable
+    "phase_launch_materialization": "device_stub", // exact rewrite owner
+    "phase_launch_reason": "one original ...",//   on one unchanged stream
     "compute_before_flops": 17,              // arith ops in BBs dominating the call;
                                              //   null if not measured
     "flops_to_first_use": 205,               // arith ops between the call and the
@@ -154,6 +162,17 @@ its mandatory flush. `write_footprint_known` means those writes are rooted in
 named kernel pointer formals; it does **not** authorize fission. The listed
 remaining proofs must all be discharged by later host/device LTO before a
 candidate may enter the model-visible legal set.
+
+`phase_launch_supported` is also a compiler proof, not a model assertion. It
+is true only when every aggregated host call is a non-throwing direct call to
+an annotated wrapper and the compiler finds exactly one matching
+`hipLaunchKernel`, an unused return value, and a launch-owner-local parameter
+array. At the early-simplification pass point the launch may still live in an
+exclusive HIP device stub reached through the kernel's constant global; the
+compiler then additionally proves the unique push/pop configuration chain and
+reports `phase_launch_materialization: "device_stub"`. After inlining, the
+equivalent location is `"wrapper"`. The materializer must recompute the same
+shape on final host IR before cloning anything.
 
 Schema v4 → v5 changes:
 - `launch_grid`, `launch_block`, `grid_blocks`, and `threads_per_block`

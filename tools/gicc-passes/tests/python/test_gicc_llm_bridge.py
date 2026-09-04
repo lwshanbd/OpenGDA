@@ -40,6 +40,10 @@ def feature(site_id, *, hk=True, locality=None, batched_loop=False):
                 "launch_block": {"x": 1, "y": 1, "z": 1},
                 "grid_blocks": 8,
                 "threads_per_block": 1,
+                "phase_launch_supported": True,
+                "phase_launch_stream": "explicit",
+                "phase_launch_materialization": "device_stub",
+                "phase_launch_reason": "compiler-proved wrapper shape",
                 "size_bytes": 4096,
                 "trip_count": 64,
             }
@@ -48,6 +52,10 @@ def feature(site_id, *, hk=True, locality=None, batched_loop=False):
         "launch_block": {"x": 1, "y": 1, "z": 1},
         "grid_blocks": 8,
         "threads_per_block": 1,
+        "phase_launch_supported": True,
+        "phase_launch_stream": "explicit",
+        "phase_launch_materialization": "device_stub",
+        "phase_launch_reason": "compiler-proved wrapper shape",
         "compute_before_flops": 0,
         "flops_to_first_use": 0,
         "trip_count": 64,
@@ -128,6 +136,9 @@ class LlmBridgeTests(unittest.TestCase):
         self.assertTrue(
             self.dossier["sites"][0]["producer_frontier"]
                         ["write_footprint_known"]
+        )
+        self.assertTrue(
+            self.dossier["sites"][0]["phase_launch_supported"]
         )
 
     def test_unknown_locality_removes_forced_ipc_but_keeps_safe_default(self):

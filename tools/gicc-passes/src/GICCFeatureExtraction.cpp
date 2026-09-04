@@ -46,7 +46,18 @@ struct LaunchContextFacts {
     LaunchGeometry geometry;
     std::optional<int64_t> sizeBytes;
     std::optional<int64_t> tripCount;
+    bool phaseLaunchSupported = false;
+    std::string phaseLaunchStream = "unknown";
+    std::string phaseLaunchMaterialization = "none";
+    std::string phaseLaunchReason = "launch wrapper was not analyzed";
     unsigned staticCallsites = 1;
+};
+
+struct PhaseLaunchShape {
+    bool supported = false;
+    std::string stream = "unknown";
+    std::string materialization = "none";
+    std::string reason;
 };
 
 bool isBeforeInBlock(const Instruction &candidate,
@@ -164,6 +175,235 @@ LaunchGeometry launchGeometry(const GICCLaunchSite &site) {
     // optional shmem/stream operands follow them and do not affect this ABI.
     result.grid = decodeDim3(*site.callsite, 1, 2);
     result.block = decodeDim3(*site.callsite, 3, 4);
+    return result;
+}
+
+SmallVector<const CallInst *, 2> hipLaunchesIn(const Function &function) {
+    SmallVector<const CallInst *, 2> launches;
+    for (const BasicBlock &BB : function) {
+        for (const Instruction &I : BB) {
+            const auto *call = dyn_cast<CallInst>(&I);
+            const Function *callee = call ? call->getCalledFunction() : nullptr;
+            if (callee && callee->getName() == "hipLaunchKernel")
+                launches.push_back(call);
+        }
+    }
+    return launches;
+}
+
+unsigned directCallsNamed(const Function &function, StringRef name) {
+    unsigned count = 0;
+    for (const BasicBlock &BB : function) {
+        for (const Instruction &I : BB) {
+            const auto *call = dyn_cast<CallBase>(&I);
+            const Function *callee = call ? call->getCalledFunction() : nullptr;
+            if (callee && callee->getName() == name) ++count;
+        }
+    }
+    return count;
+}
+
+// At the early-simplification extension point, HIP still represents a
+// source-level kernel launch as an indirect call through a constant global:
+//
+//   @kernel = constant ptr @__device_stub__kernel
+//   %stub = load ptr, ptr @kernel
+//   call void %stub(...)
+//
+// Later optimization normally folds and inlines that stub, leaving the direct
+// hipLaunchKernel shape handled below. Resolve only this exact compiler-owned
+// global form; arbitrary function-pointer calls remain unsupported.
+const Function *indirectHipStub(const CallBase &call,
+                                StringRef kernelMangled,
+                                const GlobalVariable *&kernelGlobal) {
+    kernelGlobal = nullptr;
+    if (call.getCalledFunction()) return nullptr;
+    const auto *load = dyn_cast<LoadInst>(
+        call.getCalledOperand()->stripPointerCasts());
+    if (!load) return nullptr;
+    const auto *global = dyn_cast<GlobalVariable>(
+        load->getPointerOperand()->stripPointerCasts());
+    if (!global || global->getName() != kernelMangled ||
+        !global->isConstant() || !global->hasInitializer())
+        return nullptr;
+    const auto *stub = dyn_cast<Function>(
+        global->getInitializer()->stripPointerCasts());
+    if (!stub || !stub->getName().contains("__device_stub__")) return nullptr;
+    kernelGlobal = global;
+    return stub;
+}
+
+bool hipLaunchTargetMatches(const CallInst &launch, StringRef kernelMangled) {
+    const Value *kernel = launch.getArgOperand(0)->stripPointerCasts();
+    return kernel->hasName() && kernel->getName() == kernelMangled;
+}
+
+unsigned indirectDispatchUses(const Module &module,
+                              const GlobalVariable &kernelGlobal) {
+    unsigned count = 0;
+    for (const Function &function : module) {
+        for (const BasicBlock &BB : function) {
+            for (const Instruction &I : BB) {
+                const auto *call = dyn_cast<CallBase>(&I);
+                if (!call || call->getCalledFunction()) continue;
+                const auto *load = dyn_cast<LoadInst>(
+                    call->getCalledOperand()->stripPointerCasts());
+                if (load && load->getPointerOperand()->stripPointerCasts() ==
+                                &kernelGlobal)
+                    ++count;
+            }
+        }
+    }
+    return count;
+}
+
+unsigned directDispatchUses(const Module &module, const Function &stub) {
+    unsigned count = 0;
+    for (const Function &function : module)
+        for (const BasicBlock &BB : function)
+            for (const Instruction &I : BB)
+                if (const auto *call = dyn_cast<CallBase>(&I))
+                    if (call->getCalledFunction() == &stub) ++count;
+    return count;
+}
+
+PhaseLaunchShape phaseLaunchShape(const GICCLaunchSite &site) {
+    PhaseLaunchShape result;
+    if (!site.callsite || !site.launchWrapper) {
+        result.reason = "missing launch call or annotated wrapper";
+        return result;
+    }
+    if (!isa<CallInst>(site.callsite)) {
+        result.reason = "invoke launch sites are not supported";
+        return result;
+    }
+    if (site.kernelTemplate.params.empty()) {
+        result.reason = "kernel parameter metadata is empty";
+        return result;
+    }
+
+    const unsigned userParams = site.kernelTemplate.params.size() - 1;
+    if (site.callsite->arg_size() == 5 + userParams)
+        result.stream = "default";
+    else if (site.callsite->arg_size() == 7 + userParams)
+        result.stream = "explicit";
+    else {
+        result.reason =
+            "launch operand count does not match a supported wrapper ABI";
+        return result;
+    }
+
+    SmallVector<const CallInst *, 2> launches =
+        hipLaunchesIn(*site.launchWrapper);
+    const Function *launchOwner = site.launchWrapper;
+    const CallBase *stubDispatch = nullptr;
+    const Function *stub = nullptr;
+    const GlobalVariable *kernelGlobal = nullptr;
+    std::string materialization = "wrapper";
+
+    // If the stub has not yet been folded/inlined, accept exactly one
+    // compiler-generated wrapper-to-stub edge and prove that changing the
+    // stub cannot affect another source-level kernel launch.
+    SmallVector<const CallBase *, 2> stubDispatches;
+    for (const BasicBlock &BB : *site.launchWrapper) {
+        for (const Instruction &I : BB) {
+            const auto *call = dyn_cast<CallBase>(&I);
+            if (!call) continue;
+            if (const Function *callee = call->getCalledFunction()) {
+                if (callee->getName().contains("__device_stub__"))
+                    stubDispatches.push_back(call);
+                continue;
+            }
+            const GlobalVariable *candidateGlobal = nullptr;
+            if (const Function *candidate = indirectHipStub(
+                    *call, site.kernelMangled, candidateGlobal)) {
+                if (!stub) {
+                    stub = candidate;
+                    kernelGlobal = candidateGlobal;
+                } else if (stub != candidate || kernelGlobal != candidateGlobal) {
+                    result.reason =
+                        "wrapper dispatches through multiple HIP device stubs";
+                    return result;
+                }
+                stubDispatches.push_back(call);
+            }
+        }
+    }
+
+    if (!launches.empty() && !stubDispatches.empty()) {
+        result.reason = "wrapper contains both direct and stub kernel launches";
+        return result;
+    }
+    if (launches.empty()) {
+        if (stubDispatches.size() != 1 || !isa<CallInst>(stubDispatches.front())) {
+            result.reason =
+                "annotated wrapper must contain exactly one call-form HIP stub dispatch";
+            return result;
+        }
+        stubDispatch = stubDispatches.front();
+        if (!stub) stub = stubDispatch->getCalledFunction();
+        if (!stub || stub->isDeclaration()) {
+            result.reason = "HIP device stub body is unavailable";
+            return result;
+        }
+        launches = hipLaunchesIn(*stub);
+        launchOwner = stub;
+        if (directCallsNamed(*site.launchWrapper,
+                             "__hipPushCallConfiguration") != 1 ||
+            directCallsNamed(*stub, "__hipPopCallConfiguration") != 1) {
+            result.reason =
+                "wrapper/stub launch configuration chain is not unique";
+            return result;
+        }
+        const Module &module = *site.launchWrapper->getParent();
+        const unsigned uses = directDispatchUses(module, *stub) +
+            (kernelGlobal ? indirectDispatchUses(module, *kernelGlobal) : 0);
+        if (uses != 1) {
+            result.reason =
+                "HIP device stub is shared by another kernel dispatch";
+            return result;
+        }
+        materialization = "device_stub";
+    }
+
+    if (launches.size() != 1) {
+        result.reason =
+            "launch owner must contain exactly one hipLaunchKernel call";
+        return result;
+    }
+    const CallInst *launch = launches.front();
+    if (launch->arg_size() != 8 ||
+        !launch->getArgOperand(0)->getType()->isPointerTy() ||
+        !launch->getArgOperand(5)->getType()->isPointerTy() ||
+        !launch->getArgOperand(6)->getType()->isIntegerTy() ||
+        !launch->getArgOperand(7)->getType()->isPointerTy()) {
+        result.reason =
+            "hipLaunchKernel operands do not match the audited ABI";
+        return result;
+    }
+    if (!launch->use_empty()) {
+        result.reason = "hipLaunchKernel return value is observed";
+        return result;
+    }
+
+    if (!hipLaunchTargetMatches(*launch, site.kernelMangled)) {
+        result.reason =
+            "hipLaunchKernel target does not match compiler metadata";
+        return result;
+    }
+    const Value *params = getUnderlyingObject(
+        launch->getArgOperand(5)->stripPointerCasts());
+    const auto *alloca = dyn_cast<AllocaInst>(params);
+    if (!alloca || alloca->getFunction() != launchOwner) {
+        result.reason =
+            "kernel parameter array lifetime is not launch-owner-local";
+        return result;
+    }
+
+    result.supported = true;
+    result.materialization = materialization;
+    result.reason =
+        "one original kernel launch with reusable parameters and unchanged stream";
     return result;
 }
 
@@ -293,6 +533,11 @@ LaunchContextFacts launchContext(const GICCLaunchSite &site,
                                  const OpTemplate &op) {
     LaunchContextFacts context;
     context.geometry = launchGeometry(site);
+    const PhaseLaunchShape phase = phaseLaunchShape(site);
+    context.phaseLaunchSupported = phase.supported;
+    context.phaseLaunchStream = phase.stream;
+    context.phaseLaunchMaterialization = phase.materialization;
+    context.phaseLaunchReason = phase.reason;
     if (auto size = op.args.find("size"); size != op.args.end())
         context.sizeBytes = argConstantAtLaunch(size->second, site);
     context.tripCount = tripCountAtLaunch(op, site);
@@ -304,7 +549,9 @@ auto contextKey(const LaunchContextFacts &context) {
         context.geometry.grid.x, context.geometry.grid.y,
         context.geometry.grid.z, context.geometry.block.x,
         context.geometry.block.y, context.geometry.block.z,
-        context.sizeBytes, context.tripCount);
+        context.sizeBytes, context.tripCount,
+        context.phaseLaunchSupported, context.phaseLaunchStream,
+        context.phaseLaunchMaterialization, context.phaseLaunchReason);
 }
 
 std::vector<LaunchContextFacts> coalesceContexts(
@@ -370,6 +617,11 @@ json::Value launchContextRecord(const LaunchContextFacts &context) {
     else                   record["size_bytes"] = nullptr;
     if (context.tripCount) record["trip_count"] = *context.tripCount;
     else                   record["trip_count"] = nullptr;
+    record["phase_launch_supported"] = context.phaseLaunchSupported;
+    record["phase_launch_stream"] = context.phaseLaunchStream;
+    record["phase_launch_materialization"] =
+        context.phaseLaunchMaterialization;
+    record["phase_launch_reason"] = context.phaseLaunchReason;
     return json::Value(std::move(record));
 }
 
@@ -547,6 +799,39 @@ json::Value toRecord(const std::string &siteId,
     }
     r["static_launch_sites"] = static_cast<int64_t>(staticLaunchSites);
     r["launch_contexts"] = std::move(launchContexts);
+
+    const bool phaseLaunchSupported = !contexts.empty() &&
+        std::all_of(contexts.begin(), contexts.end(), [](const auto &context) {
+            return context.phaseLaunchSupported;
+        });
+    r["phase_launch_supported"] = phaseLaunchSupported;
+    if (!contexts.empty()) {
+        const std::string &stream = contexts.front().phaseLaunchStream;
+        const std::string &materialization =
+            contexts.front().phaseLaunchMaterialization;
+        const std::string &reason = contexts.front().phaseLaunchReason;
+        bool sameStream = std::all_of(
+            contexts.begin(), contexts.end(), [&](const auto &context) {
+                return context.phaseLaunchStream == stream;
+            });
+        bool sameReason = std::all_of(
+            contexts.begin(), contexts.end(), [&](const auto &context) {
+                return context.phaseLaunchReason == reason;
+            });
+        bool sameMaterialization = std::all_of(
+            contexts.begin(), contexts.end(), [&](const auto &context) {
+                return context.phaseLaunchMaterialization == materialization;
+            });
+        r["phase_launch_stream"] = sameStream ? stream : "mixed";
+        r["phase_launch_materialization"] =
+            sameMaterialization ? materialization : "mixed";
+        r["phase_launch_reason"] =
+            sameReason ? reason : "launch contexts disagree";
+    } else {
+        r["phase_launch_stream"] = "unknown";
+        r["phase_launch_materialization"] = "none";
+        r["phase_launch_reason"] = "no host launch context";
+    }
 
     r["launch_grid"]  = dim3Record(geometry.grid);
     r["launch_block"] = dim3Record(geometry.block);

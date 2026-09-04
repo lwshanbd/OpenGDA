@@ -1,7 +1,7 @@
 # Compiler-owned producer-frontier fission
 
-Status: implementation design; not yet a runtime protocol or performance
-claim.
+Status: compiler-fact foundation in progress; not yet a runtime protocol or
+performance claim.
 
 ## Research question
 
@@ -78,11 +78,22 @@ Device LTO rewrites the original kernel body:
 
 ### Audited host-IR materialization shape
 
-The real Jacobi host IR retains one annotated launch wrapper containing one
-`hipLaunchKernel` call. Its kernel-parameter array, packed grid/block values,
-shared-memory size, and stream are all explicit operands. Host LTO can insert
-a pre-authored runtime helper around that call and clone the call while it is
-still inside the parameter-array lifetime:
+At the early-simplification extension point used for compiler facts, the real
+Jacobi host IR retains one annotated wrapper that pushes launch configuration
+and dispatches through a constant kernel global. That global has one HIP
+device-stub initializer; the stub pops the same configuration and owns the
+single `hipLaunchKernel` call and its parameter array. The normal optimizer
+later folds and inlines this chain, at which point the same launch lives
+directly in the wrapper.
+
+The feature pass now recognizes both forms and fails closed unless the stub
+dispatch (when present), push/pop chain, launch target, return-value use, and
+parameter-array lifetime are unique. It reports the exact recomputation point
+as `phase_launch_materialization: device_stub|wrapper`. On the unchanged
+Jacobi source, the real early pass proves `device_stub`; it also rejects a
+synthetic stub shared by another launch. Host LTO can insert a pre-authored
+runtime helper around the proven call and clone it while it is still inside
+the parameter-array lifetime:
 
 ```text
 set_phase_from_kernel_args(kernel_params, boundary, stream)
@@ -94,7 +105,9 @@ hipLaunchKernel(original symbol, original geometry, kernel_params, shmem, stream
 The helper reads the already-materialized `DeviceCtx*` from kernel argument
 zero and launches the GICC-owned setter kernel on the supplied stream. This
 avoids reverse-engineering `Runtime::prepare()` internals in the pass and
-does not require a new application-visible kernel stub.
+does not require a new application-visible kernel stub. Final host LTO must
+rerun the shape proof because the optimizer may have moved ownership from the
+stub to the wrapper.
 
 Trace synthesis currently executes before the annotated wrapper. An IPC
 route may therefore enqueue a copy before boundary producers run. The first
