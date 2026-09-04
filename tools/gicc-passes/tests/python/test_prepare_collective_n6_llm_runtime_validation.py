@@ -1,6 +1,9 @@
 import copy
 import importlib.util
+import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,6 +16,7 @@ sys.path.insert(0, str(PASS_ROOT / "experiments"))
 sys.path.insert(0, str(COLLECTIVE))
 sys.path.insert(0, str(TEST_ROOT))
 SCRIPT = COLLECTIVE / "prepare_collective_n6_llm_runtime_validation.py"
+BUILDER = COLLECTIVE / "build_collective_n6_llm_runtime_validation.sh"
 SPEC = importlib.util.spec_from_file_location("collective_runtime_plan", SCRIPT)
 runtime = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -110,6 +114,57 @@ class PrepareCollectiveLlmRuntimeValidationTests(unittest.TestCase):
             self.assertEqual(
                 policy["policy_id"], hint["llm_metadata"]["policy_id"],
             )
+
+    def test_contained_plan_rejects_changed_private_hint(self):
+        policies = runtime.representative_policies(
+            self.graph, self.analysis, self.screen,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_files = {}
+            for role in (
+                "preparer", "compiler_graph", "capability_analysis",
+                "policy_screen", "compiler_build_script",
+                "compiler_evaluator", "collective_bridge",
+            ):
+                path = root / f"{role}.json"
+                path.write_text("{}\n")
+                evidence_files[role] = path
+            evidence_files["compiler_graph"].write_text(
+                json.dumps(self.graph) + "\n"
+            )
+            for policy in policies:
+                policy_root = root / "policies" / policy["name"]
+                decision, hint = runtime.decision_and_hint(self.graph, policy)
+                runtime.write_json_atomic(policy_root / "decision.json", decision)
+                runtime.write_json_atomic(policy_root / "hint.json", hint)
+            payload = runtime.plan_payload(
+                graph=self.graph, analysis=self.analysis, screen=self.screen,
+                policies=policies, output_dir=root,
+                input_paths=evidence_files,
+            )
+            runtime.write_json_atomic(root / "plan.json", {
+                "plan_id": bridge._fingerprint(payload), **payload,
+            })
+            plan, graph = runtime.verify_contained(root)
+            self.assertEqual(self.graph["graph_id"], graph["graph_id"])
+            self.assertEqual(len(policies), plan["unique_policy_count"])
+
+            hint_path = root / "policies" / policies[0]["name"] / "hint.json"
+            hint_path.write_text("{}\n")
+            with self.assertRaisesRegex(
+                runtime.RuntimeValidationError, "evidence changed"
+            ):
+                runtime.verify_contained(root)
+
+    def test_builder_is_lto_only_and_scheduler_free(self):
+        subprocess.run(["bash", "-n", BUILDER], check=True)
+        text = BUILDER.read_text(encoding="utf-8")
+        self.assertNotIn("flux ", text)
+        self.assertNotIn("provider", text.lower())
+        self.assertIn('"$builder" lower', text)
+        self.assertIn("verify-plan-ir", text)
+        self.assertIn('"$preparer" verify-built', text)
 
 
 if __name__ == "__main__":

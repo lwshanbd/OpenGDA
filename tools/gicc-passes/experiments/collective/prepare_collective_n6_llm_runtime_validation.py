@@ -28,6 +28,7 @@ sys.path.insert(0, str(EXPERIMENTS))
 sys.path.insert(0, str(HERE))
 
 import analyze_compiler_llm_capability_trials as capability_analysis  # noqa: E402
+import compiler_collective_eval as collective_eval  # noqa: E402
 import gicc_collective_plan_bridge as plans  # noqa: E402
 import gicc_compiler_policy_bridge as policy_bridge  # noqa: E402
 import gicc_llm_bridge as bridge  # noqa: E402
@@ -35,6 +36,7 @@ import prepare_compiler_llm_capability_request as request_freezer  # noqa: E402
 
 
 PLAN_SCHEMA = "gicc-collective-n6-llm-runtime-validation-plan-v1"
+BUNDLE_SCHEMA = "gicc-collective-n6-llm-runtime-validation-bundle-v1"
 CONTROL_ROLES = ("anchor", "deterministic", "oracle")
 REPRESENTATIVE_ROLES = (
     "primary_modal_representative",
@@ -385,6 +387,158 @@ def verify(args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
     return expected
 
 
+def recorded_path(record: Any, role: str) -> Path:
+    require(
+        isinstance(record, dict)
+        and set(record) == {"path", "sha256", "bytes"}
+        and isinstance(record.get("path"), str),
+        f"{role}: malformed evidence record",
+    )
+    path = Path(record["path"])
+    if not path.is_absolute():
+        path = ROOT / path
+    path = path.resolve()
+    require(
+        path.is_file()
+        and sha256_file(path) == record["sha256"]
+        and path.stat().st_size == record["bytes"],
+        f"{role}: evidence changed",
+    )
+    return path
+
+
+def verify_contained(plan_dir: Path) -> tuple[
+    dict[str, Any], dict[str, Any]
+]:
+    plan = read_json(plan_dir / "plan.json")
+    require(isinstance(plan, dict) and plan.get("schema_version") == PLAN_SCHEMA,
+            f"expected {PLAN_SCHEMA}")
+    payload = dict(plan)
+    observed = payload.pop("plan_id", None)
+    require(observed == bridge._fingerprint(payload),
+            "runtime validation plan ID does not match content")
+    require(plan.get("boundary") == BOUNDARY,
+            "runtime validation plan crossed its offline boundary")
+    evidence_value = plan.get("evidence")
+    require(isinstance(evidence_value, dict), "runtime plan lacks evidence")
+    paths = {
+        role: recorded_path(record, role)
+        for role, record in evidence_value.items()
+    }
+    graph_path = paths.get("compiler_graph")
+    require(graph_path is not None, "runtime plan lacks compiler graph evidence")
+    graph = policy_bridge.verified_graph(read_json(graph_path))
+    require(graph["graph_id"] == plan.get("compiler_graph_id"),
+            "runtime plan binds another graph")
+    policies = plan.get("policies")
+    require(
+        isinstance(policies, list)
+        and len(policies) == plan.get("unique_policy_count")
+        and [item.get("name") for item in policies]
+        == [f"policy{index:02d}" for index in range(1, len(policies) + 1)],
+        "runtime plan policy cohort changed",
+    )
+    for policy in policies:
+        root = plan_dir / "policies" / policy["name"]
+        decision_path = recorded_path(policy.get("decision"), "decision")
+        hint_path = recorded_path(policy.get("compiler_hint"), "compiler hint")
+        require(
+            decision_path == (root / "decision.json").resolve()
+            and hint_path == (root / "hint.json").resolve(),
+            f"{policy['name']}: generated files escaped plan directory",
+        )
+        expected_decision, expected_hint = decision_and_hint(graph, policy)
+        require(read_json(decision_path) == expected_decision,
+                f"{policy['name']}: decision does not regenerate")
+        require(read_json(hint_path) == expected_hint,
+                f"{policy['name']}: hint does not regenerate")
+    return plan, graph
+
+
+def bundle_payload(plan_dir: Path, repo_root: Path) -> dict[str, Any]:
+    plan, graph = verify_contained(plan_dir)
+    builds = []
+    for policy in plan["policies"]:
+        root = plan_dir / "policies" / policy["name"]
+        build = root / "build"
+        provenance_path = build / "build-provenance.json"
+        provenance = read_json(provenance_path)
+        collective_eval.verify_build_provenance(
+            provenance, manifest_path=provenance_path,
+            repo_root=repo_root.resolve(),
+        )
+        require(provenance.get("build_mode") == "lower",
+                f"{policy['name']}: compiler build is not lowering")
+        hint = read_json(root / "hint.json")
+        collective_eval.verify_plan_ir(
+            graph, hint, build / "materialized.ll"
+        )
+        collective_eval.verify_device_ir(build / "materialized-device.ll")
+        builds.append({
+            "name": policy["name"],
+            "policy_id": policy["policy_id"],
+            "roles": policy["roles"],
+            "decision": evidence(root / "decision.json"),
+            "compiler_hint": evidence(root / "hint.json"),
+            "binary": evidence(build / "compiler_collective_eval"),
+            "build_provenance": evidence(provenance_path),
+            "materialized_host_ir": evidence(build / "materialized.ll"),
+            "materialized_device_ir": evidence(
+                build / "materialized-device.ll"
+            ),
+            "device_ir_audit": evidence(build / "device-ir-audit.log"),
+        })
+    return {
+        "schema_version": BUNDLE_SCHEMA,
+        "status": "ready_for_three_serial_pdebug_allocations",
+        "plan_id": plan["plan_id"],
+        "compiler_graph_id": graph["graph_id"],
+        "boundary": {
+            "compiler_lto_decisions_only": True,
+            "application_source_modified": False,
+            "model_invoked_during_build": False,
+            "provider_invoked_during_build": False,
+            "scheduler_invoked_during_build": False,
+            "runtime_benchmark_invoked_during_build": False,
+            "compiler_invoked": True,
+        },
+        "unique_policy_count": len(builds),
+        "builds": builds,
+        "evidence": {
+            "plan": evidence(plan_dir / "plan.json"),
+            "preparer": evidence(Path(__file__)),
+            "build_script": evidence(HERE / "build_compiler_collective_eval.sh"),
+            "compiler_evaluator": evidence(HERE / "compiler_collective_eval.py"),
+        },
+    }
+
+
+def finalize(plan_dir: Path, repo_root: Path) -> dict[str, Any]:
+    manifest_path = plan_dir / "manifest.json"
+    require(not manifest_path.exists(),
+            f"refusing to overwrite runtime bundle: {manifest_path}")
+    payload = bundle_payload(plan_dir, repo_root)
+    manifest = {"manifest_id": bridge._fingerprint(payload), **payload}
+    write_json_atomic(manifest_path, manifest)
+    return manifest
+
+
+def verify_built(plan_dir: Path, repo_root: Path) -> dict[str, Any]:
+    manifest = read_json(plan_dir / "manifest.json")
+    require(
+        isinstance(manifest, dict)
+        and manifest.get("schema_version") == BUNDLE_SCHEMA,
+        f"expected {BUNDLE_SCHEMA}",
+    )
+    payload = dict(manifest)
+    observed = payload.pop("manifest_id", None)
+    require(observed == bridge._fingerprint(payload),
+            "runtime bundle ID does not match content")
+    require(payload == bundle_payload(plan_dir, repo_root),
+            "runtime bundle does not regenerate")
+    return manifest
+
+
 def add_inputs(parser: argparse.ArgumentParser) -> None:
     capability_analysis.add_inputs(parser)
     parser.add_argument("--analysis", type=Path, required=True)
@@ -399,23 +553,43 @@ def main() -> int:
     verify_parser = children.add_parser("verify")
     add_inputs(verify_parser)
     verify_parser.add_argument("--plan-dir", type=Path, required=True)
+    contained_parser = children.add_parser("verify-contained")
+    contained_parser.add_argument("--plan-dir", type=Path, required=True)
+    finalize_parser = children.add_parser("finalize")
+    finalize_parser.add_argument("--plan-dir", type=Path, required=True)
+    finalize_parser.add_argument("--repo-root", type=Path, default=ROOT)
+    built_parser = children.add_parser("verify-built")
+    built_parser.add_argument("--plan-dir", type=Path, required=True)
+    built_parser.add_argument("--repo-root", type=Path, default=ROOT)
     args = parser.parse_args()
     try:
         if args.command == "prepare":
             plan = prepare(args, args.output_dir.resolve())
             action = "prepared"
-        else:
+        elif args.command == "verify":
             plan = verify(args, args.plan_dir.resolve())
             action = "verified"
+        elif args.command == "verify-contained":
+            plan, _ = verify_contained(args.plan_dir.resolve())
+            action = "verified-contained"
+        elif args.command == "finalize":
+            plan = finalize(args.plan_dir.resolve(), args.repo_root.resolve())
+            action = "finalized"
+        else:
+            plan = verify_built(
+                args.plan_dir.resolve(), args.repo_root.resolve()
+            )
+            action = "verified-built"
         print(
             f"collective-n6-llm-runtime-validation: {action}; "
             f"policies={plan['unique_policy_count']}; "
-            f"compiler_invoked=false scheduler_invoked=false; "
-            f"plan_id={plan['plan_id']}"
+            f"scheduler_invoked=false; "
+            f"content_id={plan.get('manifest_id', plan.get('plan_id'))}"
         )
         return 0
     except (
         RuntimeValidationError, capability_analysis.CapabilityAnalysisError,
+        collective_eval.EvalError,
         policy_bridge.CompilerPolicyBridgeError, plans.CollectivePlanError,
         OSError, KeyError, TypeError, ValueError,
     ) as exc:
