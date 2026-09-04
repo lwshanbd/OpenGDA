@@ -75,6 +75,42 @@ An identity-leak audit over all 18 rendered prompts found no application or
 kernel name, source suffix, site ID, materializer binding, or provenance path.
 No prompt is authorized for external transmission by this local freeze.
 
+## Frozen deterministic compiler control
+
+The eight-node collective graph also has a preregistered, source-free
+structural heuristic.  This is a compiler baseline, not a model result.  It
+reads only the verified graph and topology descriptors; it cannot read source,
+runtime measurements, or provider output.  It chooses the guarded
+`node_double_tree` cohort at four or more nodes with more than one rank per
+node, using pipeline depths `(1, 1, 4, 8)` over the four ordered message bins.
+If the topology or the complete compiler candidate cohort is unavailable, it
+falls back atomically to the semantic anchor in every bin.
+
+The control was frozen before the pending N8 runtime result:
+
+- graph ID:
+  `sha256:ce569e2575cfdc924004631dcf96a2d81077520c3198c8f78edde3a4405cf806`;
+- control ID:
+  `sha256:51363db826b95661fa1aaafd5617737eba3e3513b7e2b0a9d45c10b6fabe318a`;
+- decision, hint, and control file SHA-256 values:
+  `221a3692960539b8ed2a84aee7efa09ed6d1c04d6354a1857c28204f24f27c53`,
+  `2b2577815e124c263a66b3f3a33e5375671087b08b51dd544376747cddc0260c`,
+  and `5e630d76bf62c54622bf5062c60f83f25ea96f86187405d0c829fd602b0d66cb`;
+- materialized binary SHA-256:
+  `b71a98f2627a78d0d4869225fc1b2ac7034be06f44f6e18713a8437c19f32d5d`;
+- materialized host/device IR SHA-256 values:
+  `c341e2d2130642f6881d74b6903ba18281bb1f70f653ad63a5d56989b6060e65`
+  and `5d0e1e64bd3db53307831b34735cdd7a5c8be460e3ecdf010d8e63abe0a7d1e6`.
+
+The compiler independently revalidated the opaque option IDs and lowered the
+four-bin decision to an explicit size-dispatch CFG: tree through 4 KiB, tree
+through 256 KiB, four-way pipelined tree through 8 MiB, and eight-way
+pipelined tree above 8 MiB.  Build provenance, dependency closure, command
+records, host IR, and device proxy-ring IR all verify.  This comparator remains
+valid whether the N8 runtime gate is positive or negative; it prevents a later
+model result from being credited for a policy already expressible by a simple
+compiler rule.
+
 ## Current scientific support
 
 Existing measurements establish that compiler-level communication decisions
