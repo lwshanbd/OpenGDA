@@ -83,6 +83,8 @@ class Runtime {
                                         const std::size_t *, const std::size_t *);
     friend volatile std::uint64_t *(::gicc_runtime_trigger_addr)(Runtime *);
     friend std::uint64_t           (::gicc_runtime_trigger_val) (Runtime *);
+    friend int (::gicc_runtime_kernel_arg_matches_local_buffer)(
+        Runtime *, void *const *, std::uint32_t, std::uint32_t);
 
 public:
     static constexpr int POOL_SIZE = 32;   // max ops per batch

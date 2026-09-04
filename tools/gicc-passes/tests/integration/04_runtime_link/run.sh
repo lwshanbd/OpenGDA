@@ -23,6 +23,7 @@ EXPECTED=(
     gicc_runtime_trigger_addr
     gicc_runtime_trigger_val
     gicc_runtime_set_schedule_phase_from_kernel_args
+    gicc_runtime_kernel_arg_matches_local_buffer
 )
 
 PRESENT=$(/opt/rocm-6.4.0/lib/llvm/bin/llvm-nm "${OBJ_PATH}")

@@ -68,6 +68,16 @@ std::uint64_t           gicc_runtime_trigger_val (gicc::Runtime *rt);
 void gicc_runtime_set_schedule_phase_from_kernel_args(
     void *const *kernel_params, std::uint32_t phase, GpuStream_t stream);
 
+// Runtime legality guard for a compiler-proposed producer/buffer relation.
+// Returns 1 only when the pointer stored in kernel parameter slot
+// `pointer_param` is exactly the base of the registered local buffer whose
+// i32 index is stored in slot `buffer_index_param`. Invalid slots, handles,
+// or null values fail closed. The caller must first prove both parameter
+// types and must retain the original fused launch on the false edge.
+int gicc_runtime_kernel_arg_matches_local_buffer(
+    gicc::Runtime *rt, void *const *kernel_params,
+    std::uint32_t pointer_param, std::uint32_t buffer_index_param);
+
 // Host-mirror lookup (used by the pass-synthesized DWQ trace function when
 // a kernel formal carries a "host-mirrored" annotation: at trace time the
 // pass needs to read the array's contents to pre-stage one DWQ descriptor

@@ -76,6 +76,16 @@ the setter performs one 32-bit store to the appended context field. No pass
 calls the helper and no kernel reads the phase yet, so this milestone cannot
 change application behavior by itself.
 
+Static whole-program pointer/registration recovery is not required for the
+first candidate. A second compiler-only C ABI helper now compares a pointer
+kernel-argument slot with the base of the local registered-buffer index held
+in another slot. The eventual host materializer can branch on that check:
+the true edge executes the two phase launches, while the false edge executes
+the untouched original launch once. Parameter indices and types remain
+compiler-proved constants; neither the model nor the runtime invents them.
+The helper is also dormant until the materializer and the remaining static
+domain proofs exist.
+
 Device LTO rewrites the original kernel body:
 
 - boundary phase skips PUT/flush/quiet and executes only iterations whose
@@ -131,9 +141,10 @@ Candidate generation is fail-closed and requires all of the following:
 
 1. **One launch, one stream.** Host LTO recovers the exact launch wrapper,
    stream operand, kernel template, and device metadata ID.
-2. **Buffer identity.** Host LTO proves that a kernel pointer formal and a
-   registered-buffer handle formal refer to the same allocation at every
-   relevant launch site.
+2. **Buffer identity.** Host LTO either proves that a kernel pointer formal
+   and a registered-buffer handle formal refer to the same allocation, or
+   emits the compiler-owned runtime identity check with an untouched fused
+   launch on its false edge.
 3. **Exact transfer intervals.** Source offset and size are host-knowable
    affine expressions over launch operands.
 4. **Exact producer footprint.** Device LTO maps stores through the related

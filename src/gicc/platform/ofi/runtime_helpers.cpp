@@ -149,6 +149,25 @@ void gicc_runtime_set_schedule_phase_from_kernel_args(
                     0, stream, ctx, phase);
 }
 
+int gicc_runtime_kernel_arg_matches_local_buffer(
+        gicc::Runtime *rt, void *const *kernel_params,
+        std::uint32_t pointer_param, std::uint32_t buffer_index_param) {
+    if (!rt || !kernel_params || !kernel_params[pointer_param] ||
+        !kernel_params[buffer_index_param])
+        return 0;
+    void *pointer =
+        *static_cast<void *const *>(kernel_params[pointer_param]);
+    const std::int32_t bufferIndex = *static_cast<const std::int32_t *>(
+        kernel_params[buffer_index_param]);
+    if (!pointer || bufferIndex < 0 ||
+        static_cast<std::size_t>(bufferIndex) >= rt->local_bufs_.size())
+        return 0;
+    return rt->local_bufs_[static_cast<std::size_t>(bufferIndex)].ptr ==
+                   pointer
+        ? 1
+        : 0;
+}
+
 #ifdef GICC_CPU_PROXY
 void* gicc_runtime_proxy_ring_device_ptr(gicc::Runtime *rt) {
     return rt ? rt->ensure_proxy_ring() : nullptr;
