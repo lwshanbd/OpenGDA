@@ -93,6 +93,15 @@ kernel slots `(pointer=1, buffer-index=12)`. A synthetic group whose members
 use different source-buffer formals is rejected. These are compiler facts;
 the fission action remains absent from the legal action set.
 
+Feature extraction now also preserves every transfer's symbolic source
+interval as a half-open byte range over compiler formal indices. It reports
+separate `symbolically_exact`, `affine`, and `host_knowable` facts, and the
+source-free bridge forwards the nested expression unchanged. This closes the
+previous information-loss gap between device metadata and the model dossier,
+but deliberately does not discharge `exact_transfer_intervals`: runtime
+formal binding, buffer identity, and the matching producer domain still have
+to be proved and replayed by LTO.
+
 Device LTO rewrites the original kernel body:
 
 - boundary phase skips PUT/flush/quiet and executes only iterations whose

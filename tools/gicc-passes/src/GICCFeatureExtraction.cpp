@@ -639,6 +639,154 @@ const char *argKindTag(ArgRef::Kind k) {
     return "derived";
 }
 
+// Preserve the compiler's symbolic descriptor expression for the model
+// dossier.  This is deliberately a feature-only representation: the
+// lowering still reads and re-proves the original ArgRef from kernel
+// metadata, so a model can neither manufacture an expression nor turn this
+// record into a legality assertion.
+json::Value argRefFactRecord(const ArgRef &arg) {
+    json::Object record;
+    record["kind"] = argKindTag(arg.kind);
+    switch (arg.kind) {
+        case ArgRef::Kind::Param:
+            record["param"] = static_cast<int64_t>(arg.paramIdx);
+            break;
+        case ArgRef::Kind::ConstI64:
+            record["value"] = arg.constVal;
+            break;
+        case ArgRef::Kind::BinOp:
+        case ArgRef::Kind::Cast: {
+            record["op"] = arg.opStr;
+            json::Array children;
+            for (const auto &child : arg.children)
+                children.push_back(argRefFactRecord(child));
+            record["children"] = std::move(children);
+            break;
+        }
+        case ArgRef::Kind::FieldLoad:
+            record["base_formal"] = static_cast<int64_t>(arg.paramIdx);
+            record["struct_size"] = arg.structElemSize;
+            record["field_offset"] = arg.fieldByteOffset;
+            record["field_type"] = arg.fieldTypeStr;
+            if (!arg.children.empty())
+                record["index"] = argRefFactRecord(arg.children.front());
+            break;
+        case ArgRef::Kind::Derived:
+        case ArgRef::Kind::LoopIv:
+            break;
+    }
+    return json::Value(std::move(record));
+}
+
+bool symbolicallyExact(const ArgRef &arg, const OpTemplate &op) {
+    switch (arg.kind) {
+        case ArgRef::Kind::Param:
+        case ArgRef::Kind::ConstI64:
+            return true;
+        case ArgRef::Kind::LoopIv:
+            return op.loop.inLoop && !op.loop.degraded &&
+                   op.loop.ivBoundKnown;
+        case ArgRef::Kind::Derived:
+        case ArgRef::Kind::FieldLoad:
+            return false;
+        case ArgRef::Kind::BinOp: {
+            static constexpr const char *Supported[] = {
+                "add", "sub", "mul", "sdiv", "udiv", "srem", "urem",
+                "shl", "ashr", "lshr", "and", "or", "xor",
+            };
+            if (arg.children.size() != 2 ||
+                std::find(std::begin(Supported), std::end(Supported),
+                          arg.opStr) == std::end(Supported))
+                return false;
+            break;
+        }
+        case ArgRef::Kind::Cast: {
+            static constexpr const char *Supported[] = {
+                "trunc", "zext", "sext", "fptoui", "fptosi", "uitofp",
+                "sitofp", "fptrunc", "fpext", "ptrtoint", "inttoptr",
+                "bitcast",
+            };
+            if (arg.children.size() != 1 ||
+                std::find(std::begin(Supported), std::end(Supported),
+                          arg.opStr) == std::end(Supported))
+                return false;
+            break;
+        }
+    }
+    return std::all_of(arg.children.begin(), arg.children.end(),
+                       [&](const auto &child) {
+                           return symbolicallyExact(child, op);
+                       });
+}
+
+// Conservative affine classification over kernel formals and a modeled loop
+// IV.  It is intentionally narrower than "symbolically exact": exact bitwise
+// or divide expressions are useful facts, but they do not satisfy the first
+// producer-frontier candidate's affine-interval prerequisite.
+bool affineArgRef(const ArgRef &arg, const OpTemplate &op) {
+    switch (arg.kind) {
+        case ArgRef::Kind::Param:
+        case ArgRef::Kind::ConstI64:
+            return true;
+        case ArgRef::Kind::LoopIv:
+            return op.loop.inLoop && !op.loop.degraded &&
+                   op.loop.ivBoundKnown;
+        case ArgRef::Kind::Derived:
+        case ArgRef::Kind::FieldLoad:
+            return false;
+        case ArgRef::Kind::Cast:
+            return arg.children.size() == 1 && arg.opStr != "gep" &&
+                   symbolicallyExact(arg, op) &&
+                   affineArgRef(arg.children.front(), op);
+        case ArgRef::Kind::BinOp:
+            if (arg.children.size() != 2 || !symbolicallyExact(arg, op))
+                return false;
+            if (arg.opStr == "add" || arg.opStr == "sub")
+                return affineArgRef(arg.children[0], op) &&
+                       affineArgRef(arg.children[1], op);
+            if (arg.opStr == "mul") {
+                int64_t ignored = 0;
+                const bool lhsConst = constOf(arg.children[0], ignored);
+                const bool rhsConst = constOf(arg.children[1], ignored);
+                return (lhsConst && affineArgRef(arg.children[1], op)) ||
+                       (rhsConst && affineArgRef(arg.children[0], op));
+            }
+            if (arg.opStr == "shl") {
+                int64_t ignored = 0;
+                return constOf(arg.children[1], ignored) &&
+                       affineArgRef(arg.children[0], op);
+            }
+            return false;
+    }
+    return false;
+}
+
+std::optional<json::Value> transferIntervalRecord(const OpTemplate &op) {
+    if (op.kind != "put_no_db" && op.kind != "get_no_db")
+        return std::nullopt;
+    const auto srcBuf = op.args.find("src_buf");
+    const auto srcOff = op.args.find("src_off");
+    const auto size = op.args.find("size");
+    if (srcBuf == op.args.end() || srcOff == op.args.end() ||
+        size == op.args.end())
+        return std::nullopt;
+
+    json::Object record;
+    record["semantics"] = "source_buffer_half_open_byte_interval";
+    record["source_buffer"] = argRefFactRecord(srcBuf->second);
+    record["byte_offset"] = argRefFactRecord(srcOff->second);
+    record["byte_size"] = argRefFactRecord(size->second);
+    const bool exact = symbolicallyExact(srcBuf->second, op) &&
+                       symbolicallyExact(srcOff->second, op) &&
+                       symbolicallyExact(size->second, op);
+    record["symbolically_exact"] = exact;
+    record["affine"] = exact && affineArgRef(srcBuf->second, op) &&
+                        affineArgRef(srcOff->second, op) &&
+                        affineArgRef(size->second, op);
+    record["host_knowable"] = op.hk_capable && exact;
+    return json::Value(std::move(record));
+}
+
 // log2 of a positive constant size; null for unknown or non-positive.
 std::optional<int> sizeLog2(const std::optional<int64_t> &size) {
     if (!size || *size <= 0) return std::nullopt;
@@ -784,6 +932,11 @@ json::Value toRecord(const std::string &siteId,
     }
     if (sizeBytes) r["size_bytes"] = *sizeBytes;
     else           r["size_bytes"] = nullptr;
+
+    if (auto interval = transferIntervalRecord(op))
+        r["transfer_interval"] = std::move(*interval);
+    else
+        r["transfer_interval"] = nullptr;
 
     if (auto it = op.args.find("target_rank"); it != op.args.end()) {
         r["peer_kind"] = argKindTag(it->second.kind);

@@ -24,6 +24,15 @@ def feature(site_id, *, hk=True, locality=None, batched_loop=False):
         "size_kind": "const",
         "size_bytes": 4096,
         "size_log2": 12,
+        "transfer_interval": {
+            "semantics": "source_buffer_half_open_byte_interval",
+            "source_buffer": {"kind": "param", "param": 12},
+            "byte_offset": {"kind": "param", "param": 13},
+            "byte_size": {"kind": "param", "param": 17},
+            "symbolically_exact": True,
+            "affine": True,
+            "host_knowable": True,
+        },
         "peer_kind": "param",
         "peer_locality": locality,
         "in_loop": batched_loop,
@@ -153,6 +162,14 @@ class LlmBridgeTests(unittest.TestCase):
                 self.dossier["sites"][0]["producer_frontier"]
                             ["source_buffer_index_param"],
             ),
+        )
+        self.assertEqual(
+            {"kind": "param", "param": 13},
+            self.dossier["sites"][0]["transfer_interval"]["byte_offset"],
+        )
+        self.assertTrue(
+            self.dossier["sites"][0]["transfer_interval"]
+                        ["symbolically_exact"]
         )
         self.assertTrue(
             self.dossier["sites"][0]["phase_launch_supported"]

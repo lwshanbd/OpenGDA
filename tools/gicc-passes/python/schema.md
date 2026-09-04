@@ -37,6 +37,15 @@ for all of them.
                                              //   null when contexts differ/dynamic
     "size_log2":          12,                // null without one common,
                                              //   positive LTO-resolved size
+    "transfer_interval": {                   // source-free descriptor expression
+      "semantics": "source_buffer_half_open_byte_interval",
+      "source_buffer": {"kind": "param", "param": 12},
+      "byte_offset":   {"kind": "param", "param": 13},
+      "byte_size":     {"kind": "param", "param": 17},
+      "symbolically_exact": true,            // no opaque expression leaf
+      "affine": true,                        // conservative compiler classification
+      "host_knowable": true                  // exact and HK-reconstructible
+    },
     "peer_kind":          "param",           // | const | binop | cast | derived
     "peer_locality":      null,              // | same_node | cross_node
     "in_loop":            true,              // real value from device-side LoopInfo
@@ -174,6 +183,15 @@ identity helper using those two constant slot indices. A future materializer
 must keep one untouched fused launch on the guard's false edge. Until that
 branch exists, `buffer_identity_guarded_fallback_materialization` remains in
 `remaining_proofs` and no fission action is legal.
+
+`transfer_interval` is the compiler-recovered half-open source byte interval
+`[byte_offset, byte_offset + byte_size)` within `source_buffer`. Its nested
+expressions contain only formal indices, literals, operations, and modeled
+compiler leaves; they contain no source text. `symbolically_exact` means the
+expression has no opaque leaf, while `affine` is a stricter, conservative
+classification for the first producer-frontier candidate. Neither flag proves
+buffer identity, binds runtime formal values, proves a producer domain, or
+adds a fission action to `legal_paths`.
 
 `phase_launch_supported` is also a compiler proof, not a model assertion. It
 is true only when every aggregated host call is a non-throwing direct call to

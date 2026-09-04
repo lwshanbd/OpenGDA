@@ -46,6 +46,19 @@ define void @main(ptr %rt) {
 ; JSON-DAG: "size_kind": "const"
 ; JSON-DAG: "size_bytes": 4096
 ; JSON-DAG: "size_log2": 12
+; The source interval is a lossless, source-free compiler expression. Its
+; half-open semantics are explicit; this still does not authorize a rewrite.
+; JSON-DAG: "transfer_interval": {
+; JSON-DAG: "affine": true
+; JSON-DAG: "byte_offset": {
+; JSON-DAG: "kind": "const"
+; JSON-DAG: "value": 0
+; JSON-DAG: "byte_size": {
+; JSON-DAG: "value": 4096
+; JSON-DAG: "host_knowable": true
+; JSON-DAG: "semantics": "source_buffer_half_open_byte_interval"
+; JSON-DAG: "source_buffer": {
+; JSON-DAG: "symbolically_exact": true
 ; JSON-DAG: "peer_kind": "const"
 ; The meta JSON fixture has no `loop` entry → in_loop must serialize as false.
 ; JSON-DAG: "in_loop": false

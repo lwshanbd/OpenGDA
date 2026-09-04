@@ -64,6 +64,7 @@ FACT_FIELDS = (
     "size_kind",
     "size_bytes",
     "size_log2",
+    "transfer_interval",
     "peer_kind",
     "peer_locality",
     "in_loop",
