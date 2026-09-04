@@ -241,6 +241,27 @@ def _semantic_facts(site: dict[str, Any]) -> dict[str, Any]:
     return {key: site.get(key) for key in _SEMANTIC_FACT_FIELDS}
 
 
+def _factor_shared_records(
+    records: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Factor identical fields without dropping any per-transfer semantics."""
+    if not records:
+        return {}, []
+    shared: dict[str, Any] = {}
+    residual = [{} for _ in records]
+    keys = sorted(set().union(*(record.keys() for record in records)))
+    for key in keys:
+        present = [key in record for record in records]
+        values = [record.get(key) for record in records]
+        if all(present) and all(value == values[0] for value in values[1:]):
+            shared[key] = values[0]
+            continue
+        for index, record in enumerate(records):
+            if key in record:
+                residual[index][key] = record[key]
+    return shared, residual
+
+
 def _producer_fission_proof(
     site_ids: list[str], dossier_by_site: dict[str, dict[str, Any]],
     *, materializer_shape_legal: bool,
@@ -815,9 +836,22 @@ def model_view(
         arguments = facts.get("site_argument_expressions", {})
         legal_actions = facts.get("site_legal_actions", {})
         semantic_facts = facts.get("site_semantic_facts", {})
-        launch_contexts = facts.get("launch_contexts", {})
         compute = facts.get("compute_region", {})
         flops = compute.get("site_flops_to_completion", {})
+        transfer_arguments = [
+            without_identity_keys(arguments.get(site_id, {}))
+            for site_id in site_ids
+        ]
+        shared_arguments, transfer_arguments = _factor_shared_records(
+            transfer_arguments
+        )
+        transfer_semantics = [
+            without_identity_keys(semantic_facts.get(site_id, {}))
+            for site_id in site_ids
+        ]
+        shared_semantics, transfer_semantics = _factor_shared_records(
+            transfer_semantics
+        )
         candidate_views = []
         for candidate in opportunity["candidates"]:
             if view_kind == "opaque":
@@ -858,22 +892,14 @@ def model_view(
             "kind": opportunity["kind"],
             "compiler_facts": {
                 "transfer_count": len(site_ids),
-                "batch_size": facts.get("batch_size"),
-                "fan_out": facts.get("fan_out"),
                 "completion_kind": completion.get("kind"),
-                "transfer_argument_expressions": [
-                    arguments.get(site_id) for site_id in site_ids
-                ],
+                "shared_transfer_argument_expressions": shared_arguments,
+                "transfer_argument_expressions": transfer_arguments,
                 "transfer_legal_actions": [
                     legal_actions.get(site_id) for site_id in site_ids
                 ],
-                "transfer_semantic_facts": [
-                    without_identity_keys(semantic_facts.get(site_id))
-                    for site_id in site_ids
-                ],
-                "launch_contexts": [
-                    launch_contexts.get(site_id) for site_id in site_ids
-                ],
+                "shared_transfer_semantic_facts": shared_semantics,
+                "transfer_semantic_facts": transfer_semantics,
                 "compute_region": {
                     "transfer_flops_to_completion": [
                         flops.get(site_id) for site_id in site_ids

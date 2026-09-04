@@ -199,6 +199,28 @@ class CommunicationGroupPlanBridgeTests(unittest.TestCase):
         self.assertIn("program-dependence legality", prompt)
         self.assertIn("transfer_semantic_facts", prompt)
         self.assertIn("producer_frontier", prompt)
+        facts = groups.model_view(self.graph)["opportunities"][0][
+            "compiler_facts"
+        ]
+        self.assertEqual(
+            "put_no_db", facts["shared_transfer_semantic_facts"]["op_kind"]
+        )
+        self.assertTrue(all(
+            "op_kind" not in record
+            for record in facts["transfer_semantic_facts"]
+        ))
+        self.assertEqual(
+            {"kind": "param", "param": 12},
+            facts["shared_transfer_argument_expressions"]["src_buf"],
+        )
+        self.assertTrue(all(
+            "src_buf" not in record
+            for record in facts["transfer_argument_expressions"]
+        ))
+        self.assertTrue(all(
+            "target_rank" in record
+            for record in facts["transfer_argument_expressions"]
+        ))
         self.assertFalse(self.graph["boundary"]["source_visible"])
         self.assertEqual("candidate IDs only", self.graph["boundary"]["model_output"])
 

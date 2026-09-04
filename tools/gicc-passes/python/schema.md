@@ -660,6 +660,11 @@ the explicit cross-transfer relation edges. `opaque` retains compiler facts
 and the selectable candidate IDs but removes selectable-candidate semantics.
 These views change information only; they do not change compiler legality or
 grant the model any additional transformation authority.
+Identical per-transfer argument and semantic fields are normalized into
+`shared_transfer_argument_expressions` and
+`shared_transfer_semantic_facts`; the ordinal records retain only differing
+fields. This is lossless factoring of compiler facts, not summarization or a
+change to the decision surface.
 
 ```bash
 python3 tools/gicc-passes/python/gicc_comm_group_plan_bridge.py emit \

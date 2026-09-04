@@ -41,11 +41,11 @@ per-workload portfolios under platform profile SHA-256
 
 | Case | Opportunity shape | Plans | Private graph ID | Relational prompt SHA-256 | Descriptors prompt SHA-256 | Opaque prompt SHA-256 |
 |---|---|---:|---|---|---|---|
-| Jacobi | two-transfer completion group | 9 | `sha256:1f7a4f9adeddc978846484d938cbd3d545bb6d3a758188e53a6b6528bb9a72dd` | `b7c26801cd7e1d1e7e8d6c6318d04704797b5816307eafa2ce7442d09bfe1c6f` | `aa96875cdf226b29884e877024b4e1fcfa30484ba7760344632f9817b9d8ecf8` | `428193e53ea07e4f6f0e5d1e17d18f06c72eced52dc4a6543a6f08249283f5a3` |
-| Minimod | two-transfer completion group | 9 | `sha256:635f115d1fdcc65e48b49ef8de94d29734edfaf22f6a66b035e3e57c4396889d` | `977d29fee44d77cbc163a4101e4de37e1c6a477d03b5dc98bbc2866bfa4acbba` | `76720fe999379c42cdd91a05525b347c64a792753abc5c50cfe4780be255b859` | `aaa04cff8359073898cd56b31da262fbbd44fa13f50063a7f99fdc00274749ef` |
-| minimal matrix multiply | singleton transfer | 3 | `sha256:e8ba0ec787b531a9f900e09334dd938a5c805c3b2be79e29876e9fcb2d700987` | `753ac4326d9ab31b7668b88b3f0f0eff10c57a91cff88e52f0eaf98b34ede94a` | `9427e8d72591e32f6f6ab1bf19017ad924e28a05c8f4f10ba5bef21c408f4c13` | `42fbad52870e1ecb2fd1b77a8ec1e3b845a08e868813235fd2709a6bd6db1ff4` |
-| mixed-side-effect LTO | two-transfer completion group | 9 | `sha256:b3e137e2fe3f2cad2807eb534383066f285182c7588e8a895b73675087c0f5a5` | `62046a74cf419ad9e675a9280b6def764502683acc8404d08626849d37266c4e` | `d4e963d757c9cfa13a16250a2606e581ee0194ca4dee7e7729e21e5389ce3635` | `e627225fa94eb837cf86c43a59e11ef6a94587cd87c03d7fb463f4a7069dabb7` |
-| loop-carried LTO | singleton transfer | 2 | `sha256:0e53a7261a7be87fc9ba363c56d203db661cf99400c3f781efbc10510bb431e9` | `25786bac2433845caead0a5c11538580de0a4d56320ad7c3cc12aa62fc52f976` | `968786ce9ff64b3435be178295408d398f0ecda6538e7760fa7f2b56ae5c8c9b` | `d447fe8f5181d21a274c18e2dc03a142dc8269a4ff905fbca4f6ee7ed0ec0b3e` |
+| Jacobi | two-transfer completion group | 9 | `sha256:1f7a4f9adeddc978846484d938cbd3d545bb6d3a758188e53a6b6528bb9a72dd` | `0af23ab3d79dbbda6a6f7345841e3e9e0ac6a96a7b4a2266893c804e999951a2` | `d97e51daeef2baec7f589232b1b12391ecc7467757c286fb78325c892dc5c049` | `1ee5457271d348149fdfc702e07a9e98a74946ac6da8e712af00560b262fcca7` |
+| Minimod | two-transfer completion group | 9 | `sha256:635f115d1fdcc65e48b49ef8de94d29734edfaf22f6a66b035e3e57c4396889d` | `f70a00222199f8938cdea2c7c194073e985cb7e1ea1fa3c8ba6a31fb4a5c1568` | `9299ac535ea9913c4de92f9008f3df91be26a1c8818d1ee067cd677dfd8cc0da` | `e58a0dbfafccdb3275477583f9119565cd1a4f45057a57b867b10c15bc6673a4` |
+| minimal matrix multiply | singleton transfer | 3 | `sha256:e8ba0ec787b531a9f900e09334dd938a5c805c3b2be79e29876e9fcb2d700987` | `431596fcc224991069f5c84094bec650c896e07d78d45477aa9dde97485db74c` | `d7a573699a03ef159f3b60833d052a21a290687183cabe0f421d870b4ceb6b31` | `c5d3e28f79efb1bf867a4ebd269ec9bffa7caadf2b50797d811080053c1349f4` |
+| mixed-side-effect LTO | two-transfer completion group | 9 | `sha256:b3e137e2fe3f2cad2807eb534383066f285182c7588e8a895b73675087c0f5a5` | `194948387a5123f962b2ba6bfc1321d4acac48def0e62e1c1244005882aea671` | `900eed1308b6b1516c401ed330524c357a0171dfcb0f2e93da5fdd3860b2dc3c` | `c24cf03fdda58094ec7a13b1cd743c9cd38492e9d99d4be97bb03c0be0a4fa2c` |
+| loop-carried LTO | singleton transfer | 2 | `sha256:0e53a7261a7be87fc9ba363c56d203db661cf99400c3f781efbc10510bb431e9` | `b90b76b71e73e12dc0e4e0bde7e9948ea78b0d775869a4765ea8f25782956607` | `92bbd78f83009ce5473d8f43464f18ee08902384b7177525a8d6d516ba5f6d5c` | `acb4dcf91dc949869e216eb66c5474bf88dd49580ba687366535f5ea55b6bc3f` |
 
 These are 32 catalog entries across five separate workload decisions, not one
 32-way joint decision and not 32 distinct program transformations. They cover
@@ -75,6 +75,13 @@ schema. The private graphs retain site/materializer bindings, while every
 prompt view removes kernel names, site IDs, paths, profile provenance paths,
 and materializer strings. No provider call is authorized by generating these
 local prompts.
+
+Shared transfer arguments, launch facts, and producer-frontier proofs are
+factored into one compiler entity instead of repeated for every transfer; only
+per-transfer differences remain in the ordinal records. This preserves all
+semantic content while reducing the five portfolios' three-view prompt bytes
+from 483,350 to 302,690 (37.4%). In particular, the Jacobi relational prompt
+falls from 93,813 to 50,970 bytes without changing its graph or candidate IDs.
 
 This small, deliberately heterogeneous set does not estimate a population
 rate.  It does show that the compiler-level search space is larger than a

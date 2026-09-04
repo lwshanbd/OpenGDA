@@ -25,9 +25,9 @@ independently, and no compiler materializer composes their decisions.
 ## Frozen identity
 
 - suite ID:
-  `sha256:c5591f7eee96e2c53ab75d017be7bc1408396200aafd94272c185b760b49f4d4`
+  `sha256:0c6392c716646f0de444ca4916b115ab1e81aa118b45641ca4c8c85a01e214c2`
 - serialized suite SHA-256:
-  `d844824ebcce0d53f1395e878161d960bfcbccfd406ec35e3bd2262a9a4fa84c`
+  `59afd8a18469afceef4dc9def741a0efde40d1e4adead42a8a3d21a719a50602`
 - decision-family counts: one collective size-policy graph and five
   communication route/schedule graphs;
 - selectable compiler IDs: 32 collective option IDs over four slots and 32
@@ -38,6 +38,13 @@ The suite manifest content-addresses every private graph, selectable-ID set,
 model view, and rendered prompt.  Its verifier checks the suite and entry IDs,
 all prompt hashes and byte counts, and the independence declaration.  The tool
 has no provider, scheduler, compiler, or source-edit code path.
+
+The communication views normalize identical per-transfer facts into shared
+compiler entities. This retains every semantic field and all ordinal-specific
+differences while avoiding repeated producer and launch subgraphs. Across the
+five communication entries, the 15 prompt files shrink by 37.4%; the Jacobi
+relational view shrinks from 93,813 to 50,970 bytes with the private graph and
+all selectable IDs unchanged.
 
 ## Information ablation
 
