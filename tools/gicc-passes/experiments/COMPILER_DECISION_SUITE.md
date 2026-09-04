@@ -74,6 +74,14 @@ the primary LLM view receives graph structure and compiler-proved relations
 needed for joint policies.  This does not imply that the LLM will perform
 better; only a held-out, runtime-validated regret experiment can show that.
 
+`audit_compiler_input_separation.py` now verifies this distinction against the
+actual frozen bytes. It checks the GBT's exact seven-feature contract, finds
+nine relational compiler-semantic families in the LLM suite, and proves that
+all 21 LLM prompts preserve one selectable-ID set per task. The resulting
+audit ID is
+`sha256:af214761ac85e72bf872ee4165b803f92d811bf1e1abf0feddd521b339aa2859`;
+the report is documented in `COMPILER_INPUT_SEPARATION.md`.
+
 An identity-leak audit over all 21 rendered prompts found no application or
 kernel name, source suffix, site ID, materializer binding, or provenance path.
 No prompt is authorized for external transmission by this local freeze.
