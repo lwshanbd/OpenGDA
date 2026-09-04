@@ -58,6 +58,12 @@ It binds the suite, action-authority audit, conditional frontier, historical
 archive audit, and the null auditor itself.  Exact rational probabilities are
 stored alongside their decimal representations.
 
+The compiler-only capability protocol now requires this exact null report as a
+content-addressed input.  Without a matching 20-draw calibration for every
+suite entry, the protocol cannot freeze a provider request.  The resulting v2
+protocol remains at zero eligible entries and zero authorized calls; its ID is
+`sha256:5d093a0b9fe44e87542229efc3a1381610383a4fa1cadc30757dae59ee05a92d`.
+
 ## Reproduction
 
 From the repository root:

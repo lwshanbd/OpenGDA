@@ -22,6 +22,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE.parent / "python"))
+sys.path.insert(0, str(HERE))
 METRICS_IMPLEMENTATION = HERE.parent / "python" / "gicc_llm_capability_metrics.py"
 POLICY_BRIDGE_IMPLEMENTATION = (
     HERE.parent / "python" / "gicc_compiler_policy_bridge.py"
@@ -35,9 +36,10 @@ FAMILY_BRIDGE_IMPLEMENTATIONS = {
 }
 
 import gicc_compiler_decision_suite as decision_suite  # noqa: E402
+import audit_llm_sampling_null as sampling_null  # noqa: E402
 
 
-REPORT_SCHEMA = "gicc-compiler-llm-capability-protocol-v1"
+REPORT_SCHEMA = "gicc-compiler-llm-capability-protocol-v2"
 READINESS_SCHEMA = "gicc-compiler-llm-readiness-v1"
 SEPARATION_SCHEMA = "gicc-compiler-input-separation-v1"
 VIEWS = ("relational", "descriptors", "opaque")
@@ -153,6 +155,34 @@ def verify_readiness(value: Any, suite: dict[str, Any],
     return report
 
 
+def verify_sampling_null(value: Any, suite: dict[str, Any],
+                         suite_sha256: str) -> dict[str, Any]:
+    try:
+        report = sampling_null.verify_report(value)
+    except sampling_null.SamplingNullError as exc:
+        raise CapabilityProtocolError(f"invalid sampling null: {exc}") from exc
+    if (report.get("suite_id") != suite["suite_id"]
+            or report.get("evidence", {}).get("suite", {}).get("sha256")
+            != suite_sha256):
+        raise CapabilityProtocolError("sampling null binds another suite")
+    if report.get("trials_per_view") != TRIALS_PER_VIEW:
+        raise CapabilityProtocolError("sampling null uses another trial count")
+    entries = report.get("current_suite_uniform_null")
+    expected = {entry["label"]: entry for entry in suite["entries"]}
+    if not isinstance(entries, dict) or set(entries) != set(expected):
+        raise CapabilityProtocolError("sampling null lacks suite entries")
+    for label, entry in expected.items():
+        expected_count = entry["decision_space"]["independent_policy_count"]
+        null_entry = entries[label]
+        if (null_entry.get("legal_policy_count") != expected_count
+                or null_entry.get("draw_count") != TRIALS_PER_VIEW
+                or null_entry.get("predesignated_unique_oracle_count") != 1):
+            raise CapabilityProtocolError(
+                f"{label}: sampling-null decision space changed"
+            )
+    return report
+
+
 def entry_contract(entry: dict[str, Any], readiness: dict[str, Any],
                    separation: dict[str, Any]) -> dict[str, Any]:
     label = entry["label"]
@@ -208,7 +238,7 @@ def entry_contract(entry: dict[str, Any], readiness: dict[str, Any],
 
 
 def build_report(suite_path: Path, prompt_dir: Path, readiness_path: Path,
-                 separation_path: Path) -> dict[str, Any]:
+                 separation_path: Path, sampling_null_path: Path) -> dict[str, Any]:
     suite = decision_suite.verified_suite(read_json(suite_path), prompt_dir)
     suite_sha256 = sha256_file(suite_path)
     readiness = verify_readiness(
@@ -216,6 +246,9 @@ def build_report(suite_path: Path, prompt_dir: Path, readiness_path: Path,
     )
     separation = verify_separation(
         read_json(separation_path), suite, suite_sha256,
+    )
+    null = verify_sampling_null(
+        read_json(sampling_null_path), suite, suite_sha256,
     )
     entries = {
         entry["label"]: entry_contract(entry, readiness, separation)
@@ -241,6 +274,7 @@ def build_report(suite_path: Path, prompt_dir: Path, readiness_path: Path,
         "suite_id": suite["suite_id"],
         "readiness_id": readiness["readiness_id"],
         "input_separation_audit_id": separation["audit_id"],
+        "sampling_null_id": null["null_id"],
         "boundary": {
             "local_protocol_audit_only": True,
             "compiler_lto_decisions_only": True,
@@ -267,6 +301,7 @@ def build_report(suite_path: Path, prompt_dir: Path, readiness_path: Path,
             "all_raw_responses_archived_before_validation": True,
             "invalid_response_policy": "atomic compiler-anchor fallback",
             "runtime_labels_and_oracle_are_held_out_from_all_prompts": True,
+            "analytic_uniform_chance_null_bound_before_provider_request": True,
         },
         "preregistered_scoring": {
             "intention_to_treat": [
@@ -280,6 +315,11 @@ def build_report(suite_path: Path, prompt_dir: Path, readiness_path: Path,
                 "modal_accepted_policy_rate",
                 "unique_accepted_policy_count",
                 "accepted_policy_entropy",
+            ],
+            "chance_calibration": [
+                "uniform_single_draw_exact_oracle_probability",
+                "uniform_at_least_one_exact_oracle_hit_in_20",
+                "minimum_exact_oracle_hits_for_one_sided_alpha_0_05",
             ],
             "representatives": {
                 "primary": "modal_policy_per_view",
@@ -310,7 +350,8 @@ def build_report(suite_path: Path, prompt_dir: Path, readiness_path: Path,
             ),
             "stable_policy_claim": "uses the preregistered modal representative",
             "capability_ceiling_claim": (
-                "uses best-of-20 only and must be labeled post-hoc upper bound"
+                "uses best-of-20 only, reports its action-space-specific chance "
+                "null, and labels it a post-hoc upper bound"
             ),
             "relational_context_claim": (
                 "requires relational improvement over opaque/descriptors with "
@@ -354,6 +395,7 @@ def build_report(suite_path: Path, prompt_dir: Path, readiness_path: Path,
             "suite": evidence(suite_path),
             "readiness": evidence(readiness_path),
             "input_separation": evidence(separation_path),
+            "sampling_null": evidence(sampling_null_path),
         },
     }
     result = dict(payload)
@@ -386,6 +428,7 @@ def add_inputs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--prompt-dir", type=Path, required=True)
     parser.add_argument("--readiness", type=Path, required=True)
     parser.add_argument("--input-separation", type=Path, required=True)
+    parser.add_argument("--sampling-null", type=Path, required=True)
 
 
 def main() -> int:
@@ -401,6 +444,7 @@ def main() -> int:
     try:
         result = build_report(
             args.suite, args.prompt_dir, args.readiness, args.input_separation,
+            args.sampling_null,
         )
         if args.command == "emit":
             write_json_atomic(args.out, result)

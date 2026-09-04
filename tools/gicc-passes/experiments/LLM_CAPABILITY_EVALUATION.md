@@ -129,9 +129,9 @@ The current report is
 `build_ofi/compiler_llm_capability_protocol_20260904/report.json`:
 
 - protocol ID:
-  `sha256:849223108bf0ab5405e5bcde255f772a205cf6717f69ea9276d7af33b9ae04e5`;
+  `sha256:5d093a0b9fe44e87542229efc3a1381610383a4fa1cadc30757dae59ee05a92d`;
 - serialized report SHA-256:
-  `4778c214f013ff6b0d423ae6b4438931aea1b7c78c0386ca4a36d884c2881257`;
+  `97658c718018227288218eb411610c7b4c01fcf791f83710109af605bea1bced`;
 - frozen metrics implementation SHA-256:
   `fcc5858af4498ad39daa0efcdce4934fc7dd470e3e654189a8bb29a5d4c1250e`;
 - frozen unified bridge SHA-256:
@@ -237,6 +237,7 @@ python3 tools/gicc-passes/experiments/audit_compiler_llm_capability_protocol.py 
   --prompt-dir build_ofi/compiler_decision_suite_20260904/prompts \
   --readiness build_ofi/compiler_llm_readiness_20260904/report.json \
   --input-separation build_ofi/compiler_input_separation_20260904/report.json \
+  --sampling-null build_ofi/llm_sampling_null_20260904/report.json \
   --out build_ofi/compiler_llm_capability_protocol_20260904/report.json
 
 python3 tools/gicc-passes/experiments/audit_compiler_llm_capability_protocol.py verify \
@@ -244,5 +245,6 @@ python3 tools/gicc-passes/experiments/audit_compiler_llm_capability_protocol.py 
   --prompt-dir build_ofi/compiler_decision_suite_20260904/prompts \
   --readiness build_ofi/compiler_llm_readiness_20260904/report.json \
   --input-separation build_ofi/compiler_input_separation_20260904/report.json \
+  --sampling-null build_ofi/llm_sampling_null_20260904/report.json \
   --report build_ofi/compiler_llm_capability_protocol_20260904/report.json
 ```

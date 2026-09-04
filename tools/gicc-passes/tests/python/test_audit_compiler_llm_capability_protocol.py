@@ -129,6 +129,51 @@ class CompilerLlmCapabilityProtocolTests(unittest.TestCase):
         ):
             audit.verified_fingerprint(changed, "unit-v1", "id")
 
+    def test_sampling_null_must_match_suite_policy_count(self):
+        entry = suite_entry()
+        entry["decision_space"] = {"independent_policy_count": 9}
+        suite = {"suite_id": "sha256:" + "3" * 64, "entries": [entry]}
+        payload = {
+            "schema_version": audit.sampling_null.REPORT_SCHEMA,
+            "boundary": dict(audit.sampling_null.BOUNDARY),
+            "suite_id": suite["suite_id"],
+            "trials_per_view": audit.TRIALS_PER_VIEW,
+            "current_suite_uniform_null": {
+                "unit": {
+                    "legal_policy_count": 9,
+                    "draw_count": audit.TRIALS_PER_VIEW,
+                    "predesignated_unique_oracle_count": 1,
+                },
+            },
+            "claim_separation": {
+                "best_of_20_requires_chance_calibration": True,
+                "small_action_spaces_can_hit_oracle_by_chance": True,
+                "uniform_null_is_a_model_distribution_claim": False,
+                "uniform_null_is_performance_evidence": False,
+                "modal_frequency_is_runtime_speedup": False,
+                "llm_capability_claim_ready": False,
+            },
+            "evidence": {"suite": {"sha256": "suite-sha"}},
+        }
+        report = {
+            "null_id": audit.sampling_null.bridge._fingerprint(payload),
+            **payload,
+        }
+        audit.verify_sampling_null(report, suite, "suite-sha")
+        changed = copy.deepcopy(report)
+        changed["current_suite_uniform_null"]["unit"][
+            "legal_policy_count"
+        ] = 10
+        changed_payload = dict(changed)
+        changed_payload.pop("null_id")
+        changed["null_id"] = audit.sampling_null.bridge._fingerprint(
+            changed_payload
+        )
+        with self.assertRaisesRegex(
+            audit.CapabilityProtocolError, "decision space changed"
+        ):
+            audit.verify_sampling_null(changed, suite, "suite-sha")
+
 
 if __name__ == "__main__":
     unittest.main()
