@@ -201,6 +201,17 @@ one and only one additional N8 `pdebug` allocation. Within that allocation it
 runs all eight uniform compiler arms in three rotated sequential blocks. It
 does not call a provider and does not inspect or modify application source.
 
+The N6 recovery uses the same separation through
+`prepare_collective_n6_llm_policy_screen.py`: its three-arm scout and
+confirmation can establish only that a model-worthy hierarchy/pipeline depth
+choice exists. They are not called the 4096-policy oracle. If N6 is confirmed
+and later receives an exactly authorized 60-trial archive, the N6 adapter must
+first run the full eight-arm catalog at all measured sizes in one additional
+six-node `pdebug` allocation with three rotated blocks. Only that hidden,
+provider-invisible result defines the per-bin offline oracle and scores every
+observed graph-bound policy. The composed screen selects representatives but
+is still not a runtime performance result.
+
 The adapter replays the passed N8 confirmation, all archived responses, the
 frozen compiler bundle, all raw full-catalog logs, their correctness results,
 and the exact common allocation. It then assigns each graph-bound size policy
