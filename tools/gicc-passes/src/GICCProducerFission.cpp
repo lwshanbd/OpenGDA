@@ -37,9 +37,12 @@ namespace {
 constexpr uint32_t kScheduleOriginal = 0;
 constexpr uint32_t kScheduleProducerFrontier = 1;
 constexpr uint32_t kScheduleRemainder = 2;
+constexpr uint32_t kScheduleEarlyTrigger = 3;
 constexpr uint64_t kSchedulePhaseOffset = 16;
 constexpr StringLiteral kSyntheticFlushMD =
     "gicc.producer_fission.synthetic_flush";
+constexpr StringLiteral kGuardedEarlySyntheticFlushMD =
+    "gicc.guarded_early_trigger.synthetic_flush";
 
 std::optional<unsigned> metadataIntegerBits(StringRef metadataType) {
     if (!metadataType.consume_front("i")) return std::nullopt;
@@ -64,6 +67,9 @@ bool parameterCellTypeMatches(const Type *cellType, StringRef metadataType) {
 struct AuditedLaunch {
     CallInst *launch = nullptr;
     AllocaInst *params = nullptr;
+    Value *paramsValue = nullptr;
+    Value *runtime = nullptr;
+    Value *stream = nullptr;
     std::vector<AllocaInst *> cells;
     std::string reason;
 };
@@ -179,7 +185,162 @@ AuditedLaunch auditFinalLaunch(Function &wrapper,
     }
     result.launch = launch;
     result.params = params;
+    result.paramsValue = launch->getArgOperand(5);
+    result.runtime = wrapper.getArg(0);
+    result.stream = launch->getArgOperand(7);
     result.reason = "final HIP launch and every parameter slot re-proved";
+    return result;
+}
+
+struct AuditedHipStubDispatch {
+    CallInst *dispatch = nullptr;
+    Value *stream = nullptr;
+    std::string reason;
+};
+
+const Function *compilerHipStubFor(const CallInst &call,
+                                   StringRef kernelMangled) {
+    if (const Function *callee = call.getCalledFunction())
+        return callee->getName().contains("__device_stub__")
+            ? callee : nullptr;
+    const auto *load = dyn_cast<LoadInst>(
+        call.getCalledOperand()->stripPointerCasts());
+    if (!load) return nullptr;
+    const auto *global = dyn_cast<GlobalVariable>(
+        load->getPointerOperand()->stripPointerCasts());
+    if (!global || global->getName() != kernelMangled ||
+        !global->isConstant() || !global->hasInitializer())
+        return nullptr;
+    const auto *stub = dyn_cast<Function>(
+        global->getInitializer()->stripPointerCasts());
+    return stub && stub->getName().contains("__device_stub__")
+        ? stub : nullptr;
+}
+
+AuditedHipStubDispatch auditEarlyHipStubDispatch(
+        Function &wrapper, const KernelTemplate &kernel) {
+    AuditedHipStubDispatch result;
+    SmallVector<CallInst *, 2> dispatches;
+    SmallVector<CallInst *, 2> pushes;
+    DenseMap<CallInst *, const Function *> stubs;
+    for (BasicBlock &BB : wrapper) {
+        for (Instruction &I : BB) {
+            auto *call = dyn_cast<CallInst>(&I);
+            if (!call) continue;
+            const Function *callee = call->getCalledFunction();
+            if (callee && callee->getName() ==
+                              "__hipPushCallConfiguration") {
+                pushes.push_back(call);
+                continue;
+            }
+            if (const Function *stub =
+                    compilerHipStubFor(*call, kernel.mangledName)) {
+                dispatches.push_back(call);
+                stubs[call] = stub;
+            }
+        }
+    }
+    if (dispatches.size() != 1 || pushes.size() != 1) {
+        result.reason =
+            "annotated wrapper lacks one compiler HIP push/stub chain";
+        return result;
+    }
+    CallInst *dispatch = dispatches.front();
+    CallInst *push = pushes.front();
+    const Function *stub = stubs.lookup(dispatch);
+    if (!stub || stub->isDeclaration() || dispatch->arg_size() !=
+            kernel.params.size() || !dispatch->use_empty() ||
+        dispatch->getNumOperandBundles() != 0 || push->arg_size() != 6 ||
+        !push->getArgOperand(5)->getType()->isPointerTy()) {
+        result.reason = "compiler HIP stub dispatch ABI is not exact";
+        return result;
+    }
+    for (unsigned i = 0; i < kernel.params.size(); ++i) {
+        if (!parameterCellTypeMatches(dispatch->getArgOperand(i)->getType(),
+                                      kernel.params[i].typeStr)) {
+            result.reason =
+                "compiler HIP stub operand disagrees with device metadata";
+            return result;
+        }
+    }
+    DominatorTree DT(wrapper);
+    if (!DT.dominates(push, dispatch)) {
+        result.reason = "HIP launch configuration does not dominate dispatch";
+        return result;
+    }
+
+    SmallVector<const CallInst *, 2> hipLaunches;
+    unsigned pops = 0;
+    for (const BasicBlock &BB : *stub) {
+        for (const Instruction &I : BB) {
+            const auto *call = dyn_cast<CallInst>(&I);
+            const Function *callee = call ? call->getCalledFunction() : nullptr;
+            if (!callee) continue;
+            if (callee->getName() == "hipLaunchKernel")
+                hipLaunches.push_back(call);
+            else if (callee->getName() == "__hipPopCallConfiguration")
+                ++pops;
+        }
+    }
+    if (hipLaunches.size() != 1 || pops != 1) {
+        result.reason = "compiler HIP stub lacks one pop/launch chain";
+        return result;
+    }
+    const CallInst *hipLaunch = hipLaunches.front();
+    if (hipLaunch->arg_size() != 8 || !hipLaunch->use_empty() ||
+        hipLaunch->getNumOperandBundles() != 0) {
+        result.reason = "compiler HIP stub launch ABI is not clone-safe";
+        return result;
+    }
+    const Value *target = hipLaunch->getArgOperand(0)->stripPointerCasts();
+    if (!target->hasName() || target->getName() != kernel.mangledName) {
+        result.reason = "compiler HIP stub targets a different kernel";
+        return result;
+    }
+    result.dispatch = dispatch;
+    result.stream = push->getArgOperand(5);
+    result.reason = "compiler HIP push/stub/launch chain re-proved";
+    return result;
+}
+
+AuditedLaunch materializeStubParameterView(
+        Function &wrapper, const KernelTemplate &kernel,
+        const AuditedHipStubDispatch &audited) {
+    AuditedLaunch result;
+    if (!audited.dispatch || !audited.stream || wrapper.arg_empty() ||
+        !wrapper.getArg(0)->getType()->isPointerTy()) {
+        result.reason = "compiler HIP stub view lacks runtime inputs";
+        return result;
+    }
+    IRBuilder<> entryBuilder(
+        &*wrapper.getEntryBlock().getFirstInsertionPt());
+    AllocaInst *params = entryBuilder.CreateAlloca(
+        entryBuilder.getPtrTy(),
+        entryBuilder.getInt32(kernel.params.size()),
+        "gicc.guard.params");
+    result.cells.reserve(kernel.params.size());
+    for (unsigned i = 0; i < kernel.params.size(); ++i) {
+        AllocaInst *cell = entryBuilder.CreateAlloca(
+            audited.dispatch->getArgOperand(i)->getType(), nullptr,
+            "gicc.guard.arg");
+        result.cells.push_back(cell);
+    }
+
+    IRBuilder<> valueBuilder(audited.dispatch);
+    for (unsigned i = 0; i < kernel.params.size(); ++i) {
+        valueBuilder.CreateStore(audited.dispatch->getArgOperand(i),
+                                 result.cells[i]);
+        Value *slot = valueBuilder.CreateGEP(
+            valueBuilder.getPtrTy(), params, valueBuilder.getInt32(i),
+            "gicc.guard.slot");
+        valueBuilder.CreateStore(result.cells[i], slot);
+    }
+    result.launch = audited.dispatch;
+    result.params = params;
+    result.paramsValue = params;
+    result.runtime = wrapper.getArg(0);
+    result.stream = audited.stream;
+    result.reason = "compiler HIP stub parameter view materialized";
     return result;
 }
 
@@ -467,6 +628,220 @@ bool sameFissionPlan(const FissionPlan &left, const FissionPlan &right) {
     return true;
 }
 
+struct GuardedEarlyTriggerPlan {
+    unsigned bufferParam = 0;
+    std::vector<unsigned> sourcePointerParams;
+    std::vector<unsigned> writePointerParams;
+    std::string completionSiteId;
+    std::vector<std::string> transferSiteIds;
+    std::vector<TransferInterval> intervals;
+};
+
+std::vector<unsigned> guardedWriteRoots(
+        const ProducerFrontierFacts &frontier) {
+    std::vector<unsigned> result = frontier.ordinary_store_params;
+    result.insert(result.end(), frontier.atomic_write_params.begin(),
+                  frontier.atomic_write_params.end());
+    llvm::sort(result);
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+
+bool auditGuardedEarlyFacts(const KernelTemplate &kernel,
+                            const ProducerFrontierFacts &frontier,
+                            StringRef completionSiteId,
+                            std::string &reason) {
+    if (!frontier.analyzed ||
+        !frontier.guarded_early_trigger_analyzed ||
+        !frontier.guarded_early_trigger_guardable ||
+        !frontier.source_identity_guardable ||
+        frontier.source_pointer_candidates.empty() ||
+        frontier.guarded_early_trigger_write_params.empty() ||
+        frontier.unknown_write_sites != 0 ||
+        frontier.guarded_early_trigger_unsafe_side_effect_sites != 0) {
+        reason = "guarded early-trigger proof is absent or unsafe";
+        return false;
+    }
+    if (frontier.completion_site_id != completionSiteId) {
+        reason = "producer frontier disagrees with the completion group";
+        return false;
+    }
+    if (frontier.source_identity_buffer_index_param >=
+            kernel.params.size() ||
+        kernel.params[frontier.source_identity_buffer_index_param].typeStr !=
+            "i32") {
+        reason = "registered-source buffer formal is absent or mistyped";
+        return false;
+    }
+    if (guardedWriteRoots(frontier) !=
+        frontier.guarded_early_trigger_write_params) {
+        reason = "guarded write roots are not the complete discovered set";
+        return false;
+    }
+    for (unsigned source : frontier.source_pointer_candidates) {
+        if (source >= kernel.params.size() ||
+            kernel.params[source].typeStr != "ptr" ||
+            !kernel.params[source].noalias ||
+            !kernel.params[source].readonly) {
+            reason = "a source identity candidate lost readonly noalias";
+            return false;
+        }
+        if (llvm::is_contained(
+                frontier.guarded_early_trigger_write_params, source)) {
+            reason = "a source identity candidate is also a write root";
+            return false;
+        }
+    }
+    for (unsigned write :
+         frontier.guarded_early_trigger_write_params) {
+        if (write >= kernel.params.size() ||
+            kernel.params[write].typeStr != "ptr" ||
+            !kernel.params[write].noalias) {
+            reason = "a crossed write root lost its noalias pointer proof";
+            return false;
+        }
+    }
+    reason = "guarded early-trigger source and write roots re-proved";
+    return true;
+}
+
+std::optional<GuardedEarlyTriggerPlan> buildGuardedEarlyTriggerPlan(
+        const KernelTemplate &kernel, std::string &reason) {
+    std::vector<const OpTemplate *> transfers;
+    std::string completion;
+    unsigned matchingFlushes = 0;
+    unsigned allFlushes = 0;
+    unsigned quiets = 0;
+    for (const OpTemplate &op : kernel.ops) {
+        if (op.kind == "put_no_db" || op.kind == "get_no_db") {
+            if (op.kind != "put_no_db") {
+                reason = "guarded early trigger is defined only for PUT";
+                return std::nullopt;
+            }
+            if (!op.hk_capable || op.loop.inLoop ||
+                op.guard.kind != GuardSpec::Kind::Always) {
+                reason =
+                    "guarded early trigger requires unconditional non-loop HK PUTs";
+                return std::nullopt;
+            }
+            if (op.completion_site_id.empty()) {
+                reason = "a PUT has no compiler-proved completion";
+                return std::nullopt;
+            }
+            if (completion.empty()) completion = op.completion_site_id;
+            if (op.completion_site_id != completion) {
+                reason = "guarded early trigger supports one completion group";
+                return std::nullopt;
+            }
+            transfers.push_back(&op);
+        } else if (op.kind == "flush") {
+            ++allFlushes;
+        } else if (op.kind == "quiet") {
+            ++quiets;
+        } else {
+            reason = "kernel metadata contains an unknown communication kind";
+            return std::nullopt;
+        }
+    }
+    if (transfers.empty()) {
+        reason = "kernel has no completed PUT group";
+        return std::nullopt;
+    }
+    for (const OpTemplate &op : kernel.ops)
+        if (op.kind == "flush" && op.siteId == completion)
+            ++matchingFlushes;
+    if (allFlushes != 1 || matchingFlushes != 1 || quiets != 1) {
+        reason = "guarded early trigger requires exactly one flush and quiet";
+        return std::nullopt;
+    }
+
+    const ProducerFrontierFacts &frontier =
+        transfers.front()->producer_frontier;
+    if (!auditGuardedEarlyFacts(kernel, frontier, completion, reason))
+        return std::nullopt;
+
+    GuardedEarlyTriggerPlan result;
+    result.bufferParam = frontier.source_identity_buffer_index_param;
+    result.sourcePointerParams = frontier.source_pointer_candidates;
+    result.writePointerParams =
+        frontier.guarded_early_trigger_write_params;
+    result.completionSiteId = completion;
+    for (const OpTemplate *op : transfers) {
+        const ProducerFrontierFacts &other = op->producer_frontier;
+        if (!auditGuardedEarlyFacts(kernel, other, completion, reason) ||
+            other.source_identity_buffer_index_param != result.bufferParam ||
+            other.source_pointer_candidates != result.sourcePointerParams ||
+            other.guarded_early_trigger_write_params !=
+                result.writePointerParams) {
+            reason = "completion-group guarded early-trigger facts disagree";
+            return std::nullopt;
+        }
+        const auto source = op->args.find("src_buf");
+        const auto offset = op->args.find("src_off");
+        const auto size = op->args.find("size");
+        if (source == op->args.end() || offset == op->args.end() ||
+            size == op->args.end() ||
+            source->second.kind != ArgRef::Kind::Param ||
+            source->second.paramIdx != result.bufferParam ||
+            !materializableIntervalExpr(offset->second, kernel) ||
+            !materializableIntervalExpr(size->second, kernel)) {
+            reason = "a PUT source interval is not exactly host-materializable";
+            return std::nullopt;
+        }
+        result.transferSiteIds.push_back(op->siteId);
+        result.intervals.push_back({offset->second, size->second});
+    }
+    reason = "all guarded early-trigger compiler facts re-proved";
+    return result;
+}
+
+bool sameGuardedEarlyTriggerPlan(const GuardedEarlyTriggerPlan &left,
+                                 const GuardedEarlyTriggerPlan &right) {
+    if (left.bufferParam != right.bufferParam ||
+        left.sourcePointerParams != right.sourcePointerParams ||
+        left.writePointerParams != right.writePointerParams ||
+        left.completionSiteId != right.completionSiteId ||
+        left.transferSiteIds != right.transferSiteIds ||
+        left.intervals.size() != right.intervals.size())
+        return false;
+    for (size_t i = 0; i < left.intervals.size(); ++i)
+        if (!sameArgRef(left.intervals[i].offset,
+                        right.intervals[i].offset) ||
+            !sameArgRef(left.intervals[i].size, right.intervals[i].size))
+            return false;
+    return true;
+}
+
+bool auditGuardedEarlyDwqRoute(const GuardedEarlyTriggerPlan &plan,
+                               std::string &reason) {
+    const auto &config = getConfig();
+    if (config.hintIn.empty()) {
+        reason = "guarded early trigger requires an explicit DWQ hint file";
+        return false;
+    }
+    HintFile hint;
+    if (!readHintFile(config.hintIn, hint)) {
+        reason = "guarded early trigger could not validate its hint file";
+        return false;
+    }
+    for (const std::string &siteId : plan.transferSiteIds) {
+        SiteHint selected = hintFor(hint, siteId);
+        if (selected.dispatch != DispatchKind::DwqTrigger) {
+            reason = "every guarded early PUT must use DWQ_TRIGGER";
+            return false;
+        }
+        if (selected.transform !=
+            CommunicationTransform::GuardedEarlyTrigger) {
+            reason =
+                "every guarded early PUT must request the compiler-owned "
+                "GUARDED_EARLY_TRIGGER transform";
+            return false;
+        }
+    }
+    reason = "every guarded early PUT is staged for delayed DWQ trigger";
+    return true;
+}
+
 bool auditDelayedDwqRoute(const FissionPlan &plan, std::string &reason) {
     const auto &config = getConfig();
     if (config.hintIn.empty()) {
@@ -634,6 +1009,102 @@ bool materializeHostFission(Function &wrapper, const FissionPlan &plan,
         setPhase,
         {params, phasedBuilder.getInt32(kScheduleOriginal), stream});
     phasedBuilder.CreateBr(continuation);
+    return true;
+}
+
+bool materializeHostGuardedEarlyTrigger(
+        Function &wrapper, const GuardedEarlyTriggerPlan &plan,
+        const AuditedLaunch &audited) {
+    if (!audited.launch || !audited.paramsValue || !audited.runtime ||
+        !audited.stream || !audited.runtime->getType()->isPointerTy() ||
+        !audited.paramsValue->getType()->isPointerTy() ||
+        !audited.stream->getType()->isPointerTy())
+        return false;
+    CallInst *launch = audited.launch;
+    IRBuilder<> guardBuilder(launch);
+    Module &module = *wrapper.getParent();
+    Type *ptr = guardBuilder.getPtrTy();
+    Type *i32 = guardBuilder.getInt32Ty();
+    Type *i64 = guardBuilder.getInt64Ty();
+    FunctionCallee identity = module.getOrInsertFunction(
+        "gicc_runtime_kernel_arg_matches_local_buffer",
+        FunctionType::get(i32, {ptr, ptr, i32, i32}, false));
+    FunctionCallee interval = module.getOrInsertFunction(
+        "gicc_runtime_local_buffer_contains_interval",
+        FunctionType::get(i32, {ptr, ptr, i32, i64, i64}, false));
+    FunctionCallee disjoint = module.getOrInsertFunction(
+        "gicc_runtime_local_buffer_disjoint_from_kernel_arg_allocation",
+        FunctionType::get(i32, {ptr, ptr, i32, i32}, false));
+    FunctionCallee setPhase = module.getOrInsertFunction(
+        "gicc_runtime_set_schedule_phase_from_kernel_args",
+        FunctionType::get(guardBuilder.getVoidTy(), {ptr, i32, ptr}, false));
+
+    Value *runtime = audited.runtime;
+    Value *params = audited.paramsValue;
+    Value *stream = audited.stream;
+    Value *guard = guardBuilder.getFalse();
+    for (unsigned sourcePointer : plan.sourcePointerParams) {
+        Value *matches = guardBuilder.CreateICmpNE(
+            guardBuilder.CreateCall(
+                identity,
+                {runtime, params, guardBuilder.getInt32(sourcePointer),
+                 guardBuilder.getInt32(plan.bufferParam)},
+                "gicc.source.identity"),
+            guardBuilder.getInt32(0), "gicc.source.identity.ok");
+        guard = guardBuilder.CreateOr(guard, matches,
+                                      "gicc.source.identity.any");
+    }
+    for (const TransferInterval &transfer : plan.intervals) {
+        Value *offset = evaluateIntervalExpr(
+            guardBuilder, transfer.offset, audited.cells);
+        Value *size = evaluateIntervalExpr(
+            guardBuilder, transfer.size, audited.cells);
+        if (!offset || !size) return false;
+        Value *valid = guardBuilder.CreateICmpNE(
+            guardBuilder.CreateCall(
+                interval,
+                {runtime, params, guardBuilder.getInt32(plan.bufferParam),
+                 offset, size},
+                "gicc.source.interval"),
+            guardBuilder.getInt32(0), "gicc.source.interval.ok");
+        guard = guardBuilder.CreateAnd(guard, valid,
+                                       "gicc.early.guards");
+    }
+    for (unsigned writePointer : plan.writePointerParams) {
+        Value *separate = guardBuilder.CreateICmpNE(
+            guardBuilder.CreateCall(
+                disjoint,
+                {runtime, params, guardBuilder.getInt32(plan.bufferParam),
+                 guardBuilder.getInt32(writePointer)},
+                "gicc.write.allocation.disjoint"),
+            guardBuilder.getInt32(0), "gicc.write.disjoint.ok");
+        guard = guardBuilder.CreateAnd(guard, separate,
+                                       "gicc.early.guards");
+    }
+
+    BasicBlock *guardBlock = launch->getParent();
+    Instruction *afterLaunch = launch->getNextNode();
+    if (!afterLaunch) return false;
+    BasicBlock *originalBlock = guardBlock->splitBasicBlock(
+        launch, "gicc.early.original");
+    BasicBlock *continuation = originalBlock->splitBasicBlock(
+        afterLaunch, "gicc.early.cont");
+    BasicBlock *guardedBlock = BasicBlock::Create(
+        module.getContext(), "gicc.early.guarded", &wrapper, originalBlock);
+
+    guardBlock->getTerminator()->eraseFromParent();
+    IRBuilder<> branchBuilder(guardBlock);
+    branchBuilder.CreateCondBr(guard, guardedBlock, originalBlock);
+
+    IRBuilder<> guardedBuilder(guardedBlock);
+    guardedBuilder.CreateCall(
+        setPhase,
+        {params, guardedBuilder.getInt32(kScheduleEarlyTrigger), stream});
+    cloneLaunch(guardedBuilder, *launch);
+    guardedBuilder.CreateCall(
+        setPhase,
+        {params, guardedBuilder.getInt32(kScheduleOriginal), stream});
+    guardedBuilder.CreateBr(continuation);
     return true;
 }
 
@@ -961,7 +1432,9 @@ bool callUsesContext(const CallInst &call, const Argument &context) {
 }
 
 std::optional<DeviceCommunication> auditDeviceCommunication(
-        const GICCKernelInfo &info, const FissionPlan &plan,
+        const GICCKernelInfo &info,
+        ArrayRef<std::string> transferSiteIds,
+        StringRef completionSiteId,
         DominatorTree &DT, PostDominatorTree &PDT, std::string &reason) {
     if (!info.kernel || info.kernel->arg_empty()) {
         reason = "device kernel has no context formal";
@@ -970,14 +1443,14 @@ std::optional<DeviceCommunication> auditDeviceCommunication(
     const Argument &context = *info.kernel->getArg(0);
     DeviceCommunication result;
     for (const GICCCallSite &site : info.sites) {
-        const bool selected = std::find(plan.transferSiteIds.begin(),
-                                        plan.transferSiteIds.end(),
+        const bool selected = std::find(transferSiteIds.begin(),
+                                        transferSiteIds.end(),
                                         site.siteId) !=
-                              plan.transferSiteIds.end();
+                              transferSiteIds.end();
         if (site.kind == GICCOpKind::PutNoDb && selected) {
             result.transfers.push_back(site.CI);
         } else if (site.kind == GICCOpKind::Flush &&
-                   site.siteId == plan.completionSiteId && !result.flush) {
+                   site.siteId == completionSiteId && !result.flush) {
             result.flush = site.CI;
         } else if (site.kind == GICCOpKind::Quiet && !result.quiet) {
             result.quiet = site.CI;
@@ -990,7 +1463,7 @@ std::optional<DeviceCommunication> auditDeviceCommunication(
             return std::nullopt;
         }
     }
-    if (result.transfers.size() != plan.transferSiteIds.size() ||
+    if (result.transfers.size() != transferSiteIds.size() ||
         !result.flush || !result.quiet) {
         reason = "fission group lacks one flush and one quiet";
         return std::nullopt;
@@ -1136,6 +1609,42 @@ bool materializeDeviceFission(Function &kernel, const FissionPlan &plan,
     return true;
 }
 
+bool materializeDeviceGuardedEarlyTrigger(
+        Function &kernel, const DeviceCommunication &communication) {
+    if (kernel.arg_empty() ||
+        !kernel.getArg(0)->getType()->isPointerTy() ||
+        !communication.lastTransfer || !communication.flush)
+        return false;
+
+    IRBuilder<> entryBuilder(&*kernel.getEntryBlock().getFirstInsertionPt());
+    Value *phasePointer = entryBuilder.CreateGEP(
+        entryBuilder.getInt8Ty(), kernel.getArg(0),
+        entryBuilder.getInt64(kSchedulePhaseOffset), "gicc.phase.ptr");
+    Value *phase = entryBuilder.CreateAlignedLoad(
+        entryBuilder.getInt32Ty(), phasePointer, Align(4), false,
+        "gicc.phase");
+    Value *isEarly = entryBuilder.CreateICmpEQ(
+        phase, entryBuilder.getInt32(kScheduleEarlyTrigger),
+        "gicc.phase.early_trigger");
+    Value *isOriginal = entryBuilder.CreateNot(
+        isEarly, "gicc.phase.original_trigger");
+
+    Instruction *insertBefore = communication.lastTransfer->getNextNode();
+    auto *earlyFlush = cast<CallInst>(communication.flush->clone());
+    earlyFlush->setArgOperand(
+        0, communication.lastTransfer->getArgOperand(0));
+    earlyFlush->setMetadata(
+        kGuardedEarlySyntheticFlushMD,
+        MDNode::get(kernel.getContext(), MDString::get(
+            kernel.getContext(), "guarded_early_trigger")));
+    earlyFlush->insertBefore(insertBefore);
+
+    gateCall(*earlyFlush, isEarly, "gicc.early.synthetic_flush");
+    gateCall(*communication.flush, isOriginal,
+             "gicc.early.original_flush");
+    return true;
+}
+
 }  // namespace
 
 PreservedAnalyses GICCProducerFissionHostPass::run(
@@ -1245,7 +1754,9 @@ PreservedAnalyses GICCProducerFissionDevicePass::run(
             kernel, *currentPlan, DT, PDT, regionReason);
         std::string communicationReason;
         auto communication = auditDeviceCommunication(
-            info, *currentPlan, DT, PDT, communicationReason);
+            info, currentPlan->transferSiteIds,
+            currentPlan->completionSiteId, DT, PDT,
+            communicationReason);
         if (!region || !communication) {
             errs() << "[producer-fission-device] " << kernel.getName()
                    << ": rejected: "
@@ -1266,6 +1777,171 @@ PreservedAnalyses GICCProducerFissionDevicePass::run(
         }
         errs() << "[producer-fission-device] " << kernel.getName()
                << ": materialized exact producer/remainder partition\n";
+        changed = true;
+    }
+    return changed ? PreservedAnalyses::none()
+                   : PreservedAnalyses::all();
+}
+
+PreservedAnalyses GICCGuardedEarlyTriggerHostPass::run(
+        Module &module, ModuleAnalysisManager &) {
+    const auto &config = getConfig();
+    if (config.mode != Mode::Lower ||
+        Triple(module.getTargetTriple()).getArch() != Triple::x86_64)
+        return PreservedAnalyses::all();
+
+    GICCLaunchInventory inventory =
+        collectLaunchInventory(module, config.metaDir);
+    SmallPtrSet<Function *, 4> visited;
+    bool changed = false;
+    for (const GICCLaunchSite &site : inventory.sites) {
+        Function *wrapper = site.launchWrapper;
+        if (!wrapper || !site.haveTemplate ||
+            !visited.insert(wrapper).second)
+            continue;
+        std::string reason;
+        if (!site.kernelTemplate
+                 .guarded_early_trigger_device_materialized) {
+            errs() << "[guarded-early-trigger-host] "
+                   << site.kernelMangled
+                   << ": rejected: final device LTO did not attest the "
+                      "early/original trigger partition\n";
+            continue;
+        }
+        auto plan = buildGuardedEarlyTriggerPlan(
+            site.kernelTemplate, reason);
+        if (!plan) {
+            errs() << "[guarded-early-trigger-host] "
+                   << site.kernelMangled << ": rejected: " << reason
+                   << "\n";
+            continue;
+        }
+        if (!auditGuardedEarlyDwqRoute(*plan, reason)) {
+            errs() << "[guarded-early-trigger-host] "
+                   << site.kernelMangled << ": rejected: " << reason
+                   << "\n";
+            continue;
+        }
+        AuditedLaunch launch = auditFinalLaunch(
+            *wrapper, site.kernelTemplate);
+        if (!launch.launch) {
+            AuditedHipStubDispatch stub = auditEarlyHipStubDispatch(
+                *wrapper, site.kernelTemplate);
+            if (!stub.dispatch) {
+                errs() << "[guarded-early-trigger-host] "
+                       << site.kernelMangled << ": rejected: "
+                       << launch.reason << "; " << stub.reason << "\n";
+                continue;
+            }
+            launch = materializeStubParameterView(
+                *wrapper, site.kernelTemplate, stub);
+            if (!launch.launch) {
+                errs() << "[guarded-early-trigger-host] "
+                       << site.kernelMangled << ": rejected: "
+                       << launch.reason << "\n";
+                continue;
+            }
+        }
+        if (!materializeHostGuardedEarlyTrigger(
+                *wrapper, *plan, launch)) {
+            errs() << "[guarded-early-trigger-host] "
+                   << site.kernelMangled
+                   << ": rejected during IR materialization\n";
+            continue;
+        }
+        errs() << "[guarded-early-trigger-host] "
+               << site.kernelMangled
+               << ": materialized allocation-guarded single launch\n";
+        changed = true;
+    }
+    return changed ? PreservedAnalyses::none()
+                   : PreservedAnalyses::all();
+}
+
+PreservedAnalyses GICCGuardedEarlyTriggerDevicePass::run(
+        Module &module, ModuleAnalysisManager &MAM) {
+    const auto &config = getConfig();
+    if (config.mode != Mode::Lower ||
+        !Triple(module.getTargetTriple()).isAMDGCN())
+        return PreservedAnalyses::all();
+
+    FunctionAnalysisManager &FAM =
+        MAM.getResult<FunctionAnalysisManagerModuleProxy>(module)
+            .getManager();
+    bool changed = false;
+    for (Function &kernel : module) {
+        if (kernel.isDeclaration() || !isGPUKernel(kernel)) continue;
+
+        KernelTemplate frozen;
+        if (!readKernelTemplate(config.metaDir, kernel.getName().str(),
+                                frozen))
+            continue;
+        GICCKernelInfo info;
+        collectGICCSites(kernel, info);
+        if (info.sites.empty()) continue;
+
+        LoopInfo &LI = FAM.getResult<LoopAnalysis>(kernel);
+        DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(kernel);
+        ScalarEvolution &SE =
+            FAM.getResult<ScalarEvolutionAnalysis>(kernel);
+        PostDominatorTree &PDT =
+            FAM.getResult<PostDominatorTreeAnalysis>(kernel);
+        KernelTemplate current =
+            buildKernelTemplate(info, &LI, &DT, &SE, &PDT);
+
+        std::string frozenReason;
+        std::string currentReason;
+        auto frozenPlan = buildGuardedEarlyTriggerPlan(
+            frozen, frozenReason);
+        auto currentPlan = buildGuardedEarlyTriggerPlan(
+            current, currentReason);
+        if (!frozenPlan || !currentPlan ||
+            !sameGuardedEarlyTriggerPlan(*frozenPlan, *currentPlan)) {
+            errs() << "[guarded-early-trigger-device] "
+                   << kernel.getName()
+                   << ": rejected: final compiler facts disagree with "
+                      "persisted metadata"
+                   << (currentPlan ? "" : (": " + currentReason))
+                   << "\n";
+            continue;
+        }
+        if (!auditGuardedEarlyDwqRoute(*currentPlan, currentReason)) {
+            errs() << "[guarded-early-trigger-device] "
+                   << kernel.getName() << ": rejected: "
+                   << currentReason << "\n";
+            continue;
+        }
+
+        std::string communicationReason;
+        auto communication = auditDeviceCommunication(
+            info, currentPlan->transferSiteIds,
+            currentPlan->completionSiteId, DT, PDT,
+            communicationReason);
+        if (!communication) {
+            errs() << "[guarded-early-trigger-device] "
+                   << kernel.getName() << ": rejected: "
+                   << communicationReason << "\n";
+            continue;
+        }
+        if (!materializeDeviceGuardedEarlyTrigger(
+                kernel, *communication)) {
+            errs() << "[guarded-early-trigger-device] "
+                   << kernel.getName()
+                   << ": rejected during IR materialization\n";
+            continue;
+        }
+        current.guarded_early_trigger_device_materialized = true;
+        if (!writeKernelTemplate(config.metaDir, current)) {
+            errs() << "[guarded-early-trigger-device] "
+                   << kernel.getName()
+                   << ": warning: could not persist device materialization "
+                      "attestation; host transformation will remain "
+                      "disabled\n";
+        }
+        errs() << "[guarded-early-trigger-device] "
+               << kernel.getName()
+               << ": materialized guarded early/original trigger "
+                  "partition\n";
         changed = true;
     }
     return changed ? PreservedAnalyses::none()

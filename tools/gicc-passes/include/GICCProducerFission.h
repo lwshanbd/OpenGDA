@@ -30,4 +30,28 @@ public:
     }
 };
 
+// Host/device halves of the guarded early-trigger schedule. The host half
+// runs at the pre-inliner LTO extension point so every later-expanded launch
+// inherits its guard; named tests may also exercise the final direct-launch
+// shape. Both halves keep a separate transform and device attestation.
+class GICCGuardedEarlyTriggerHostPass
+    : public llvm::PassInfoMixin<GICCGuardedEarlyTriggerHostPass> {
+public:
+    llvm::PreservedAnalyses run(llvm::Module &M,
+                                llvm::ModuleAnalysisManager &);
+    static llvm::StringRef name() {
+        return "GICCGuardedEarlyTriggerHostPass";
+    }
+};
+
+class GICCGuardedEarlyTriggerDevicePass
+    : public llvm::PassInfoMixin<GICCGuardedEarlyTriggerDevicePass> {
+public:
+    llvm::PreservedAnalyses run(llvm::Module &M,
+                                llvm::ModuleAnalysisManager &);
+    static llvm::StringRef name() {
+        return "GICCGuardedEarlyTriggerDevicePass";
+    }
+};
+
 }  // namespace gicc::pass

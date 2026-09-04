@@ -66,11 +66,12 @@ namespace gicc {
 // Compiler-owned execution phases. Application kernels ignore this word
 // unless a verified LTO schedule has rewritten their control flow. Keeping
 // ORIGINAL as zero preserves the behavior of every unmodified kernel and of
-// contexts allocated before producer-frontier fission is enabled.
+// contexts allocated before any compiler-owned phase schedule is enabled.
 enum : std::uint32_t {
     GICC_SCHEDULE_PHASE_ORIGINAL = 0,
     GICC_SCHEDULE_PHASE_PRODUCER_FRONTIER = 1,
     GICC_SCHEDULE_PHASE_REMAINDER = 2,
+    GICC_SCHEDULE_PHASE_EARLY_TRIGGER = 3,
 };
 
 //==============================================================================

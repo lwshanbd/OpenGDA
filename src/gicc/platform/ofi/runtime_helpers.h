@@ -60,11 +60,12 @@ void gicc_runtime_dwq_enqueue_batched(gicc::Runtime    *rt,
 volatile std::uint64_t *gicc_runtime_trigger_addr(gicc::Runtime *rt);
 std::uint64_t           gicc_runtime_trigger_val (gicc::Runtime *rt);
 
-// Compiler-only phase switch used by producer-frontier fission. The first
+// Compiler-only phase switch used by verified LTO schedules. The first
 // kernel parameter array entry points at the host-side DeviceCtx* argument
 // slot materialized by HIP. The implementation dereferences that slot and
 // launches a one-thread setter kernel on `stream`; it never edits application
-// source or changes the original kernel ABI.
+// source or changes the original kernel ABI. Producer fission and guarded
+// early trigger use distinct compiler-owned phase values.
 void gicc_runtime_set_schedule_phase_from_kernel_args(
     void *const *kernel_params, std::uint32_t phase, GpuStream_t stream);
 

@@ -75,6 +75,11 @@ enum class CommunicationTransform {
     // host and device LTO passes independently rebuild and validate the
     // persisted producer-frontier proof before changing the schedule.
     ProducerFrontierTwoPhase,
+    // Keep the original kernel launch and computation intact, but issue the
+    // already-staged DWQ trigger at the unique post-PUT frontier when runtime
+    // allocation guards prove every crossed write root disjoint from the
+    // registered source buffer. No source-level operation is moved.
+    GuardedEarlyTrigger,
     Unknown,
 };
 

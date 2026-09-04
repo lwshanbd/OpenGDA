@@ -22,7 +22,12 @@ pointer identities, ranges, predicates, or legality assertions.
 ## Frozen execution shape
 
 The original kernel symbol, arguments, grid, block size, shared-memory size,
-and stream are unchanged. Final host LTO may emit exactly:
+and stream are unchanged. Host LTO emits the guard in the annotated launch
+wrapper before general inlining. At that extension point HIP may still
+represent the application launch as a compiler-owned `push configuration ->
+device stub -> hipLaunchKernel` chain. The pass audits that whole chain,
+builds a temporary kernel-parameter view from the exact stub operands, and
+then may emit exactly:
 
 ```text
 guard = source-handle matches one compiler-proved readonly pointer formal
@@ -50,7 +55,11 @@ Final device LTO may change the kernel only as follows:
 The existing same-stream setter kernel orders the phase write before the
 application kernel and resets it afterward. A false or failed guard runs the
 untouched schedule once. The new phase value is compiler/runtime-owned and is
-not application-visible.
+not application-visible. Transforming before inlining is required: otherwise
+O3 can distribute unguarded `hipLaunchKernel` calls into application callers
+before a late wrapper-only pass sees them. Final optimized IR must show that
+every source launch still reaches the guarded wrapper (or contains an inlined
+copy of its guard), with no reachable direct-launch bypass.
 
 ## Required compiler proof
 
@@ -78,7 +87,9 @@ must each fail closed unless all applicable facts below agree:
    placement.
 8. Final device LTO rebuilds the write-root and communication facts, exact
    compares them with discovery metadata, materializes the phase CFG, and
-   persists a fresh attestation. Final host LTO requires that attestation.
+   persists a fresh attestation. Host LTO requires that attestation and
+   independently audits either the final direct-launch ABI or the pre-inliner
+   compiler HIP-stub chain before it adds the guard.
 9. The original completion semantics remain: hardware may begin the logical
    PUT any time after its source-level call, and quiet/reset still guarantee
    completion at the original boundary. No ordering is inferred for a GET.

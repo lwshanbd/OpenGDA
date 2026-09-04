@@ -588,6 +588,10 @@ struct KernelTemplate {
     // Device discovery rewrites the template with the default false value on
     // every compile, preventing an earlier failed attempt from inheriting it.
     bool                    producer_fission_device_materialized = false;
+    // Written only after final device LTO re-proves and emits the guarded
+    // early-trigger phase CFG. Final host LTO requires this one-way
+    // attestation before it may add the guarded single-launch path.
+    bool                    guarded_early_trigger_device_materialized = false;
     // Set to true by GICCDispatchLowering when at least one of this
     // kernel's call sites was lowered to CPU_PROXY_ENQUEUE. The
     // device-side lowering pass (Task 8) reads this bit to decide

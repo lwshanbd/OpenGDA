@@ -502,22 +502,29 @@ PreservedAnalyses GICCDeviceLoweringPass::run(Module &M,
     for (Function &F : M) {
         if (F.isDeclaration() || !isGPUKernel(F)) continue;
 
-        // The producer-fission pass clones one early remainder-only flush and
-        // marks it so source site numbering stays stable. It is intentionally
-        // absent from collectGICCSites(), but still needs the ordinary AMDGCN
-        // MMIO lowering here.
+        // Compiler-owned phase passes clone an early flush and mark it so
+        // source site numbering stays stable. Such calls are intentionally
+        // absent from collectGICCSites(), but still need ordinary AMDGCN MMIO
+        // lowering here.
         for (BasicBlock &BB : F) {
             for (Instruction &I : BB) {
                 auto *call = dyn_cast<CallInst>(&I);
-                if (!call || !call->getMetadata(
-                                 "gicc.producer_fission.synthetic_flush"))
+                if (!call) continue;
+                const bool fission = call->getMetadata(
+                    "gicc.producer_fission.synthetic_flush");
+                const bool guarded = call->getMetadata(
+                    "gicc.guarded_early_trigger.synthetic_flush");
+                if (!fission && !guarded)
                     continue;
                 GICCOpKind kind;
                 if (!classifyGICCCall(*call, kind) ||
                     kind != GICCOpKind::Flush)
                     report_fatal_error(
-                        "gicc: malformed producer-fission synthetic flush");
+                        "gicc: malformed compiler-synthetic flush");
                 flushCalls.push_back(call);
+                if (guarded)
+                    earlyFlushes[call] =
+                        CommunicationTransform::GuardedEarlyTrigger;
             }
         }
 

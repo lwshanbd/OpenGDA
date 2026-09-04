@@ -42,6 +42,8 @@ CommunicationTransform parseCommunicationTransform(llvm::StringRef s) {
     if (s == "TRIGGER_GROUP_EARLY") return CommunicationTransform::TriggerGroupEarly;
     if (s == "PRODUCER_FRONTIER_TWO_PHASE")
         return CommunicationTransform::ProducerFrontierTwoPhase;
+    if (s == "GUARDED_EARLY_TRIGGER")
+        return CommunicationTransform::GuardedEarlyTrigger;
     return CommunicationTransform::Unknown;
 }
 
@@ -55,6 +57,8 @@ const char *communicationTransformName(CommunicationTransform t) {
             return "TRIGGER_GROUP_EARLY";
         case CommunicationTransform::ProducerFrontierTwoPhase:
             return "PRODUCER_FRONTIER_TWO_PHASE";
+        case CommunicationTransform::GuardedEarlyTrigger:
+            return "GUARDED_EARLY_TRIGGER";
         case CommunicationTransform::Unknown:      return "UNKNOWN";
     }
     return "UNKNOWN";

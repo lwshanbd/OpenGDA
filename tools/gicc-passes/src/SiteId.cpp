@@ -104,6 +104,9 @@ void collectGICCSites(Function &F, GICCKernelInfo &info) {
             // and must not renumber source-derived site IDs on a later pass.
             if (CI->getMetadata("gicc.producer_fission.synthetic_flush"))
                 continue;
+            if (CI->getMetadata(
+                    "gicc.guarded_early_trigger.synthetic_flush"))
+                continue;
             GICCOpKind kind;
             if (!classifyGICCCall(*CI, kind)) continue;
 

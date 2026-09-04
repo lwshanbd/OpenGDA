@@ -50,6 +50,17 @@ bool producerFissionPipelineEnabled() {
             CommunicationTransform::ProducerFrontierTwoPhase;
     });
 }
+
+bool guardedEarlyTriggerPipelineEnabled() {
+    const auto &config = getConfig();
+    if (config.hintIn.empty()) return false;
+    HintFile hint;
+    if (!readHintFile(config.hintIn, hint)) return false;
+    return llvm::any_of(hint.sites, [](const auto &entry) {
+        return entry.second.transform ==
+            CommunicationTransform::GuardedEarlyTrigger;
+    });
+}
 #endif
 
 struct GICCSentinelPass : PassInfoMixin<GICCSentinelPass> {
@@ -119,6 +130,15 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                         MPM.addPass(GICCDispatchLoweringPass());
                         if (producerFissionPipelineEnabled())
                             MPM.addPass(GICCProducerFissionDevicePass());
+                        if (guardedEarlyTriggerPipelineEnabled()) {
+                            MPM.addPass(GICCGuardedEarlyTriggerDevicePass());
+                            // Host wrappers must be guarded before the O3
+                            // inliner distributes their hipLaunchKernel call
+                            // into application call sites. The pass still
+                            // audits the complete generated wrapper ABI and
+                            // requires the one-way device attestation.
+                            MPM.addPass(GICCGuardedEarlyTriggerHostPass());
+                        }
                         MPM.addPass(GICCDeviceLoweringPass());
                     }
 #endif
@@ -184,6 +204,14 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-producer-fission-device") {
                         MPM.addPass(GICCProducerFissionDevicePass());
+                        return true;
+                    }
+                    if (Name == "gicc-guarded-early-trigger-host") {
+                        MPM.addPass(GICCGuardedEarlyTriggerHostPass());
+                        return true;
+                    }
+                    if (Name == "gicc-guarded-early-trigger-device") {
+                        MPM.addPass(GICCGuardedEarlyTriggerDevicePass());
                         return true;
                     }
 #endif
