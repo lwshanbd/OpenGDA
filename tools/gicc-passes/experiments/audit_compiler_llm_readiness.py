@@ -38,7 +38,7 @@ EXPECTED_LABELS = {
     "mixed_lto",
     "mm_minimal",
 }
-CAPACITY_ONLY_LABELS = ("loop_lto", "minimod", "mixed_lto")
+CAPACITY_ONLY_LABELS = ("minimod", "mixed_lto")
 
 
 class ReadinessError(RuntimeError):
@@ -282,6 +282,74 @@ def classify_guarded_early_trigger(entry: dict[str, Any], phase: str,
     return result
 
 
+def classify_reused_loop_descriptor(entry: dict[str, Any], phase: str,
+                                    analysis: Any | None) -> dict[str, Any]:
+    """Classify the model-invisible loop graph-expansion oracle."""
+    if analysis is None:
+        status = {
+            "waiting_predecessor": "awaiting_predecessor",
+            "waiting_scheduler_idle": "awaiting_predecessor",
+            "submitting": "awaiting_scout",
+            "monitoring": "awaiting_scout",
+            "analyzing": "awaiting_scout",
+            "missing": "runtime_labels_missing",
+            "failed": "scout_failed",
+        }.get(phase)
+        if status is None:
+            raise ReadinessError(
+                f"reused-loop-descriptor state {phase!r} requires an analysis"
+            )
+        next_stage = {
+            "awaiting_predecessor": "wait_for_serial_compiler_headroom_campaign",
+            "awaiting_scout": "wait_for_reused_loop_descriptor_scout",
+            "runtime_labels_missing": (
+                "establish_preregistered_compiler_oracle_headroom_first"
+            ),
+            "scout_failed": "diagnose_without_model_call",
+        }[status]
+        result = _base_entry(entry, status, next_stage)
+    else:
+        if (not isinstance(analysis, dict)
+                or analysis.get("schema_version")
+                != "gicc-reused-loop-descriptor-analysis-v1"
+                or analysis.get("correctness_gate", {}).get("passed") is not True):
+            raise ReadinessError(
+                "reused-loop-descriptor scout violates its correctness gate"
+            )
+        gate = analysis.get("oracle_headroom_gate")
+        if (
+            not isinstance(gate, dict)
+            or not isinstance(gate.get("passed"), bool)
+            or gate.get("paper_claim") is not False
+            or gate.get("provider_protocol_permitted") is not False
+        ):
+            raise ReadinessError(
+                "reused-loop-descriptor scout violates its oracle gate"
+            )
+        expected_phase = "promising" if gate["passed"] else "negative"
+        if phase != expected_phase:
+            raise ReadinessError(
+                "reused-loop-descriptor controller state disagrees with analysis"
+            )
+        if gate["passed"]:
+            result = _base_entry(
+                entry, "confirmation_required",
+                "freeze_and_run_confirmatory_graph_expansion_oracle",
+            )
+        else:
+            result = _base_entry(
+                entry, "closed_negative",
+                "keep_reused_loop_descriptor_model_invisible",
+            )
+        result["runtime_gate_passed"] = gate["passed"]
+    result.update({
+        "candidate_kind": "trigger_reused_descriptor_loop",
+        "candidate_model_visible": False,
+        "current_suite_graph_expanded": False,
+    })
+    return result
+
+
 def _normalized_structural_graph(value: Any) -> tuple[dict[str, Any], str]:
     graph = dict(structural.verified_graph(value))
     graph.pop("graph_id")
@@ -332,6 +400,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         read_json(args.guarded_analysis)
         if args.guarded_analysis.is_file() else None
     )
+    reused_analysis = (
+        read_json(args.reused_analysis)
+        if args.reused_analysis.is_file() else None
+    )
     records = {
         "coalescing_placement": classify_placement(
             placement_entry, placement_summary, graphs_equivalent,
@@ -347,6 +419,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "mm_minimal": classify_guarded_early_trigger(
             entries["mm_minimal"], state_phase(args.guarded_state),
             guarded_analysis,
+        ),
+        "loop_lto": classify_reused_loop_descriptor(
+            entries["loop_lto"], state_phase(args.reused_state),
+            reused_analysis,
         ),
     }
     for label in CAPACITY_ONLY_LABELS:
@@ -399,6 +475,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "producer_analysis": evidence(args.producer_analysis),
             "guarded_state": evidence(args.guarded_state),
             "guarded_analysis": evidence(args.guarded_analysis),
+            "reused_state": evidence(args.reused_state),
+            "reused_analysis": evidence(args.reused_analysis),
         },
     }
     result = dict(payload)
@@ -438,6 +516,8 @@ def add_inputs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--producer-analysis", type=Path, required=True)
     parser.add_argument("--guarded-state", type=Path, required=True)
     parser.add_argument("--guarded-analysis", type=Path, required=True)
+    parser.add_argument("--reused-state", type=Path, required=True)
+    parser.add_argument("--reused-analysis", type=Path, required=True)
 
 
 def main() -> int:

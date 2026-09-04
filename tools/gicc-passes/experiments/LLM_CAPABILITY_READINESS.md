@@ -32,12 +32,12 @@ and fails closed at every transition. Its current output is:
 | `minimod` | `runtime_labels_missing` | establish a preregistered compiler oracle first |
 | `mixed_lto` | `runtime_labels_missing` | establish a preregistered compiler oracle first |
 | `mm_minimal` | `awaiting_predecessor` | run the frozen guarded-trigger scout after the serial campaign |
-| `loop_lto` | `runtime_labels_missing` | establish a preregistered compiler oracle first |
+| `loop_lto` | `awaiting_predecessor` | run the frozen reused-descriptor scout after the serial campaign |
 
 The report has readiness ID
-`sha256:3718159ad83791d99d28bd1e3b6e9fbd497a6fce677267efd39f48ea4b64e348`
+`sha256:c20068a37c24b50f27e4ab3f10445af9d2550aed796bc208cc699ae0f06f930f`
 and serialized SHA-256
-`830332ba509ec4750640c0cfd48784ff54725a907bcf7b27f84a95e4d8308683`.
+`e9669d86c1011386a6720da531a6d6c8b8411068421e2044eb47c8c0c6068891`.
 It reports zero provider-protocol-permitted entries, zero authorized provider
 calls, zero measured LLM policies, and
 `paper_llm_performance_claim_ready=false`.
@@ -58,6 +58,9 @@ capacity but cannot support an LLM-selection benefit.
   authorizes a provider request.
 - The guarded early-trigger scout is subject to the same rule and remains
   absent from model-visible candidates while it waits or until confirmation.
+- The reused-loop-descriptor scout is a graph-expansion oracle. Its candidate
+  remains explicitly model-invisible even after a positive scout; only an
+  independently frozen confirmation may justify rebuilding the compiler graph.
 - A graph without runtime labels remains a capability-inventory entry, not a
   performance test.
 - Only a positive confirmatory headroom result may permit preparation of an
@@ -136,6 +139,17 @@ decision-graph labels, or support an LLM performance claim. Its result ID is
 the serialized report SHA-256 is
 `cc97f0aecff14af15786ed24546266558a5b3519270c047ab2943544f4d02a3c`.
 
+The retrospective has now been converted into a prospective, compiler-only
+oracle. LTO proves that every descriptor field is loop invariant, replaces six
+runtime-sized host arrays with one scalar descriptor, and calls a runtime
+helper that still enqueues exactly the original number of ordered network
+operations. The application source and optimized device kernel are identical
+between arms. The frozen N2 `pdebug` scout uses six balanced same-allocation
+pairs at batches 4 and 64, validates all 24 enqueue counts, and is queued only
+as a local successor to the existing serial campaign. Commit `06ab7fd` freezes
+its protocol and fail-closed monitor. No scout result exists yet, so the
+candidate is not present in the model-visible graph.
+
 ## Reproduction
 
 From the repository root:
@@ -153,6 +167,8 @@ python3 tools/gicc-passes/experiments/audit_compiler_llm_readiness.py emit \
   --producer-analysis build_ofi/producer_fission_oracle_scout_7687377_20260904/analysis.json \
   --guarded-state build_ofi/guarded_early_trigger_scout_77897d9_20260904.state \
   --guarded-analysis build_ofi/guarded_early_trigger_scout_77897d9_20260904/analysis.json \
+  --reused-state build_ofi/reused_loop_descriptor_scout_aff76f9_20260904.state \
+  --reused-analysis build_ofi/reused_loop_descriptor_scout_aff76f9_20260904/analysis.json \
   --out build_ofi/compiler_llm_readiness_20260904/report.json
 ```
 

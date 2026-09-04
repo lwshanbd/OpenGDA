@@ -101,6 +101,29 @@ class CompilerLlmReadinessTests(unittest.TestCase):
         self.assertFalse(result["provider_protocol_permitted"])
         self.assertFalse(result["provider_call_authorized"])
 
+    def test_reused_loop_scout_stays_model_invisible(self):
+        waiting = readiness.classify_reused_loop_descriptor(
+            entry(), "waiting_predecessor", None,
+        )
+        self.assertEqual("awaiting_predecessor", waiting["status"])
+        self.assertFalse(waiting["candidate_model_visible"])
+        analysis = {
+            "schema_version": "gicc-reused-loop-descriptor-analysis-v1",
+            "correctness_gate": {"passed": True},
+            "oracle_headroom_gate": {
+                "passed": True,
+                "paper_claim": False,
+                "provider_protocol_permitted": False,
+            },
+        }
+        result = readiness.classify_reused_loop_descriptor(
+            entry(), "promising", analysis,
+        )
+        self.assertEqual("confirmation_required", result["status"])
+        self.assertFalse(result["candidate_model_visible"])
+        self.assertFalse(result["current_suite_graph_expanded"])
+        self.assertFalse(result["provider_protocol_permitted"])
+
     def test_contract_violations_fail_closed(self):
         placement = {
             "schema_version": "gicc-communication-plan-placement-runtime-v1",
@@ -144,6 +167,20 @@ class CompilerLlmReadinessTests(unittest.TestCase):
                     "schema_version": "gicc-guarded-early-trigger-analysis-v1",
                     "correctness_gate": {"passed": True},
                     "oracle_headroom_gate": {"passed": True},
+                },
+            )
+        with self.assertRaises(readiness.ReadinessError):
+            readiness.classify_reused_loop_descriptor(
+                entry(), "promising", {
+                    "schema_version": (
+                        "gicc-reused-loop-descriptor-analysis-v1"
+                    ),
+                    "correctness_gate": {"passed": True},
+                    "oracle_headroom_gate": {
+                        "passed": False,
+                        "paper_claim": False,
+                        "provider_protocol_permitted": False,
+                    },
                 },
             )
 
