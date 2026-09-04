@@ -71,6 +71,40 @@ if [[ -e $output_dir ]]; then
     exit 2
 fi
 
+artifacts=(
+    "$baseline" "$fission" "$source_file" "$helper_source" "$hint"
+    "$runner" "$monitor" "$analyzer" "$protocol" "$builder" "$provenance"
+    "$binary_dir/baseline/meta/features.json"
+    "$binary_dir/fission/meta/features.json"
+)
+for metadata in "$binary_dir/baseline/meta/"*.json \
+                "$binary_dir/fission/meta/"*.json; do
+    case $metadata in
+        */features.json) ;;
+        *) artifacts+=("$metadata") ;;
+    esac
+done
+artifact_hashes=()
+artifact_args=()
+for artifact in "${artifacts[@]}"; do
+    digest=$(sha256sum "$artifact")
+    digest=${digest%% *}
+    artifact_hashes+=("$digest")
+    artifact_args+=(--artifact "$artifact=$digest")
+done
+
+verify_frozen_artifacts() {
+    local index actual
+    for index in "${!artifacts[@]}"; do
+        actual=$(sha256sum "${artifacts[$index]}")
+        actual=${actual%% *}
+        if [[ $actual != "${artifact_hashes[$index]}" ]]; then
+            echo "artifact changed while waiting: ${artifacts[$index]}" >&2
+            exit 2
+        fi
+    done
+}
+
 set_state waiting_predecessor "$predecessor_job"
 flux job wait-event "$predecessor_job" clean >/dev/null
 for ((attempt = 0; attempt < 120; ++attempt)); do
@@ -98,6 +132,7 @@ for replicate in 1 2 3 4; do
     done
 done
 
+verify_frozen_artifacts
 set_state submitting "one two-node pdebug allocation after $predecessor_job"
 job_id=$(flux batch -q pdebug -N2 -n16 -c8 -g1 -t 20m -u \
     --job-name=pfission-oracle-ab --cwd="$output_dir" \
@@ -107,26 +142,6 @@ if [[ -z $job_id || $job_id == *$'\n'* ]]; then
     exit 2
 fi
 printf '%s\n' "$job_id" >"$output_dir/job-id"
-
-artifacts=(
-    "$baseline" "$fission" "$source_file" "$helper_source" "$hint"
-    "$runner" "$monitor" "$analyzer" "$protocol" "$builder" "$provenance"
-    "$binary_dir/baseline/meta/features.json"
-    "$binary_dir/fission/meta/features.json"
-)
-for metadata in "$binary_dir/baseline/meta/"*.json \
-                "$binary_dir/fission/meta/"*.json; do
-    case $metadata in
-        */features.json) ;;
-        *) artifacts+=("$metadata") ;;
-    esac
-done
-artifact_args=()
-for artifact in "${artifacts[@]}"; do
-    digest=$(sha256sum "$artifact")
-    digest=${digest%% *}
-    artifact_args+=(--artifact "$artifact=$digest")
-done
 
 set_state monitoring "$job_id"
 python3 "$monitor" --job-id "$job_id" --output-dir "$output_dir" \
