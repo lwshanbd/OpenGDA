@@ -70,6 +70,14 @@ capability upper bound; it cannot be presented as typical model behavior.
 Offline scoring against already held-out oracle labels is only a policy screen,
 not runtime speedup evidence.
 
+The pure aggregation rules are implemented in
+`python/gicc_llm_capability_metrics.py`. Family-specific adapters remain
+responsible for verifying the provider archive, strict-bridge output, graph
+identity, and held-out runtime-control labels before calling it. In particular,
+the modal-policy tie break is the lexicographically smallest canonical policy
+ID, never the policy with better held-out regret; only the explicitly post-hoc
+best-of-20 selector may inspect regret when choosing a representative.
+
 Every representative used in a performance claim must be deduplicated,
 compiled through the strict LTO bridge, audited in materialized IR, and measured
 against the semantic anchor and deterministic compiler control in paired
