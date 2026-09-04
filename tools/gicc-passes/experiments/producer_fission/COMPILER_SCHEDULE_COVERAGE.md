@@ -39,13 +39,13 @@ choices. The existing route materializer exposes the following independent
 per-workload portfolios under platform profile SHA-256
 `9c40639b6a14f439905fbd46dda682ad17ff017e79d8a15dc61de4f73e437fe3`:
 
-| Case | Opportunity shape | Materializable route plans | Private graph ID | Model-prompt SHA-256 |
-|---|---|---:|---|---|
-| Jacobi | two-transfer completion group | 9 | `sha256:1f7a4f9adeddc978846484d938cbd3d545bb6d3a758188e53a6b6528bb9a72dd` | `da520e8ec701cec38a8ea84bf339bd557fb0c33d602e2b50537c9973a41dcf8c` |
-| Minimod | two-transfer completion group | 9 | `sha256:635f115d1fdcc65e48b49ef8de94d29734edfaf22f6a66b035e3e57c4396889d` | `4fbc8f029c5a0f237226c76067dd4f636fca10a991d596141dfed9d22d13e178` |
-| minimal matrix multiply | singleton transfer | 3 | `sha256:e8ba0ec787b531a9f900e09334dd938a5c805c3b2be79e29876e9fcb2d700987` | `f8d51838bd326aadab6efac8a0589b3ac7a63d5f20c005e3ed4d99ce8c9175a3` |
-| mixed-side-effect LTO | two-transfer completion group | 9 | `sha256:b3e137e2fe3f2cad2807eb534383066f285182c7588e8a895b73675087c0f5a5` | `1c208c409dd1055d420a3c79910cd95f0019b845104ab17d0cde9e3a59a6482f` |
-| loop-carried LTO | singleton transfer | 2 | `sha256:0e53a7261a7be87fc9ba363c56d203db661cf99400c3f781efbc10510bb431e9` | `788c7aaaac36373f0b9fb43ec06b13482c48ad356206a2e3ccd3f809b37454a9` |
+| Case | Opportunity shape | Plans | Private graph ID | Relational prompt SHA-256 | Descriptors prompt SHA-256 | Opaque prompt SHA-256 |
+|---|---|---:|---|---|---|---|
+| Jacobi | two-transfer completion group | 9 | `sha256:1f7a4f9adeddc978846484d938cbd3d545bb6d3a758188e53a6b6528bb9a72dd` | `b7c26801cd7e1d1e7e8d6c6318d04704797b5816307eafa2ce7442d09bfe1c6f` | `aa96875cdf226b29884e877024b4e1fcfa30484ba7760344632f9817b9d8ecf8` | `428193e53ea07e4f6f0e5d1e17d18f06c72eced52dc4a6543a6f08249283f5a3` |
+| Minimod | two-transfer completion group | 9 | `sha256:635f115d1fdcc65e48b49ef8de94d29734edfaf22f6a66b035e3e57c4396889d` | `977d29fee44d77cbc163a4101e4de37e1c6a477d03b5dc98bbc2866bfa4acbba` | `76720fe999379c42cdd91a05525b347c64a792753abc5c50cfe4780be255b859` | `aaa04cff8359073898cd56b31da262fbbd44fa13f50063a7f99fdc00274749ef` |
+| minimal matrix multiply | singleton transfer | 3 | `sha256:e8ba0ec787b531a9f900e09334dd938a5c805c3b2be79e29876e9fcb2d700987` | `753ac4326d9ab31b7668b88b3f0f0eff10c57a91cff88e52f0eaf98b34ede94a` | `9427e8d72591e32f6f6ab1bf19017ad924e28a05c8f4f10ba5bef21c408f4c13` | `42fbad52870e1ecb2fd1b77a8ec1e3b845a08e868813235fd2709a6bd6db1ff4` |
+| mixed-side-effect LTO | two-transfer completion group | 9 | `sha256:b3e137e2fe3f2cad2807eb534383066f285182c7588e8a895b73675087c0f5a5` | `62046a74cf419ad9e675a9280b6def764502683acc8404d08626849d37266c4e` | `d4e963d757c9cfa13a16250a2606e581ee0194ca4dee7e7729e21e5389ce3635` | `e627225fa94eb837cf86c43a59e11ef6a94587cd87c03d7fb463f4a7069dabb7` |
+| loop-carried LTO | singleton transfer | 2 | `sha256:0e53a7261a7be87fc9ba363c56d203db661cf99400c3f781efbc10510bb431e9` | `25786bac2433845caead0a5c11538580de0a4d56320ad7c3cc12aa62fc52f976` | `968786ce9ff64b3435be178295408d398f0ecda6538e7760fa7f2b56ae5c8c9b` | `d447fe8f5181d21a274c18e2dc03a142dc8269a4ff905fbca4f6ee7ed0ec0b3e` |
 
 These are 32 catalog entries across five separate workload decisions, not one
 32-way joint decision and not 32 distinct program transformations. They cover
@@ -63,10 +63,15 @@ inventing another transformation. A future composed portfolio must enumerate
 and revalidate only route × schedule combinations that the corresponding LTO
 materializers jointly support; it must not assume a Cartesian product.
 
-The model prompts above contain the richer compiler relations needed for that
-study—formal argument expressions, transfer intervals, producer-frontier
-facts, launch contexts, compute distance, dependence legality, and measured
-platform data. The private graphs retain site/materializer bindings, while the
+The primary relational prompts above contain the richer compiler relations
+needed for that study—formal argument expressions, transfer intervals,
+producer-frontier facts, launch contexts, compute distance, dependence
+legality, and measured platform data. Their explicit relation edges name
+transfer order and shared/distinct argument structure. The `descriptors`
+ablation removes those edges while retaining the same compiler and candidate
+descriptors. The `opaque` ablation additionally removes selectable-candidate
+semantics while preserving exactly the same candidate IDs and response
+schema. The private graphs retain site/materializer bindings, while every
 prompt view removes kernel names, site IDs, paths, profile provenance paths,
 and materializer strings. No provider call is authorized by generating these
 local prompts.
@@ -123,7 +128,8 @@ python3 tools/gicc-passes/python/gicc_comm_group_plan_bridge.py emit \
   --dossier build_ofi/compiler_fact_coverage_20260904/portfolio/jacobi/dossier.json \
   --meta-dir build_ofi/compiler_fact_coverage_20260904/jacobi_disjoint/meta \
   --graph build_ofi/compiler_fact_coverage_20260904/portfolio/jacobi/group-graph.json \
-  --prompt build_ofi/compiler_fact_coverage_20260904/portfolio/jacobi/group-prompt.txt
+  --prompt build_ofi/compiler_fact_coverage_20260904/portfolio/jacobi/group-prompt.txt \
+  --prompt-view relational
 ```
 
 The JSON report retains paths and human labels only in its internal audit

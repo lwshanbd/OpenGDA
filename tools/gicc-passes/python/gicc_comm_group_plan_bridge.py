@@ -29,9 +29,10 @@ import gicc_llm_bridge as bridge
 
 
 GRAPH_SCHEMA = "gicc-communication-group-opportunity-graph-v1"
-MODEL_VIEW_SCHEMA = "gicc-communication-opportunity-model-view-v1"
+MODEL_VIEW_SCHEMA = "gicc-communication-opportunity-model-view-v2"
 DECISION_SCHEMA = "gicc-communication-group-plan-decision-v1"
 HINT_SCHEMA = "gicc-hint-v1"
+MODEL_VIEW_KINDS = ("relational", "descriptors", "opaque")
 
 ACTION_TO_MATERIALIZER = {
     "default": {"dispatch": "IPC_OR_DWQ", "transform": "NONE"},
@@ -769,8 +770,12 @@ def verified_graph(value: Any) -> dict[str, Any]:
     return value
 
 
-def model_view(graph_value: Any) -> dict[str, Any]:
-    """Build the rich, identity-free graph that is eligible for a model."""
+def model_view(
+    graph_value: Any, view_kind: str = "relational",
+) -> dict[str, Any]:
+    """Build an identity-free model view over one unchanged private graph."""
+    if view_kind not in MODEL_VIEW_KINDS:
+        raise GroupPlanError(f"unknown model view {view_kind}")
     graph = verified_graph(graph_value)
     forbidden_keys = {
         "site_id", "site_ids", "kernel", "kernel_mangled",
@@ -815,6 +820,11 @@ def model_view(graph_value: Any) -> dict[str, Any]:
         flops = compute.get("site_flops_to_completion", {})
         candidate_views = []
         for candidate in opportunity["candidates"]:
+            if view_kind == "opaque":
+                candidate_views.append({
+                    "candidate_id": candidate["candidate_id"],
+                })
+                continue
             effects = dict(candidate.get("effects", {}))
             site_actions = effects.pop("site_actions", {})
             effects["route_actions"] = [
@@ -827,6 +837,22 @@ def model_view(graph_value: Any) -> dict[str, Any]:
                 "compiler_proof": candidate["compiler_proof"],
                 "effects": effects,
             })
+        relations = []
+        if view_kind == "relational":
+            relations.append({
+                "kind": "operation_order",
+                "ordered_transfer_ordinals": list(range(len(site_ids))),
+                "completion_kind": completion.get("kind"),
+            })
+            for argument, relation in sorted(
+                (facts.get("argument_relations") or {}).items()
+            ):
+                relations.append({
+                    "kind": "transfer_argument_relation",
+                    "argument": argument,
+                    "relation": relation,
+                    "transfer_ordinals": list(range(len(site_ids))),
+                })
         opportunity_views.append({
             "opportunity_id": opportunity["opportunity_id"],
             "kind": opportunity["kind"],
@@ -835,7 +861,6 @@ def model_view(graph_value: Any) -> dict[str, Any]:
                 "batch_size": facts.get("batch_size"),
                 "fan_out": facts.get("fan_out"),
                 "completion_kind": completion.get("kind"),
-                "argument_relations": facts.get("argument_relations"),
                 "transfer_argument_expressions": [
                     arguments.get(site_id) for site_id in site_ids
                 ],
@@ -859,7 +884,14 @@ def model_view(graph_value: Any) -> dict[str, Any]:
                 },
                 "dependence_legality": facts.get("dependence_legality"),
             },
-            "masked_candidates": opportunity.get("masked_candidates", []),
+            "relations": relations,
+            "masked_candidates": (
+                opportunity.get("masked_candidates", [])
+                if view_kind != "opaque" else []
+            ),
+            "masked_candidate_count": len(
+                opportunity.get("masked_candidates", [])
+            ),
             "candidates": candidate_views,
         })
 
@@ -869,6 +901,7 @@ def model_view(graph_value: Any) -> dict[str, Any]:
     }
     view = {
         "schema_version": MODEL_VIEW_SCHEMA,
+        "view_kind": view_kind,
         "compiler_graph_id": graph["graph_id"],
         "compiler_input_ids": graph["compiler_inputs"],
         "boundary": graph["boundary"],
@@ -902,9 +935,11 @@ def model_view(graph_value: Any) -> dict[str, Any]:
     return view
 
 
-def render_prompt(graph_value: Any) -> str:
+def render_prompt(
+    graph_value: Any, view_kind: str = "relational",
+) -> str:
     graph = verified_graph(graph_value)
-    public_graph = model_view(graph)
+    public_graph = model_view(graph, view_kind)
     example = {
         "schema_version": DECISION_SCHEMA,
         "graph_id": graph["graph_id"],
@@ -917,12 +952,13 @@ def render_prompt(graph_value: Any) -> str:
         },
     }
     return (
-        "You are a constrained relational communication planner inside LTO. "
+        "You are a constrained communication planner inside LTO. "
         "You receive compiler IR facts, program-dependence legality, launch "
         "contexts, and compiler-generated plans. You cannot see or modify "
         "source and must not emit code, IR, site IDs, dispatch names, new "
         "transformations, or legality claims. Select exactly one existing "
-        "candidate_id for every opportunity_id.\n\n"
+        "candidate_id for every opportunity_id. The compiler input declares "
+        "which preregistered information view you received.\n\n"
         "Return ONLY one JSON object with this shape:\n"
         + json.dumps(example, indent=2, sort_keys=True)
         + "\n\nCOMPILER-GENERATED COMMUNICATION GRAPH:\n"
@@ -1090,7 +1126,9 @@ def _emit(args: argparse.Namespace) -> int:
         _read_json(args.dossier), _load_templates(args.meta_dir)
     )
     bridge._write_json_atomic(args.graph, graph)
-    bridge._write_text_atomic(args.prompt, render_prompt(graph))
+    bridge._write_text_atomic(
+        args.prompt, render_prompt(graph, args.prompt_view)
+    )
     print(
         f"gicc-comm-group-plan-bridge: wrote {len(graph['opportunities'])} "
         f"communication opportunity(s); graph_id={graph['graph_id']}",
@@ -1131,6 +1169,9 @@ def _parser() -> argparse.ArgumentParser:
     emit.add_argument("--meta-dir", type=Path, required=True)
     emit.add_argument("--graph", type=Path, required=True)
     emit.add_argument("--prompt", type=Path, required=True)
+    emit.add_argument(
+        "--prompt-view", choices=MODEL_VIEW_KINDS, default="relational"
+    )
     emit.set_defaults(run=_emit)
     accept = sub.add_parser("accept")
     accept.add_argument("--graph", type=Path, required=True)

@@ -202,6 +202,54 @@ class CommunicationGroupPlanBridgeTests(unittest.TestCase):
         self.assertFalse(self.graph["boundary"]["source_visible"])
         self.assertEqual("candidate IDs only", self.graph["boundary"]["model_output"])
 
+    def test_model_views_ablate_information_without_changing_actions(self):
+        views = {
+            kind: groups.model_view(self.graph, kind)
+            for kind in groups.MODEL_VIEW_KINDS
+        }
+        candidate_ids = {
+            candidate["candidate_id"]
+            for candidate in self.opportunity["candidates"]
+        }
+        for kind, view in views.items():
+            self.assertEqual(groups.MODEL_VIEW_SCHEMA, view["schema_version"])
+            self.assertEqual(kind, view["view_kind"])
+            self.assertEqual(self.graph["graph_id"], view["compiler_graph_id"])
+            self.assertEqual(
+                candidate_ids,
+                {
+                    candidate["candidate_id"]
+                    for candidate in view["opportunities"][0]["candidates"]
+                },
+            )
+
+        relational = views["relational"]["opportunities"][0]
+        descriptors = views["descriptors"]["opportunities"][0]
+        opaque = views["opaque"]["opportunities"][0]
+        self.assertTrue(relational["relations"])
+        self.assertEqual([], descriptors["relations"])
+        self.assertEqual([], opaque["relations"])
+        self.assertIn("summary", descriptors["candidates"][0])
+        self.assertEqual(
+            [{"candidate_id": candidate["candidate_id"]}
+             for candidate in self.opportunity["candidates"]],
+            opaque["candidates"],
+        )
+        self.assertEqual([], opaque["masked_candidates"])
+        self.assertEqual(
+            len(self.opportunity["masked_candidates"]),
+            opaque["masked_candidate_count"],
+        )
+        for kind in groups.MODEL_VIEW_KINDS:
+            prompt = groups.render_prompt(self.graph, kind)
+            self.assertIn(f'"view_kind": "{kind}"', prompt)
+            self.assertNotIn("unit.cpp", prompt)
+            self.assertNotIn("group_kernel", prompt)
+
+    def test_unknown_model_view_is_rejected(self):
+        with self.assertRaisesRegex(groups.GroupPlanError, "unknown model view"):
+            groups.model_view(self.graph, "invented")
+
     def test_early_candidate_becomes_only_a_narrow_lto_hint(self):
         hint, accepted, errors = groups.plan_to_hint(
             self.graph, self.decision()

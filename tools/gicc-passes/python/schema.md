@@ -652,10 +652,20 @@ bindings for `accept`; the prompt contains a separately constructed model view
 that expresses transfers by ordinal, removes kernel/site/path identities and
 materializer strings, and omits profile provenance paths.
 
+As with the collective bridge, `emit --prompt-view relational` is the primary
+view and two controlled ablations keep the exact same private graph, opaque
+candidate IDs, response schema, validator, and LTO materializer.
+`descriptors` retains the per-transfer and candidate descriptors but removes
+the explicit cross-transfer relation edges. `opaque` retains compiler facts
+and the selectable candidate IDs but removes selectable-candidate semantics.
+These views change information only; they do not change compiler legality or
+grant the model any additional transformation authority.
+
 ```bash
 python3 tools/gicc-passes/python/gicc_comm_group_plan_bridge.py emit \
   --dossier build/dossier.json --meta-dir build/meta \
-  --graph build/group-graph.json --prompt build/group-prompt.txt
+  --graph build/group-graph.json --prompt build/group-prompt.txt \
+  --prompt-view relational
 ```
 
 The response contains only one existing candidate ID per opportunity. `accept`
