@@ -240,6 +240,20 @@ checks the authorized provider CLI version.  It emits a content-addressed
 record with `provider_inference_invoked=false`; only after that record is
 frozen does the post-authorization controller enter the model archive stage.
 
+An exact authorization is never inferred from a general instruction to keep
+working.  After the final priority request is frozen,
+`prepare_compiler_llm_capability_authorization_proposal.py emit` can create an
+offline, content-addressed proposal for the provider executable/version, model,
+effort, delivery, and retry limits.  The proposal's outer schema is deliberately
+rejected by the trial runner and permits zero provider calls.  It separately
+states the number of semantic trials and the worst-case provider-process
+invocation count implied by transport retries.  Materializing
+the embedded runner-compatible authorization requires a later explicit `grant`
+operation whose two arguments exactly repeat both the proposal ID and proposed
+authorization ID; any evidence or provider-setting change requires a new
+proposal.  Emitting or verifying a proposal neither executes the provider CLI
+nor grants permission for inference.
+
 `collective/analyze_collective_n6_llm_runtime_validation.py` replays the three
 raw allocation monitors, exact jobspecs, node sets, compiler artifacts and
 rotated policy orders.  It reports each modal and post-hoc representative
