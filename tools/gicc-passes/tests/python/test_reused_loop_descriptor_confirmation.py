@@ -82,6 +82,7 @@ class ReusedLoopDescriptorConfirmationTests(unittest.TestCase):
         scripts = [
             EXPERIMENT / "run_reused_loop_descriptor_confirmation.sh",
             EXPERIMENT / "continue_reused_loop_descriptor_confirmation.sh",
+            EXPERIMENT / "continue_reused_loop_descriptor_after_scout.sh",
         ]
         for script in scripts:
             subprocess.run(["bash", "-n", script], check=True)
@@ -94,6 +95,14 @@ class ReusedLoopDescriptorConfirmationTests(unittest.TestCase):
         self.assertIn("wait_scheduler_idle", controller)
         self.assertIn("flux batch -q pdebug", controller)
         self.assertNotIn("flux cancel", controller)
+
+        successor = scripts[2].read_text(encoding="utf-8")
+        self.assertIn("set_state waiting_scout", successor)
+        self.assertIn("promising|negative|failed", successor)
+        self.assertIn('if [[ $phase != promising ]]', successor)
+        self.assertIn('bash "$controller"', successor)
+        self.assertNotIn("flux batch", successor)
+        self.assertNotIn("flux cancel", successor)
 
 
 if __name__ == "__main__":

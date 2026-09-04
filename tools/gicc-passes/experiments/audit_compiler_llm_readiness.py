@@ -1295,6 +1295,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 / "reused_loop_descriptor/"
                 "continue_reused_loop_descriptor_confirmation.sh"
             ),
+            "reused_confirmation_successor": evidence(
+                HERE
+                / "reused_loop_descriptor/"
+                "continue_reused_loop_descriptor_after_scout.sh"
+            ),
             "reused_confirmation_protocol": evidence(
                 HERE
                 / "reused_loop_descriptor/"

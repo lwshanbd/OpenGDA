@@ -35,9 +35,9 @@ and fails closed at every transition. Its current output is:
 | `loop_lto` | `awaiting_predecessor` | run the frozen reused-descriptor scout after the serial campaign |
 
 The report has readiness ID
-`sha256:fc336ca09aa8d43f9e33aaa11eb2f7a351738069003e9b9cebb459353cfcac89`
+`sha256:a224533826148f79c33d792bfea6423d48439d3f96ec95b21171ffc00fdbc506`
 and serialized SHA-256
-`c6c074f59f5c1331bd591642f8771c700320fb8c67c6c5bcfe312595bc6875a5`.
+`57353bb9918d1193776a31533102e8e300628420dc316a64448628f63e2b34bd`.
 It reports zero provider-protocol-permitted entries, zero authorized provider
 calls, zero measured LLM policies, and
 `paper_llm_performance_claim_ready=false`.

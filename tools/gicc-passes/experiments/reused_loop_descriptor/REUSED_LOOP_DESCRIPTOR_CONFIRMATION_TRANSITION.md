@@ -88,3 +88,22 @@ each submission, submits exactly one N2 `pdebug` allocation, waits for and
 audits it, and only then considers the next allocation. It never cancels or
 modifies another job. The analyzer reparses every raw log and independently
 recomputes all 120 fixed-stratum speedups and the three-allocation gate.
+
+For unattended serial continuation, the standalone successor waits for the
+frozen scout state and performs no submission itself. It skips confirmation
+after a `negative` or `failed` scout. Only a `promising` scout lets it freeze
+and re-verify the transition before invoking the controller above:
+
+```sh
+bash tools/gicc-passes/experiments/reused_loop_descriptor/continue_reused_loop_descriptor_after_scout.sh \
+  build_ofi/reused_loop_descriptor_scout_aff76f9_20260904.state \
+  build_ofi/reused_loop_descriptor_scout_aff76f9_20260904 \
+  build_ofi/reused_loop_descriptor_oracle_aff76f9_20260904 \
+  build_ofi/reused_loop_descriptor_confirmation_transition_aff76f9_20260904.json \
+  build_ofi/reused_loop_descriptor_confirmation_aff76f9_20260904
+```
+
+The successor hashes all confirmation code and frozen binaries before waiting,
+then rechecks those hashes before either transition preparation or execution.
+Its own state is written beside the confirmation output with the suffix
+`.chain.state`; it contains no provider or model path.
