@@ -136,6 +136,28 @@ def validate_scout(value: Any) -> dict[str, Any]:
     return value
 
 
+def validate_scout_provenance(path: Path, value: dict[str, Any]) -> None:
+    summaries = value.get("block_monitors")
+    if not isinstance(summaries, list) or len(summaries) != 3:
+        raise TransitionError("N8 scout lacks three raw monitor bindings")
+    monitor_paths = []
+    for summary in summaries:
+        if (not isinstance(summary, dict)
+                or not isinstance(summary.get("monitor"), str)
+                or not isinstance(summary.get("monitor_sha256"), str)):
+            raise TransitionError("N8 scout has an invalid monitor binding")
+        monitor_path = Path(summary["monitor"]).resolve()
+        if (not monitor_path.is_file()
+                or sha256_file(monitor_path) != summary["monitor_sha256"]):
+            raise TransitionError(f"N8 scout monitor changed: {monitor_path}")
+        monitor_paths.append(monitor_path)
+    regenerated = scout.analyze_monitors(monitor_paths)
+    if regenerated != value:
+        raise TransitionError(
+            f"N8 scout does not regenerate from raw monitors: {path}"
+        )
+
+
 def derive_bin_algorithms(value: Any) -> tuple[
     dict[str, str], dict[str, dict[str, Any]], str
 ]:
@@ -252,6 +274,21 @@ def validate_heuristic(graph: dict[str, Any], value: Any) -> dict[str, Any]:
     return value
 
 
+def materialize_heuristic_hint(
+    graph: dict[str, Any], value: dict[str, Any],
+) -> dict[str, Any]:
+    hint, accepted, errors = plans.decision_to_hint(graph, value)
+    if not accepted or errors:
+        raise TransitionError(
+            "frozen structural heuristic is invalid: " + "; ".join(errors)
+        )
+    hint["llm_metadata"].update({
+        "model_invoked": False,
+        "decision_origin": "frozen_structural_heuristic",
+    })
+    return hint
+
+
 def file_record(path: Path, role: str, base: Path | None = None) -> dict[str, Any]:
     resolved = path.resolve()
     if base is not None:
@@ -296,7 +333,9 @@ def build_outputs(graph_path: Path, scout_path: Path,
                   heuristic_path: Path) -> dict[str, Any]:
     graph = validate_graph(read_json(graph_path))
     scout_value = validate_scout(read_json(scout_path))
+    validate_scout_provenance(scout_path, scout_value)
     heuristic = validate_heuristic(graph, read_json(heuristic_path))
+    heuristic_hint = materialize_heuristic_hint(graph, heuristic)
     selected, bin_records, best_uniform = derive_bin_algorithms(scout_value)
     derived_decision, derived_hint = make_decision(
         graph, selected,
@@ -316,6 +355,7 @@ def build_outputs(graph_path: Path, scout_path: Path,
         "graph": graph,
         "scout": scout_value,
         "heuristic": heuristic,
+        "heuristic_hint": heuristic_hint,
         "selected": selected,
         "bin_records": bin_records,
         "best_uniform": best_uniform,
@@ -338,6 +378,7 @@ def transition_payload(inputs: dict[str, Any], graph_path: Path,
         "derived_hint": output_dir / "derived-bin-policy-hint.json",
         "uniform_decision": output_dir / "best-uniform-decision.json",
         "uniform_hint": output_dir / "best-uniform-hint.json",
+        "heuristic_hint": output_dir / "frozen-structural-heuristic-hint.json",
     }
     payload = {
         "schema_version": TRANSITION_SCHEMA,
@@ -454,6 +495,10 @@ def prepare(graph_path: Path, scout_path: Path, heuristic_path: Path,
     write_json_atomic(
         output_dir / "best-uniform-hint.json", inputs["uniform_hint"]
     )
+    write_json_atomic(
+        output_dir / "frozen-structural-heuristic-hint.json",
+        inputs["heuristic_hint"],
+    )
     payload = transition_payload(
         inputs, graph_path, scout_path, heuristic_path, output_dir,
     )
@@ -470,6 +515,7 @@ def verify(graph_path: Path, scout_path: Path, heuristic_path: Path,
         "derived-bin-policy-hint.json": inputs["derived_hint"],
         "best-uniform-decision.json": inputs["uniform_decision"],
         "best-uniform-hint.json": inputs["uniform_hint"],
+        "frozen-structural-heuristic-hint.json": inputs["heuristic_hint"],
     }
     for name, expected in expected_values.items():
         if read_json(output_dir / name) != expected:

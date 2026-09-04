@@ -114,6 +114,31 @@ class CompilerCollectiveN8ConfirmationTransitionTests(unittest.TestCase):
             {"b0": "d", "b1": "b"},
         ))
 
+    def test_structural_heuristic_hint_is_materialized_without_a_model(self):
+        # Use the regular mocked graph path exercised by make_decision tests
+        # indirectly: this assertion focuses on the metadata added after the
+        # strict bridge has accepted a real decision.
+        real_graph_path = (
+            PASS_ROOT.parents[1]
+            / "build_ofi/compiler_collective_capacity_n8_hierpipe_v1_20260903"
+            / "discovery/graph.json"
+        )
+        decision_path = (
+            PASS_ROOT.parents[1]
+            / "build_ofi/compiler_decision_suite_20260904/controls"
+            / "collective-n8-heuristic-decision.json"
+        )
+        if not real_graph_path.is_file() or not decision_path.is_file():
+            self.skipTest("workspace runtime artifacts are not available")
+        graph = transition.read_json(real_graph_path)
+        decision = transition.read_json(decision_path)
+        hint = transition.materialize_heuristic_hint(graph, decision)
+        self.assertFalse(hint["llm_metadata"]["model_invoked"])
+        self.assertEqual(
+            "frozen_structural_heuristic",
+            hint["llm_metadata"]["decision_origin"],
+        )
+
     def test_reported_winner_and_uniform_must_regenerate(self):
         wrong_winner = passed_scout()
         wrong_winner["per_size_pooled_median"]["1024"]["winner"] = (

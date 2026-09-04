@@ -69,3 +69,24 @@ python3 tools/gicc-passes/experiments/collective/prepare_compiler_collective_n8_
 The preparer intentionally rejects the current state while the scout result is
 missing or negative. It creates compiler decisions and hints only; it does not
 build or submit the confirmation runtime experiment.
+
+The preparer materializes three strict-bridge hints: the derived bin policy,
+the regenerated scout-best-uniform policy, and the frozen structural heuristic.
+If and only if the transition reports `confirmation_plan_ready`, the following
+controller builds all three from the same compiler/LTO inputs.  It then submits
+one allocation, waits for its clean audited completion, and only then submits
+the next allocation:
+
+```sh
+bash tools/gicc-passes/experiments/collective/continue_compiler_collective_n8_confirmation.sh \
+  build_ofi/compiler_collective_capacity_n8_hierpipe_v1_20260903 \
+  build_ofi/compiler_collective_hierpipe_n8_scout_20260903 \
+  build_ofi/compiler_decision_suite_20260904/controls/collective-n8-heuristic-decision.json \
+  build_ofi/compiler_collective_n8_confirmation_transition_20260904 \
+  build_ofi/compiler_collective_n8_confirmation_20260904
+```
+
+This command is documented, not launched by the transition preparer. The
+controller and analyzer reject any queue other than `pdebug`, any shared job
+ID across allocations, an altered arm order, changed artifacts, nonzero
+correctness errors, or a failure to satisfy both co-primary comparisons.
