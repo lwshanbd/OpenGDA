@@ -10,6 +10,8 @@
 ; RUN:     %FileCheck %s --check-prefix=SAFE
 ; RUN: cat %t.metadir/group_write.json | \
 ; RUN:     %FileCheck %s --check-prefix=WRITE
+; RUN: cat %t.metadir/single_write.json | \
+; RUN:     %FileCheck %s --check-prefix=SINGLE
 
 target triple = "amdgcn-amd-amdhsa"
 
@@ -72,6 +74,34 @@ produce:
 reduce:
   call void @lane_collective()
   %old = atomicrmw fadd ptr addrspace(1) %sum, float 1.000000e+00 monotonic
+  br label %complete
+
+complete:
+  call void @_ZN4gicc5flushEPN4gicc9DeviceCtxE(ptr %ctx)
+  ret void
+}
+
+; A one-transfer completion group must retain the same producer facts.  These
+; facts feed later compiler scheduling even though the current group-plan
+; bridge deliberately exposes only multi-site route choices.
+define amdgpu_kernel void @single_write(
+    ptr %ctx, ptr addrspace(1) %out, i32 %peer, i32 %buf, i64 %limit) {
+entry:
+  call void @_ZN4gicc9put_no_dbEPN4gicc9DeviceCtxEiimimm(
+      ptr %ctx, i32 %peer, i32 %buf, i64 0,
+      i32 %buf, i64 0, i64 4096)
+  %block = call i32 @_ZN24__hip_builtin_blockIdx_t7__get_xEv()
+  %width = call i32 @_ZN24__hip_builtin_blockDim_t7__get_xEv()
+  %thread = call i32 @_ZN25__hip_builtin_threadIdx_t7__get_xEv()
+  %block_base = mul i32 %block, %width
+  %global_i32 = add i32 %block_base, %thread
+  %element = zext i32 %global_i32 to i64
+  %in_bounds = icmp ult i64 %element, %limit
+  br i1 %in_bounds, label %produce, label %complete
+
+produce:
+  %slot = getelementptr i32, ptr addrspace(1) %out, i64 %element
+  store volatile i32 1, ptr addrspace(1) %slot
   br label %complete
 
 complete:
@@ -204,6 +234,19 @@ entry:
 ; WRITE-DAG: "required_value": true
 ; WRITE-DAG: "guard_predicates_exact": true
 ; WRITE-DAG: "reason": "formal-rooted writes and exact local store domains recovered; transfer matching and side-effect partition remain unproved"
+
+; SINGLE: "completion_site_id": "?:?:single_write::1"
+; SINGLE: "group_early_trigger_legal": false
+; SINGLE: "producer_frontier": {
+; SINGLE-DAG: "ordinary_store_sites": 1
+; SINGLE-DAG: "unknown_write_sites": 0
+; SINGLE-DAG: "write_footprint_known": true
+; SINGLE-DAG: "buffer_identity_guardable": true
+; SINGLE-DAG: "producer_pointer_param": 1
+; SINGLE-DAG: "source_buffer_index_param": 3
+; SINGLE-DAG: "producer_domains_known": true
+; SINGLE-DAG: "partition_region_exact": true
+; SINGLE: "site_id": "?:?:single_write::0"
 
 ; RUN: cat %t.metadir/group_multi_entry.json | \
 ; RUN:     %FileCheck %s --check-prefix=MULTI-ENTRY

@@ -1350,8 +1350,11 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
             t.ops[i].completion_site_id = t.ops[owner[i]].siteId;
     }
 
-    // Prove the narrow multi-site early-trigger shape advertised to the
-    // communication-plan bridge.  A registered buffer is represented in the
+    // Prove the narrow completion-group early-trigger shape and recover the
+    // matching producer frontier. The group bridge currently advertises only
+    // multi-site choices, but producer facts are equally meaningful for one
+    // transfer and must not disappear merely because its group has one member.
+    // A registered buffer is represented in the
     // device API by an integer handle, so LLVM AA cannot relate it to ordinary
     // pointer stores.  Refuse to move the trigger across *any* instruction
     // which may write memory.  This loses opportunities but cannot turn a
@@ -1361,7 +1364,7 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
         SmallVector<unsigned, 4> members;
         for (unsigned i = 0; i < owner.size(); ++i)
             if (owner[i] == completion) members.push_back(i);
-        if (members.size() < 2) continue;
+        if (members.empty()) continue;
 
         auto finish = [&](bool legal, StringRef reason) {
             for (unsigned i : members) {
