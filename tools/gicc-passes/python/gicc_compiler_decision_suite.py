@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 import gicc_collective_plan_bridge as collective
 import gicc_comm_group_plan_bridge as communication
+import gicc_comm_plan_bridge as structural
 import gicc_llm_bridge as bridge
 
 
@@ -228,19 +229,77 @@ def _collective_entry(
     return {"entry_id": bridge._fingerprint(payload), **payload}
 
 
+def _structural_entry(
+    label: str, path: Path, prompt_dir: Path | None,
+) -> dict[str, Any]:
+    graph = structural.verified_graph(_read_json(path))
+    candidate_ids = [
+        candidate["candidate_id"]
+        for opportunity in graph["opportunities"]
+        for candidate in opportunity["candidates"]
+    ]
+    per_opportunity = [
+        {
+            "opportunity_id": opportunity["opportunity_id"],
+            "kind": opportunity["kind"],
+            "selectable_candidate_count": len(opportunity["candidates"]),
+        }
+        for opportunity in graph["opportunities"]
+    ]
+    payload = {
+        "label": label,
+        "decision_family": (
+            "communication_coalescing_and_trigger_placement"
+        ),
+        "graph_schema": graph["schema_version"],
+        "graph_id": graph["graph_id"],
+        "graph_file_sha256": _file_sha256(path),
+        "decision_space": {
+            "opportunity_count": len(per_opportunity),
+            "fixed_site_count": len(graph.get("fixed_sites", [])),
+            "per_opportunity": per_opportunity,
+            "independent_policy_count": math.prod(
+                item["selectable_candidate_count"]
+                for item in per_opportunity
+            ),
+            "selectable_candidate_id_count": len(candidate_ids),
+            "selectable_candidate_id_set_sha256": _id_set_sha256(
+                candidate_ids
+            ),
+        },
+        "response_schema": _response_schema_record(
+            structural.decision_response_schema(graph),
+            label=label,
+            prompt_dir=prompt_dir,
+        ),
+        "views": _prompt_views(
+            graph,
+            model_view=structural.model_view,
+            render_prompt=structural.render_prompt,
+            label=label,
+            prompt_dir=prompt_dir,
+        ),
+    }
+    return {"entry_id": bridge._fingerprint(payload), **payload}
+
+
 def make_suite(
     communication_graphs: list[tuple[str, Path]],
     collective_graphs: list[tuple[str, Path]],
+    structural_graphs: list[tuple[str, Path]] | None = None,
     *,
     prompt_dir: Path | None = None,
 ) -> dict[str, Any]:
     if (tuple(communication.MODEL_VIEW_KINDS) != VIEW_KINDS
-            or tuple(collective.MODEL_VIEW_KINDS) != VIEW_KINDS):
+            or tuple(collective.MODEL_VIEW_KINDS) != VIEW_KINDS
+            or tuple(structural.MODEL_VIEW_KINDS) != VIEW_KINDS):
         raise SuiteError("decision bridges do not expose the same view kinds")
     specs = [
         *(('communication', label, path)
           for label, path in communication_graphs),
         *(('collective', label, path) for label, path in collective_graphs),
+        *(('structural', label, path)
+          for label, path in (structural_graphs or [])),
     ]
     if not specs:
         raise SuiteError("suite requires at least one compiler decision graph")
@@ -253,8 +312,10 @@ def make_suite(
     for family, label, path in specs:
         if family == "communication":
             entries.append(_communication_entry(label, path, prompt_dir))
-        else:
+        elif family == "collective":
             entries.append(_collective_entry(label, path, prompt_dir))
+        else:
+            entries.append(_structural_entry(label, path, prompt_dir))
     entries.sort(key=lambda item: item["label"])
     family_counts: dict[str, int] = {}
     for entry in entries:
@@ -303,6 +364,8 @@ def verified_suite(value: Any, prompt_dir: Path | None = None) -> dict[str, Any]
         expected_schema = {
             "communication_route_or_schedule": communication.GRAPH_SCHEMA,
             "collective_algorithm_and_size_policy": collective.GRAPH_SCHEMA,
+            "communication_coalescing_and_trigger_placement":
+                structural.GRAPH_SCHEMA,
         }.get(family)
         if expected_schema is None or entry.get("graph_schema") != expected_schema:
             raise SuiteError(
@@ -379,7 +442,8 @@ def _spec(value: str) -> tuple[str, Path]:
 
 def _emit(args: argparse.Namespace) -> int:
     value = make_suite(
-        args.communication, args.collective, prompt_dir=args.prompt_dir
+        args.communication, args.collective, args.structural,
+        prompt_dir=args.prompt_dir,
     )
     bridge._write_json_atomic(args.out, value)
     print(
@@ -412,6 +476,10 @@ def _parser() -> argparse.ArgumentParser:
         "--collective", type=_spec, action="append", default=[],
         metavar="LABEL=GRAPH.json",
     )
+    emit.add_argument(
+        "--structural", type=_spec, action="append", default=[],
+        metavar="LABEL=GRAPH.json",
+    )
     emit.add_argument("--prompt-dir", type=Path)
     emit.add_argument("--out", type=Path, required=True)
     emit.set_defaults(run=_emit)
@@ -428,7 +496,8 @@ def main(argv: list[str] | None = None) -> int:
         return int(args.run(args))
     except (
         SuiteError, communication.GroupPlanError,
-        collective.CollectivePlanError, OSError, ValueError,
+        collective.CollectivePlanError, structural.PlanBridgeError,
+        OSError, ValueError,
     ) as exc:
         print(f"gicc-compiler-decision-suite: ERROR: {exc}", file=sys.stderr)
         return 2

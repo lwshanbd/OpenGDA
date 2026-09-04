@@ -6,11 +6,12 @@ runtime-performance claim.
 This suite answers a narrower question than model accuracy: do we have a
 replayable set of non-source compiler decisions whose inputs are materially
 richer than the scalar rows used by the original path GBT?  The current answer
-is yes.  The frozen index contains six **independent** compiler/LTO decision
-tasks from two decision families:
+is yes.  The frozen index contains seven **independent** compiler/LTO decision
+tasks from three decision families:
 
 | Entry | Compiler decision | Independent policy count | Runtime status |
 |---|---|---:|---|
+| `coalescing_placement` | proxy/trigger route, loop coalescing, and early/late trigger placement over six compiler opportunities | 4096 | four-replicate runtime capacity measured; preregistered LLM gate failed |
 | `collective_n8` | collective algorithm jointly across four message regions | 4096 | topology-matched hierarchy-pipeline scout pending |
 | `jacobi` | two-transfer communication-group route | 9 | producer-frontier schedule exists but remains masked pending its oracle A/B |
 | `minimod` | two-transfer communication-group route | 9 | route capacity only |
@@ -25,13 +26,15 @@ independently, and no compiler materializer composes their decisions.
 ## Frozen identity
 
 - suite ID:
-  `sha256:1ed321f82348a58dc9ee910889925092f7e6f037bf098c394271c0babc9ab40b`
+  `sha256:0089efb08a37fde688717be90d2004460a3f6ee82ccbda75c9234e0214bc3483`
 - serialized suite SHA-256:
-  `cd24754920d6f2f3de8ba158d56de7ca30876b0b654895f0ce0b2a845deba828`
-- decision-family counts: one collective size-policy graph and five
-  communication route/schedule graphs;
+  `748f816f48a379b27d5c8f4d4157357d009047202eabfa2952f11082be9f7bba`
+- decision-family counts: one collective size-policy graph, five
+  communication route/schedule graphs, and one communication coalescing and
+  trigger-placement graph;
 - selectable compiler IDs: 32 collective option IDs over four slots and 32
-  communication candidate IDs over five separate tasks;
+  communication route/schedule candidate IDs over five separate tasks, plus
+  24 structural candidate IDs over six opportunities;
 - prompt views: `relational`, `descriptors`, and `opaque` for every entry.
 - one graph-derived exact response schema per entry; every selectable field is
   an enum of existing option/candidate IDs and every unknown field is rejected.
@@ -71,9 +74,66 @@ the primary LLM view receives graph structure and compiler-proved relations
 needed for joint policies.  This does not imply that the LLM will perform
 better; only a held-out, runtime-validated regret experiment can show that.
 
-An identity-leak audit over all 18 rendered prompts found no application or
+An identity-leak audit over all 21 rendered prompts found no application or
 kernel name, source suffix, site ID, materializer binding, or provenance path.
 No prompt is authorized for external transmission by this local freeze.
+
+## Structural action-space entry
+
+The added `coalescing_placement` entry is the largest already materialized
+compiler transformation space in the suite.  Its six opportunities each offer
+four compiler-generated candidates: device proxy, trigger descriptor batch,
+late loop coalescing, and early coalescing/trigger placement.  This is a
+factorized `4^6 = 4096` space with 20 additional fixed sites.  The model sees
+compiler facts and compiler-proved effects but not source, kernel names, site
+IDs, provenance paths, or materializer bindings; an exact response schema
+allows only the 24 existing candidate IDs.  All three information views bind
+to that same action set and strict compiler validator.
+
+The official suite binds the current-plugin graph:
+
+- graph ID:
+  `sha256:77a0f61a8e569b76f43391f1c4fbcae04d606db78b20a69ab65460aba7371c24`;
+- graph file SHA-256:
+  `80799c6e8acb056f2f213fa12463d57ad4f8863a75a2200d7c3bd86ea78242ef`;
+- entry ID:
+  `sha256:37e902c3c1eaf75bfa9cecc0259b3297436066a8df1be36e334e6e9c2912930d`;
+- selectable-ID-set SHA-256:
+  `f0d9c5e04b14890571625cfd20e4dfb6176b6b72f0c60d210dac4535b73e447a`;
+- relational/descriptors/opaque prompt SHA-256 values:
+  `324be5d0e8f2ef5ecc2a2480f1ef3bfd387f06a123afb6aab5fd3b73d6982974`,
+  `ed4c9bd02b2115c88e818ae6745b87c78cf6bb38229651729c99b43213bbb1f7`,
+  and `e7e5d0f08e2f92a3d38ab0ba3e2158945728298cf7e95d3492b9fd0718fe930b`;
+- exact response-schema ID:
+  `sha256:174375e342426dfa006b3ab832d1b5c0146e1febc42c6aa91c5f03ce3adab4b8`.
+
+The historical four-replicate runtime bundle is intentionally not rewritten.
+It was frozen against plugin SHA-256
+`7f11ba4ccbbee6d2d79d0c02059476cefc87d4339a73af471c1639629bab8a73`
+and graph ID
+`sha256:544a66f3b4c217fe5aea56c1c0ed7a87f685e47f460659110764ed26f9756d7b`.
+The available plugin is now
+`e8ef1675c02b580efb868a70211bd896891709b4a87aff5eea6e635b7c09e33d`,
+so the historical bundle verifier reports that plugin mismatch rather than
+pretending bitwise provenance still holds.  A disjoint rebuild with the
+current plugin produced the graph above and passed the compiler's manifest,
+host-IR, and device-IR semantic checks for all four uniform arms.  After
+removing only `compiler_dossier_id` and `graph_id`, the historical and current
+private graphs are byte-for-byte canonical-equal, with normalized SHA-256
+`413346b17a40fef5fc3d96ecbe32bd944c3605c01db59c69557280e9be0821fa`;
+all opportunity and candidate IDs are identical.  Thus the historical timings
+support the unchanged compiler action semantics, while any future response is
+still bound to and revalidated against the current graph.
+
+The historical runtime result is a useful positive and negative control at
+once.  Trigger descriptor batch is `5.485628x` slower than the exact factorized
+oracle, demonstrating large compiler-owned optimization headroom from the
+available transformations.  But the best uniform arm is only `1.017982x`
+slower than that oracle, with paired-bootstrap 95% CI
+`[0.989739, 1.054439]`; there are two stable early winners and no stable late
+winner.  The preregistered placement LLM gate therefore failed.  This supports
+the paper's compiler transformation/action-space claim, not an LLM performance
+claim or a stable per-site placement claim.
 
 ## Frozen deterministic compiler control
 
@@ -126,6 +186,9 @@ on both this simple rule and the unchanged compiler anchor.
 Existing measurements establish that compiler-level communication decisions
 can have large performance effects, but not yet that an LLM captures them:
 
+- the compiler coalescing/placement graph has a `5.485628x` baseline-to-oracle
+  gap, but only a noisy `1.017982x` best-uniform-to-oracle gap, so its
+  preregistered LLM gate failed;
 - the two-node collective capacity screen was negative;
 - a four-node topology crossover favored the semantic baseline at two nodes
   and the hierarchical tree at four nodes, with `1.274x` equal-weight
@@ -154,9 +217,18 @@ python3 tools/gicc-passes/python/gicc_compiler_decision_suite.py emit \
   --communication mixed_lto=build_ofi/compiler_fact_coverage_20260904/portfolio/mixed_lto/group-graph.json \
   --communication loop_lto=build_ofi/compiler_fact_coverage_20260904/portfolio/loop_lto/group-graph.json \
   --collective collective_n8=build_ofi/compiler_collective_capacity_n8_hierpipe_v1_20260903/discovery/graph.json \
+  --structural coalescing_placement=build_ofi/compiler_comm_plan_placement_current_20260904/generated/opportunity-graph.json \
   --prompt-dir build_ofi/compiler_decision_suite_20260904/prompts \
   --out build_ofi/compiler_decision_suite_20260904/suite.json
 python3 tools/gicc-passes/python/gicc_compiler_decision_suite.py verify \
   --suite build_ofi/compiler_decision_suite_20260904/suite.json \
   --prompt-dir build_ofi/compiler_decision_suite_20260904/prompts
+```
+
+The current structural graph and four uniform materializations can be rebuilt
+without overwriting the historical runtime bundle:
+
+```sh
+GICC_COMM_PLAN_OUT="$PWD/build_ofi/compiler_comm_plan_placement_current_20260904" \
+  bash examples/proxy/build_compiler_comm_plan_placement.sh controls
 ```

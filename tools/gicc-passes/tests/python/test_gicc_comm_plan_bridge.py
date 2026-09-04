@@ -1,4 +1,5 @@
 import copy
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -115,7 +116,112 @@ class CommunicationPlanBridgeTests(unittest.TestCase):
         )
         prompt = plans.render_prompt(self.graph)
         self.assertNotIn("SECRET_SOURCE_SENTINEL", prompt)
+        self.assertNotIn("unit.cpp", prompt)
+        self.assertNotIn('"site_ids"', prompt)
+        self.assertNotIn('"materializer"', prompt)
         self.assertIn("candidate IDs only", prompt)
+
+    def test_model_views_ablate_relations_without_changing_actions(self):
+        second = coalescable_feature("unit.cpp:20:k2::0")
+        second["kernel"] = "k2"
+        second["size_bytes"] = 2048
+        second["size_log2"] = 11
+        dossier = bridge.make_dossier(
+            [coalescable_feature(), second], PLATFORM
+        )
+        graph = plans.make_opportunity_graph(dossier)
+        views = {
+            kind: plans.model_view(graph, kind)
+            for kind in plans.MODEL_VIEW_KINDS
+        }
+        expected_ids = {
+            opportunity["opportunity_id"]: {
+                candidate["candidate_id"]
+                for candidate in opportunity["candidates"]
+            }
+            for opportunity in graph["opportunities"]
+        }
+        for kind, view in views.items():
+            self.assertEqual(plans.MODEL_VIEW_SCHEMA, view["schema_version"])
+            self.assertEqual(kind, view["view_kind"])
+            self.assertEqual(graph["graph_id"], view["compiler_graph_id"])
+            self.assertEqual(
+                expected_ids,
+                {
+                    opportunity["opportunity_id"]: {
+                        candidate["candidate_id"]
+                        for candidate in opportunity["candidates"]
+                    }
+                    for opportunity in view["opportunities"]
+                },
+            )
+            rendered = json.dumps(view, sort_keys=True)
+            self.assertNotIn("unit.cpp", rendered)
+            self.assertNotIn('"site_ids"', rendered)
+            self.assertNotIn('"materializer"', rendered)
+        self.assertTrue(views["relational"]["relations"])
+        size_order = next(
+            relation
+            for relation in views["relational"]["relations"]
+            if relation["kind"] == "ascending_numeric_compiler_fact"
+            and relation["fact"] == "size_bytes"
+        )
+        self.assertEqual(
+            [1024, 2048],
+            [member["value"] for member in size_order["members"]],
+        )
+        self.assertEqual([], views["descriptors"]["relations"])
+        self.assertEqual([], views["opaque"]["relations"])
+        self.assertIn(
+            "summary",
+            views["descriptors"]["opportunities"][0]["candidates"][0],
+        )
+        self.assertEqual(
+            [
+                {"candidate_id": candidate["candidate_id"]}
+                for candidate in graph["opportunities"][0]["candidates"]
+            ],
+            views["opaque"]["opportunities"][0]["candidates"],
+        )
+
+    def test_response_schema_is_exactly_graph_bound(self):
+        schema = plans.decision_response_schema(self.graph)
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            {"const": plans.DECISION_SCHEMA},
+            schema["properties"]["schema_version"],
+        )
+        self.assertEqual(
+            {"const": self.graph["graph_id"]},
+            schema["properties"]["graph_id"],
+        )
+        selections = schema["properties"]["selections"]
+        self.assertEqual(
+            [self.opportunity["opportunity_id"]], selections["required"]
+        )
+        self.assertEqual(
+            [candidate["candidate_id"]
+             for candidate in self.opportunity["candidates"]],
+            selections["properties"][self.opportunity["opportunity_id"]][
+                "properties"
+            ]["candidate_id"]["enum"],
+        )
+        rendered = json.dumps(schema, sort_keys=True)
+        self.assertNotIn("unit.cpp", rendered)
+        self.assertNotIn("materializer", rendered)
+
+    def test_unknown_model_view_and_identity_leak_are_rejected(self):
+        with self.assertRaisesRegex(plans.PlanBridgeError, "unknown model view"):
+            plans.model_view(self.graph, "invented")
+        platform = copy.deepcopy(PLATFORM)
+        platform["leaked_identity"] = "unit.cpp:10:k::0"
+        graph = plans.make_opportunity_graph(
+            bridge.make_dossier([coalescable_feature()], platform)
+        )
+        with self.assertRaisesRegex(
+            plans.PlanBridgeError, "identity escaped"
+        ):
+            plans.model_view(graph)
 
     def test_valid_selection_becomes_narrow_compiler_hint(self):
         hint, accepted, errors = plans.plan_to_hint(

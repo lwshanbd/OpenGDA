@@ -26,8 +26,10 @@ import gicc_llm_bridge as bridge
 
 
 GRAPH_SCHEMA = "gicc-communication-opportunity-graph-v1"
+MODEL_VIEW_SCHEMA = "gicc-communication-plan-model-view-v2"
 DECISION_SCHEMA = "gicc-communication-plan-decision-v1"
 HINT_SCHEMA = "gicc-hint-v1"
+MODEL_VIEW_KINDS = ("relational", "descriptors", "opaque")
 
 _CANDIDATE_KINDS = (
     "proxy_device",
@@ -356,8 +358,184 @@ def verified_graph(value: Any) -> dict[str, Any]:
     return value
 
 
-def render_prompt(graph_value: Any) -> str:
+def model_view(
+    graph_value: Any, view_kind: str = "relational",
+) -> dict[str, Any]:
+    """Project a private compiler graph to one identity-free model view."""
+    if view_kind not in MODEL_VIEW_KINDS:
+        raise PlanBridgeError(f"unknown model view {view_kind}")
     graph = verified_graph(graph_value)
+    forbidden_keys = {
+        "site_id", "site_ids", "kernel", "kernel_mangled", "materializer",
+        "path", "source_path", "provenance",
+    }
+
+    def without_identity_keys(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: without_identity_keys(child)
+                for key, child in value.items()
+                if key not in forbidden_keys
+            }
+        if isinstance(value, list):
+            return [without_identity_keys(child) for child in value]
+        return value
+
+    private_fragments: set[str] = set()
+    opportunity_views = []
+    for opportunity in graph["opportunities"]:
+        private_fragments.update(opportunity["site_ids"])
+        for site_id in opportunity["site_ids"]:
+            source_identity = site_id.split(":", 1)[0]
+            if len(source_identity) >= 3 and source_identity != "?":
+                private_fragments.add(source_identity)
+        kernel = opportunity.get("compiler_facts", {}).get("kernel")
+        if isinstance(kernel, str) and len(kernel) >= 3:
+            private_fragments.add(kernel)
+        candidates = []
+        for candidate in opportunity["candidates"]:
+            if view_kind == "opaque":
+                candidates.append({"candidate_id": candidate["candidate_id"]})
+            else:
+                candidates.append({
+                    "candidate_id": candidate["candidate_id"],
+                    "kind": candidate["kind"],
+                    "summary": candidate["summary"],
+                    "compiler_proof": candidate["compiler_proof"],
+                    "effects": without_identity_keys(candidate["effects"]),
+                })
+        opportunity_views.append({
+            "opportunity_id": opportunity["opportunity_id"],
+            "kind": opportunity["kind"],
+            "compiler_facts": without_identity_keys(
+                opportunity["compiler_facts"]
+            ),
+            "candidates": candidates,
+        })
+    for fixed in graph.get("fixed_sites", []):
+        site_id = fixed.get("site_id")
+        if isinstance(site_id, str):
+            private_fragments.add(site_id)
+            source_identity = site_id.split(":", 1)[0]
+            if len(source_identity) >= 3 and source_identity != "?":
+                private_fragments.add(source_identity)
+
+    relations: list[dict[str, Any]] = []
+    if view_kind == "relational":
+        fact_names = (
+            "size_bytes", "trip_count", "batch_size", "grid_blocks",
+            "descriptor_reusable", "buffer_reusable", "coalescable",
+            "guard_kind", "flops_to_first_use",
+        )
+        for fact in fact_names:
+            buckets: dict[str, list[str]] = {}
+            bucket_values: dict[str, Any] = {}
+            numeric: list[tuple[float, Any, str]] = []
+            for opportunity in opportunity_views:
+                value = opportunity["compiler_facts"].get(fact)
+                encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+                buckets.setdefault(encoded, []).append(
+                    opportunity["opportunity_id"]
+                )
+                bucket_values[encoded] = value
+                if (
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                ):
+                    numeric.append(
+                        (float(value), value, opportunity["opportunity_id"])
+                    )
+            for encoded, opportunity_ids in sorted(buckets.items()):
+                if len(opportunity_ids) > 1:
+                    relations.append({
+                        "kind": "equal_compiler_fact",
+                        "fact": fact,
+                        "value": bucket_values[encoded],
+                        "opportunity_ids": sorted(opportunity_ids),
+                    })
+            if len(numeric) == len(opportunity_views) and len(numeric) > 1:
+                numeric.sort(key=lambda item: (item[0], item[2]))
+                relations.append({
+                    "kind": "ascending_numeric_compiler_fact",
+                    "fact": fact,
+                    "members": [
+                        {"value": value, "opportunity_id": opportunity_id}
+                        for _, value, opportunity_id in numeric
+                    ],
+                })
+        candidate_kinds = sorted({
+            candidate["kind"]
+            for opportunity in opportunity_views
+            for candidate in opportunity["candidates"]
+        })
+        for candidate_kind in candidate_kinds:
+            members = []
+            for opportunity in opportunity_views:
+                candidate = next(
+                    (candidate for candidate in opportunity["candidates"]
+                     if candidate["kind"] == candidate_kind),
+                    None,
+                )
+                if candidate is not None:
+                    members.append({
+                        "opportunity_id": opportunity["opportunity_id"],
+                        "candidate_id": candidate["candidate_id"],
+                    })
+            if len(members) > 1:
+                relations.append({
+                    "kind": "shared_candidate_semantics",
+                    "candidate_kind": candidate_kind,
+                    "members": members,
+                })
+
+    platform = {
+        key: value for key, value in graph["platform_profile"].items()
+        if key != "provenance"
+    }
+    view = {
+        "schema_version": MODEL_VIEW_SCHEMA,
+        "view_kind": view_kind,
+        "compiler_graph_id": graph["graph_id"],
+        "compiler_dossier_id": graph["compiler_dossier_id"],
+        "boundary": graph["boundary"],
+        "objective": graph["objective"],
+        "platform_profile": without_identity_keys(platform),
+        "fixed_site_count": len(graph.get("fixed_sites", [])),
+        "opportunities": opportunity_views,
+        "relations": relations,
+    }
+
+    def validate(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in forbidden_keys:
+                    raise PlanBridgeError(
+                        f"identity-bearing key {key!r} escaped into model view"
+                    )
+                validate(child)
+        elif isinstance(value, list):
+            for child in value:
+                validate(child)
+        elif isinstance(value, str):
+            if (value.startswith("/") or value.startswith("./")
+                    or value.startswith("../")):
+                raise PlanBridgeError("filesystem path escaped into model view")
+            for fragment in private_fragments:
+                if len(fragment) >= 3 and fragment in value:
+                    raise PlanBridgeError(
+                        "compiler/source identity escaped into model view"
+                    )
+
+    validate(view)
+    return view
+
+
+def render_prompt(
+    graph_value: Any, view_kind: str = "relational",
+) -> str:
+    graph = verified_graph(graph_value)
+    public_graph = model_view(graph, view_kind)
     example = {
         "schema_version": DECISION_SCHEMA,
         "graph_id": graph["graph_id"],
@@ -371,16 +549,62 @@ def render_prompt(graph_value: Any) -> str:
     }
     return (
         "You are a constrained communication-plan component inside a two-phase "
-        "LTO workflow. You cannot see or modify source code and must not emit "
-        "code, IR, transformations, site IDs, or new legality claims. Select "
-        "exactly one existing candidate_id for every opportunity_id. The "
-        "compiler will independently verify and materialize the plan.\n\n"
+        "LTO workflow. You receive compiler facts, cross-opportunity relations, "
+        "and compiler-generated candidates. You cannot see or modify source "
+        "code and must not emit code, IR, transformations, site IDs, or new "
+        "legality claims. Select exactly one existing candidate_id for every "
+        "opportunity_id. The compiler input declares which preregistered "
+        "information view you received. The compiler will independently verify "
+        "and materialize the plan.\n\n"
         "Return ONLY one JSON object with this shape:\n"
         + json.dumps(example, indent=2, sort_keys=True)
         + "\n\nCOMPILER-GENERATED OPPORTUNITY GRAPH:\n"
-        + json.dumps(graph, indent=2, sort_keys=True)
+        + json.dumps(public_graph, indent=2, sort_keys=True)
         + "\n"
     )
+
+
+def decision_response_schema(graph_value: Any) -> dict[str, Any]:
+    """Return an exact schema bound to this graph's candidate IDs."""
+    graph = verified_graph(graph_value)
+    selections = {}
+    required = []
+    for opportunity in graph["opportunities"]:
+        opportunity_id = opportunity["opportunity_id"]
+        required.append(opportunity_id)
+        selections[opportunity_id] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "candidate_id": {
+                    "type": "string",
+                    "enum": [
+                        candidate["candidate_id"]
+                        for candidate in opportunity["candidates"]
+                    ],
+                },
+                "confidence": {
+                    "type": "number", "minimum": 0.0, "maximum": 1.0,
+                },
+                "rationale": {"type": "string", "maxLength": 512},
+            },
+            "required": ["candidate_id", "confidence", "rationale"],
+        }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "schema_version": {"const": DECISION_SCHEMA},
+            "graph_id": {"const": graph["graph_id"]},
+            "selections": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": selections,
+                "required": required,
+            },
+        },
+        "required": ["schema_version", "graph_id", "selections"],
+    }
 
 
 def _fallback_hint(graph: dict[str, Any], errors: list[str]) -> dict[str, Any]:
@@ -538,7 +762,9 @@ def _write_json(path: Path, value: Any) -> None:
 def _emit(args: argparse.Namespace) -> int:
     graph = make_opportunity_graph(_read_json(args.dossier))
     _write_json(args.graph, graph)
-    bridge._write_text_atomic(args.prompt, render_prompt(graph))
+    bridge._write_text_atomic(
+        args.prompt, render_prompt(graph, args.prompt_view)
+    )
     print(
         f"gicc-comm-plan-bridge: wrote {len(graph['opportunities'])} "
         f"opportunities; graph_id={graph['graph_id']}",
@@ -578,6 +804,9 @@ def main() -> int:
     emit.add_argument("--dossier", required=True, type=Path)
     emit.add_argument("--graph", required=True, type=Path)
     emit.add_argument("--prompt", required=True, type=Path)
+    emit.add_argument(
+        "--prompt-view", choices=MODEL_VIEW_KINDS, default="relational"
+    )
     emit.set_defaults(func=_emit)
     accept = sub.add_parser("accept")
     accept.add_argument("--graph", required=True, type=Path)

@@ -10,6 +10,7 @@ sys.path.insert(0, str(PASS_ROOT / "python"))
 
 import gicc_collective_plan_bridge as collective
 import gicc_comm_group_plan_bridge as communication
+import gicc_comm_plan_bridge as structural
 import gicc_compiler_decision_suite as suite
 
 
@@ -133,17 +134,97 @@ def collective_graph():
     return collective.make_graph(inventory, profile)
 
 
+def structural_graph():
+    site = {"site_id": "unit.cpp:7:structural_kernel::0"}
+    candidates = [
+        structural._candidate(
+            site, kind, request["dispatch"], request["transform"],
+            f"Compiler-generated {kind} plan.",
+            {"network_operations": operations, "host_descriptors": descriptors},
+            ["compiler proof"],
+        )
+        for kind, request, operations, descriptors in (
+            (
+                "proxy_device",
+                structural._MATERIALIZER_FOR_KIND["proxy_device"], 8, 0,
+            ),
+            (
+                "trigger_descriptor_batch",
+                structural._MATERIALIZER_FOR_KIND[
+                    "trigger_descriptor_batch"
+                ], 8, 8,
+            ),
+            (
+                "trigger_coalesced_loop",
+                structural._MATERIALIZER_FOR_KIND[
+                    "trigger_coalesced_loop"
+                ], 1, 1,
+            ),
+            (
+                "trigger_coalesced_early",
+                structural._MATERIALIZER_FOR_KIND[
+                    "trigger_coalesced_early"
+                ], 1, 1,
+            ),
+        )
+    ]
+    opportunity = {
+        "opportunity_id": structural._opportunity_id(site["site_id"]),
+        "kind": "loop_communication_plan",
+        "site_ids": [site["site_id"]],
+        "compiler_facts": {
+            "kernel": "structural_kernel",
+            "size_bytes": 1024,
+            "trip_count": 8,
+            "batch_size": 8,
+            "grid_blocks": 2,
+            "descriptor_reusable": False,
+            "buffer_reusable": True,
+            "coalescable": True,
+            "guard_kind": "always",
+            "flops_to_first_use": 32,
+        },
+        "candidates": candidates,
+    }
+    payload = {
+        "schema_version": structural.GRAPH_SCHEMA,
+        "compiler_dossier_id": "sha256:" + "5" * 64,
+        "boundary": {
+            "source_visible": False,
+            "model_may_generate_code": False,
+            "model_may_generate_ir": False,
+            "model_output": "candidate IDs only",
+            "compiler_revalidates_before_materialization": True,
+        },
+        "objective": {
+            "metric": "end_to_end_wall_time",
+            "instruction": "Select one existing compiler plan.",
+        },
+        "platform_profile": {
+            "schema_version": "gicc-platform-profile-v1",
+            "platform_id": "unit-structural-platform",
+        },
+        "fixed_sites": [],
+        "opportunities": [opportunity],
+    }
+    return {**payload, "graph_id": structural._fingerprint(payload)}
+
+
 class CompilerDecisionSuiteTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.communication_path = self.root / "communication.json"
         self.collective_path = self.root / "collective.json"
+        self.structural_path = self.root / "structural.json"
         self.communication_path.write_text(
             json.dumps(communication_graph()), encoding="utf-8"
         )
         self.collective_path.write_text(
             json.dumps(collective_graph()), encoding="utf-8"
+        )
+        self.structural_path.write_text(
+            json.dumps(structural_graph()), encoding="utf-8"
         )
 
     def tearDown(self):
@@ -153,6 +234,7 @@ class CompilerDecisionSuiteTests(unittest.TestCase):
         return suite.make_suite(
             [("unit-communication", self.communication_path)],
             [("unit-collective", self.collective_path)],
+            [("unit-structural", self.structural_path)],
             prompt_dir=prompt_dir,
         )
 
@@ -164,7 +246,7 @@ class CompilerDecisionSuiteTests(unittest.TestCase):
         self.assertTrue(value["boundary"]["compiler_lto_decisions_only"])
         self.assertFalse(value["boundary"]["source_visible"])
         self.assertFalse(value["composition"]["cross_entry_joint_selection"])
-        self.assertEqual(2, value["entry_count"])
+        self.assertEqual(3, value["entry_count"])
         entries = {entry["label"]: entry for entry in value["entries"]}
         self.assertEqual(
             2,
@@ -176,6 +258,11 @@ class CompilerDecisionSuiteTests(unittest.TestCase):
             entries["unit-collective"]["decision_space"]
                 ["independent_policy_count"],
         )
+        self.assertEqual(
+            4,
+            entries["unit-structural"]["decision_space"]
+                ["independent_policy_count"],
+        )
         for entry in entries.values():
             self.assertEqual(set(suite.VIEW_KINDS), set(entry["views"]))
             for view_kind, record in entry["views"].items():
@@ -183,6 +270,7 @@ class CompilerDecisionSuiteTests(unittest.TestCase):
                 prompt = self.root / "prompts" / entry["label"] / f"{view_kind}.txt"
                 self.assertTrue(prompt.is_file())
                 self.assertEqual(record["prompt_bytes"], prompt.stat().st_size)
+                self.assertNotIn("unit.cpp", prompt.read_text())
             schema_record = entry["response_schema"]
             schema = (
                 prompt_dir / entry["label"] / "response-schema.json"

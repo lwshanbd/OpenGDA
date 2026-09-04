@@ -15,14 +15,14 @@ MODE="${1:-controls}"
 VARIANT="${GICC_COMM_PLAN_VARIANT:-calibration}"
 case "${VARIANT}" in
   calibration)
-    OUT="${GICC_ROOT}/build_ofi/compiler_comm_plan_calibration"
+    OUT="${GICC_COMM_PLAN_OUT:-${GICC_ROOT}/build_ofi/compiler_comm_plan_calibration}"
     PROFILE="${GICC_ROOT}/examples/proxy/compiler_lto_calibration_profile.json"
     CONTROL_COMMAND=uniform-controls
     BINARY_STEM=compiler_comm_plan_calibration
     EVAL_CUID=gicc_compiler_comm_plan_calibration_v1
     ;;
   placement)
-    OUT="${GICC_ROOT}/build_ofi/compiler_comm_plan_placement"
+    OUT="${GICC_COMM_PLAN_OUT:-${GICC_ROOT}/build_ofi/compiler_comm_plan_placement}"
     PROFILE="${GICC_ROOT}/examples/proxy/compiler_comm_plan_placement_profile.json"
     CONTROL_COMMAND=placement-controls
     BINARY_STEM=compiler_comm_plan_placement
