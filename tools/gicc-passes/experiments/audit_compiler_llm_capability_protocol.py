@@ -23,6 +23,16 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE.parent / "python"))
 METRICS_IMPLEMENTATION = HERE.parent / "python" / "gicc_llm_capability_metrics.py"
+POLICY_BRIDGE_IMPLEMENTATION = (
+    HERE.parent / "python" / "gicc_compiler_policy_bridge.py"
+)
+FAMILY_BRIDGE_IMPLEMENTATIONS = {
+    "collective": HERE.parent / "python" / "gicc_collective_plan_bridge.py",
+    "communication_group": (
+        HERE.parent / "python" / "gicc_comm_group_plan_bridge.py"
+    ),
+    "structural": HERE.parent / "python" / "gicc_comm_plan_bridge.py",
+}
 
 import gicc_compiler_decision_suite as decision_suite  # noqa: E402
 
@@ -330,7 +340,15 @@ def build_report(suite_path: Path, prompt_dir: Path, readiness_path: Path,
             "paper_llm_performance_claim_ready": False,
         },
         "implementation": {
+            "capability_protocol_auditor": evidence(Path(__file__)),
             "capability_metrics": evidence(METRICS_IMPLEMENTATION),
+            "unified_compiler_policy_bridge": evidence(
+                POLICY_BRIDGE_IMPLEMENTATION
+            ),
+            "authoritative_family_bridges": {
+                label: evidence(path)
+                for label, path in sorted(FAMILY_BRIDGE_IMPLEMENTATIONS.items())
+            },
         },
         "evidence": {
             "suite": evidence(suite_path),

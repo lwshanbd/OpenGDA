@@ -78,6 +78,13 @@ the modal-policy tie break is the lexicographically smallest canonical policy
 ID, never the policy with better held-out regret; only the explicitly post-hoc
 best-of-20 selector may inspect regret when choosing a representative.
 
+`python/gicc_compiler_policy_bridge.py` provides the shared response boundary
+for all three suite families. It delegates to the existing authoritative
+collective, communication-group, or structural bridge, revalidates the emitted
+compiler IDs, verifies atomic fallback, and normalizes the result into one
+policy slot map. The compiler hint may contain private materializer identities,
+so it is explicitly downstream-only and can never become provider input.
+
 Every representative used in a performance claim must be deduplicated,
 compiled through the strict LTO bridge, audited in materialized IR, and measured
 against the semantic anchor and deterministic compiler control in paired
@@ -108,17 +115,23 @@ The current report is
 `build_ofi/compiler_llm_capability_protocol_20260904/report.json`:
 
 - protocol ID:
-  `sha256:7b699d0e0cbe2570388b9ef7b2ad1b5e1afc328e8eb8121bd1947ce00b56cfd6`;
+  `sha256:0976e6f974779e34364be9872f7d810d2df4aa08b8e712ee941a9dc288f40b52`;
 - serialized report SHA-256:
-  `83918559c2d0c1b19205906268988d7291c68f8fbb238a106f9b1ea5f4240fd5`;
+  `3feb02766b955b328999c40bbf283b59082e906888a80781348ecff5f18fad8b`;
 - frozen metrics implementation SHA-256:
   `fcc5858af4498ad39daa0efcdce4934fc7dd470e3e654189a8bb29a5d4c1250e`;
+- frozen unified bridge SHA-256:
+  `b7ea9e96cfefcb585bb3324325a613654ef8d2633428aedeae28051d1034365a`;
 - status: `blocked_no_runtime_eligible_entries`;
 - suite entries: 7;
 - runtime-eligible entries: 0;
 - provider requests frozen: 0;
 - provider calls authorized or made: 0;
 - paper LLM-performance claim ready: false.
+
+The report additionally binds the exact protocol auditor and all three
+authoritative family bridges, so changing validation or fallback semantics
+invalidates the protocol identity even when the graph bytes do not change.
 
 This negative readiness result is important: it prevents rich prompts alone
 from being counted as LLM evidence. The existing N8 collective, Jacobi
