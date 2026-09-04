@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "schema_version": "gicc-hint-v1",
+  "default_dispatch": "DWQ_TRIGGER",
+  "sites": {
+    "?:?:_Z18matmul_step_kernelPN4gicc9DeviceCtxEPKfS3_Pfiiiiiim::0": {
+      "dispatch": "DWQ_TRIGGER"
+    }
+  }
+}
