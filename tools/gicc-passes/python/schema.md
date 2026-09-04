@@ -539,6 +539,19 @@ requires that attestation before cloning a launch. Host runtime
 identity/interval checks then retain the original fused launch on every false
 edge. A route-only hint cannot activate this schedule.
 
+`GUARDED_EARLY_TRIGGER` is a distinct singleton schedule for one exact
+host-knowable PUT followed by one compiler-proved completion. The group bridge
+exposes it only when compiler metadata identifies at least one readonly
+noalias source-pointer candidate, every crossed write is rooted in a distinct
+noalias pointer formal, no unknown write or unclassified observable side
+effect is crossed, host phase launch is materializable, and the platform
+profile enables `compiler_transforms.guarded_early_trigger` after runtime
+confirmation. Its opaque candidate maps only to `DWQ_TRIGGER` plus the
+`GUARDED_EARLY_TRIGGER` transform. Final host/device LTO rebuilds these facts;
+host allocation, identity, and interval guards keep the original completion
+schedule on every false edge. Route-only trigger selection cannot activate
+this transform.
+
 
 ## Decider invocation
 

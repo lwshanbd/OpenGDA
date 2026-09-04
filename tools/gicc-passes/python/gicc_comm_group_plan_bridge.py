@@ -320,6 +320,57 @@ def _producer_fission_proof(
     ]
 
 
+def _guarded_early_trigger_proof(
+    site: dict[str, Any], *, materializer_shape_legal: bool,
+) -> list[str] | None:
+    """Recognize the compiler facts consumed by the guarded materializer."""
+    frontier = site.get("producer_frontier")
+    interval = site.get("transfer_interval")
+    if (not materializer_shape_legal
+            or not isinstance(frontier, dict)
+            or not isinstance(interval, dict)):
+        return None
+    sources = frontier.get("source_pointer_candidates")
+    writes = frontier.get("guarded_early_trigger_write_params")
+    buffer_index = frontier.get("source_identity_buffer_index_param")
+    if (
+        site.get("op_kind") != "put_no_db"
+        or site.get("hk_capable") is not True
+        or site.get("in_loop") is True
+        or site.get("guard_kind") != "always"
+        or site.get("phase_launch_supported") is not True
+        or interval.get("symbolically_exact") is not True
+        or interval.get("host_knowable") is not True
+        or frontier.get("analyzed") is not True
+        or frontier.get("source_identity_guardable") is not True
+        or frontier.get("guarded_early_trigger_guardable") is not True
+        or frontier.get("unknown_write_sites") != 0
+        or frontier.get("guarded_early_trigger_unsafe_side_effect_sites") != 0
+        or not isinstance(buffer_index, int)
+        or isinstance(buffer_index, bool)
+        or not isinstance(sources, list)
+        or not sources
+        or any(isinstance(value, bool) or not isinstance(value, int)
+               for value in sources)
+        or len(set(sources)) != len(sources)
+        or not isinstance(writes, list)
+        or not writes
+        or any(isinstance(value, bool) or not isinstance(value, int)
+               for value in writes)
+        or len(set(writes)) != len(writes)
+        or set(sources).intersection(writes)
+    ):
+        return None
+    return [
+        "one unconditional non-loop host-knowable PUT has an exact source interval",
+        "the compiler identified readonly noalias source-pointer candidates",
+        "every intervening write is rooted in a distinct noalias pointer formal",
+        "no unclassified observable side effect may be crossed",
+        "host allocation and interval guards retain the original completion fallback",
+        "the final host and device LTO passes independently rebuild the proof",
+    ]
+
+
 def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
         -> dict[str, Any]:
     dossier = bridge._verified_dossier(dossier_value)
@@ -347,6 +398,10 @@ def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
     fission_enabled = (
         isinstance(transform_profile, dict)
         and transform_profile.get("producer_frontier_fission") is True
+    )
+    guarded_early_enabled = (
+        isinstance(transform_profile, dict)
+        and transform_profile.get("guarded_early_trigger") is True
     )
     opportunities: list[dict[str, Any]] = []
     opportunity_sites: set[str] = set()
@@ -598,6 +653,54 @@ def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
             )
             for action in actions
         ]
+        kernel_ops = [
+            item for item in meta_by_site.values()
+            if item["kernel_mangled"] == meta["kernel_mangled"]
+        ]
+        guarded_shape_legal = (
+            sum(item["kind"] in {"put_no_db", "get_no_db"}
+                for item in kernel_ops) == 1
+            and sum(item["kind"] == "flush" for item in kernel_ops) == 1
+        )
+        guarded_proof = _guarded_early_trigger_proof(
+            site, materializer_shape_legal=guarded_shape_legal,
+        )
+        guarded_legal = guarded_proof is not None and "trigger" in actions
+        masked_candidates = []
+        if guarded_early_enabled and guarded_legal:
+            frontier = site["producer_frontier"]
+            candidates.append(_candidate(
+                "site_guarded_early_trigger",
+                [site_id], ("trigger",),
+                (
+                    "Move the compiler-owned trigger before compute only when "
+                    "runtime source-identity, interval, and write-allocation "
+                    "guards pass."
+                ),
+                guarded_proof,
+                {
+                    "site_actions": {site_id: "trigger"},
+                    "trigger_placement": "pre_compute_guarded",
+                    "runtime_fallback": "original_completion",
+                    "source_identity_candidate_count": len(
+                        frontier["source_pointer_candidates"]
+                    ),
+                    "write_allocation_guard_count": len(
+                        frontier["guarded_early_trigger_write_params"]
+                    ),
+                    "host_descriptor_sites": 1,
+                    "device_proxy_sites": 0,
+                },
+                transform="GUARDED_EARLY_TRIGGER",
+            ))
+        elif guarded_legal:
+            masked_candidates.append({
+                "kind": "site_guarded_early_trigger",
+                "reason": [
+                    "platform profile has not enabled the transform after "
+                    "its runtime oracle gate"
+                ],
+            })
         compiler_facts = {
             "kernel": meta["kernel"],
             "operation_order": [site_id],
@@ -634,13 +737,17 @@ def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
                 ],
             },
         }
+        if guarded_proof is not None:
+            compiler_facts["dependence_legality"][
+                "guarded_early_trigger_legal"
+            ] = True
         opportunity_id = _opportunity_id([site_id], completion_id)
         opportunities.append({
             "opportunity_id": opportunity_id,
             "kind": "single_site_communication_route",
             "site_ids": [site_id],
             "compiler_facts": compiler_facts,
-            "masked_candidates": [],
+            "masked_candidates": masked_candidates,
             "candidates": candidates,
         })
         opportunity_sites.add(site_id)
@@ -779,6 +886,19 @@ def verified_graph(value: Any) -> dict[str, Any]:
                         ) is True
                         and isinstance(transforms, dict)
                         and transforms.get("producer_frontier_fission") is True
+                    )
+                elif transform == "GUARDED_EARLY_TRIGGER":
+                    transforms = value.get("platform_profile", {}).get(
+                        "compiler_transforms", {}
+                    )
+                    legal = (
+                        dispatch == "DWQ_TRIGGER"
+                        and candidate.get("kind") == "site_guarded_early_trigger"
+                        and opportunity["compiler_facts"][
+                            "dependence_legality"
+                        ].get("guarded_early_trigger_legal") is True
+                        and isinstance(transforms, dict)
+                        and transforms.get("guarded_early_trigger") is True
                     )
                 else:
                     action = next(

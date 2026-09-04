@@ -40,3 +40,26 @@ permits creation of a new content-addressed compiler graph containing the
 pre-authored candidate ID; it does not mutate a frozen graph or authorize a
 provider call. One positive application establishes compiler action-space
 headroom, not an LLM-selection claim.
+
+## Confirmation-gated graph expansion
+
+After—and only after—the confirmation gate passes, replay the raw evidence and
+generate a separate compiler graph bundle:
+
+```sh
+python3 tools/gicc-passes/experiments/guarded_early_trigger/prepare_confirmed_guarded_early_graph.py prepare \
+  --confirmation-analysis build_ofi/guarded_early_trigger_confirmation_77897d9_20260904/analysis.json \
+  --dossier build_ofi/compiler_fact_coverage_20260904/portfolio/mm_minimal/dossier.json \
+  --template build_ofi/compiler_fact_coverage_20260904/mm_minimal_disjoint/meta/_Z18matmul_step_kernelPN4gicc9DeviceCtxEPKfS3_Pfiiiiiim.json \
+  --graph build_ofi/compiler_fact_coverage_20260904/portfolio/mm_minimal/group-graph.json \
+  --output-dir build_ofi/guarded_early_trigger_graph_expansion_20260904
+```
+
+The preparer verifies the confirmation, its runtime-guard/correctness gates,
+the baseline and device-attested compiler metadata, and the final-IR audit. It
+requires the old graph to regenerate exactly, enriches its dossier with only
+the four confirmed guarded facts, preserves all three route candidate IDs,
+and adds one compiler-owned `GUARDED_EARLY_TRIGGER` candidate. The unchanged
+application source is hash-checked by the confirmation transition but is not
+included in any model view. The bundle does not refreeze the suite, invoke a
+model, or authorize a provider call.

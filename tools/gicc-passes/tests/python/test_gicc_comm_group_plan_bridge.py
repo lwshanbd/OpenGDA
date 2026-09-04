@@ -150,6 +150,32 @@ def fission_feature(site_id):
     return row
 
 
+def guarded_early_feature(site_id):
+    row = feature(site_id)
+    row["phase_launch_supported"] = True
+    row["transfer_interval"] = {
+        "symbolically_exact": True,
+        "host_knowable": True,
+        "source_buffer": {"kind": "param", "param": 9},
+        "byte_offset": {"kind": "const", "value": 0},
+        "byte_size": {"kind": "param", "param": 10},
+    }
+    row["producer_frontier"] = {
+        "analyzed": True,
+        "source_identity_guardable": True,
+        "source_identity_buffer_index_param": 9,
+        "source_pointer_candidates": [1, 2],
+        "guarded_early_trigger_guardable": True,
+        "guarded_early_trigger_write_params": [3],
+        "guarded_early_trigger_unsafe_side_effect_sites": 0,
+        "guarded_early_trigger_reason": (
+            "host allocation guards prove source/write disjointness"
+        ),
+        "unknown_write_sites": 0,
+    }
+    return row
+
+
 class CommunicationGroupPlanBridgeTests(unittest.TestCase):
     def setUp(self):
         self.site_ids = [
@@ -446,6 +472,59 @@ class CommunicationGroupPlanBridgeTests(unittest.TestCase):
         prompt = groups.render_prompt(graph)
         self.assertNotIn(self.site_ids[0], prompt)
         self.assertNotIn("group_kernel", prompt)
+
+    def test_guarded_early_singleton_requires_profile_gate_and_becomes_hint(self):
+        single_template = template()
+        single_template["ops"] = [
+            op for op in single_template["ops"]
+            if op["site_id"] != self.site_ids[1]
+        ]
+        platform = copy.deepcopy(PLATFORM)
+        platform["compiler_transforms"] = {"guarded_early_trigger": False}
+        dossier = bridge.make_dossier(
+            [guarded_early_feature(self.site_ids[0])], platform,
+        )
+        masked_graph = groups.make_group_graph(dossier, [single_template])
+        opportunity = masked_graph["opportunities"][0]
+        self.assertNotIn(
+            "site_guarded_early_trigger",
+            {candidate["kind"] for candidate in opportunity["candidates"]},
+        )
+        self.assertEqual(
+            ["site_guarded_early_trigger"],
+            [candidate["kind"]
+             for candidate in opportunity["masked_candidates"]],
+        )
+
+        platform["compiler_transforms"]["guarded_early_trigger"] = True
+        enabled = groups.make_group_graph(
+            bridge.make_dossier(
+                [guarded_early_feature(self.site_ids[0])], platform,
+            ),
+            [single_template],
+        )
+        opportunity = enabled["opportunities"][0]
+        candidate = next(
+            candidate for candidate in opportunity["candidates"]
+            if candidate["kind"] == "site_guarded_early_trigger"
+        )
+        decision = {
+            "schema_version": groups.DECISION_SCHEMA,
+            "graph_id": enabled["graph_id"],
+            "selections": {
+                opportunity["opportunity_id"]: {
+                    "candidate_id": candidate["candidate_id"],
+                    "confidence": 0.9,
+                    "rationale": "select compiler-guarded early trigger",
+                }
+            },
+        }
+        hint, accepted, errors = groups.plan_to_hint(enabled, decision)
+        self.assertTrue(accepted, errors)
+        self.assertEqual(
+            "GUARDED_EARLY_TRIGGER",
+            hint["sites"][self.site_ids[0]]["transform"],
+        )
 
     def test_real_meta_directory_ignores_sibling_features_json(self):
         with tempfile.TemporaryDirectory() as temporary:
