@@ -190,6 +190,17 @@ struct ProducerFrontierFacts {
     std::vector<unsigned> source_pointer_candidates;
     unsigned              source_identity_buffer_index_param = 0;
     std::string           source_identity_guard_reason;
+    // Narrow proof shape for moving an already-logical PUT's hardware
+    // trigger across writes to disjoint allocations. This is not an
+    // unconditional legality result: final host LTO must check source
+    // identity, interval bounds, and the registered source interval against
+    // every write-root allocation. Final device LTO must rebuild the same
+    // roots and reject all unclassified side effects.
+    bool                  guarded_early_trigger_analyzed = false;
+    bool                  guarded_early_trigger_guardable = false;
+    std::vector<unsigned> guarded_early_trigger_write_params;
+    unsigned              guarded_early_trigger_unsafe_side_effect_sites = 0;
+    std::string           guarded_early_trigger_reason;
     bool                  producer_domains_known = false;
     std::vector<ProducerStoreDomainFact> producer_store_domains;
     bool                  atomic_domains_known = false;

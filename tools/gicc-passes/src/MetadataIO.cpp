@@ -617,6 +617,20 @@ json::Value producerFrontierToJSON(const ProducerFrontierFacts &facts) {
         o["source_identity_buffer_index_param"] = nullptr;
     o["source_identity_guard_reason"] =
         facts.source_identity_guard_reason;
+    if (facts.guarded_early_trigger_analyzed) {
+        o["guarded_early_trigger_guardable"] =
+            facts.guarded_early_trigger_guardable;
+        json::Array writeParams;
+        for (unsigned param : facts.guarded_early_trigger_write_params)
+            writeParams.push_back(static_cast<int64_t>(param));
+        o["guarded_early_trigger_write_params"] =
+            std::move(writeParams);
+        o["guarded_early_trigger_unsafe_side_effect_sites"] =
+            static_cast<int64_t>(
+                facts.guarded_early_trigger_unsafe_side_effect_sites);
+        o["guarded_early_trigger_reason"] =
+            facts.guarded_early_trigger_reason;
+    }
     o["producer_domains_known"] = facts.producer_domains_known;
     json::Array domains;
     for (const auto &domain : facts.producer_store_domains)
@@ -754,6 +768,37 @@ bool producerFrontierFromJSON(const json::Value &v,
     if (parsed.source_identity_guardable !=
         !parsed.source_pointer_candidates.empty())
         return false;
+    if (auto guardable =
+            o->getBoolean("guarded_early_trigger_guardable")) {
+        const auto *writeParams =
+            o->getArray("guarded_early_trigger_write_params");
+        auto unsafe = o->getInteger(
+            "guarded_early_trigger_unsafe_side_effect_sites");
+        auto guardReason =
+            o->getString("guarded_early_trigger_reason");
+        if (!writeParams || !unsafe || *unsafe < 0 || !guardReason ||
+            static_cast<uint64_t>(*unsafe) >
+                std::numeric_limits<unsigned>::max())
+            return false;
+        parsed.guarded_early_trigger_analyzed = true;
+        parsed.guarded_early_trigger_guardable = *guardable;
+        parsed.guarded_early_trigger_unsafe_side_effect_sites =
+            static_cast<unsigned>(*unsafe);
+        parsed.guarded_early_trigger_reason = guardReason->str();
+        for (const json::Value &value : *writeParams) {
+            auto param = value.getAsInteger();
+            if (!param || *param < 0 ||
+                static_cast<uint64_t>(*param) >
+                    std::numeric_limits<unsigned>::max())
+                return false;
+            parsed.guarded_early_trigger_write_params.push_back(
+                static_cast<unsigned>(*param));
+        }
+        if (parsed.guarded_early_trigger_guardable &&
+            (parsed.guarded_early_trigger_write_params.empty() ||
+             parsed.guarded_early_trigger_unsafe_side_effect_sites != 0))
+            return false;
+    }
     if (auto knownDomains = o->getBoolean("producer_domains_known"))
         parsed.producer_domains_known = *knownDomains;
     if (const auto *domains = o->getArray("producer_store_domains")) {

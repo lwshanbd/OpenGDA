@@ -1512,6 +1512,8 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
         SmallVector<unsigned, 4> atomicParams;
         SmallPtrSet<const Instruction *, 32> classified;
         SmallPtrSet<const Instruction *, 32> phaseSensitiveClassified;
+        SmallPtrSet<const Instruction *, 8> recognizedAtomicCalls;
+        SmallPtrSet<const Instruction *, 8> unsafeSideEffects;
 
         auto pointerFormal = [&](const Value *pointer)
                 -> const Argument * {
@@ -1560,6 +1562,7 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
                 pointer = call->getArgOperand(0);
                 atomic = true;
                 atomicOperation = "atomic_add";
+                recognizedAtomicCalls.insert(&I);
             } else {
                 ++frontier.unknown_write_sites;
                 return;
@@ -1606,6 +1609,33 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
         auto classifyFrontierInstruction = [&](const Instruction &I) {
             classifyWrite(I);
             classifyPhaseSensitive(I);
+            if (const auto *load = dyn_cast<LoadInst>(&I)) {
+                if (load->isVolatile()) unsafeSideEffects.insert(&I);
+                return;
+            }
+            if (const auto *store = dyn_cast<StoreInst>(&I)) {
+                if (store->isVolatile()) unsafeSideEffects.insert(&I);
+                return;
+            }
+            if (isa<FenceInst>(I)) {
+                unsafeSideEffects.insert(&I);
+                return;
+            }
+            if (const auto *call = dyn_cast<CallBase>(&I)) {
+                if (call->isInlineAsm()) {
+                    unsafeSideEffects.insert(&I);
+                    return;
+                }
+                if (gpuBuiltinName(*call) ||
+                    recognizedAtomicCalls.contains(&I))
+                    return;
+                if (call->mayHaveSideEffects() || call->isConvergent() ||
+                    call->cannotDuplicate())
+                    unsafeSideEffects.insert(&I);
+                return;
+            }
+            if (I.mayHaveSideEffects() && !classified.contains(&I))
+                unsafeSideEffects.insert(&I);
         };
 
         bool afterLastForFacts = false;
@@ -1735,6 +1765,53 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
         } else {
             frontier.source_identity_guard_reason =
                 "no readonly noalias pointer formal can serve as a registered-source identity candidate";
+        }
+        frontier.guarded_early_trigger_analyzed = true;
+        SmallVector<unsigned, 8> guardedWriteParams(ordinaryParams.begin(),
+                                                     ordinaryParams.end());
+        guardedWriteParams.append(atomicParams.begin(), atomicParams.end());
+        llvm::sort(guardedWriteParams);
+        guardedWriteParams.erase(
+            std::unique(guardedWriteParams.begin(), guardedWriteParams.end()),
+            guardedWriteParams.end());
+        frontier.guarded_early_trigger_write_params.assign(
+            guardedWriteParams.begin(), guardedWriteParams.end());
+        frontier.guarded_early_trigger_unsafe_side_effect_sites =
+            unsafeSideEffects.size();
+        const bool writeRootsNoAlias = !guardedWriteParams.empty() &&
+            llvm::all_of(guardedWriteParams, [&](unsigned param) {
+                return param < t.params.size() &&
+                    t.params[param].typeStr == "ptr" &&
+                    t.params[param].noalias;
+            });
+        const bool sourceAndWritesDistinct = llvm::none_of(
+            guardedWriteParams, [&](unsigned param) {
+                return llvm::is_contained(
+                    frontier.source_pointer_candidates, param);
+            });
+        frontier.guarded_early_trigger_guardable =
+            frontier.source_identity_guardable &&
+            frontier.unknown_write_sites == 0 &&
+            unsafeSideEffects.empty() && writeRootsNoAlias &&
+            sourceAndWritesDistinct;
+        if (!frontier.source_identity_guardable) {
+            frontier.guarded_early_trigger_reason =
+                "registered source lacks a readonly noalias pointer identity candidate";
+        } else if (frontier.unknown_write_sites != 0) {
+            frontier.guarded_early_trigger_reason =
+                "an intervening write is not rooted in a kernel pointer formal";
+        } else if (!unsafeSideEffects.empty()) {
+            frontier.guarded_early_trigger_reason =
+                "intervening control contains an unclassified observable side effect";
+        } else if (!writeRootsNoAlias) {
+            frontier.guarded_early_trigger_reason =
+                "intervening write roots are not complete noalias pointer formals";
+        } else if (!sourceAndWritesDistinct) {
+            frontier.guarded_early_trigger_reason =
+                "a source identity candidate is also an intervening write root";
+        } else {
+            frontier.guarded_early_trigger_reason =
+                "host allocation guards can prove every write root disjoint from the registered source";
         }
         if (frontier.unknown_write_sites != 0) {
             frontier.reason =

@@ -273,6 +273,11 @@ entry:
 ; CANDIDATE: "atomic_write_params": [
 ; CANDIDATE-NEXT: 2
 ; CANDIDATE: "buffer_identity_guardable": false
+; CANDIDATE: "guarded_early_trigger_guardable": true
+; CANDIDATE: "guarded_early_trigger_reason": "host allocation guards can prove every write root disjoint from the registered source"
+; CANDIDATE: "guarded_early_trigger_unsafe_side_effect_sites": 0
+; CANDIDATE: "guarded_early_trigger_write_params": [
+; CANDIDATE-NEXT: 2
 ; CANDIDATE: "source_identity_buffer_index_param": 4
 ; CANDIDATE-NEXT: "source_identity_guard_reason": "readonly noalias pointer candidates can be matched to the shared source-buffer formal at launch; write-allocation disjointness remains unproved"
 ; CANDIDATE-NEXT: "source_identity_guardable": true
