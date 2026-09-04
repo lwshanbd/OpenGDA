@@ -541,6 +541,32 @@ def archive_authorization(value: Any, output_dir: Path) -> None:
         write_json_atomic(path, value)
 
 
+def verify_complete_archive(
+    *, request: dict[str, Any], authorization_value: Any,
+    graph: dict[str, Any], output_dir: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Verify a complete archive without inspecting or invoking a provider."""
+    authorization = verify_authorization(authorization_value, request)
+    authorization_id = authorization_value["authorization_id"]
+    require(read_json(output_dir / "authorization.json") == authorization_value,
+            "archived authorization differs from analysis input")
+    index = existing_index(
+        output_dir / "run-index.json", request, authorization_id,
+    )
+    require(index.get("status") == "complete",
+            "capability archive is not complete")
+    wanted = expected_trials(request)
+    completed = [
+        verify_archived_run(
+            row, output_dir, request, authorization, authorization_id, graph,
+        )
+        for row in index["runs"]
+    ]
+    require(completed == wanted,
+            "complete archive does not contain the exact rotating trial order")
+    return index, authorization
+
+
 def run_trials(
     *, suite_path: Path, prompt_dir: Path, readiness_path: Path,
     separation_path: Path, protocol_path: Path, label: str,

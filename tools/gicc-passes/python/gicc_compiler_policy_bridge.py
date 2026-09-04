@@ -72,6 +72,23 @@ def decision_response_schema(graph_value: Any) -> dict[str, Any]:
     return adapter.response_schema(adapter.verify(graph_value))
 
 
+def verified_policy(graph_value: Any,
+                    selected_ids_by_slot: Any) -> dict[str, Any]:
+    """Verify a normalized policy contains only exact graph-bound IDs."""
+    adapter = _adapter(graph_value)
+    graph = adapter.verify(graph_value)
+    if not isinstance(selected_ids_by_slot, dict):
+        raise CompilerPolicyBridgeError("normalized policy must be an object")
+    selected = dict(selected_ids_by_slot)
+    _validate_selection(adapter.family, graph, selected)
+    return {
+        "decision_family": adapter.family,
+        "graph_id": graph["graph_id"],
+        "selected_ids_by_slot": selected,
+        "policy_id": metrics.policy_id(selected),
+    }
+
+
 def _fallback_selection(family: str,
                         graph: dict[str, Any]) -> dict[str, str]:
     selected: dict[str, str] = {}
@@ -200,7 +217,7 @@ def decision_to_policy(graph_value: Any, decision: Any) -> dict[str, Any]:
     selected = _hint_selection(
         adapter.family, graph, hint, accepted, errors,
     )
-    _validate_selection(adapter.family, graph, selected)
+    normalized = verified_policy(graph, selected)
     return {
         "decision_family": adapter.family,
         "graph_schema": graph["schema_version"],
@@ -209,8 +226,8 @@ def decision_to_policy(graph_value: Any, decision: Any) -> dict[str, Any]:
         "bridge_accepted": accepted,
         "bridge_errors": errors,
         "fallback_applied": not accepted,
-        "selected_ids_by_slot": selected,
-        "policy_id": metrics.policy_id(selected),
+        "selected_ids_by_slot": normalized["selected_ids_by_slot"],
+        "policy_id": normalized["policy_id"],
         "compiler_hint_id": fingerprinting._fingerprint(hint),
         "compiler_hint": hint,
         "compiler_hint_is_private_and_never_provider_input": True,

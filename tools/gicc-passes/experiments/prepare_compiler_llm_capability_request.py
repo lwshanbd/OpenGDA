@@ -331,6 +331,9 @@ def build_request(inputs: dict[str, Any], bundle: Path) -> dict[str, Any]:
             "model_trial_runner": evidence(
                 HERE / "run_compiler_llm_capability_trials.py"
             ),
+            "capability_analyzer": evidence(
+                HERE / "analyze_compiler_llm_capability_trials.py"
+            ),
             "unified_compiler_policy_bridge": evidence(
                 PASS_PYTHON / "gicc_compiler_policy_bridge.py"
             ),

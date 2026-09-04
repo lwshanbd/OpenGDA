@@ -118,13 +118,13 @@ The current report is
 `build_ofi/compiler_llm_capability_protocol_20260904/report.json`:
 
 - protocol ID:
-  `sha256:c6447eb5d35260671b6f40c40fea532c6774f2bdccfcfd2ce0d22508e3cece53`;
+  `sha256:3f60e2a2eb1a80413766980213002b7b663b87437c22e2e12d3f8ccfe610a2cb`;
 - serialized report SHA-256:
-  `67f4ac8f8e46e489bdbffa096787d14caacf959a061cc5994026ff5803603899`;
+  `3ce312a43e6ce8edb74d4184af2a68033ff5efc817d3baebd61963ccac5f484d`;
 - frozen metrics implementation SHA-256:
   `fcc5858af4498ad39daa0efcdce4934fc7dd470e3e654189a8bb29a5d4c1250e`;
 - frozen unified bridge SHA-256:
-  `b992d518c7d71297f659074c3f6fe901ae9bd9c07d6d222cf9c11a85c980c219`;
+  `68b46946928c86e7da2b1607056cd28e3649b5b805c4a23733bd933a056e9b7f`;
 - status: `blocked_no_runtime_eligible_entries`;
 - suite entries: 7;
 - runtime-eligible entries: 0;
@@ -144,7 +144,8 @@ copies only the source-free prompts, exact response schema, and system prompt
 into the provider-visible bundle; the compiler graph remains a private
 downstream bridge input. The generated request starts with zero permitted calls
 and still requires a separate authorization bound to its exact request ID and
-provider settings. It also content-addresses the common trial runner.
+provider settings. It also content-addresses the common trial runner and
+analysis implementation.
 
 `run_compiler_llm_capability_trials.py` supports all three graph families via
 the unified compiler-policy bridge. Before inspecting a provider executable it
@@ -157,6 +158,15 @@ semantically invalid successful response is recorded once and receives the
 atomic compiler-anchor fallback; it is never retried to search for a better
 answer. With the current zero-eligible report, no request can be created and the
 runner cannot reach a provider call.
+
+`analyze_compiler_llm_capability_trials.py` closes the archive-to-metrics path
+without calling the provider or compiler. It revalidates the complete 60-trial
+archive and accepts held-out costs only through a content-addressed,
+provider-invisible family adapter that covers every observed graph-bound
+policy. It then applies the shared ITT fallback, modal-policy, entropy, regret,
+and post-hoc best-of-20 rules and records the exact archive trials underlying
+each representative. Offline screen results remain explicitly distinct from
+paired runtime speedup evidence.
 
 This negative readiness result is important: it prevents rich prompts alone
 from being counted as LLM evidence. The existing N8 collective, Jacobi

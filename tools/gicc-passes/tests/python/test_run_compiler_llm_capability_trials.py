@@ -127,6 +127,32 @@ class CompilerLlmCapabilityTrialTests(unittest.TestCase):
             ("opaque", 3), ("relational", 3), ("descriptors", 3),
         ], order[:9])
 
+    def test_offline_archive_verifier_rejects_incomplete_index(self):
+        graph = structural.make_opportunity_graph(llm.make_dossier(
+            [coalescable_feature()], PLATFORM,
+        ))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            trials.write_json_atomic(
+                output / "authorization.json", self.authorization,
+            )
+            trials.write_json_atomic(output / "run-index.json", {
+                "schema_version": trials.INDEX_SCHEMA,
+                "status": "running",
+                "request_id": self.request["request_id"],
+                "authorization_id": self.authorization["authorization_id"],
+                "runs": [],
+            })
+            with self.assertRaisesRegex(
+                trials.CapabilityTrialError, "archive is not complete"
+            ):
+                trials.verify_complete_archive(
+                    request=self.request,
+                    authorization_value=self.authorization,
+                    graph=graph,
+                    output_dir=output,
+                )
+
     @mock.patch.object(trials.subprocess, "run")
     def test_semantic_failure_is_archived_once_with_compiler_fallback(self, run):
         run.return_value = SimpleNamespace(

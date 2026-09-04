@@ -160,6 +160,17 @@ class UnifiedCompilerPolicyBridgeTests(unittest.TestCase):
             collective.decision_response_schema(graph),
             unified.decision_response_schema(graph),
         )
+        accepted = unified.decision_to_policy(graph, None)
+        verified = unified.verified_policy(
+            graph, accepted["selected_ids_by_slot"]
+        )
+        self.assertEqual(accepted["policy_id"], verified["policy_id"])
+        changed = dict(accepted["selected_ids_by_slot"])
+        changed[next(iter(changed))] = "option:" + "0" * 24
+        with self.assertRaisesRegex(
+            unified.CompilerPolicyBridgeError, "non-compiler-generated ID"
+        ):
+            unified.verified_policy(graph, changed)
 
 
 if __name__ == "__main__":
