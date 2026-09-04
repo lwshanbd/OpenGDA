@@ -52,11 +52,11 @@ Only after the existing successor controller completes with a positive scout:
 
 ```sh
 python3 tools/gicc-passes/experiments/producer_fission/prepare_producer_fission_confirmation.py prepare \
-  --monitor build_ofi/producer_fission_oracle_scout_90b9123_20260904/monitor.json \
-  --analysis build_ofi/producer_fission_oracle_scout_90b9123_20260904/analysis.json \
+  --monitor build_ofi/producer_fission_oracle_scout_7687377_20260904/monitor.json \
+  --analysis build_ofi/producer_fission_oracle_scout_7687377_20260904/analysis.json \
   --coverage-report build_ofi/compiler_fact_coverage_20260904/coverage-report.json \
-  --binary-dir build_ofi/producer_fission_oracle_90b9123 \
-  --out build_ofi/producer_fission_confirmation_transition_20260904.json
+  --binary-dir build_ofi/producer_fission_oracle_7687377 \
+  --out build_ofi/producer_fission_confirmation_transition_7687377_20260904.json
 ```
 
 The preparer rehashes the complete scout artifact set, regenerates every
@@ -70,9 +70,9 @@ the transition exists, and only when it verifies as
 
 ```sh
 bash tools/gicc-passes/experiments/producer_fission/continue_producer_fission_confirmation.sh \
-  build_ofi/producer_fission_confirmation_transition_20260904.json \
-  build_ofi/producer_fission_oracle_90b9123 \
-  build_ofi/producer_fission_confirmation_20260904
+  build_ofi/producer_fission_confirmation_transition_7687377_20260904.json \
+  build_ofi/producer_fission_oracle_7687377 \
+  build_ofi/producer_fission_confirmation_7687377_20260904
 ```
 
 The controller reuses the exact scout-bound baseline and compiler-fission

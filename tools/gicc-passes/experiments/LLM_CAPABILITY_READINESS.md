@@ -147,8 +147,8 @@ python3 tools/gicc-passes/experiments/audit_compiler_llm_readiness.py emit \
   --placement-current-graph build_ofi/compiler_comm_plan_placement_current_20260904/generated/opportunity-graph.json \
   --collective-state build_ofi/compiler_collective_hierpipe_n8_scout_20260903.state \
   --collective-analysis build_ofi/compiler_collective_hierpipe_n8_scout_20260903/analysis.json \
-  --producer-state build_ofi/producer_fission_oracle_scout_90b9123_20260904.state \
-  --producer-analysis build_ofi/producer_fission_oracle_scout_90b9123_20260904/analysis.json \
+  --producer-state build_ofi/producer_fission_oracle_scout_7687377_20260904.state \
+  --producer-analysis build_ofi/producer_fission_oracle_scout_7687377_20260904/analysis.json \
   --out build_ofi/compiler_llm_readiness_20260904/report.json
 ```
 
