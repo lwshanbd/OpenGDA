@@ -121,6 +121,7 @@ def validate_topology(jobspec: dict[str, Any]) -> None:
 
 
 def completed_job(job_id: str, expected_name: str) -> dict[str, Any]:
+    common.run_flux("job", "wait-event", job_id, "clean")
     events = common.parse_json_lines(
         common.run_flux("job", "info", job_id, "eventlog"), "eventlog")
     jobspec_value = json.loads(

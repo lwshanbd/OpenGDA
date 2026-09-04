@@ -16,3 +16,8 @@ The report may label the missing producer-to-trigger ordering as a semantic
 inference, not as a measured performance claim.  Application source changes
 are outside this protocol; the failed and fixed builds must hash the same
 application source.
+
+`continue_producer_fission_runtime_triage.sh` refuses to submit when any user
+job is active, launches one `pdebug` allocation, and blocks in the auditor
+until Flux records a clean event.  The runner executes the two arms serially;
+the controller rechecks every frozen artifact before accepting the report.
