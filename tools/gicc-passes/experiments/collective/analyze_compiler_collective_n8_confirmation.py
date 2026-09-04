@@ -38,6 +38,24 @@ GENERATED_ROLES = {
 ConfirmError = transition_base.TransitionError
 sha256 = transition_base.sha256_file
 fingerprint = transition_base.bridge._fingerprint
+TOPOLOGY_LABEL = "N8"
+NODES = 8
+RANKS = 64
+PPN = 8
+RUNS = 7
+WARMUP = 2
+BATCH_DURATION_SECONDS = 1200.0
+RUNNER_FILENAME = "run_compiler_collective_n8_confirmation.sh"
+CONTROLLER_FILENAME = "continue_compiler_collective_n8_confirmation.sh"
+ANALYZER_PATH = Path(__file__).resolve()
+SUPPORT_ANALYZER_FILES: tuple[Path, ...] = ()
+LOG_PREFIX = "COLLECTIVE_N8_CONFIRM"
+RESULT_SCHEMA = "gicc-collective-n8-confirmation-v1"
+RESULT_SCOPE = (
+    "Three sequential independent N8 pdebug allocations with Latin-"
+    "rotated compiler/LTO policies; no model or source modification."
+)
+PROGRAM_NAME = "compiler-collective-n8-confirm"
 
 
 def read_json(path: Path) -> Any:
@@ -186,9 +204,10 @@ def _transition_file_paths(
             raise ConfirmError(f"transition file changed: {path}")
         result[role] = path
     expected_roles = {
-        "compiler_graph", "passed_n8_scout",
+        "compiler_graph", transition_base.SCOUT_FILE_ROLE,
         "frozen_structural_heuristic", "preregistered_transition_protocol",
-        "transition_preparer", *GENERATED_ROLES,
+        "transition_preparer", *transition_base.TRANSITION_SUPPORT_ROLES,
+        *GENERATED_ROLES,
     }
     if set(result) != expected_roles:
         raise ConfirmError("transition file roles changed")
@@ -203,7 +222,9 @@ def validate_transition(
             or value.get("schema_version")
             != transition_base.TRANSITION_SCHEMA
             or value.get("status") != "confirmation_plan_ready"):
-        raise ConfirmError("confirmation requires a ready N8 transition")
+        raise ConfirmError(
+            f"confirmation requires a ready {TOPOLOGY_LABEL} transition"
+        )
     payload = dict(value)
     transition_id = payload.pop("transition_id", None)
     if transition_id != fingerprint(payload):
@@ -221,9 +242,9 @@ def validate_transition(
     required_contract = {
         "enabled": True,
         "queue": "pdebug",
-        "nodes": 8,
-        "ranks": 64,
-        "ranks_per_node": 8,
+        "nodes": NODES,
+        "ranks": RANKS,
+        "ranks_per_node": PPN,
         "cpu_cores_per_rank": 8,
         "gpus_per_rank": 1,
         "independent_allocations": 3,
@@ -239,14 +260,14 @@ def validate_transition(
     if not isinstance(contract, dict) or any(
             contract.get(key) != expected
             for key, expected in required_contract.items()):
-        raise ConfirmError("N8 confirmation contract changed")
+        raise ConfirmError(f"{TOPOLOGY_LABEL} confirmation contract changed")
     paths = _transition_file_paths(transition_path, value)
     regenerated = transition_base.verify(
-        paths["compiler_graph"], paths["passed_n8_scout"],
+        paths["compiler_graph"], paths[transition_base.SCOUT_FILE_ROLE],
         paths["frozen_structural_heuristic"], transition_path.parent,
     )
     if regenerated != value:
-        raise ConfirmError("N8 transition does not regenerate")
+        raise ConfirmError(f"{TOPOLOGY_LABEL} transition does not regenerate")
     return value, paths
 
 
@@ -281,13 +302,14 @@ def _validate_monitor(
     if replicate not in ORDERS:
         raise ConfirmError("confirmation allocation number is invalid")
     expected = {
-        "nodes": 8, "ranks": 64, "ppn": 8, "runs": 7, "warmup": 2,
+        "nodes": NODES, "ranks": RANKS, "ppn": PPN,
+        "runs": RUNS, "warmup": WARMUP,
         "sizes": list(SIZES),
     }
     resources = [{
-        "type": "node", "count": 8,
+        "type": "node", "count": NODES,
         "with": [{
-            "type": "slot", "count": 8, "label": "task",
+            "type": "slot", "count": PPN, "label": "task",
             "with": [
                 {"type": "core", "count": 8},
                 {"type": "gpu", "count": 1},
@@ -300,31 +322,36 @@ def _validate_monitor(
             or scheduler.get("exit_code") != 0
             or scheduler.get("exception_types") != []
             or jobspec.get("queue") != "pdebug"
-            or jobspec.get("duration_seconds") != 1200.0
+            or jobspec.get("duration_seconds") != BATCH_DURATION_SECONDS
             or jobspec.get("resources") != resources):
         raise ConfirmError(
             f"allocation {replicate} runtime contract changed"
         )
     nodelist = value.get("resource_set", {}).get("nodelist")
-    if not isinstance(nodelist, list) or len(nodelist) != 8:
-        raise ConfirmError(f"allocation {replicate} lacks eight exact nodes")
+    if not isinstance(nodelist, list) or len(nodelist) != NODES:
+        raise ConfirmError(
+            f"allocation {replicate} lacks {NODES} exact nodes"
+        )
 
     records = _artifact_records(value)
-    here = Path(__file__).resolve().parent
+    here = ANALYZER_PATH.parent
     output_root = path.resolve().parent.parent
     binary_root = (output_root / "binaries").resolve()
     required = {
         transition_path.resolve(), *transition_files.values(),
         (here / "build_compiler_collective_eval.sh").resolve(),
         (here / "compiler_collective_eval.py").resolve(),
-        (here / "run_compiler_collective_n8_confirmation.sh").resolve(),
-        (here / "continue_compiler_collective_n8_confirmation.sh").resolve(),
+        (here / RUNNER_FILENAME).resolve(),
+        (here / CONTROLLER_FILENAME).resolve(),
         (here / "monitor_compiler_collective_replicate.py").resolve(),
-        Path(__file__).resolve(),
+        ANALYZER_PATH,
     }
+    required.update(path.resolve() for path in SUPPORT_ANALYZER_FILES)
     freezes = [item for item in records if item.name == "FROZEN_V3_MANIFEST.json"]
     if len(freezes) != 1:
-        raise ConfirmError("confirmation lacks one frozen N8 bundle manifest")
+        raise ConfirmError(
+            f"confirmation lacks one frozen {TOPOLOGY_LABEL} bundle manifest"
+        )
     required.add(freezes[0])
     for arm in ARMS:
         required.update({
@@ -334,9 +361,11 @@ def _validate_monitor(
     if set(records) != required:
         raise ConfirmError("confirmation artifact set changed")
 
-    runner = (here / "run_compiler_collective_n8_confirmation.sh").resolve()
+    runner = (here / RUNNER_FILENAME).resolve()
     if jobspec.get("embedded_script_sha256") != records[runner]:
-        raise ConfirmError("Flux did not execute the frozen N8 runner")
+        raise ConfirmError(
+            f"Flux did not execute the frozen {TOPOLOGY_LABEL} runner"
+        )
     command = jobspec.get("command")
     try:
         script_index = command.index("{{tmpdir}}/script")
@@ -363,16 +392,16 @@ def _validate_monitor(
             or driver_err.stat().st_size != 0):
         raise ConfirmError(f"allocation {replicate} driver log changed")
     expected_lines = [
-        f"COLLECTIVE_N8_CONFIRM_CONFIG replicate={replicate} "
+        f"{LOG_PREFIX}_CONFIG replicate={replicate} "
         f"arms={' '.join(ORDERS[replicate])}",
     ]
     for arm in ORDERS[replicate]:
         expected_lines.extend([
-            f"COLLECTIVE_N8_CONFIRM_ARM_START replicate={replicate} arm={arm}",
-            f"COLLECTIVE_N8_CONFIRM_ARM_DONE replicate={replicate} arm={arm}",
+            f"{LOG_PREFIX}_ARM_START replicate={replicate} arm={arm}",
+            f"{LOG_PREFIX}_ARM_DONE replicate={replicate} arm={arm}",
         ])
     expected_lines.append(
-        f"COLLECTIVE_N8_CONFIRM_DONE replicate={replicate}"
+        f"{LOG_PREFIX}_DONE replicate={replicate}"
     )
     if driver.read_text(encoding="utf-8").splitlines() != expected_lines:
         raise ConfirmError(f"allocation {replicate} arm order changed")
@@ -399,7 +428,7 @@ def _validate_monitor(
                 or err.stat().st_size != stderr.get("bytes")):
             raise ConfirmError(f"allocation {replicate}/{arm} log changed")
         reparsed = monitor_base.validate_output(
-            log, arm, list(SIZES), 8, 64, 8, 7, 2,
+            log, arm, list(SIZES), NODES, RANKS, PPN, RUNS, WARMUP,
         )
         if reparsed != benchmark or benchmark.get("total_errors") != 0:
             raise ConfirmError(
@@ -448,11 +477,8 @@ def analyze_monitors(
         raise ConfirmError("confirmation allocations used different artifacts")
     analysis = analyze_rows(rows)
     payload = {
-        "schema_version": "gicc-collective-n8-confirmation-v1",
-        "scope": (
-            "Three sequential independent N8 pdebug allocations with Latin-"
-            "rotated compiler/LTO policies; no model or source modification."
-        ),
+        "schema_version": RESULT_SCHEMA,
+        "scope": RESULT_SCOPE,
         "model_invoked": False,
         "application_source_modified": False,
         "provider_call_authorized": False,
@@ -488,7 +514,7 @@ def main() -> int:
         print(json.dumps(result["confirmation_gate"], sort_keys=True))
         return 0
     except (ConfirmError, OSError, KeyError, TypeError, ValueError) as exc:
-        print(f"compiler-collective-n8-confirm: ERROR: {exc}", file=sys.stderr)
+        print(f"{PROGRAM_NAME}: ERROR: {exc}", file=sys.stderr)
         return 2
 
 

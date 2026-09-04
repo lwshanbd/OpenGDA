@@ -48,6 +48,24 @@ SLOT_INTERVALS = {
     "message-bin-3": {"min": 8388609, "max": None},
 }
 SYSTEM_PROTOCOL = HERE / "HIERPIPE_N8_CONFIRMATION_TRANSITION.md"
+SCOUT_SCHEMA = "gicc-collective-hierpipe-n8-scout-v1"
+CAPACITY_GATE_KEY = "n8_capacity_gate"
+TOPOLOGY_LABEL = "N8"
+NODES = 8
+RANKS = 64
+RANKS_PER_NODE = 8
+SCOUT_FILE_ROLE = "passed_n8_scout"
+DECISION_ORIGIN = "preregistered_n8_scout_to_confirmation_selector"
+DERIVED_RATIONALE = (
+    "preregistered per-bin geometric-mean selector from the N8 scout"
+)
+UNIFORM_RATIONALE = (
+    "regenerated best uniform hierarchy-pipeline arm from the N8 scout"
+)
+PREPARER_PATH = Path(__file__).resolve()
+SUPPORT_PREPARER_FILES: tuple[tuple[Path, str], ...] = ()
+TRANSITION_SUPPORT_ROLES: set[str] = set()
+PROGRAM_NAME = "compiler-collective-n8-confirmation"
 
 
 class TransitionError(RuntimeError):
@@ -92,14 +110,15 @@ def geomean(values: list[float]) -> float:
 def validate_scout(value: Any) -> dict[str, Any]:
     if (not isinstance(value, dict)
             or value.get("schema_version")
-            != "gicc-collective-hierpipe-n8-scout-v1"
+            != SCOUT_SCHEMA
             or value.get("graph_id") != GRAPH_ID
             or value.get("bundle_id") != BUNDLE_ID
             or value.get("model_invoked") is not False
             or value.get("application_source_modified") is not False
-            or value.get("n8_capacity_gate", {}).get("passed") is not True):
+            or value.get(CAPACITY_GATE_KEY, {}).get("passed") is not True):
         raise TransitionError(
-            "N8 confirmation requires the passed compiler-only scout"
+            f"{TOPOLOGY_LABEL} confirmation requires the passed "
+            "compiler-only scout"
         )
     payload = dict(value)
     result_id = payload.pop("result_id", None)
@@ -248,7 +267,7 @@ def make_decision(graph_value: Any, algorithms: dict[str, str],
         )
     hint["llm_metadata"].update({
         "model_invoked": False,
-        "decision_origin": "preregistered_n8_scout_to_confirmation_selector",
+        "decision_origin": DECISION_ORIGIN,
     })
     return decision, hint
 
@@ -338,12 +357,11 @@ def build_outputs(graph_path: Path, scout_path: Path,
     heuristic_hint = materialize_heuristic_hint(graph, heuristic)
     selected, bin_records, best_uniform = derive_bin_algorithms(scout_value)
     derived_decision, derived_hint = make_decision(
-        graph, selected,
-        "preregistered per-bin geometric-mean selector from the N8 scout",
+        graph, selected, DERIVED_RATIONALE,
     )
     uniform_decision, uniform_hint = make_decision(
         graph, {slot_id: best_uniform for slot_id in SLOT_SIZES},
-        "regenerated best uniform hierarchy-pipeline arm from the N8 scout",
+        UNIFORM_RATIONALE,
     )
     heuristic_ids = selected_option_ids(heuristic)
     derived_ids = selected_option_ids(derived_decision)
@@ -419,9 +437,9 @@ def transition_payload(inputs: dict[str, Any], graph_path: Path,
         "confirmation_contract": {
             "enabled": inputs["incremental_policy"],
             "queue": "pdebug",
-            "nodes": 8,
-            "ranks": 64,
-            "ranks_per_node": 8,
+            "nodes": NODES,
+            "ranks": RANKS,
+            "ranks_per_node": RANKS_PER_NODE,
             "cpu_cores_per_rank": 8,
             "gpus_per_rank": 1,
             "independent_allocations": 3,
@@ -463,10 +481,14 @@ def transition_payload(inputs: dict[str, Any], graph_path: Path,
         },
         "files": [
             file_record(graph_path, "compiler_graph"),
-            file_record(scout_path, "passed_n8_scout"),
+            file_record(scout_path, SCOUT_FILE_ROLE),
             file_record(heuristic_path, "frozen_structural_heuristic"),
             file_record(SYSTEM_PROTOCOL, "preregistered_transition_protocol"),
-            file_record(Path(__file__), "transition_preparer"),
+            file_record(PREPARER_PATH, "transition_preparer"),
+            *[
+                file_record(path, role)
+                for path, role in SUPPORT_PREPARER_FILES
+            ],
             *[
                 file_record(path, role, output_dir)
                 for role, path in generated.items()
@@ -560,14 +582,14 @@ def main() -> int:
             )
             action = "verified"
         print(
-            f"compiler-collective-n8-confirmation: {action}; "
+            f"{PROGRAM_NAME}: {action}; "
             f"model_invoked=false; scheduler_job_submitted=false; "
             f"transition_id={transition['transition_id']}"
         )
         return 0
     except (TransitionError, plans.CollectivePlanError, OSError, KeyError,
             TypeError, ValueError) as exc:
-        print(f"compiler-collective-n8-confirmation: ERROR: {exc}", file=sys.stderr)
+        print(f"{PROGRAM_NAME}: ERROR: {exc}", file=sys.stderr)
         return 2
 
 
