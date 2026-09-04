@@ -54,6 +54,7 @@ struct LoweringHelpers {
     FunctionCallee memcpyFn;
     FunctionCallee enqFn;
     FunctionCallee enqBatchedFn;
+    FunctionCallee enqRepeatedFn;
 };
 
 LoweringHelpers makeHelpers(Module *M) {
@@ -94,6 +95,13 @@ LoweringHelpers makeHelpers(Module *M) {
             {H.ptrTy, H.i32Ty,
              H.ptrTy, H.ptrTy, H.ptrTy, H.ptrTy, H.ptrTy, H.ptrTy},
             false));
+    // Repeated descriptor: void(rt, n_ops, peer, dst_buf, dst_off,
+    // src_buf, src_off, size).
+    H.enqRepeatedFn = M->getOrInsertFunction(
+        "gicc_runtime_dwq_enqueue_repeated",
+        FunctionType::get(voidTy,
+            {H.ptrTy, H.i32Ty, H.i32Ty, H.i32Ty, H.i64Ty,
+             H.i32Ty, H.i64Ty, H.i64Ty}, false));
     return H;
 }
 
@@ -347,6 +355,7 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
 
     SmallVector<CallInst *, 32> placeholders;
     SmallVector<CallInst *, 32> batchedPlaceholders;
+    SmallVector<CallInst *, 32> repeatedPlaceholders;
     for (Function &F : M) {
         for (BasicBlock &BB : F) {
             for (Instruction &I : BB) {
@@ -361,11 +370,15 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
                 } else if (n == "gicc.runtime.put_no_db.batched.placeholder" ||
                            n == "gicc.runtime.get_no_db.batched.placeholder") {
                     batchedPlaceholders.push_back(CI);
+                } else if (
+                    n == "gicc.runtime.put_no_db.repeated.placeholder") {
+                    repeatedPlaceholders.push_back(CI);
                 }
             }
         }
     }
-    if (placeholders.empty() && batchedPlaceholders.empty())
+    if (placeholders.empty() && batchedPlaceholders.empty() &&
+        repeatedPlaceholders.empty())
         return PreservedAnalyses::all();
 
     // Per-site HK capability map (from kernel JSON) for cross-check.
@@ -528,12 +541,39 @@ PreservedAnalyses GICCDispatchLoweringPass::run(Module &M,
         }
     }
 
+    // A repeated placeholder is emitted only for the explicitly selected
+    // REUSE_LOOP_DESCRIPTOR transform. Keep this boundary narrower than the
+    // generic batched path: no implicit fallback or alternate dispatch may
+    // reinterpret its scalar-template ABI.
+    if (!repeatedPlaceholders.empty()) {
+        LoweringHelpers H = makeHelpers(&M);
+        for (CallInst *PH : repeatedPlaceholders) {
+            StringRef siteId = siteIdOf(PH);
+            SiteHint sh = hintFor(hints, siteId);
+            auto hkIt = hkMap.find(siteId.str());
+            const SiteHKInfo *hkInfo = (hkIt != hkMap.end())
+                ? &hkIt->second : nullptr;
+            if (hkInfo && !hkInfo->hk_capable)
+                report_fatal_error(
+                    Twine("gicc: repeated-descriptor site ") + siteId +
+                    " has hk_capable=false");
+            if (sh.dispatch != DispatchKind::DwqTrigger ||
+                sh.transform !=
+                    CommunicationTransform::ReuseLoopDescriptor)
+                report_fatal_error(
+                    Twine("gicc: repeated-descriptor site ") + siteId +
+                    " requires DWQ_TRIGGER plus REUSE_LOOP_DESCRIPTOR");
+            PH->setCalledFunction(H.enqRepeatedFn);
+        }
+    }
+
     // Drop the now-unused placeholder declarations so the linker doesn't
     // need definitions.
     for (StringRef n : {"gicc.runtime.put_no_db.placeholder",
                         "gicc.runtime.get_no_db.placeholder",
                         "gicc.runtime.put_no_db.batched.placeholder",
-                        "gicc.runtime.get_no_db.batched.placeholder"}) {
+                        "gicc.runtime.get_no_db.batched.placeholder",
+                        "gicc.runtime.put_no_db.repeated.placeholder"}) {
         if (Function *F = M.getFunction(n))
             if (F->use_empty()) F->eraseFromParent();
     }

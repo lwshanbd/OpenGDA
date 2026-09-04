@@ -47,6 +47,7 @@ define void @main(ptr %rt, i64 %dynamic.grid.xy) {
 ; JSON-DAG: "iv_step": 1
 ; JSON-DAG: "bound_known": true
 ; JSON-DAG: "bound_param_idx": 3
+; JSON-DAG: "bound_param_type": "i32"
 ; JSON-DAG: "compute_before_flops": 7
 ; Dynamic grid x/y remain unknown rather than guessed; the constant block is
 ; still recovered independently.

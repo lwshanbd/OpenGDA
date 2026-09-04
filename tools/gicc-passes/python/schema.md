@@ -401,7 +401,9 @@ Schema v1 → v2 changes:
 - `compute_before_flops` is the DominatorTree-derived count; was hardcoded 0.
   `null` means the device pass ran without DT available.
 - New optional `loop` sub-object present iff `in_loop=true`, exposing the
-  canonical loop descriptor (`iv_start`, `iv_step`, `bound_param_idx`).
+  canonical loop descriptor (`iv_start`, `iv_step`, `bound_param_idx`). Newer
+  schema-v6 emitters also attach `bound_param_type` for dynamic bounds, so a
+  structural bridge can prove the exact host trace ABI without source access.
 - `peer_locality` still null — requires a runtime topology side-band that
   is not yet wired up (filled by a future v2.x decider hook).
 
@@ -511,6 +513,17 @@ stores. The proof therefore rejects `TRIGGER_GROUP_EARLY` if moving the shared
 flush would cross *any* instruction that may write memory. The final device
 lowering repeats dominance, post-dominance, group-completeness, operand
 dominance, and intervening-write checks before moving the MMIO trigger.
+
+`REUSE_LOOP_DESCRIPTOR` is a default-off compiler-owned transform for a
+modeled PUT loop whose full descriptor is recursively loop invariant. It
+evaluates one scalar descriptor and calls
+`gicc_runtime_dwq_enqueue_repeated(rt, n, ...)`; the helper still queues
+exactly `n` ordered network operations and retains the original completion
+point. The graph may expose it only when the compiler emitted
+`descriptor_reusable=true`, the zero-start/unit-step bound is a positive
+signed-i32 constant or an i32 formal, no per-iteration guard exists, and the
+platform profile enables `compiler_transforms.reused_loop_descriptor` after
+runtime confirmation. The final trace pass repeats these checks.
 
 `PRODUCER_FRONTIER_TWO_PHASE` is a separate compiler-owned transform for a
 completion group whose `producer_frontier.overlap_partition.exact` proof is
@@ -686,8 +699,10 @@ enum of the graph's opaque IDs, and additional fields are forbidden.
 `gicc_comm_plan_bridge.py` exposes the compiler's existing communication-plan
 opportunities without exposing their source identities. Each opportunity can
 contain only compiler-generated, compiler-proved candidates such as device
-proxy, trigger descriptor batch, late loop coalescing, and early
-coalescing/trigger placement. The private
+proxy, trigger descriptor batch, repeated invariant-descriptor loops, late
+loop coalescing, and early coalescing/trigger placement. Repeated-descriptor
+candidates are profile-gated and therefore remain absent from existing
+production prompts until their runtime gate passes. The private
 `gicc-communication-opportunity-graph-v1` retains site IDs and materializer
 bindings for strict validation and lowering; those fields are never copied to
 the model view.

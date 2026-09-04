@@ -7,9 +7,11 @@ compiler dossier.  ``accept`` revalidates the graph and translates the
 selection into a narrow ``gicc-hint-v1`` request; the LTO pass independently
 re-proves the transformation before materializing it.
 
-The v1 structural opportunity is deliberately conservative: a constant-trip
+The structural opportunities are deliberately conservative: a constant-trip
 ``put_no_db`` loop whose source and destination adjacency was proved by the
-compiler may be represented by one larger PUT instead of N descriptors.
+compiler may be represented by one larger PUT, while a runtime-bounded loop
+whose complete descriptor is invariant may reuse one scalar descriptor while
+still queueing exactly N PUTs.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ MODEL_VIEW_KINDS = ("relational", "descriptors", "opaque")
 _CANDIDATE_KINDS = (
     "proxy_device",
     "trigger_descriptor_batch",
+    "trigger_reused_descriptor_loop",
     "trigger_coalesced_loop",
     "trigger_coalesced_early",
 )
@@ -41,6 +44,9 @@ _CANDIDATE_KINDS = (
 _MATERIALIZER_FOR_KIND = {
     "proxy_device": {"dispatch": "CPU_PROXY_ENQUEUE", "transform": "NONE"},
     "trigger_descriptor_batch": {"dispatch": "DWQ_TRIGGER", "transform": "NONE"},
+    "trigger_reused_descriptor_loop": {
+        "dispatch": "DWQ_TRIGGER", "transform": "REUSE_LOOP_DESCRIPTOR"
+    },
     "trigger_coalesced_loop": {
         "dispatch": "DWQ_TRIGGER", "transform": "COALESCE_LOOP"
     },
@@ -110,6 +116,64 @@ def _coalesce_proof(site: dict[str, Any]) -> list[str] | None:
     ]
 
 
+def _reused_descriptor_proof(site: dict[str, Any]) -> list[str] | None:
+    """Prove the narrow scalar-template form from compiler-emitted facts."""
+    loop = site.get("loop")
+    if (
+        site.get("op_kind") != "put_no_db"
+        or site.get("hk_capable") is not True
+        or site.get("descriptor_reusable") is not True
+        or site.get("in_loop") is not True
+        or not isinstance(loop, dict)
+        or loop.get("bound_known") is not True
+        or loop.get("iv_start") != 0
+        or loop.get("iv_step") != 1
+        or site.get("guard_kind") == "field_not_null"
+        or "trigger" not in site.get("legal_actions", [])
+    ):
+        return None
+    bound_const = loop.get("bound_const")
+    bound_param = loop.get("bound_param_idx")
+    if bound_const is not None:
+        if (
+            not _positive_int(bound_const)
+            or bound_const > (1 << 31) - 1
+        ):
+            return None
+        bound_proof = "positive constant loop bound fits signed i32"
+    else:
+        if (
+            not _positive_int(bound_param)
+            or loop.get("bound_param_type") != "i32"
+        ):
+            return None
+        bound_proof = "runtime loop bound is an i32 kernel formal"
+    return [
+        "put_no_db operation",
+        "host-knowable descriptor",
+        "modeled non-degraded natural loop",
+        "iv_start equals zero and iv_step equals one",
+        bound_proof,
+        "all six descriptor expressions are recursively loop invariant",
+        "no per-iteration guard",
+        "trigger lowering is legal",
+        "network operation count and order are preserved",
+    ]
+
+
+def _operation_count(site: dict[str, Any]) -> Any:
+    trips = site.get("trip_count")
+    if _positive_int(trips):
+        return trips
+    loop = site.get("loop")
+    if isinstance(loop, dict) and _positive_int(loop.get("bound_param_idx")):
+        return {
+            "kind": "runtime_loop_bound",
+            "kernel_param_index": loop["bound_param_idx"],
+        }
+    return None
+
+
 def _candidate(
     site: dict[str, Any], kind: str, dispatch: str, transform: str,
     summary: str, effects: dict[str, Any], proof: list[str],
@@ -145,19 +209,27 @@ def make_opportunity_graph(dossier_value: Any) -> dict[str, Any]:
         isinstance(transform_profile, dict)
         and transform_profile.get("early_trigger") is True
     )
+    reused_descriptor_enabled = (
+        isinstance(transform_profile, dict)
+        and transform_profile.get("reused_loop_descriptor") is True
+    )
     opportunities: list[dict[str, Any]] = []
     fixed_sites: list[dict[str, Any]] = []
     for site in dossier["sites"]:
-        proof = _coalesce_proof(site)
-        if proof is None:
+        coalesce_proof = _coalesce_proof(site)
+        reuse_proof = (
+            _reused_descriptor_proof(site)
+            if reused_descriptor_enabled else None
+        )
+        if coalesce_proof is None and reuse_proof is None:
             fixed_sites.append({
                 "site_id": site["site_id"],
                 "materializer": _fixed_materializer(site),
                 "reason": "not part of a compiler-proved structural opportunity",
             })
             continue
-        trips = site["trip_count"]
-        size = site["size_bytes"]
+        trips = _operation_count(site)
+        size = site.get("size_bytes")
         candidates: list[dict[str, Any]] = []
         if "proxy" in site["legal_actions"]:
             candidates.append(_candidate(
@@ -169,17 +241,38 @@ def make_opportunity_graph(dossier_value: Any) -> dict[str, Any]:
                 {"network_operations": trips, "host_descriptors": 0},
                 ["proxy is a compiler-advertised legal action"],
             ))
-        candidates.extend([
-            _candidate(
+        candidates.append(_candidate(
+            site,
+            "trigger_descriptor_batch",
+            "DWQ_TRIGGER",
+            "NONE",
+            "Stage the loop as N descriptors and release them with one trigger.",
+            {"network_operations": trips, "host_descriptors": trips},
+            ["trigger is legal", "modeled loop is host-reconstructable"],
+        ))
+        if reuse_proof is not None:
+            candidates.append(_candidate(
                 site,
-                "trigger_descriptor_batch",
+                "trigger_reused_descriptor_loop",
                 "DWQ_TRIGGER",
-                "NONE",
-                "Stage the loop as N descriptors and release them with one trigger.",
-                {"network_operations": trips, "host_descriptors": trips},
-                ["trigger is legal", "constant loop is host-reconstructable"],
-            ),
-            _candidate(
+                "REUSE_LOOP_DESCRIPTOR",
+                (
+                    "Construct one loop-invariant descriptor template and "
+                    "queue it N times without caller-side descriptor arrays."
+                ),
+                {
+                    "network_operations": trips,
+                    "host_descriptor_templates": 1,
+                    "host_descriptor_instances": trips,
+                    "caller_descriptor_arrays": 0,
+                    "trigger_placement": "original_completion",
+                },
+                reuse_proof,
+            ))
+        if coalesce_proof is not None:
+            concrete_trips = site["trip_count"]
+            concrete_size = site["size_bytes"]
+            candidates.append(_candidate(
                 site,
                 "trigger_coalesced_loop",
                 "DWQ_TRIGGER",
@@ -188,14 +281,14 @@ def make_opportunity_graph(dossier_value: Any) -> dict[str, Any]:
                 {
                     "network_operations": 1,
                     "host_descriptors": 1,
-                    "coalesced_bytes": size * trips,
+                    "coalesced_bytes": concrete_size * concrete_trips,
                 },
-                proof,
-            ),
-        ])
+                coalesce_proof,
+            ))
         flops = site.get("flops_to_first_use")
         if (
-            early_trigger_enabled
+            coalesce_proof is not None
+            and early_trigger_enabled
             and site.get("distance_exact") is True
             and isinstance(flops, int)
             and not isinstance(flops, bool)
@@ -214,11 +307,11 @@ def make_opportunity_graph(dossier_value: Any) -> dict[str, Any]:
                 {
                     "network_operations": 1,
                     "host_descriptors": 1,
-                    "coalesced_bytes": size * trips,
+                    "coalesced_bytes": concrete_size * concrete_trips,
                     "trigger_placement": "loop_exit",
                     "overlap_flops": flops,
                 },
-                proof + [
+                coalesce_proof + [
                     "compiler measured an exact operation-to-completion distance",
                     "device pass must reprove one communication loop and one later flush",
                 ],
@@ -231,11 +324,12 @@ def make_opportunity_graph(dossier_value: Any) -> dict[str, Any]:
                 "kernel": site.get("kernel"),
                 "size_bytes": size,
                 "trip_count": trips,
+                "loop": site.get("loop"),
                 "batch_size": site.get("batch_size"),
                 "grid_blocks": site.get("grid_blocks"),
                 "descriptor_reusable": site.get("descriptor_reusable"),
                 "buffer_reusable": site.get("buffer_reusable"),
-                "coalescable": True,
+                "coalescable": site.get("coalescable"),
                 "guard_kind": site.get("guard_kind"),
                 "flops_to_first_use": site.get("flops_to_first_use"),
             },

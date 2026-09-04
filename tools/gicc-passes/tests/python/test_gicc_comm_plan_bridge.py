@@ -74,6 +74,29 @@ def fixed_feature(site_id, legal_paths):
     return feature
 
 
+def reusable_feature(site_id="unit.cpp:50:reuse::0"):
+    feature = coalescable_feature(site_id)
+    feature.update({
+        "kernel": "reuse",
+        "size_kind": "param",
+        "size_bytes": None,
+        "size_log2": None,
+        "loop": {
+            "bound_known": True,
+            "bound_param_idx": 4,
+            "bound_param_type": "i32",
+            "iv_start": 0,
+            "iv_step": 1,
+        },
+        "trip_count": None,
+        "descriptor_reusable": True,
+        "coalescable": False,
+        "batch_size": 1,
+        "distance_exact": False,
+    })
+    return feature
+
+
 class CommunicationPlanBridgeTests(unittest.TestCase):
     def setUp(self):
         self.dossier = bridge.make_dossier(
@@ -282,6 +305,69 @@ class CommunicationPlanBridgeTests(unittest.TestCase):
             "trigger_coalesced_early",
             {candidate["kind"] for candidate in graph["opportunities"][0]["candidates"]},
         )
+
+    def test_reused_descriptor_is_invisible_until_profile_enabled(self):
+        dossier = bridge.make_dossier([reusable_feature()], PLATFORM)
+        with self.assertRaisesRegex(
+            plans.PlanBridgeError, "no compiler-proved structural opportunity"
+        ):
+            plans.make_opportunity_graph(dossier)
+
+        platform = copy.deepcopy(PLATFORM)
+        platform["compiler_transforms"] = {
+            "reused_loop_descriptor": True,
+        }
+        graph = plans.make_opportunity_graph(
+            bridge.make_dossier([reusable_feature()], platform)
+        )
+        opportunity = graph["opportunities"][0]
+        self.assertEqual(
+            {
+                "proxy_device",
+                "trigger_descriptor_batch",
+                "trigger_reused_descriptor_loop",
+            },
+            {candidate["kind"] for candidate in opportunity["candidates"]},
+        )
+        reused = next(
+            candidate for candidate in opportunity["candidates"]
+            if candidate["kind"] == "trigger_reused_descriptor_loop"
+        )
+        self.assertEqual(
+            {"kind": "runtime_loop_bound", "kernel_param_index": 4},
+            reused["effects"]["network_operations"],
+        )
+        decision = {
+            "schema_version": plans.DECISION_SCHEMA,
+            "graph_id": graph["graph_id"],
+            "selections": {
+                opportunity["opportunity_id"]: {
+                    "candidate_id": reused["candidate_id"],
+                    "confidence": 0.8,
+                    "rationale": "reuse the compiler-proved invariant descriptor",
+                }
+            },
+        }
+        hint, accepted, errors = plans.plan_to_hint(graph, decision)
+        self.assertTrue(accepted, errors)
+        self.assertEqual(
+            "REUSE_LOOP_DESCRIPTOR",
+            hint["sites"]["unit.cpp:50:reuse::0"]["transform"],
+        )
+
+    def test_reused_descriptor_rejects_unproved_bound_type(self):
+        platform = copy.deepcopy(PLATFORM)
+        platform["compiler_transforms"] = {
+            "reused_loop_descriptor": True,
+        }
+        feature = reusable_feature()
+        feature["loop"]["bound_param_type"] = "i64"
+        with self.assertRaisesRegex(
+            plans.PlanBridgeError, "no compiler-proved structural opportunity"
+        ):
+            plans.make_opportunity_graph(
+                bridge.make_dossier([feature], platform)
+            )
 
     def test_invented_candidate_falls_back_without_transform(self):
         decision = self.decision()

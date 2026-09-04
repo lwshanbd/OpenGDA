@@ -37,6 +37,8 @@ const char *dispatchName(DispatchKind d) {
 
 CommunicationTransform parseCommunicationTransform(llvm::StringRef s) {
     if (s == "NONE")                return CommunicationTransform::None;
+    if (s == "REUSE_LOOP_DESCRIPTOR")
+        return CommunicationTransform::ReuseLoopDescriptor;
     if (s == "COALESCE_LOOP")       return CommunicationTransform::CoalesceLoop;
     if (s == "COALESCE_LOOP_EARLY") return CommunicationTransform::CoalesceLoopEarly;
     if (s == "TRIGGER_GROUP_EARLY") return CommunicationTransform::TriggerGroupEarly;
@@ -50,6 +52,8 @@ CommunicationTransform parseCommunicationTransform(llvm::StringRef s) {
 const char *communicationTransformName(CommunicationTransform t) {
     switch (t) {
         case CommunicationTransform::None:         return "NONE";
+        case CommunicationTransform::ReuseLoopDescriptor:
+            return "REUSE_LOOP_DESCRIPTOR";
         case CommunicationTransform::CoalesceLoop: return "COALESCE_LOOP";
         case CommunicationTransform::CoalesceLoopEarly:
             return "COALESCE_LOOP_EARLY";

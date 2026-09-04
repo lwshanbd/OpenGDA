@@ -1328,7 +1328,7 @@ int kernelFanOut(const KernelTemplate &t) {
 // Structured loop descriptor for the ML decider. Only emitted when the
 // site is actually inside a loop. The decider can combine this with
 // runtime-side param values to reconstruct a trip-count estimate.
-json::Value loopDescriptor(const OpLoopInfo &L) {
+json::Value loopDescriptor(const OpLoopInfo &L, StringRef boundParamType) {
     json::Object o;
     o["iv_start"]    = L.ivStart;
     o["iv_step"]     = L.ivStep;
@@ -1336,8 +1336,11 @@ json::Value loopDescriptor(const OpLoopInfo &L) {
     if (L.ivBoundKnown) {
         if (L.ivBoundIsConst)
             o["bound_const"] = L.ivBoundConst;
-        else
+        else {
             o["bound_param_idx"] = static_cast<int64_t>(L.ivParamIdx);
+            if (!boundParamType.empty())
+                o["bound_param_type"] = boundParamType;
+        }
     }
     if (L.degraded) o["degraded"] = true;
     return json::Value(std::move(o));
@@ -1622,6 +1625,7 @@ json::Value producerFrontierRecord(
 json::Value toRecord(const std::string &siteId,
                      const std::string &simpleKernel,
                      const OpTemplate  &op,
+                     const std::string &boundParamType,
                      int                fanOut,
                      const ProducerOverlapPartitionFacts &partition,
                      std::vector<LaunchContextFacts> contexts) {
@@ -1682,7 +1686,8 @@ json::Value toRecord(const std::string &siteId,
     r["peer_locality"] = nullptr;
 
     r["in_loop"]       = op.loop.inLoop;
-    if (op.loop.inLoop) r["loop"] = loopDescriptor(op.loop);
+    if (op.loop.inLoop)
+        r["loop"] = loopDescriptor(op.loop, boundParamType);
 
     r["guard_density"] = guardDensity(op.guard);
     // A scalar density was enough for the original per-site cost model, but
@@ -1873,6 +1878,7 @@ PreservedAnalyses GICCFeatureExtractionPass::run(Module &M,
     struct PendingRecord {
         std::string kernel;
         OpTemplate op;
+        std::string boundParamType;
         int fanOut = 0;
         bool initialized = false;
         ProducerOverlapPartitionFacts overlapPartition;
@@ -1888,6 +1894,11 @@ PreservedAnalyses GICCFeatureExtractionPass::run(Module &M,
             if (!record.initialized) {
                 record.kernel = s.kernelTemplate.simpleName;
                 record.op = op;
+                if (op.loop.inLoop && op.loop.ivBoundKnown &&
+                    !op.loop.ivBoundIsConst &&
+                    op.loop.ivParamIdx < s.kernelTemplate.params.size())
+                    record.boundParamType =
+                        s.kernelTemplate.params[op.loop.ivParamIdx].typeStr;
                 record.fanOut = fanOut;
                 record.overlapPartition =
                     producerOverlapPartition(s.kernelTemplate, op);
@@ -1907,6 +1918,7 @@ PreservedAnalyses GICCFeatureExtractionPass::run(Module &M,
     json::Array records;
     for (auto &[siteId, record] : pending)
         records.push_back(toRecord(siteId, record.kernel, record.op,
+                                   record.boundParamType,
                                    record.fanOut,
                                    record.overlapPartition,
                                    std::move(record.contexts)));

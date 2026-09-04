@@ -266,6 +266,29 @@ FunctionCallee getBatchedPlaceholder(Module &M, GICCOpKind kind) {
     return {};
 }
 
+// Repeated-descriptor form:
+//   (ptr rt, i32 n_ops, i32 peer, i32 dst_buf, i64 dst_off,
+//    i32 src_buf, i64 src_off, i64 size)
+//
+// Unlike the batched-array placeholder, this carries one scalar descriptor
+// which dispatch lowering queues exactly n_ops times.
+FunctionCallee getRepeatedPlaceholder(Module &M, GICCOpKind kind) {
+    LLVMContext &Ctx = M.getContext();
+    Type *ptrTy = PointerType::getUnqual(Ctx);
+    Type *i32Ty = Type::getInt32Ty(Ctx);
+    Type *i64Ty = Type::getInt64Ty(Ctx);
+    if (kind == GICCOpKind::PutNoDb) {
+        auto *FT = FunctionType::get(
+            Type::getVoidTy(Ctx),
+            {ptrTy, i32Ty, i32Ty, i32Ty, i64Ty,
+             i32Ty, i64Ty, i64Ty},
+            /*isVarArg=*/false);
+        return M.getOrInsertFunction(
+            "gicc.runtime.put_no_db.repeated.placeholder", FT);
+    }
+    return {};
+}
+
 GICCOpKind opKindFromStr(StringRef s) {
     if (s == "put_no_db") return GICCOpKind::PutNoDb;
     if (s == "get_no_db") return GICCOpKind::GetNoDb;
@@ -547,6 +570,80 @@ void emitCoalescedLoop(Module &M, IRBuilder<> &B, Function *traceFn,
                     MDString::get(M.getContext(), transform)));
 }
 
+// Materialize a runtime-bounded loop whose complete PUT descriptor is
+// compiler-proved invariant. The helper still queues N network operations;
+// only the redundant host-side array construction and descriptor resolution
+// are removed.
+void emitReusedLoopDescriptor(Module &M, IRBuilder<> &B, Function *traceFn,
+                              const OpTemplate &op, GICCOpKind kind,
+                              const SiteHint &hint) {
+    const char *transform = communicationTransformName(hint.transform);
+    auto reject = [&](const Twine &reason) -> void {
+        report_fatal_error(
+            Twine("gicc: ") + transform + " rejected for site " + op.siteId +
+            ": " + reason);
+    };
+
+    if (hint.dispatch != DispatchKind::DwqTrigger)
+        reject(Twine("requires DWQ_TRIGGER, got ") +
+               dispatchName(hint.dispatch));
+    if (kind != GICCOpKind::PutNoDb || op.kind != "put_no_db")
+        reject("v1 supports put_no_db only");
+    if (!op.hk_capable)
+        reject("descriptor is not host-knowable");
+    if (!op.loop.inLoop || op.loop.degraded || !op.loop.ivBoundKnown)
+        reject("requires a compiler-modeled loop with a known bound");
+    if (op.loop.ivStart != 0 || op.loop.ivStep != 1)
+        reject("v1 requires iv_start=0 and iv_step=1");
+    if (!descriptorReusable(op))
+        reject("every descriptor expression must be loop invariant");
+    if (op.guard.kind == GuardSpec::Kind::FieldNotNull)
+        reject("per-iteration guards cannot reuse one descriptor");
+
+    LLVMContext &Ctx = M.getContext();
+    Type *i32Ty = Type::getInt32Ty(Ctx);
+    Type *i64Ty = Type::getInt64Ty(Ctx);
+    Value *count = nullptr;
+    if (op.loop.ivBoundIsConst) {
+        if (op.loop.ivBoundConst <= 0 ||
+            op.loop.ivBoundConst > std::numeric_limits<int32_t>::max())
+            reject("constant loop bound must fit positive signed i32");
+        count = ConstantInt::get(
+            i32Ty, static_cast<uint64_t>(op.loop.ivBoundConst));
+    } else {
+        const unsigned boundIdx = op.loop.ivParamIdx;
+        if (boundIdx == 0 || boundIdx >= traceFn->arg_size())
+            reject("loop-bound formal is missing from the host trace ABI");
+        Value *raw = traceFn->getArg(boundIdx);
+        if (!raw->getType()->isIntegerTy(32))
+            reject("dynamic loop bound must be an i32 kernel formal");
+        Value *positive = B.CreateICmpSGT(
+            raw, ConstantInt::get(i32Ty, 0), "repeat.bound.positive");
+        count = B.CreateSelect(
+            positive, raw, ConstantInt::get(i32Ty, 0), "repeat.count");
+    }
+
+    SmallVector<Value *, 8> args;
+    args.push_back(traceFn->getArg(0));
+    args.push_back(count);
+    for (size_t i = 0; i < putGetArgOrder().size(); ++i) {
+        const char *argName = putGetArgOrder()[i];
+        Type *expected = (i == 0 || i == 1 || i == 3) ? i32Ty : i64Ty;
+        auto it = op.args.find(argName);
+        if (it == op.args.end())
+            reject(Twine("descriptor argument is missing: ") + argName);
+        args.push_back(evalArgRef(
+            B, traceFn, it->second, expected, /*currentIv=*/nullptr));
+    }
+
+    auto *CI = B.CreateCall(getRepeatedPlaceholder(M, kind), args);
+    CI->setMetadata(
+        "gicc.site_id", MDNode::get(Ctx, MDString::get(Ctx, op.siteId)));
+    CI->setMetadata(
+        "gicc.communication_transform",
+        MDNode::get(Ctx, MDString::get(Ctx, transform)));
+}
+
 void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,
             const OpTemplate &op, const KernelTemplate &t,
             BasicBlock *contBB, const HintFile &hints) {
@@ -588,6 +685,11 @@ void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,
     B.SetInsertPoint(doBB);
 
     SiteHint hint = hintFor(hints, op.siteId);
+    if (hint.transform == CommunicationTransform::ReuseLoopDescriptor) {
+        emitReusedLoopDescriptor(M, B, traceFn, op, kind, hint);
+        B.CreateBr(contBB);
+        return;
+    }
     if (hint.transform == CommunicationTransform::CoalesceLoop ||
         hint.transform == CommunicationTransform::CoalesceLoopEarly) {
         emitCoalescedLoop(M, B, traceFn, op, kind, hint);

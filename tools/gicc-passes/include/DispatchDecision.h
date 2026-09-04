@@ -59,6 +59,10 @@ const char  *dispatchName(DispatchKind d);
 // materializes anything.
 enum class CommunicationTransform {
     None,
+    // A modeled PUT loop whose complete descriptor is loop invariant may
+    // stage that scalar descriptor once and queue it N times.  This preserves
+    // N network operations; unlike CoalesceLoop it does not merge transfers.
+    ReuseLoopDescriptor,
     CoalesceLoop,  // replace a proven contiguous constant-trip PUT loop by one PUT
     // As above, and move the compiler-owned device trigger from the later
     // completion point to the proven loop exit.  The device pass must reprove

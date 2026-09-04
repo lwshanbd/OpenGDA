@@ -155,6 +155,47 @@ void gicc_runtime_dwq_enqueue_batched(gicc::Runtime    *rt,
     }
 }
 
+void gicc_runtime_dwq_enqueue_repeated(gicc::Runtime *rt,
+                                        int            n_ops,
+                                        int            peer,
+                                        int            dst_buf,
+                                        std::size_t    dst_off,
+                                        int            src_buf,
+                                        std::size_t    src_off,
+                                        std::size_t    size) {
+    if (!rt || n_ops <= 0) return;
+
+    // The compiler has proved every descriptor field loop invariant. Resolve
+    // the invariant registration and remote address once, then preserve the
+    // original loop's exact number and order of deferred network operations.
+    auto &ob = rt->local_bufs_[src_buf];
+    auto &ri = rt->remote_info_cache_[
+        static_cast<std::size_t>(peer) *
+            static_cast<std::size_t>(rt->n_bufs_) +
+        static_cast<std::size_t>(dst_buf)];
+    const std::uint64_t remote_addr = rt->comm_->is_virt_addr_mode()
+        ? (ri.rma_addr + dst_off)
+        : (ri.rma_addr - ri.base_addr) + dst_off;
+
+    const auto count = static_cast<std::uint64_t>(n_ops);
+    rt->mono_total_ops_  += count;
+    rt->mono_mmio_ops_   += count;
+    rt->my_n_remote_ops_ += count;
+    const std::uint64_t batch_top = rt->mono_mmio_ops_;
+    for (int i = 0; i < n_ops; ++i) {
+        const std::uint64_t threshold =
+            batch_top - static_cast<std::uint64_t>(n_ops - 1 - i);
+        auto *dwq = rt->dwq_get_();
+        dwq->queue_rma_write(
+            rt->comm_->fabric->domain, rt->comm_->fabric->ep,
+            static_cast<char *>(ob.ptr) + src_off, ob.desc_, size,
+            rt->comm_->av_addrs[peer], remote_addr, ri.rma_key,
+            rt->comm_->fabric->trigger_cntr,
+            rt->shared_completion_cntr_, threshold);
+        rt->my_pending_.push_back(dwq);
+    }
+}
+
 volatile std::uint64_t *gicc_runtime_trigger_addr(gicc::Runtime *rt) {
     return rt ? rt->comm_->get_trigger_addr() : nullptr;
 }

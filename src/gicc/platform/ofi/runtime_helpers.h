@@ -56,6 +56,19 @@ void gicc_runtime_dwq_enqueue_batched(gicc::Runtime    *rt,
                                        const std::size_t *src_offs,
                                        const std::size_t *sizes);
 
+// Compiler-only descriptor-template reuse. Queues exactly n_ops RMA WRITE
+// descriptors, but every descriptor has the same compiler-proved
+// loop-invariant arguments. Registration/address resolution is performed
+// once and no caller-side descriptor arrays are required.
+void gicc_runtime_dwq_enqueue_repeated(gicc::Runtime *rt,
+                                        int            n_ops,
+                                        int            peer,
+                                        int            dst_buf,
+                                        std::size_t    dst_off,
+                                        int            src_buf,
+                                        std::size_t    src_off,
+                                        std::size_t    size);
+
 // Device-side helpers (called from device IR emitted by GICCDeviceLowering).
 volatile std::uint64_t *gicc_runtime_trigger_addr(gicc::Runtime *rt);
 std::uint64_t           gicc_runtime_trigger_val (gicc::Runtime *rt);
