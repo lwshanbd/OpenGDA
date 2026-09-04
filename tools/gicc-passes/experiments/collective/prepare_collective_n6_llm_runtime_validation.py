@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -256,6 +257,34 @@ def decision_and_hint(
     return decision, hint
 
 
+def runtime_orders(policies: list[dict[str, Any]]) -> dict[str, list[str]]:
+    names = [policy["name"] for policy in policies]
+    require(names, "runtime order requires at least one policy")
+    stride = math.ceil(len(names) / 3)
+    return {
+        str(replicate): names[offset:] + names[:offset]
+        for replicate in (1, 2, 3)
+        for offset in [((replicate - 1) * stride) % len(names)]
+    }
+
+
+def runtime_contract(policies: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "queue": "pdebug",
+        "nodes": 6,
+        "ranks": 48,
+        "ranks_per_node": 8,
+        "independent_allocations": 3,
+        "maximum_active_or_queued_jobs": 1,
+        "all_policies_run_sequentially_with_rotated_order": True,
+        "policy_order_by_allocation": runtime_orders(policies),
+        "timed_calls": 7,
+        "warmup_calls": 2,
+        "point_estimate_threshold": 1.03,
+        "paired_cluster_bootstrap_lower_95_threshold": 1.0,
+    }
+
+
 def plan_payload(
     *, graph: dict[str, Any], analysis: dict[str, Any],
     screen: dict[str, Any], policies: list[dict[str, Any]],
@@ -286,19 +315,7 @@ def plan_payload(
         },
         "unique_policy_count": len(policy_records),
         "policies": policy_records,
-        "runtime_contract": {
-            "queue": "pdebug",
-            "nodes": 6,
-            "ranks": 48,
-            "ranks_per_node": 8,
-            "independent_allocations": 3,
-            "maximum_active_or_queued_jobs": 1,
-            "all_policies_run_sequentially_with_rotated_order": True,
-            "timed_calls": 7,
-            "warmup_calls": 2,
-            "point_estimate_threshold": 1.03,
-            "paired_cluster_bootstrap_lower_95_threshold": 1.0,
-        },
+        "runtime_contract": runtime_contract(policies),
         "evidence": {
             role: evidence(path) for role, path in sorted(input_paths.items())
         },
@@ -437,6 +454,10 @@ def verify_contained(plan_dir: Path) -> tuple[
         and [item.get("name") for item in policies]
         == [f"policy{index:02d}" for index in range(1, len(policies) + 1)],
         "runtime plan policy cohort changed",
+    )
+    require(
+        plan.get("runtime_contract") == runtime_contract(policies),
+        "runtime validation execution contract changed",
     )
     for policy in policies:
         root = plan_dir / "policies" / policy["name"]

@@ -115,6 +115,14 @@ class PrepareCollectiveLlmRuntimeValidationTests(unittest.TestCase):
                 policy["policy_id"], hint["llm_metadata"]["policy_id"],
             )
 
+    def test_three_allocation_order_is_frozen_and_rotated(self):
+        policies = [{"name": f"policy{index:02d}"} for index in range(1, 6)]
+        self.assertEqual({
+            "1": ["policy01", "policy02", "policy03", "policy04", "policy05"],
+            "2": ["policy03", "policy04", "policy05", "policy01", "policy02"],
+            "3": ["policy05", "policy01", "policy02", "policy03", "policy04"],
+        }, runtime.runtime_orders(policies))
+
     def test_contained_plan_rejects_changed_private_hint(self):
         policies = runtime.representative_policies(
             self.graph, self.analysis, self.screen,
@@ -149,6 +157,18 @@ class PrepareCollectiveLlmRuntimeValidationTests(unittest.TestCase):
             plan, graph = runtime.verify_contained(root)
             self.assertEqual(self.graph["graph_id"], graph["graph_id"])
             self.assertEqual(len(policies), plan["unique_policy_count"])
+
+            changed = copy.deepcopy(plan)
+            changed["runtime_contract"]["queue"] = "pci"
+            changed_payload = dict(changed)
+            changed_payload.pop("plan_id")
+            changed["plan_id"] = bridge._fingerprint(changed_payload)
+            runtime.write_json_atomic(root / "plan.json", changed)
+            with self.assertRaisesRegex(
+                runtime.RuntimeValidationError, "execution contract changed"
+            ):
+                runtime.verify_contained(root)
+            runtime.write_json_atomic(root / "plan.json", plan)
 
             hint_path = root / "policies" / policies[0]["name"] / "hint.json"
             hint_path.write_text("{}\n")
