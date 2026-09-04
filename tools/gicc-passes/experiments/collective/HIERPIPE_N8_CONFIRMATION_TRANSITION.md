@@ -90,3 +90,30 @@ This command is documented, not launched by the transition preparer. The
 controller and analyzer reject any queue other than `pdebug`, any shared job
 ID across allocations, an altered arm order, changed artifacts, nonzero
 correctness errors, or a failure to satisfy both co-primary comparisons.
+
+## Post-archive full-action-space screen
+
+A passed confirmation permits the generic eligibility audit to advance; it
+does not by itself provide costs for every model-selectable policy. The N8
+scout and confirmation cover three hierarchy/pipeline policies, whereas the
+frozen graph contains eight algorithms per message bin. Once a separately
+authorized 60-response archive exists, run the full-catalog screen as a single
+additional allocation:
+
+```sh
+bash tools/gicc-passes/experiments/collective/continue_compiler_collective_llm_controls.sh \
+  build_ofi/compiler_collective_capacity_n8_hierpipe_v1_20260903 \
+  REQUEST_DIR \
+  ARCHIVE_DIR \
+  N8_CONFIRMATION.json \
+  OUTPUT_DIR
+```
+
+The controller has exactly one `flux batch -q pdebug` submission. All eight
+uniform catalog arms run sequentially in three rotated blocks on that same N8
+allocation. Its adapter verifies the completed archive and the original N8
+confirmation before submission, then re-hashes and reparses every runtime log
+before producing `policy-screen.json`. No provider call is made by this
+controller. The screen is an offline representative-selection artifact, not a
+runtime speedup result for a composed LLM policy; modal and labeled post-hoc
+representatives still require paired materialized runtime confirmation.

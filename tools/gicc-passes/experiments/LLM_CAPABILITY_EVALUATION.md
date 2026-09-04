@@ -168,6 +168,31 @@ and post-hoc best-of-20 rules and records the exact archive trials underlying
 each representative. Offline screen results remain explicitly distinct from
 paired runtime speedup evidence.
 
+For `collective_n8`,
+`collective/prepare_collective_llm_policy_screen.py` is the concrete family
+adapter. The topology scout and three-allocation confirmation measure only the
+three preregistered hierarchy/pipeline policies, while the model-facing graph
+retains eight legal algorithms in each of four compiler-owned message bins
+(4096 joint policies). The adapter therefore refuses to extrapolate those
+three curves to the larger action space. After an exact 60-trial archive is
+complete, `collective/continue_compiler_collective_llm_controls.sh` may submit
+one and only one additional N8 `pdebug` allocation. Within that allocation it
+runs all eight uniform compiler arms in three rotated sequential blocks. It
+does not call a provider and does not inspect or modify application source.
+
+The adapter replays the passed N8 confirmation, all archived responses, the
+frozen compiler bundle, all raw full-catalog logs, their correctness results,
+and the exact common allocation. It then assigns each graph-bound size policy
+the pooled latency of its selected uniform arm at each measured message size.
+Bin weights come only from the frozen compiler graph. The oracle is the
+minimum-geometric-mean arm independently within each frozen bin; the anchor is
+the compiler's atomic semantic fallback; and the deterministic comparator is
+the preregistered source-free topology/pipeline heuristic. Missing algorithms,
+sizes, blocks, raw logs, a non-`pdebug` job, an incomplete archive, or a failed
+confirmation all stop the screen. These composed costs select policies for
+later validation and are explicitly not runtime measurements of the composed
+LLM policies.
+
 This negative readiness result is important: it prevents rich prompts alone
 from being counted as LLM evidence. The existing N8 collective, Jacobi
 producer-fission, guarded early-trigger, and reused-descriptor campaigns must
