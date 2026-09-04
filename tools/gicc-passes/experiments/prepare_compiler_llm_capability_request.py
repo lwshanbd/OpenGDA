@@ -328,6 +328,9 @@ def build_request(inputs: dict[str, Any], bundle: Path) -> dict[str, Any]:
         "runtime_validation": inputs["protocol"]["runtime_validation"],
         "implementation": {
             "request_preparer": evidence(Path(__file__)),
+            "model_trial_runner": evidence(
+                HERE / "run_compiler_llm_capability_trials.py"
+            ),
             "unified_compiler_policy_bridge": evidence(
                 PASS_PYTHON / "gicc_compiler_policy_bridge.py"
             ),

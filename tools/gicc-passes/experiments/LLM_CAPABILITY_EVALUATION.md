@@ -144,8 +144,19 @@ copies only the source-free prompts, exact response schema, and system prompt
 into the provider-visible bundle; the compiler graph remains a private
 downstream bridge input. The generated request starts with zero permitted calls
 and still requires a separate authorization bound to its exact request ID and
-provider settings. With the current zero-eligible report, no request can be
-created.
+provider settings. It also content-addresses the common trial runner.
+
+`run_compiler_llm_capability_trials.py` supports all three graph families via
+the unified compiler-policy bridge. Before inspecting a provider executable it
+re-verifies eligibility, every request-bundle byte, and a separate authorization
+ID binding the exact prompts, schema, rotating order, provider version/model,
+fresh-session setting, and transport-only retry limits. Calls are strictly
+sequential. Every raw attempt, extracted response, private compiler hint, and
+normalized policy is hash-bound and re-verifiable. A syntactically or
+semantically invalid successful response is recorded once and receives the
+atomic compiler-anchor fallback; it is never retried to search for a better
+answer. With the current zero-eligible report, no request can be created and the
+runner cannot reach a provider call.
 
 This negative readiness result is important: it prevents rich prompts alone
 from being counted as LLM evidence. The existing N8 collective, Jacobi
