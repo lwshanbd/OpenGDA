@@ -498,6 +498,7 @@ class CompilerLlmReadinessTests(unittest.TestCase):
             payload = {
                 "schema_version": "unit-hidden-confirmation-v1",
                 "model_invoked": False,
+                "application_source_visible_to_model": False,
                 "application_source_modified": False,
                 "provider_call_authorized": False,
                 "transition": str(transition),
@@ -519,6 +520,7 @@ class CompilerLlmReadinessTests(unittest.TestCase):
             self.assertTrue(readiness.verified_hidden_candidate_confirmation(
                 path, schema=payload["schema_version"], analyzer=analyzer,
                 label="unit-hidden", require_runtime_guard=True,
+                require_source_invisible=True,
             ))
             analyzer.analyze_monitors.assert_called_once_with(
                 transition, monitors,
@@ -563,6 +565,33 @@ class CompilerLlmReadinessTests(unittest.TestCase):
         self.assertFalse(result["candidate_model_visible"])
         self.assertFalse(result["current_suite_graph_expanded"])
         self.assertFalse(result["provider_protocol_permitted"])
+
+        waiting_confirmation = readiness.classify_reused_loop_descriptor(
+            entry(), "promising", analysis, "waiting_scheduler_idle",
+        )
+        self.assertEqual(
+            "awaiting_confirmation", waiting_confirmation["status"],
+        )
+
+        confirmed = readiness.classify_reused_loop_descriptor(
+            entry(), "promising", analysis, "confirmed", True,
+        )
+        self.assertEqual("graph_expansion_required", confirmed["status"])
+        self.assertTrue(confirmed["runtime_confirmation_gate_passed"])
+        self.assertFalse(confirmed["candidate_model_visible"])
+        self.assertFalse(confirmed["current_suite_graph_expanded"])
+        self.assertFalse(confirmed["provider_protocol_permitted"])
+
+        negative = readiness.classify_reused_loop_descriptor(
+            entry(), "promising", analysis, "negative", False,
+        )
+        self.assertEqual("closed_negative", negative["status"])
+        with self.assertRaisesRegex(
+            readiness.ReadinessError, "confirmation state disagrees"
+        ):
+            readiness.classify_reused_loop_descriptor(
+                entry(), "promising", analysis, "negative", True,
+            )
 
     def test_contract_violations_fail_closed(self):
         placement = {

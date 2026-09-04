@@ -35,9 +35,9 @@ and fails closed at every transition. Its current output is:
 | `loop_lto` | `awaiting_predecessor` | run the frozen reused-descriptor scout after the serial campaign |
 
 The report has readiness ID
-`sha256:15a2117773f3ef5d248ae2bbdf933138c7290f18628dc495110495576e78768b`
+`sha256:fc336ca09aa8d43f9e33aaa11eb2f7a351738069003e9b9cebb459353cfcac89`
 and serialized SHA-256
-`019aa484dc9aa1a1cc419179094159f57e7db3d1b08dbf5b8619244a399d8dc3`.
+`c6c074f59f5c1331bd591642f8771c700320fb8c67c6c5bcfe312595bc6875a5`.
 It reports zero provider-protocol-permitted entries, zero authorized provider
 calls, zero measured LLM policies, and
 `paper_llm_performance_claim_ready=false`.
@@ -94,7 +94,8 @@ capacity but cannot support an LLM-selection benefit.
   That confirmation is now preregistered as three serial N2 `pdebug`
   allocations with an allocation-cluster bootstrap, fixed batch/size coverage,
   and compiler-IR/enqueue-count audits. Its preparer freezes evidence but has
-  no scheduler path.
+  no scheduler path; the separate controller waits for scheduler idleness and
+  submits/finishes exactly one `pdebug` allocation before considering the next.
 - A graph without runtime labels remains a capability-inventory entry, not a
   performance test.
 - Only a positive confirmatory headroom result may permit preparation of an
@@ -220,6 +221,8 @@ python3 tools/gicc-passes/experiments/audit_compiler_llm_readiness.py emit \
   --guarded-refreeze-manifest build_ofi/guarded_early_trigger_suite_refreeze_20260904/manifest.json \
   --reused-state build_ofi/reused_loop_descriptor_scout_aff76f9_20260904.state \
   --reused-analysis build_ofi/reused_loop_descriptor_scout_aff76f9_20260904/analysis.json \
+  --reused-confirmation-state build_ofi/reused_loop_descriptor_confirmation_aff76f9_20260904.state \
+  --reused-confirmation-analysis build_ofi/reused_loop_descriptor_confirmation_aff76f9_20260904/analysis.json \
   --out build_ofi/compiler_llm_readiness_20260904/report.json
 ```
 

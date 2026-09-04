@@ -72,3 +72,19 @@ python3 tools/gicc-passes/experiments/reused_loop_descriptor/prepare_reused_loop
 the original source hash, compiler facts, two distinct binaries, and final-IR
 mechanism attestation, and verifies every file record and the transition ID.
 The preparer itself has no scheduler path.
+
+Only after that transition exists and re-verifies, the separate controller is
+eligible to run:
+
+```sh
+bash tools/gicc-passes/experiments/reused_loop_descriptor/continue_reused_loop_descriptor_confirmation.sh \
+  build_ofi/reused_loop_descriptor_confirmation_transition_aff76f9_20260904.json \
+  build_ofi/reused_loop_descriptor_oracle_aff76f9_20260904 \
+  build_ofi/reused_loop_descriptor_confirmation_aff76f9_20260904
+```
+
+The controller refuses an existing output, waits for an idle account before
+each submission, submits exactly one N2 `pdebug` allocation, waits for and
+audits it, and only then considers the next allocation. It never cancels or
+modifies another job. The analyzer reparses every raw log and independently
+recomputes all 120 fixed-stratum speedups and the three-allocation gate.

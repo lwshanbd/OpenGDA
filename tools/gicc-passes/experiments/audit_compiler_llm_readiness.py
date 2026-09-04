@@ -25,10 +25,12 @@ sys.path.insert(0, str(PASS_PYTHON))
 sys.path.insert(0, str(HERE / "collective"))
 sys.path.insert(0, str(HERE / "producer_fission"))
 sys.path.insert(0, str(HERE / "guarded_early_trigger"))
+sys.path.insert(0, str(HERE / "reused_loop_descriptor"))
 
 import analyze_compiler_collective_n8_confirmation as n8_confirmation  # noqa: E402
 import analyze_guarded_early_trigger_confirmation as guarded_confirmation  # noqa: E402
 import analyze_producer_fission_confirmation as producer_confirmation  # noqa: E402
+import analyze_reused_loop_descriptor_confirmation as reused_confirmation  # noqa: E402
 import gicc_comm_plan_bridge as structural  # noqa: E402
 import gicc_compiler_decision_suite as decision_suite  # noqa: E402
 import gicc_llm_bridge as bridge  # noqa: E402
@@ -321,6 +323,7 @@ def _confirmation_pending_result(
 ) -> dict[str, Any]:
     status = {
         "missing": "confirmation_required",
+        "waiting_scheduler_idle": "awaiting_confirmation",
         "submitting": "awaiting_confirmation",
         "monitoring": "awaiting_confirmation",
         "analyzing": "awaiting_confirmation",
@@ -805,6 +808,7 @@ def classify_guarded_early_trigger(
 def verified_hidden_candidate_confirmation(
     path: Path, *, schema: str, analyzer: Any, label: str,
     require_runtime_guard: bool = False,
+    require_source_invisible: bool = False,
 ) -> bool:
     """Replay a model-invisible candidate's three confirmation allocations."""
     value = read_json(path)
@@ -826,6 +830,9 @@ def verified_hidden_candidate_confirmation(
     if (require_runtime_guard
             and value.get("runtime_guard_gate", {}).get("passed") is not True):
         raise ReadinessError(f"{label} runtime guard gate failed")
+    if (require_source_invisible
+            and value.get("application_source_visible_to_model") is not False):
+        raise ReadinessError(f"{label} source-visibility boundary changed")
     transition_path = Path(value.get("transition", ""))
     if (not transition_path.is_absolute() or not transition_path.is_file()
             or sha256_file(transition_path) != value.get("transition_sha256")):
@@ -847,10 +854,17 @@ def verified_hidden_candidate_confirmation(
     return gate["passed"]
 
 
-def classify_reused_loop_descriptor(entry: dict[str, Any], phase: str,
-                                    analysis: Any | None) -> dict[str, Any]:
+def classify_reused_loop_descriptor(
+    entry: dict[str, Any], phase: str, analysis: Any | None,
+    confirmation_phase: str = "missing",
+    confirmation_passed: bool | None = None,
+) -> dict[str, Any]:
     """Classify the model-invisible loop graph-expansion oracle."""
     if analysis is None:
+        if confirmation_passed is not None:
+            raise ReadinessError(
+                "reused-loop confirmation exists without a passed scout"
+            )
         status = {
             "waiting_predecessor": "awaiting_predecessor",
             "waiting_scheduler_idle": "awaiting_predecessor",
@@ -897,11 +911,27 @@ def classify_reused_loop_descriptor(entry: dict[str, Any], phase: str,
                 "reused-loop-descriptor controller state disagrees with analysis"
             )
         if gate["passed"]:
-            result = _base_entry(
-                entry, "confirmation_required",
-                "freeze_and_run_confirmatory_graph_expansion_oracle",
-            )
+            if confirmation_passed is None:
+                result = _confirmation_pending_result(
+                    entry, phase=confirmation_phase,
+                    label="reused_loop_descriptor",
+                )
+            else:
+                expected_confirmation_phase = (
+                    "confirmed" if confirmation_passed else "negative"
+                )
+                if confirmation_phase != expected_confirmation_phase:
+                    raise ReadinessError(
+                        "reused-loop confirmation state disagrees with analysis"
+                    )
+                result = _hidden_candidate_result(
+                    entry, confirmation_passed=confirmation_passed,
+                )
         else:
+            if confirmation_passed is not None:
+                raise ReadinessError(
+                    "reused-loop confirmation exists after a negative scout"
+                )
             result = _base_entry(
                 entry, "closed_negative",
                 "keep_reused_loop_descriptor_model_invisible",
@@ -981,6 +1011,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         read_json(args.reused_analysis)
         if args.reused_analysis.is_file() else None
     )
+    reused_confirmation_analysis = (
+        read_json(args.reused_confirmation_analysis)
+        if args.reused_confirmation_analysis.is_file() else None
+    )
     collective_confirmation_passed = (
         verified_collective_confirmation(
             args.collective_confirmation_analysis,
@@ -1004,6 +1038,15 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             require_runtime_guard=True,
         )
         if guarded_confirmation_analysis is not None else None
+    )
+    reused_confirmation_passed = (
+        verified_hidden_candidate_confirmation(
+            args.reused_confirmation_analysis,
+            schema="gicc-reused-loop-descriptor-confirmation-v1",
+            analyzer=reused_confirmation, label="reused-loop-descriptor",
+            require_source_invisible=True,
+        )
+        if reused_confirmation_analysis is not None else None
     )
     guarded_graph_phase = "missing"
     guarded_expansion_present = args.guarded_expansion_manifest.is_file()
@@ -1111,6 +1154,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "loop_lto": classify_reused_loop_descriptor(
             entries["loop_lto"], state_phase(args.reused_state),
             reused_analysis,
+            state_phase(args.reused_confirmation_state),
+            reused_confirmation_passed,
         ),
     }
     for label in CAPACITY_ONLY_LABELS:
@@ -1224,6 +1269,32 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "reused_state": evidence(args.reused_state),
             "reused_analysis": evidence(args.reused_analysis),
+            "reused_confirmation_state": evidence(
+                args.reused_confirmation_state
+            ),
+            "reused_confirmation_analysis": evidence(
+                args.reused_confirmation_analysis
+            ),
+            "reused_confirmation_analyzer": evidence(
+                HERE
+                / "reused_loop_descriptor/"
+                "analyze_reused_loop_descriptor_confirmation.py"
+            ),
+            "reused_confirmation_runner": evidence(
+                HERE
+                / "reused_loop_descriptor/"
+                "run_reused_loop_descriptor_confirmation.sh"
+            ),
+            "reused_confirmation_monitor": evidence(
+                HERE
+                / "reused_loop_descriptor/"
+                "monitor_reused_loop_descriptor_confirmation.py"
+            ),
+            "reused_confirmation_controller": evidence(
+                HERE
+                / "reused_loop_descriptor/"
+                "continue_reused_loop_descriptor_confirmation.sh"
+            ),
             "reused_confirmation_protocol": evidence(
                 HERE
                 / "reused_loop_descriptor/"
@@ -1344,6 +1415,21 @@ def add_inputs(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--reused-state", type=Path, required=True)
     parser.add_argument("--reused-analysis", type=Path, required=True)
+    parser.add_argument(
+        "--reused-confirmation-state", type=Path,
+        default=(
+            ROOT / "build_ofi/"
+            "reused_loop_descriptor_confirmation_aff76f9_20260904.state"
+        ),
+    )
+    parser.add_argument(
+        "--reused-confirmation-analysis", type=Path,
+        default=(
+            ROOT / "build_ofi/"
+            "reused_loop_descriptor_confirmation_aff76f9_20260904/"
+            "analysis.json"
+        ),
+    )
 
 
 def main() -> int:
@@ -1393,6 +1479,8 @@ def main() -> int:
         guarded_refreeze.RefreezeError,
         guarded_confirmation.ConfirmError,
         guarded_confirmation.common.MonitorError,
+        reused_confirmation.ConfirmError,
+        reused_confirmation.common.MonitorError,
         OSError, KeyError, TypeError, ValueError,
     ) as exc:
         print(f"compiler-llm-readiness: ERROR: {exc}", file=sys.stderr)
