@@ -63,3 +63,22 @@ The preparer rehashes the complete scout artifact set, regenerates every
 reported speedup from baseline/fission seconds, verifies the dormant candidate
 identity and source-free coverage graph, and rejects missing, failed, or
 tampered evidence. It emits a plan only and never submits confirmation work.
+
+The confirmation implementation is also frozen before the scout result. After
+the transition exists, and only when it verifies as
+`confirmation_plan_ready`, the serial controller can be started with:
+
+```sh
+bash tools/gicc-passes/experiments/producer_fission/continue_producer_fission_confirmation.sh \
+  build_ofi/producer_fission_confirmation_transition_20260904.json \
+  build_ofi/producer_fission_oracle_90b9123 \
+  build_ofi/producer_fission_confirmation_20260904
+```
+
+The controller reuses the exact scout-bound baseline and compiler-fission
+binaries. It submits one `pdebug` allocation, waits for a clean audited result,
+and only then submits the next. Each allocation contains an `AB` block and a
+`BA` block over both sizes. The analyzer rejects shared job IDs, altered
+artifacts or execution order, queue/resource drift, and any iteration-count or
+final-norm mismatch. This command is documented here but is not launched by
+the preparer or by the pending scout controller.

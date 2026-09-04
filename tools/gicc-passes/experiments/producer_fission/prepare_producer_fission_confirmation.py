@@ -290,6 +290,58 @@ def file_record(path: Path, role: str) -> dict[str, Any]:
     }
 
 
+def verify_contained_report(report_path: Path) -> dict[str, Any]:
+    value = read_json(report_path)
+    if (not isinstance(value, dict)
+            or value.get("schema_version") != TRANSITION_SCHEMA):
+        raise TransitionError("unexpected producer-fission transition schema")
+    payload = dict(value)
+    transition_id = payload.pop("transition_id", None)
+    if transition_id != bridge._fingerprint(payload):
+        raise TransitionError("producer-fission transition ID changed")
+    records = value.get("files")
+    if not isinstance(records, list):
+        raise TransitionError("producer-fission transition lacks file records")
+    paths = {}
+    for record in records:
+        if (not isinstance(record, dict)
+                or not isinstance(record.get("role"), str)
+                or not isinstance(record.get("path"), str)
+                or not isinstance(record.get("sha256"), str)
+                or isinstance(record.get("bytes"), bool)
+                or not isinstance(record.get("bytes"), int)):
+            raise TransitionError("producer-fission transition file is invalid")
+        role = record["role"]
+        if role in paths:
+            raise TransitionError(f"duplicate transition file role: {role}")
+        raw = Path(record["path"])
+        path = raw.resolve() if raw.is_absolute() else (ROOT / raw).resolve()
+        if (not path.is_file() or sha256_file(path) != record["sha256"]
+                or path.stat().st_size != record["bytes"]):
+            raise TransitionError(f"producer-fission transition file changed: {path}")
+        paths[role] = path
+    expected_roles = {
+        "passed_scout_monitor", "passed_scout_analysis",
+        "source_free_schedule_coverage", "frozen_baseline_binary",
+        "frozen_fission_binary", "frozen_build_provenance",
+        "preregistered_transition_protocol", "transition_preparer",
+    }
+    if set(paths) != expected_roles:
+        raise TransitionError("producer-fission transition file roles changed")
+    binary_dir = paths["frozen_baseline_binary"].parent.parent
+    if paths["frozen_fission_binary"].parent.parent != binary_dir:
+        raise TransitionError("producer-fission binaries use different roots")
+    regenerated = build_transition(
+        paths["passed_scout_monitor"], paths["passed_scout_analysis"],
+        paths["source_free_schedule_coverage"], binary_dir,
+    )
+    if regenerated != value:
+        raise TransitionError(
+            "producer-fission confirmation transition does not regenerate"
+        )
+    return value
+
+
 def build_transition(monitor_path: Path, analysis_path: Path,
                      coverage_path: Path, binary_dir: Path) -> dict[str, Any]:
     monitor = read_json(monitor_path)
@@ -425,18 +477,24 @@ def main() -> int:
     verify_parser = subparsers.add_parser("verify")
     add_inputs(verify_parser)
     verify_parser.add_argument("--report", type=Path, required=True)
+    contained_parser = subparsers.add_parser("verify-contained")
+    contained_parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
     try:
-        transition = build_transition(
-            args.monitor, args.analysis, args.coverage_report,
-            args.binary_dir,
-        )
+        if args.command == "verify-contained":
+            transition = verify_contained_report(args.report)
+            action = "verified-contained"
+        else:
+            transition = build_transition(
+                args.monitor, args.analysis, args.coverage_report,
+                args.binary_dir,
+            )
         if args.command == "prepare":
             if args.out.exists():
                 raise TransitionError(f"refusing to overwrite {args.out}")
             write_json_atomic(args.out, transition)
             action = "prepared"
-        else:
+        elif args.command == "verify":
             if read_json(args.report) != transition:
                 raise TransitionError(
                     "producer-fission confirmation transition changed"
