@@ -216,6 +216,18 @@ def load_case(label: str, features_path: Path) -> tuple[dict[str, Any], dict[str
         frontier.get("overlap_partition", {}).get("exact") is True
         for frontier in frontiers
     )
+    atomic_domains_known = bool(frontiers) and all(
+        frontier.get("atomic_domains_known") is True
+        for frontier in frontiers
+    )
+    buffer_identity_guardable = bool(frontiers) and all(
+        frontier.get("buffer_identity_guardable") is True
+        for frontier in frontiers
+    )
+    write_footprint_known = bool(frontiers) and all(
+        frontier.get("write_footprint_known") is True
+        for frontier in frontiers
+    )
     max_compute = max(
         int(row.get("flops_to_first_use") or 0) for row in transfers
     )
@@ -239,8 +251,11 @@ def load_case(label: str, features_path: Path) -> tuple[dict[str, Any], dict[str
         schedule_class = "intra_kernel_exact_partition"
     elif loop_sites:
         schedule_class = "loop_carried_communication"
-    elif atomic and not ordinary:
+    elif (atomic and not ordinary and atomic_domains_known
+          and buffer_identity_guardable):
         schedule_class = "atomic_producer_no_store_remainder"
+    elif atomic and not ordinary:
+        schedule_class = "unresolved_atomic_alias_frontier"
     elif unknown:
         schedule_class = "unknown_side_effect_frontier"
     elif all(kind != "always" for kind in guard_kinds) and max_compute == 0:
@@ -255,8 +270,13 @@ def load_case(label: str, features_path: Path) -> tuple[dict[str, Any], dict[str
         missing_proof_families.append("guarded_completion_region")
     if max_compute == 0 and not frontiers:
         missing_proof_families.append("cross_launch_producer_pipeline")
-    if atomic and not ordinary:
+    if (atomic and not ordinary and atomic_domains_known
+            and buffer_identity_guardable):
         missing_proof_families.append("atomic_producer_partition")
+    elif atomic and not ordinary:
+        missing_proof_families.append(
+            "registered_source_alias_disambiguation"
+        )
     if unknown:
         missing_proof_families.append("side_effect_alias_partition")
     if not phase_supported:
@@ -275,6 +295,9 @@ def load_case(label: str, features_path: Path) -> tuple[dict[str, Any], dict[str
         "ordinary_store_sites": ordinary,
         "atomic_write_sites": atomic,
         "unknown_write_sites": unknown,
+        "atomic_domains_known": atomic_domains_known,
+        "buffer_identity_guardable": buffer_identity_guardable,
+        "write_footprint_known": write_footprint_known,
         "exact_overlap_partition": exact_partition,
         "max_flops_to_completion": max_compute,
         "compiler_blockers": {

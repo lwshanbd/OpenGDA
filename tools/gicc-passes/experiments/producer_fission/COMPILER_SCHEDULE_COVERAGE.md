@@ -19,9 +19,9 @@ runtime or LLM-quality result.
   headroom and a later request explicitly authorizes a provider call.
 
 The stable source-free graph ID for this snapshot is
-`sha256:4ec6b7d42622988f57c4b740b38fd872fd4d8a8e18cf49b209a993c1ea0c8f4f`.
+`sha256:8ff0050a3a1afbfe25e06cc9a68771d56c70c82f4226792f26b2cd3604e117d2`.
 The only materializable two-phase oracle is
-`sha256:be6d9caef2578ca61bd623eca44e590533cf0fd347d739b8ad35c5b2cb33aa53`;
+`sha256:a5eeadf62752ba2ce13c2c380c53a3dc731d5e4f605dc875ca828c48d2575276`;
 it is deliberately absent from the model-visible candidate lists.
 
 ## Coverage result
@@ -30,7 +30,7 @@ it is deliberately absent from the model-visible candidate lists.
 |---|---|---|---|
 | Jacobi | `9ef34ae5ad60516a97c8736dfc4d263bfc4c0b958410450f0bea6e399b184539` | `intra_kernel_exact_partition` | none for the guarded two-phase oracle |
 | Minimod | `67950e39e52de4307072a3032644e23feda5beabbb14f0e997f6d8c052f34a33` | `conditional_communication_only` | guarded completion region; cross-launch producer pipeline |
-| minimal matrix multiply | `bc83a7afe5b6b69d56c954c8c66016932c882cc18d245cba714447867124f5b4` | `atomic_producer_no_store_remainder` | atomic producer partition |
+| minimal matrix multiply | `bc83a7afe5b6b69d56c954c8c66016932c882cc18d245cba714447867124f5b4` | `unresolved_atomic_alias_frontier` | registered-source alias disambiguation |
 | mixed-side-effect LTO | `934dd3c7084088ad25f357b984c9c3c336561eca718f90a7089baa0f622448e4` | `unknown_side_effect_frontier` | side-effect alias partition |
 | loop-carried LTO | `c139fa05703d764d5e691611ab6ed2649b71cb973ca1025e126b3043cd43caf4` | `loop_carried_communication` | guarded loop phase schedule |
 
@@ -43,6 +43,13 @@ phase-materialization shape audit.  Three had previously been rejected solely
 because the application-side wrapper call used LLVM `invoke`; the compiler
 now correctly audits the independent HIP launch inside the wrapper without
 changing the caller's normal or unwind edge.
+
+The matrix-multiply atomic is not assumed to produce the communicated
+buffer.  Device IR identifies its root as the `Cs` pointer formal, whereas
+the transfer names a registered-buffer index.  Until the compiler links that
+index to a disjoint `readonly noalias` pointer formal, the report labels this
+an unresolved alias frontier rather than inventing an atomic-producer
+relationship.
 
 ## Reproduction
 

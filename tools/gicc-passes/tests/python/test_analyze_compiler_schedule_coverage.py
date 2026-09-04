@@ -96,11 +96,14 @@ class CompilerScheduleCoverageTests(unittest.TestCase):
                         },
                     )
 
-    def test_main_classifies_atomic_frontier_and_writes_markdown(self):
+    def test_main_classifies_unresolved_atomic_alias(self):
         frontier = {
             "ordinary_store_sites": 0,
             "atomic_write_sites": 1,
             "unknown_write_sites": 0,
+            "atomic_domains_known": False,
+            "buffer_identity_guardable": False,
+            "write_footprint_known": False,
             "overlap_partition": {"exact": False},
             "reason": "no ordinary producer store",
         }
@@ -119,12 +122,32 @@ class CompilerScheduleCoverageTests(unittest.TestCase):
                 self.assertEqual(0, coverage.main())
             report = json.loads(output.read_text(encoding="utf-8"))
             facts = report["cases"]["atomic"]["facts"]
-            self.assertEqual("atomic_producer_no_store_remainder",
+            self.assertEqual("unresolved_atomic_alias_frontier",
                              facts["schedule_class"])
             self.assertIn("host_phase_materialization",
                           facts["missing_proof_families"])
-            self.assertIn("atomic_producer_partition",
+            self.assertIn("registered_source_alias_disambiguation",
                           markdown.read_text(encoding="utf-8"))
+
+    def test_exact_atomic_producer_keeps_partition_gap(self):
+        frontier = {
+            "ordinary_store_sites": 0,
+            "atomic_write_sites": 1,
+            "unknown_write_sites": 0,
+            "atomic_domains_known": True,
+            "buffer_identity_guardable": True,
+            "write_footprint_known": True,
+            "overlap_partition": {"exact": False},
+            "reason": "exact atomic producer",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.write_case(Path(temporary), frontier=frontier)
+            internal, _ = coverage.load_case("atomic", path)
+            facts = internal["facts"]
+            self.assertEqual("atomic_producer_no_store_remainder",
+                             facts["schedule_class"])
+            self.assertIn("atomic_producer_partition",
+                          facts["missing_proof_families"])
 
 
 if __name__ == "__main__":
