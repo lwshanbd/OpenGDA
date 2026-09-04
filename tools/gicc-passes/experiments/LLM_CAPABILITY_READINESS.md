@@ -35,9 +35,9 @@ and fails closed at every transition. Its current output is:
 | `loop_lto` | `awaiting_predecessor` | run the frozen reused-descriptor scout after the serial campaign |
 
 The report has readiness ID
-`sha256:79867ef65a0c1e1b22882b2c56f0bab22cd3057d64520e6f1134ba332b437d81`
+`sha256:c67641b1e342b5e0fd8ab94e6187cdee1b403254c4f3174c22879922169ea05c`
 and serialized SHA-256
-`066a908d98e157136deaf938c765fa2fecf7aebeb767f6411e3e9dfa872f1f9d`.
+`c7769e39453b4b72f92955aa79b73ceded95a78e8b8dd28f36d4c290611cfb23`.
 It reports zero provider-protocol-permitted entries, zero authorized provider
 calls, zero measured LLM policies, and
 `paper_llm_performance_claim_ready=false`.
@@ -102,6 +102,11 @@ capacity but cannot support an LLM-selection benefit.
   pass, readiness requires the serial hash lineage
   `original → producer → guarded → reused`; disconnected expansion/refreeze
   manifests cannot make an entry eligible.
+- `continue_compiler_headroom_graph_refreezes.sh` is the single unattended
+  postprocessor for that lineage. It submits no scheduler job: it waits for
+  the three confirmation states, skips negative branches, verifies all frozen
+  inputs, and runs each positive graph expansion and suite refreeze strictly
+  in order. Existing bundles are verified rather than overwritten.
 - A graph without runtime labels remains a capability-inventory entry, not a
   performance test.
 - Only a positive confirmatory headroom result may permit preparation of an

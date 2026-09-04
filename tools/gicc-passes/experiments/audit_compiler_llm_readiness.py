@@ -1388,6 +1388,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "paper_llm_performance_claim_ready": False,
         },
         "evidence": {
+            "graph_refreeze_finalizer": evidence(
+                HERE / "continue_compiler_headroom_graph_refreezes.sh"
+            ),
             "suite": evidence(args.suite),
             "placement_summary": evidence(args.placement_summary),
             "placement_historical_graph": evidence(
