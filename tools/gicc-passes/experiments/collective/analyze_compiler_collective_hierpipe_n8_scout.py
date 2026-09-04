@@ -29,6 +29,26 @@ ORDERS = {
 SIZES = base.SIZES
 GRAPH_ID = "sha256:ce569e2575cfdc924004631dcf96a2d81077520c3198c8f78edde3a4405cf806"
 BUNDLE_ID = "sha256:4ed11ecb6a6049b07e18ccf4e88cc7f54f7c1247c119ed1d37a133d6b017f361"
+TOPOLOGY_LABEL = "n8"
+NODES = 8
+RANKS = 64
+PPN = 8
+RUNS = 7
+WARMUP = 2
+BATCH_DURATION_SECONDS = 1200.0
+LOG_PREFIX = "HIERPIPE_N8"
+PROTOCOL_FILENAME = "HIERPIPE_N8_PROTOCOL.md"
+RUNNER_FILENAME = "run_compiler_collective_hierpipe_n8_scout.sh"
+CONTROLLER_FILENAME = "continue_compiler_collective_hierpipe_n8_scout.sh"
+ANALYZER_PATH = Path(__file__).resolve()
+SUPPORT_FILENAMES: tuple[str, ...] = ()
+RESULT_SCHEMA = "gicc-collective-hierpipe-n8-scout-v1"
+CAPACITY_GATE_KEY = "n8_capacity_gate"
+RESULT_SCOPE = (
+    "One eight-node pdebug allocation with three rotated compiler-control "
+    "blocks; no model or application-source change."
+)
+PROGRAM_NAME = "compiler-collective-hierpipe-n8-scout"
 ScoutError = base.ScoutError
 sha256 = base.sha256
 read_json = base.read_json
@@ -164,7 +184,7 @@ def analyze_rows(rows: dict[int, dict[str, dict[str, float]]]) -> dict[str, Any]
             "distinct_size_winners": sorted(winners),
         },
         "pipeline_winner_persistence": persistence,
-        "n8_capacity_gate": {
+        CAPACITY_GATE_KEY: {
             "passed": all(item["passed"] for item in criteria.values()),
             "criteria": criteria,
         },
@@ -177,24 +197,26 @@ def _validate_bundle(records: dict[Path, str], bundle: Path) -> None:
     platform_path = (bundle / "inputs/platform.json").resolve()
     freeze = read_json(freeze_path)
     if not isinstance(freeze, dict):
-        raise ScoutError("n8 offline freeze is invalid")
+        raise ScoutError(f"{TOPOLOGY_LABEL} offline freeze is invalid")
     payload = dict(freeze)
     manifest_id = payload.pop("manifest_id", None)
     if manifest_id != BUNDLE_ID or manifest_id != fingerprint(payload):
-        raise ScoutError("n8 offline freeze ID changed")
+        raise ScoutError(f"{TOPOLOGY_LABEL} offline freeze ID changed")
     graph = read_json(graph_path)
     platform = read_json(platform_path)
     if (not isinstance(graph, dict) or graph.get("graph_id") != GRAPH_ID
             or freeze.get("graph", {}).get("graph_id") != GRAPH_ID
             or not isinstance(platform, dict)
-            or platform.get("topology", {}).get("nodes") != 8
-            or platform.get("topology", {}).get("ranks_per_node") != 8
+            or platform.get("topology", {}).get("nodes") != NODES
+            or platform.get("topology", {}).get("ranks_per_node") != PPN
             or platform.get("disabled_algorithms")
             != ["hierarchical_direct", "hierarchical_ring"]):
-        raise ScoutError("n8 graph/profile topology changed")
+        raise ScoutError(f"{TOPOLOGY_LABEL} graph/profile topology changed")
     for path in (freeze_path, graph_path, platform_path):
         if path not in records:
-            raise ScoutError("n8 bundle artifacts are incomplete")
+            raise ScoutError(
+                f"{TOPOLOGY_LABEL} bundle artifacts are incomplete"
+            )
 
 
 def _artifact_records(value: dict[str, Any], replicate: int) -> tuple[dict[Path, str], Path]:
@@ -216,17 +238,20 @@ def _artifact_records(value: dict[str, Any], replicate: int) -> tuple[dict[Path,
     if len(freezes) != 1:
         raise ScoutError(f"block {replicate} lacks one offline freeze")
     bundle = freezes[0].parent
-    script_dir = Path(__file__).resolve().parent
+    script_dir = ANALYZER_PATH.parent
     required = {
         freezes[0],
         (bundle / "discovery/graph.json").resolve(),
         (bundle / "inputs/platform.json").resolve(),
-        (script_dir / "HIERPIPE_N8_PROTOCOL.md").resolve(),
-        (script_dir / "run_compiler_collective_hierpipe_n8_scout.sh").resolve(),
-        (script_dir / "continue_compiler_collective_hierpipe_n8_scout.sh").resolve(),
+        (script_dir / PROTOCOL_FILENAME).resolve(),
+        (script_dir / RUNNER_FILENAME).resolve(),
+        (script_dir / CONTROLLER_FILENAME).resolve(),
         (script_dir / "monitor_compiler_collective_replicate.py").resolve(),
-        Path(__file__).resolve(),
+        ANALYZER_PATH,
     }
+    required.update(
+        (script_dir / filename).resolve() for filename in SUPPORT_FILENAMES
+    )
     for arm in ARMS:
         required.update({
             (bundle / f"binaries/{arm}/compiler_collective_eval").resolve(),
@@ -245,20 +270,23 @@ def _validate_monitor(path: Path) -> tuple[int, dict[str, dict[str, float]], dic
             or value.get("schema_version")
             != "gicc-collective-replicate-job-monitor-v1"
             or value.get("state") != "passed"):
-        raise ScoutError(f"n8 scout monitor did not pass: {path}")
+        raise ScoutError(
+            f"{TOPOLOGY_LABEL} scout monitor did not pass: {path}"
+        )
     replicate = value.get("replicate")
     if replicate not in ORDERS:
-        raise ScoutError("n8 scout replicate is invalid")
+        raise ScoutError(f"{TOPOLOGY_LABEL} scout replicate is invalid")
     expected = {
-        "nodes": 8, "ranks": 64, "ppn": 8, "runs": 7, "warmup": 2,
+        "nodes": NODES, "ranks": RANKS, "ppn": PPN,
+        "runs": RUNS, "warmup": WARMUP,
         "sizes": list(SIZES),
     }
     jobspec = value.get("jobspec", {})
     scheduler = value.get("scheduler", {})
     resources = [{
-        "type": "node", "count": 8,
+        "type": "node", "count": NODES,
         "with": [{
-            "type": "slot", "count": 8, "label": "task",
+            "type": "slot", "count": PPN, "label": "task",
             "with": [
                 {"type": "core", "count": 8},
                 {"type": "gpu", "count": 1},
@@ -269,19 +297,18 @@ def _validate_monitor(path: Path) -> tuple[int, dict[str, dict[str, float]], dic
             or scheduler.get("exit_code") != 0
             or scheduler.get("exception_types") != []
             or jobspec.get("queue") != "pdebug"
-            or jobspec.get("duration_seconds") != 1200.0
+            or jobspec.get("duration_seconds") != BATCH_DURATION_SECONDS
             or jobspec.get("resources") != resources):
         raise ScoutError(f"block {replicate} runtime contract changed")
     allocation = value.get("resource_set", {}).get("nodelist")
     if not isinstance(allocation, list) or not allocation:
         raise ScoutError(f"block {replicate} lacks an exact node list")
     records, bundle = _artifact_records(value, replicate)
-    runner = (
-        Path(__file__).resolve().parent
-        / "run_compiler_collective_hierpipe_n8_scout.sh"
-    ).resolve()
+    runner = (ANALYZER_PATH.parent / RUNNER_FILENAME).resolve()
     if jobspec.get("embedded_script_sha256") != records[runner]:
-        raise ScoutError("Flux did not execute the frozen n8 runner")
+        raise ScoutError(
+            f"Flux did not execute the frozen {TOPOLOGY_LABEL} runner"
+        )
 
     driver_record = value.get("driver_stdout")
     driver_stderr = value.get("driver_stderr")
@@ -297,28 +324,30 @@ def _validate_monitor(path: Path) -> tuple[int, dict[str, dict[str, float]], dic
             or driver_err.stat().st_size != 0):
         raise ScoutError(f"block {replicate} driver log changed")
     expected_lines = [
-        f"HIERPIPE_N8_CONFIG replicate={replicate} "
+        f"{LOG_PREFIX}_CONFIG replicate={replicate} "
         f"arms={' '.join(ORDERS[replicate])}",
     ]
     for arm in ORDERS[replicate]:
         expected_lines.extend([
-            f"HIERPIPE_N8_ARM_START replicate={replicate} arm={arm}",
-            f"HIERPIPE_N8_ARM_DONE replicate={replicate} arm={arm}",
+            f"{LOG_PREFIX}_ARM_START replicate={replicate} arm={arm}",
+            f"{LOG_PREFIX}_ARM_DONE replicate={replicate} arm={arm}",
         ])
-    expected_lines.append(f"HIERPIPE_N8_DONE replicate={replicate}")
+    expected_lines.append(f"{LOG_PREFIX}_DONE replicate={replicate}")
     if driver.read_text().splitlines() != expected_lines:
         raise ScoutError(f"block {replicate} arm order changed")
     command = jobspec.get("command")
     try:
         script_index = command.index("{{tmpdir}}/script")
     except (AttributeError, ValueError):
-        raise ScoutError("n8 scout lacks its Flux batch command") from None
+        raise ScoutError(
+            f"{TOPOLOGY_LABEL} scout lacks its Flux batch command"
+        ) from None
     arguments = command[script_index + 1:]
     output_root = driver.parent.parent.resolve()
     if (len(arguments) != 2
             or Path(arguments[0]).resolve() != bundle
             or Path(arguments[1]).resolve() != output_root):
-        raise ScoutError("n8 scout batch arguments changed")
+        raise ScoutError(f"{TOPOLOGY_LABEL} scout batch arguments changed")
 
     benchmarks = value.get("benchmarks")
     if not isinstance(benchmarks, dict) or set(benchmarks) != set(ARMS):
@@ -342,7 +371,7 @@ def _validate_monitor(path: Path) -> tuple[int, dict[str, dict[str, float]], dic
                 or err.stat().st_size != stderr.get("bytes")):
             raise ScoutError(f"block {replicate}/{arm} log changed")
         reparsed = monitor_base.validate_output(
-            log, arm, list(SIZES), 8, 64, 8, 7, 2,
+            log, arm, list(SIZES), NODES, RANKS, PPN, RUNS, WARMUP,
         )
         if reparsed != benchmark:
             raise ScoutError(f"block {replicate}/{arm} monitor/raw log mismatch")
@@ -385,11 +414,8 @@ def analyze_monitors(monitor_paths: list[Path]) -> dict[str, Any]:
         raise ScoutError("n8 scout blocks used different artifacts")
     analysis = analyze_rows(rows)
     payload = {
-        "schema_version": "gicc-collective-hierpipe-n8-scout-v1",
-        "scope": (
-            "One eight-node pdebug allocation with three rotated compiler-control "
-            "blocks; no model or application-source change."
-        ),
+        "schema_version": RESULT_SCHEMA,
+        "scope": RESULT_SCOPE,
         "model_invoked": False,
         "application_source_modified": False,
         "graph_id": GRAPH_ID,
@@ -415,11 +441,11 @@ def main() -> int:
             raise ScoutError(f"refusing to overwrite {args.out}")
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
-        print(json.dumps(result["n8_capacity_gate"], sort_keys=True))
+        print(json.dumps(result[CAPACITY_GATE_KEY], sort_keys=True))
         return 0
     except (ScoutError, monitor_base.MonitorError, OSError, KeyError,
             TypeError, ValueError) as exc:
-        print(f"compiler-collective-hierpipe-n8-scout: ERROR: {exc}", file=sys.stderr)
+        print(f"{PROGRAM_NAME}: ERROR: {exc}", file=sys.stderr)
         return 2
 
 

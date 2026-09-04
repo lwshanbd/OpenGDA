@@ -1,0 +1,58 @@
+{
+  "schema_version": "gicc-collective-platform-profile-v1",
+  "platform_id": "tioga-mi250x-cxi-collective-capacity-n6-hierpipe-v1",
+  "scope": "six-node compiler-only collective policy capacity screen with hierarchical tree pipeline depth; no application source is exposed to or modified by the model",
+  "topology": {
+    "nodes": 6,
+    "ranks_per_node": 8,
+    "gpus_per_node": 8,
+    "rank_placement": "one rank per MI250X GCD"
+  },
+  "hardware": {
+    "gpu": "AMD MI250X GCD",
+    "gcds_per_node": 8,
+    "nics_per_node": 4
+  },
+  "transport": {
+    "inter_node": "Slingshot-11/CXI through GICC CPU proxy",
+    "intra_node": "xGMI IPC where the compiler catalog implementation permits it"
+  },
+  "resource_constraints": {
+    "cooperative_launch": true,
+    "registered_data_buffer": true,
+    "registered_scratch_buffer": true,
+    "host_pinned_completion_flags": true,
+    "device_node_barrier_buffer": true,
+    "compiler_catalog_has_runtime_precondition_fallbacks": true
+  },
+  "primitive_calibration": {
+    "schema_version": "gicc-collective-primitive-calibration-v1",
+    "role": "prior platform primitive evidence only; never a collective action label or collective runtime result",
+    "collective_action_labels_visible": false,
+    "applicability": "two-node cross-node CXI primitive measured with one rank per node and eight proxy worker lanes; use as a link/issue prior, not as a six-node collective latency predictor",
+    "artifacts": [
+      {
+        "sha256": "6f15e0a4ec26756c23c69447472502ad93b879603478c7cd5d37fb59d9781378",
+        "role": "pre-existing compiler-path calibration dossier"
+      }
+    ],
+    "measurements": {
+      "cross_node_link_bandwidth_GB_s": 24.0,
+      "proxy_fixed_us": 5.37,
+      "proxy_per_operation_issue_us": 2.872
+    }
+  },
+  "message_distribution": {
+    "source": "preregistered logarithmic collective size sweep",
+    "bins_weight": [
+      0.25,
+      0.25,
+      0.25,
+      0.25
+    ]
+  },
+  "disabled_algorithms": [
+    "hierarchical_direct",
+    "hierarchical_ring"
+  ]
+}

@@ -21,3 +21,24 @@ optimization headroom. The audited confirmation result is
 `sha256:4c9f0532ec6fdd0957fb1ea4e86510e68b0fd5debe4f31689d312c1af2e70df2`.
 No hierarchy-pipeline model prompt or provider call is justified for the n4
 profile.
+
+## n8 scheduling infeasibility and n6 replacement (2026-09-04)
+
+The preregistered n8 scout job `f5to6fn64qBM` produced no runtime data. The
+`pdebug` partition has eight nominal nodes, but `tioga41` has been drained
+since 2026-07-21 with reason `node falls out consistently`; only seven nodes
+can therefore be allocated. Flux supplied no start estimate for the eight-node
+request. The job was cancelled after this condition was established so that
+smaller compiler-only experiments could continue. Its terminal controller
+state is an infrastructure failure, not a negative capacity or performance
+result.
+
+A separate n6 replacement is preregistered in `HIERPIPE_N6_PROTOCOL.md`. Six
+nodes/48 ranks are the largest even topology schedulable on the currently
+usable `pdebug` resources. Its frozen compiler graph is
+`sha256:a7aa1f681a64574251aa8e2511550fb8d46b2ea08b5a4aae35fd3865b860a0c0`;
+its verified offline bundle is
+`sha256:dc243d4f358d3c6b64eb9ff26ff5851ef458f9eed2f7be079424657125edc113`.
+The bridge accepted all 4096 graph-bound policies and all control builds passed
+IR/provenance checks. This is preparation evidence only: the n6 runtime job
+has not been submitted and no model or provider was invoked.
