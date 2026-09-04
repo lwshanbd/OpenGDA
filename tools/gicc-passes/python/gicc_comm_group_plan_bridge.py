@@ -371,6 +371,70 @@ def _guarded_early_trigger_proof(
     ]
 
 
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _reused_loop_descriptor_proof(
+    site: dict[str, Any], *, materializer_shape_legal: bool,
+) -> list[str] | None:
+    """Recognize the narrow loop-invariant descriptor-template proof."""
+    loop = site.get("loop")
+    interval = site.get("transfer_interval")
+    if (
+        not materializer_shape_legal
+        or site.get("op_kind") != "put_no_db"
+        or site.get("hk_capable") is not True
+        or site.get("descriptor_reusable") is not True
+        or site.get("buffer_reusable") is not True
+        or site.get("in_loop") is not True
+        or not isinstance(loop, dict)
+        or loop.get("bound_known") is not True
+        or loop.get("iv_start") != 0
+        or loop.get("iv_step") != 1
+        or site.get("guard_kind") == "field_not_null"
+        or not isinstance(interval, dict)
+        or interval.get("host_knowable") is not True
+        or interval.get("symbolically_exact") is not True
+        or "trigger" not in site.get("legal_actions", [])
+    ):
+        return None
+    bound_const = loop.get("bound_const")
+    bound_param = loop.get("bound_param_idx")
+    if bound_const is not None:
+        if not _positive_int(bound_const) or bound_const > (1 << 31) - 1:
+            return None
+        bound_proof = "positive constant loop bound fits signed i32"
+    elif (_positive_int(bound_param)
+            and loop.get("bound_param_type") == "i32"):
+        bound_proof = "runtime loop bound is an i32 kernel formal"
+    else:
+        return None
+    return [
+        "one host-knowable PUT is enclosed by a modeled natural loop",
+        "the compiler proved all six descriptor expressions loop invariant",
+        "iv_start equals zero and iv_step equals one",
+        bound_proof,
+        "the source interval is symbolically exact and host knowable",
+        "one descriptor template preserves network operation count and order",
+        "the original compiler-owned completion point is retained",
+        "the final host LTO pass independently rebuilds the proof",
+    ]
+
+
+def _loop_operation_count(site: dict[str, Any]) -> Any:
+    trips = site.get("trip_count")
+    if _positive_int(trips):
+        return trips
+    loop = site.get("loop")
+    if isinstance(loop, dict) and _positive_int(loop.get("bound_param_idx")):
+        return {
+            "kind": "runtime_loop_bound",
+            "kernel_param_index": loop["bound_param_idx"],
+        }
+    return None
+
+
 def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
         -> dict[str, Any]:
     dossier = bridge._verified_dossier(dossier_value)
@@ -402,6 +466,10 @@ def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
     guarded_early_enabled = (
         isinstance(transform_profile, dict)
         and transform_profile.get("guarded_early_trigger") is True
+    )
+    reused_descriptor_enabled = (
+        isinstance(transform_profile, dict)
+        and transform_profile.get("reused_loop_descriptor") is True
     )
     opportunities: list[dict[str, Any]] = []
     opportunity_sites: set[str] = set()
@@ -667,6 +735,44 @@ def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
         )
         guarded_legal = guarded_proof is not None and "trigger" in actions
         masked_candidates = []
+        reuse_shape_legal = (
+            sum(item["kind"] in {"put_no_db", "get_no_db"}
+                for item in kernel_ops) == 1
+            and isinstance(completion, str)
+            and meta_by_site.get(completion, {}).get("kind") in {"flush", "quiet"}
+        )
+        reuse_proof = _reused_loop_descriptor_proof(
+            site, materializer_shape_legal=reuse_shape_legal,
+        )
+        reuse_legal = reuse_proof is not None and "trigger" in actions
+        if reused_descriptor_enabled and reuse_legal:
+            count = _loop_operation_count(site)
+            candidates.append(_candidate(
+                "trigger_reused_descriptor_loop",
+                [site_id], ("trigger",),
+                (
+                    "Construct one compiler-proved loop-invariant descriptor "
+                    "template and queue it for the original loop count."
+                ),
+                reuse_proof,
+                {
+                    "site_actions": {site_id: "trigger"},
+                    "network_operations": count,
+                    "host_descriptor_templates": 1,
+                    "host_descriptor_instances": count,
+                    "caller_descriptor_arrays": 0,
+                    "trigger_placement": "original_completion",
+                    "device_proxy_sites": 0,
+                },
+                transform="REUSE_LOOP_DESCRIPTOR",
+            ))
+        elif reused_descriptor_enabled:
+            masked_candidates.append({
+                "kind": "trigger_reused_descriptor_loop",
+                "reason": [
+                    "compiler did not prove loop-invariant descriptor reuse"
+                ],
+            })
         if guarded_early_enabled and guarded_legal:
             frontier = site["producer_frontier"]
             candidates.append(_candidate(
@@ -737,6 +843,10 @@ def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
                 ],
             },
         }
+        if reused_descriptor_enabled:
+            compiler_facts["dependence_legality"][
+                "reused_loop_descriptor_legal"
+            ] = reuse_legal
         if guarded_proof is not None:
             compiler_facts["dependence_legality"][
                 "guarded_early_trigger_legal"
@@ -899,6 +1009,20 @@ def verified_graph(value: Any) -> dict[str, Any]:
                         ].get("guarded_early_trigger_legal") is True
                         and isinstance(transforms, dict)
                         and transforms.get("guarded_early_trigger") is True
+                    )
+                elif transform == "REUSE_LOOP_DESCRIPTOR":
+                    transforms = value.get("platform_profile", {}).get(
+                        "compiler_transforms", {}
+                    )
+                    legal = (
+                        dispatch == "DWQ_TRIGGER"
+                        and candidate.get("kind")
+                            == "trigger_reused_descriptor_loop"
+                        and opportunity["compiler_facts"][
+                            "dependence_legality"
+                        ].get("reused_loop_descriptor_legal") is True
+                        and isinstance(transforms, dict)
+                        and transforms.get("reused_loop_descriptor") is True
                     )
                 else:
                     action = next(

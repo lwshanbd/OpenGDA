@@ -176,6 +176,31 @@ def guarded_early_feature(site_id):
     return row
 
 
+def reused_loop_feature(site_id):
+    row = feature(site_id)
+    row.update({
+        "descriptor_reusable": True,
+        "buffer_reusable": True,
+        "in_loop": True,
+        "guard_kind": "unknown",
+        "loop": {
+            "bound_known": True,
+            "bound_param_idx": 4,
+            "bound_param_type": "i32",
+            "iv_start": 0,
+            "iv_step": 1,
+        },
+        "transfer_interval": {
+            "symbolically_exact": True,
+            "host_knowable": True,
+            "source_buffer": {"kind": "param", "param": 2},
+            "byte_offset": {"kind": "const", "value": 0},
+            "byte_size": {"kind": "param", "param": 3},
+        },
+    })
+    return row
+
+
 class CommunicationGroupPlanBridgeTests(unittest.TestCase):
     def setUp(self):
         self.site_ids = [
@@ -524,6 +549,78 @@ class CommunicationGroupPlanBridgeTests(unittest.TestCase):
         self.assertEqual(
             "GUARDED_EARLY_TRIGGER",
             hint["sites"][self.site_ids[0]]["transform"],
+        )
+
+    def test_reused_descriptor_requires_profile_gate_and_becomes_hint(self):
+        single_template = template()
+        single_template["ops"] = [
+            op for op in single_template["ops"]
+            if op["site_id"] != self.site_ids[1]
+        ]
+        transfer = next(
+            op for op in single_template["ops"]
+            if op["site_id"] == self.site_ids[0]
+        )
+        transfer["loop"] = {
+            "in_loop": True, "iv_param": 4, "iv_start": 0, "iv_step": 1,
+        }
+        row = reused_loop_feature(self.site_ids[0])
+        gated = groups.make_group_graph(
+            bridge.make_dossier([row], PLATFORM), [single_template],
+        )
+        opportunity = gated["opportunities"][0]
+        self.assertNotIn(
+            "trigger_reused_descriptor_loop",
+            {candidate["kind"] for candidate in opportunity["candidates"]},
+        )
+        self.assertNotIn(
+            "trigger_reused_descriptor_loop",
+            {candidate["kind"]
+             for candidate in opportunity["masked_candidates"]},
+        )
+
+        platform = copy.deepcopy(PLATFORM)
+        platform["compiler_transforms"]["reused_loop_descriptor"] = True
+        enabled = groups.make_group_graph(
+            bridge.make_dossier([row], platform), [single_template],
+        )
+        groups.verified_graph(enabled)
+        opportunity = enabled["opportunities"][0]
+        candidate = next(
+            candidate for candidate in opportunity["candidates"]
+            if candidate["kind"] == "trigger_reused_descriptor_loop"
+        )
+        self.assertEqual(
+            {"kind": "runtime_loop_bound", "kernel_param_index": 4},
+            candidate["effects"]["network_operations"],
+        )
+        decision = {
+            "schema_version": groups.DECISION_SCHEMA,
+            "graph_id": enabled["graph_id"],
+            "selections": {
+                opportunity["opportunity_id"]: {
+                    "candidate_id": candidate["candidate_id"],
+                    "confidence": 0.9,
+                    "rationale": "use compiler-proved descriptor reuse",
+                }
+            },
+        }
+        hint, accepted, errors = groups.plan_to_hint(enabled, decision)
+        self.assertTrue(accepted, errors)
+        self.assertEqual(
+            "REUSE_LOOP_DESCRIPTOR",
+            hint["sites"][self.site_ids[0]]["transform"],
+        )
+
+        invalid = copy.deepcopy(row)
+        invalid["descriptor_reusable"] = False
+        masked = groups.make_group_graph(
+            bridge.make_dossier([invalid], platform), [single_template],
+        )
+        self.assertEqual(
+            ["trigger_reused_descriptor_loop"],
+            [candidate["kind"]
+             for candidate in masked["opportunities"][0]["masked_candidates"]],
         )
 
     def test_real_meta_directory_ignores_sibling_features_json(self):
