@@ -138,6 +138,23 @@ class CompilerLlmCapabilityAnalysisTests(unittest.TestCase):
         ):
             analysis.score_archive(index, self.graph, self.screen)
 
+    def test_exact_oracle_rate_is_chance_calibrated(self):
+        scored = analysis.score_archive(self.index, self.graph, self.screen)
+        null_entry = analysis.sampling_null.uniform_oracle_null(4, 20)
+        result = analysis.chance_calibration(scored["metrics"], null_entry)
+        self.assertEqual(15, result["views"]["relational"][
+            "observed_exact_oracle_hits"
+        ])
+        self.assertTrue(result["views"]["relational"][
+            "meets_one_sided_alpha_0_05_hit_threshold"
+        ])
+        self.assertEqual(0, result["views"]["opaque"][
+            "observed_exact_oracle_hits"
+        ])
+        self.assertFalse(result[
+            "null_is_model_distribution_or_performance_evidence"
+        ])
+
     def test_screen_binds_archive_boundary_and_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

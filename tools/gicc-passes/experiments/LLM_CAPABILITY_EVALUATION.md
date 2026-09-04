@@ -149,8 +149,9 @@ invalidates the protocol identity even when the graph bytes do not change.
 
 `prepare_compiler_llm_capability_request.py` is the common request-freezing
 boundary for all three decision families. It re-runs this protocol audit from
-the readiness and input-separation evidence and refuses an entry unless its
-status is exactly `provider_protocol_permitted`. A successful future freeze
+the readiness, input-separation, and analytic sampling-null evidence and
+refuses an entry unless its status is exactly
+`provider_protocol_permitted`. A successful future freeze
 copies only the source-free prompts, exact response schema, and system prompt
 into the provider-visible bundle; the compiler graph remains a private
 downstream bridge input. The generated request starts with zero permitted calls
@@ -176,8 +177,10 @@ archive and accepts held-out costs only through a content-addressed,
 provider-invisible family adapter that covers every observed graph-bound
 policy. It then applies the shared ITT fallback, modal-policy, entropy, regret,
 and post-hoc best-of-20 rules and records the exact archive trials underlying
-each representative. Offline screen results remain explicitly distinct from
-paired runtime speedup evidence.
+each representative. It also converts each view's exact-oracle rate back to an
+integer hit count and reports the exact binomial tail under the frozen
+action-space-specific uniform null. Offline screen results and chance
+calibration remain explicitly distinct from paired runtime speedup evidence.
 
 For `collective_n8`,
 `collective/prepare_collective_llm_policy_screen.py` is the concrete family

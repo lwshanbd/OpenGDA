@@ -180,6 +180,7 @@ def verified_inputs(
     prompt_dir: Path,
     readiness_path: Path,
     separation_path: Path,
+    sampling_null_path: Path,
     protocol_path: Path,
     label: str,
     graph_path: Path,
@@ -187,6 +188,7 @@ def verified_inputs(
     suite = decision_suite.verified_suite(read_json(suite_path), prompt_dir)
     expected_protocol = capability.build_report(
         suite_path, prompt_dir, readiness_path, separation_path,
+        sampling_null_path,
     )
     protocol = read_json(protocol_path)
     require(protocol == expected_protocol,
@@ -224,6 +226,7 @@ def verified_inputs(
         "suite": suite,
         "readiness_path": readiness_path,
         "separation_path": separation_path,
+        "sampling_null_path": sampling_null_path,
         "protocol_path": protocol_path,
         "protocol": protocol,
         "suite_entry": suite_entry,
@@ -343,6 +346,7 @@ def build_request(inputs: dict[str, Any], bundle: Path) -> dict[str, Any]:
             "suite": evidence(inputs["suite_path"]),
             "readiness": evidence(inputs["readiness_path"]),
             "input_separation": evidence(inputs["separation_path"]),
+            "sampling_null": evidence(inputs["sampling_null_path"]),
             "source_graph": evidence(inputs["graph_path"]),
             "bundle_files": files,
         },
@@ -416,6 +420,7 @@ def add_inputs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--prompt-dir", type=Path, required=True)
     parser.add_argument("--readiness", type=Path, required=True)
     parser.add_argument("--input-separation", type=Path, required=True)
+    parser.add_argument("--sampling-null", type=Path, required=True)
     parser.add_argument("--capability-protocol", type=Path, required=True)
     parser.add_argument("--label", required=True)
     parser.add_argument("--graph", type=Path, required=True)
@@ -435,6 +440,7 @@ def main() -> int:
         inputs = verified_inputs(
             args.suite.resolve(), args.prompt_dir.resolve(),
             args.readiness.resolve(), args.input_separation.resolve(),
+            args.sampling_null.resolve(),
             args.capability_protocol.resolve(), args.label,
             args.graph.resolve(),
         )

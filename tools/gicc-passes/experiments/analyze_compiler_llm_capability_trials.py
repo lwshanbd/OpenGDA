@@ -31,6 +31,7 @@ sys.path.insert(0, str(HERE))
 import gicc_compiler_policy_bridge as policy_bridge  # noqa: E402
 import gicc_llm_bridge as bridge  # noqa: E402
 import gicc_llm_capability_metrics as metrics  # noqa: E402
+import audit_llm_sampling_null as sampling_null  # noqa: E402
 import prepare_compiler_llm_capability_request as request_freezer  # noqa: E402
 import run_compiler_llm_capability_trials as trial_runner  # noqa: E402
 
@@ -273,14 +274,70 @@ def score_archive(index: dict[str, Any], graph: dict[str, Any],
     }
 
 
+def chance_calibration(metrics_summary: dict[str, Any],
+                       null_entry: dict[str, Any]) -> dict[str, Any]:
+    trial_count = null_entry.get("draw_count")
+    threshold = null_entry.get("minimum_exact_hits_for_one_sided_alpha_0_05")
+    policy_count = null_entry.get("legal_policy_count")
+    require(trial_count == request_freezer.TRIALS_PER_VIEW,
+            "sampling null has another trial count")
+    require(isinstance(policy_count, int) and not isinstance(policy_count, bool)
+            and policy_count > 0, "sampling null has invalid policy count")
+    require(isinstance(threshold, int) and not isinstance(threshold, bool)
+            and 1 <= threshold <= trial_count,
+            "sampling null has invalid significance threshold")
+    views = metrics_summary.get("views")
+    require(isinstance(views, dict) and set(views) == set(request_freezer.VIEWS),
+            "metrics summary lacks exact information views")
+    calibrated = {}
+    probability = sampling_null.Fraction(1, policy_count)
+    for view in request_freezer.VIEWS:
+        summary = views[view]
+        observed_trials = summary.get("trial_count")
+        rate = summary.get("intention_to_treat", {}).get(
+            "exact_oracle_policy_rate"
+        )
+        require(observed_trials == trial_count
+                and isinstance(rate, (int, float)) and not isinstance(rate, bool),
+                f"{view}: cannot calibrate exact-oracle hits")
+        hits = round(float(rate) * trial_count)
+        require(abs(float(rate) - hits / trial_count) <= 1e-12,
+                f"{view}: exact-oracle rate is not an integer hit count")
+        tail = sampling_null.binomial_tail(trial_count, probability, hits)
+        calibrated[view] = {
+            "observed_exact_oracle_hits": hits,
+            "uniform_null_tail_probability": sampling_null.fraction_record(tail),
+            "meets_one_sided_alpha_0_05_hit_threshold": hits >= threshold,
+        }
+    return {
+        "null_hypothesis": (
+            "independent uniform legal-policy draws with exactly one "
+            "predesignated oracle"
+        ),
+        "legal_policy_count": policy_count,
+        "trials_per_view": trial_count,
+        "uniform_single_draw_exact_oracle_probability": null_entry[
+            "single_draw_exact_oracle_probability"
+        ],
+        "uniform_at_least_one_exact_oracle_hit_probability": null_entry[
+            "at_least_one_exact_oracle_in_draws_probability"
+        ],
+        "minimum_exact_hits_for_one_sided_alpha_0_05": threshold,
+        "views": calibrated,
+        "null_is_model_distribution_or_performance_evidence": False,
+    }
+
+
 def build_report(
     *, suite_path: Path, prompt_dir: Path, readiness_path: Path,
-    separation_path: Path, protocol_path: Path, label: str,
+    separation_path: Path, sampling_null_path: Path,
+    protocol_path: Path, label: str,
     graph_path: Path, request_dir: Path, authorization_path: Path,
     archive_dir: Path, screen_path: Path, repo_root: Path,
 ) -> dict[str, Any]:
     inputs = request_freezer.verified_inputs(
         suite_path, prompt_dir, readiness_path, separation_path,
+        sampling_null_path,
         protocol_path, label, graph_path,
     )
     request = request_freezer.verify_bundle(inputs, request_dir)
@@ -298,6 +355,13 @@ def build_report(
         index_path=index_path, repo_root=repo_root,
     )
     scored = score_archive(index, graph, screen)
+    null_report = sampling_null.verify_report(read_json(sampling_null_path))
+    null_entry = null_report.get("current_suite_uniform_null", {}).get(label)
+    require(isinstance(null_entry, dict),
+            f"{label}: sampling null lacks current suite entry")
+    scored["chance_calibration"] = chance_calibration(
+        scored["metrics"], null_entry,
+    )
     payload = {
         "schema_version": ANALYSIS_SCHEMA,
         "status": "offline_screen_complete_runtime_validation_required",
@@ -317,6 +381,7 @@ def build_report(
             "offline_screen_is_runtime_speedup_evidence": False,
             "representative_runtime_validation_still_required": True,
             "best_of_20_is_posthoc_capability_upper_bound": True,
+            "best_of_20_is_action_space_chance_calibrated": True,
         },
         "provider": {
             "requested_model": authorization["provider"]["requested_model"],
@@ -340,6 +405,7 @@ def build_report(
             "authorization": evidence(authorization_path),
             "run_index": evidence(index_path),
             "policy_screen": evidence(screen_path),
+            "sampling_null": evidence(sampling_null_path),
         },
     }
     result = dict(payload)
@@ -392,6 +458,7 @@ def main() -> int:
             prompt_dir=args.prompt_dir.resolve(),
             readiness_path=args.readiness.resolve(),
             separation_path=args.input_separation.resolve(),
+            sampling_null_path=args.sampling_null.resolve(),
             protocol_path=args.capability_protocol.resolve(),
             label=args.label, graph_path=args.graph.resolve(),
             request_dir=args.request_dir.resolve(),

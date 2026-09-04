@@ -116,7 +116,9 @@ class CompilerLlmCapabilityRequestTests(unittest.TestCase):
                 path.write_text(f"{view} compiler facts\n")
                 prompts[view] = path
             evidence_files = {}
-            for name in ("suite", "readiness", "separation", "protocol"):
+            for name in (
+                "suite", "readiness", "separation", "sampling_null", "protocol",
+            ):
                 path = sources / f"{name}.json"
                 path.write_text("{}\n")
                 evidence_files[name] = path
@@ -125,6 +127,7 @@ class CompilerLlmCapabilityRequestTests(unittest.TestCase):
                 "suite": suite,
                 "readiness_path": evidence_files["readiness"],
                 "separation_path": evidence_files["separation"],
+                "sampling_null_path": evidence_files["sampling_null"],
                 "protocol_path": evidence_files["protocol"],
                 "protocol": {
                     **protocol,

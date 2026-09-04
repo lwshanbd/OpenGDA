@@ -63,6 +63,10 @@ content-addressed input.  Without a matching 20-draw calibration for every
 suite entry, the protocol cannot freeze a provider request.  The resulting v2
 protocol remains at zero eligible entries and zero authorized calls; its ID is
 `sha256:5d093a0b9fe44e87542229efc3a1381610383a4fa1cadc30757dae59ee05a92d`.
+The request freezer, sequential trial runner, and offline analyzer now all
+re-verify the same null artifact.  Final analysis reports the observed integer
+oracle-hit count and its exact uniform-null binomial tail for each of the three
+information views.
 
 ## Reproduction
 

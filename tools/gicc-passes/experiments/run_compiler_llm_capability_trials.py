@@ -569,12 +569,14 @@ def verify_complete_archive(
 
 def run_trials(
     *, suite_path: Path, prompt_dir: Path, readiness_path: Path,
-    separation_path: Path, protocol_path: Path, label: str,
+    separation_path: Path, sampling_null_path: Path,
+    protocol_path: Path, label: str,
     graph_path: Path, request_dir: Path, authorization_path: Path,
     output_dir: Path,
 ) -> dict[str, Any]:
     inputs = request_freezer.verified_inputs(
         suite_path, prompt_dir, readiness_path, separation_path,
+        sampling_null_path,
         protocol_path, label, graph_path,
     )
     request = request_freezer.verify_bundle(inputs, request_dir)
@@ -653,6 +655,7 @@ def main() -> int:
             prompt_dir=args.prompt_dir.resolve(),
             readiness_path=args.readiness.resolve(),
             separation_path=args.input_separation.resolve(),
+            sampling_null_path=args.sampling_null.resolve(),
             protocol_path=args.capability_protocol.resolve(),
             label=args.label, graph_path=args.graph.resolve(),
             request_dir=args.request_dir.resolve(),
