@@ -73,6 +73,41 @@ does not contain. That creates a larger *reasoning surface*, not automatic
 performance headroom. Runtime gates determine whether each reasoning problem
 is worth evaluating at all.
 
+## Retrospective Minimod route-only evidence
+
+The older Minimod campaign contains a useful compiler-only subset, but it is
+not promoted into the readiness table. Its `default`, `trigger`, and `proxy`
+binaries differ through LTO route hints, and the strict historical parser can
+revalidate all raw logs, route counters, checksums, and paired allocations.
+Holding the hand-written schedule fixed gives the following descriptive
+best-uniform-route versus per-topology route-oracle gaps:
+
+| Grid | Fixed schedule | Oracle headroom | Largest cell | Route winners |
+|---:|---|---:|---:|---|
+| 400 | overlap | `1.007268x` | `1.022787x` | default, proxy |
+| 800 | overlap | `1.007272x` | `1.023226x` | default, proxy |
+| 400 | serial | `1.017184x` | `1.083567x` | default, proxy, trigger |
+| 800 | serial | `1.015597x` | `1.069086x` | default, proxy |
+
+Four of five topology winners repeat across the two grids under each fixed
+schedule (eight of ten comparisons in total). This is real evidence that an
+LTO route decision can be context-dependent, but its aggregate opportunity is
+only about 0.7% under the faster overlap schedule. It therefore strengthens
+the motivation for
+compiler-level selection while also showing why richer scheduling candidates,
+not merely a more powerful selector, are necessary.
+
+The compatibility gate remains closed: historical facts use schema 4 while
+the current graph uses schema 6, only the three uniform-route candidates map
+semantically, six mixed-route candidates have no measurements, and the
+serial/overlap axis was hand-written. The deterministic report consequently
+sets `current_graph_runtime_labels_complete=false`,
+`llm_performance_measured=false`, and
+`provider_protocol_permitted=false`. Its result ID is
+`sha256:3af3c14c9ecfb95653b2691aee8bdca2dd9b45fc968cf14aa17171390e1fc008`;
+the serialized report SHA-256 is
+`a02c3531a95b861042261a9a2d8587dd8217b9e52996c710bc2f3e60e3423706`.
+
 ## Reproduction
 
 From the repository root:
@@ -96,3 +131,16 @@ Use `verify` with the same inputs and
 the report still matches the current external state. When a monitored runtime
 stage changes, `verify` deliberately rejects the stale report and `emit`
 derives a new one.
+
+The retrospective route-only audit is reproduced separately with:
+
+```sh
+python3 tools/gicc-passes/experiments/analyze_minimod_route_only_retrospective.py emit \
+  --dataset 400=docs/experiments/minimod-paper/paper-v1-grid400-analysis/measurements.csv \
+  --dataset 800=docs/experiments/minimod-paper/paper-v1-analysis-n1-n4/measurements.csv \
+  --legacy-features build_ofi/minimod_paper/meta/standard-features/features.json \
+  --current-features build_ofi/compiler_fact_coverage_20260904/minimod_disjoint/meta/features.json \
+  --graph build_ofi/compiler_fact_coverage_20260904/portfolio/minimod/group-graph.json \
+  --binary-sha256 build_ofi/minimod_paper/binary-sha256.txt \
+  --out build_ofi/minimod_route_only_retrospective_20260904/report.json
+```
