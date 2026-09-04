@@ -44,6 +44,19 @@ STRUCTURAL_TRANSFORMS = {"COALESCE_LOOP", "COALESCE_LOOP_EARLY"}
 COMMUNICATION_LABELS = {
     "jacobi", "minimod", "mixed_lto", "mm_minimal", "loop_lto",
 }
+DEFAULT_COLLECTIVE_LABEL = "collective_n8"
+BASELINE_COMMUNICATION_POLICY_COUNTS = {
+    "jacobi": 9,
+    "loop_lto": 2,
+    "minimod": 9,
+    "mixed_lto": 9,
+    "mm_minimal": 3,
+}
+CONFIRMED_TRANSFORM_BY_LABEL = {
+    "jacobi": "PRODUCER_FRONTIER_TWO_PHASE",
+    "loop_lto": "REUSE_LOOP_DESCRIPTOR",
+    "mm_minimal": "GUARDED_EARLY_TRIGGER",
+}
 BOUNDARY = {
     "application_source_read": False,
     "application_source_modified": False,
@@ -172,12 +185,15 @@ def analyze_communication(
     graphs: dict[str, tuple[dict[str, Any], dict[str, Any]]],
 ) -> dict[str, Any]:
     per_entry = {}
-    candidate_count = 0
+    route_candidate_count = 0
+    transform_candidate_count = 0
     atomic_group_candidates = 0
     mixed_group_candidates = 0
+    observed_transforms: set[str] = set()
     for label in sorted(graphs):
         graph, entry = graphs[label]
-        local_candidates = 0
+        local_routes = 0
+        local_transforms: set[str] = set()
         local_atomic = 0
         local_mixed = 0
         for opportunity in graph["opportunities"]:
@@ -185,47 +201,91 @@ def analyze_communication(
             for candidate in opportunity["candidates"]:
                 actions = candidate.get("effects", {}).get("site_actions")
                 materializers = candidate.get("materializer", {}).get("sites")
-                if (not isinstance(actions, dict) or set(actions) != set(site_ids)
-                        or set(actions.values()) - GBT_ROUTE_ACTIONS
+                if (not isinstance(actions, dict)
+                        or set(actions) != set(site_ids)
                         or not isinstance(materializers, dict)
-                        or set(materializers) != set(site_ids)
-                        or any(route_materializer(item) != actions[site]
-                               for site, item in materializers.items())):
+                        or set(materializers) != set(site_ids)):
                     raise AuthorityError(
-                        f"{label}: current communication candidate is not route-composable"
+                        f"{label}: communication candidate/site mapping changed"
                     )
-                local_candidates += 1
-                if len(site_ids) > 1:
-                    local_atomic += 1
-                    if len(set(actions.values())) > 1:
-                        local_mixed += 1
+                route_composable = (
+                    not (set(actions.values()) - GBT_ROUTE_ACTIONS)
+                    and all(route_materializer(item) == actions[site]
+                            for site, item in materializers.items())
+                )
+                if route_composable:
+                    local_routes += 1
+                    if len(site_ids) > 1:
+                        local_atomic += 1
+                        if len(set(actions.values())) > 1:
+                            local_mixed += 1
+                    continue
+                expected_transform = CONFIRMED_TRANSFORM_BY_LABEL.get(label)
+                transforms = {
+                    item.get("transform") for item in materializers.values()
+                    if isinstance(item, dict)
+                    and item.get("dispatch") == "DWQ_TRIGGER"
+                }
+                if (expected_transform is None
+                        or set(actions.values()) - GBT_ROUTE_ACTIONS
+                        or set(actions.values()) != {"trigger"}
+                        or transforms != {expected_transform}
+                        or any(not isinstance(item, dict)
+                               or item.get("dispatch") != "DWQ_TRIGGER"
+                               or item.get("transform") != expected_transform
+                               for item in materializers.values())):
+                    raise AuthorityError(
+                        f"{label}: communication candidate has an unknown "
+                        "compiler transform"
+                    )
+                local_transforms.add(expected_transform)
         expected = entry["decision_space"]["selectable_candidate_id_count"]
-        if local_candidates != expected:
+        if local_routes + len(local_transforms) != expected:
             raise AuthorityError(f"{label}: communication candidate count changed")
         policy_count = entry["decision_space"]["independent_policy_count"]
+        baseline_count = BASELINE_COMMUNICATION_POLICY_COUNTS[label]
+        if (policy_count != baseline_count + len(local_transforms)
+                or local_routes != baseline_count
+                or len(local_transforms) > 1):
+            raise AuthorityError(
+                f"{label}: confirmed-transform policy delta changed"
+            )
         per_entry[label] = {
             "independent_policy_count": policy_count,
-            "route_composable_candidate_count": local_candidates,
+            "baseline_route_policy_count": baseline_count,
+            "route_composable_candidate_count": local_routes,
             "atomic_multi_site_candidate_count": local_atomic,
             "mixed_route_candidate_count": local_mixed,
-            "semantic_actions_outside_gbt_route_vocabulary": 0,
-            "structured_output_absent_from_frozen_gbt_schema": local_atomic > 0,
+            "compiler_transform_candidate_count": len(local_transforms),
+            "compiler_transforms": sorted(local_transforms),
+            "semantic_actions_outside_gbt_route_vocabulary": len(
+                local_transforms
+            ),
+            "structured_output_absent_from_frozen_gbt_schema": (
+                local_atomic > 0 or bool(local_transforms)
+            ),
         }
-        candidate_count += local_candidates
+        route_candidate_count += local_routes
+        transform_candidate_count += len(local_transforms)
         atomic_group_candidates += local_atomic
         mixed_group_candidates += local_mixed
-    if (candidate_count, atomic_group_candidates, mixed_group_candidates) != (32, 27, 18):
+        observed_transforms.update(local_transforms)
+    if (route_candidate_count, atomic_group_candidates,
+            mixed_group_candidates) != (32, 27, 18):
         raise AuthorityError("communication authority totals changed")
     return {
         "per_entry": per_entry,
-        "route_composable_candidate_count": candidate_count,
+        "route_composable_candidate_count": route_candidate_count,
+        "compiler_transform_candidate_count": transform_candidate_count,
+        "compiler_transforms": sorted(observed_transforms),
         "atomic_multi_site_candidate_count": atomic_group_candidates,
         "mixed_route_candidate_count": mixed_group_candidates,
         "interpretation": (
-            "All current communication candidates use the GBT route vocabulary, "
-            "but 27 are atomic multi-site candidate-ID decisions absent from the "
-            "frozen one-label GBT output schema. This is an interface-granularity "
-            "gap, not proof that a redesigned structured ML baseline could not act."
+            "The frozen route candidates retain the GBT route vocabulary, while "
+            "atomic multi-site IDs and any confirmed compiler transforms require "
+            "structured output absent from the frozen one-label GBT schema. This "
+            "is an interface-authority gap, not proof that a redesigned structured "
+            "ML baseline could not act."
         ),
     }
 
@@ -320,7 +380,10 @@ def analyze_collective(graph: dict[str, Any], entry: dict[str, Any]) -> dict[str
     }
 
 
-def analyze_conditional_frontier(value: Any) -> dict[str, Any]:
+def analyze_conditional_frontier(
+    value: Any,
+    communication_graphs: dict[str, tuple[dict[str, Any], dict[str, Any]]],
+) -> dict[str, Any]:
     report = action_frontier.verify_report(value)
     verify_recorded_evidence(report.get("evidence"))
     records = report["conditional_frontier"]
@@ -334,11 +397,29 @@ def analyze_conditional_frontier(value: Any) -> dict[str, Any]:
                      != "forbidden_until_positive_confirmation_and_refreeze"
                      for item in records)):
         raise AuthorityError("conditional frontier overstates model authority")
+    unresolved = []
+    realized = []
+    for item in records:
+        label = item["label"]
+        current_graph = communication_graphs[label][0]
+        if current_graph["graph_id"] == item["current_graph_id"]:
+            unresolved.append(label)
+        elif current_graph["graph_id"] == item["conditional_graph_id"]:
+            realized.append(label)
+        else:
+            raise AuthorityError(
+                f"{label}: suite graph is neither the frozen base nor exact "
+                "compiler-frontier expansion"
+            )
     return {
         "frontier_id": report["frontier_id"],
-        "runtime_unconfirmed_transform_count": len(records),
+        "frontier_suite_id": report["suite_id"],
+        "runtime_unconfirmed_transform_count": len(unresolved),
+        "unresolved_conditional_entries": sorted(unresolved),
+        "realized_current_entry_count": len(realized),
+        "realized_current_entries": sorted(realized),
         "compiler_transforms": sorted(transforms),
-        "model_visible_transform_count": 0,
+        "model_visible_transform_count": len(realized),
         "performance_claim_supported": False,
     }
 
@@ -391,14 +472,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         read_json(collective_path)
     )
     collective_entry = suite_entry(
-        entries, "collective_n8", collective_path, collective_graph,
+        entries, args.collective_label, collective_path, collective_graph,
     )
 
     communication = analyze_communication(communication_graphs)
     structural = analyze_structural(structural_graph, structural_entry)
     collective = analyze_collective(collective_graph, collective_entry)
     conditional_path = args.conditional_frontier.resolve()
-    conditional = analyze_conditional_frontier(read_json(conditional_path))
+    conditional = analyze_conditional_frontier(
+        read_json(conditional_path), communication_graphs,
+    )
 
     payload = {
         "schema_version": REPORT_SCHEMA,
@@ -415,12 +498,22 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "claim_separation": {
             "frozen_gbt_is_a_valid_route_baseline": True,
             "frozen_gbt_and_compiler_policy_interfaces_have_equal_authority": False,
-            "current_nonroute_compiler_candidate_or_option_ids": 40,
+            "current_nonroute_compiler_candidate_or_option_ids": (
+                40 + communication["compiler_transform_candidate_count"]
+            ),
             "current_nonroute_policy_counts_by_independent_entry": {
                 "coalescing_placement": 4032,
-                "collective_n8": 4095,
+                args.collective_label: 4095,
+                **{
+                    label: record["independent_policy_count"]
+                    - record["baseline_route_policy_count"]
+                    for label, record in communication["per_entry"].items()
+                    if record["compiler_transform_candidate_count"]
+                },
             },
-            "conditional_runtime_unconfirmed_nonroute_transforms": 3,
+            "conditional_runtime_unconfirmed_nonroute_transforms": (
+                conditional["runtime_unconfirmed_transform_count"]
+            ),
             "wider_authority_comes_from_compiler_interface_not_llm_identity": True,
             "structured_ml_could_use_the_same_interface": True,
             "llm_is_required_for_these_actions": False,
@@ -492,6 +585,11 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--communication", type=parse_spec, action="append", required=True)
     value.add_argument("--structural-graph", type=Path, required=True)
     value.add_argument("--collective-graph", type=Path, required=True)
+    value.add_argument(
+        "--collective-label",
+        choices=("collective_n8", "collective_n6"),
+        default=DEFAULT_COLLECTIVE_LABEL,
+    )
     value.add_argument("--conditional-frontier", type=Path, required=True)
     value.add_argument("--out", type=Path, required=True)
     return value

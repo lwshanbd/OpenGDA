@@ -75,6 +75,39 @@ class LlmSamplingNullTests(unittest.TestCase):
         with self.assertRaisesRegex(audit.SamplingNullError, "overstates"):
             audit.verify_report(invalid)
 
+    def test_realized_frontier_is_not_double_counted_as_conditional(self):
+        frontier = {
+            "frontier_id": "frontier-id",
+            "suite_id": "ancestor-suite",
+            "conditional_frontier": [
+                {"label": "jacobi"},
+                {"label": "loop_lto"},
+                {"label": "mm_minimal"},
+            ],
+        }
+        authority = {"conditional_compiler_policy_authority": {
+            "frontier_id": "frontier-id",
+            "frontier_suite_id": "ancestor-suite",
+            "unresolved_conditional_entries": ["loop_lto", "mm_minimal"],
+            "realized_current_entries": ["jacobi"],
+        }}
+        unresolved, realized = audit.resolved_frontier_sets(
+            authority, frontier, "current-suite",
+        )
+        self.assertEqual({"loop_lto", "mm_minimal"}, unresolved)
+        self.assertEqual({"jacobi"}, realized)
+
+        overlapping = copy.deepcopy(authority)
+        overlapping["conditional_compiler_policy_authority"][
+            "unresolved_conditional_entries"
+        ].append("jacobi")
+        with self.assertRaisesRegex(
+            audit.SamplingNullError, "does not partition"
+        ):
+            audit.resolved_frontier_sets(
+                overlapping, frontier, "current-suite",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -206,6 +206,40 @@ def verified_historical(value: Any) -> dict[str, Any]:
     return value
 
 
+def resolved_frontier_sets(
+    authority: dict[str, Any], frontier: dict[str, Any], suite_id: str,
+) -> tuple[set[str], set[str]]:
+    """Partition old conditional candidates against the current suite audit."""
+    authority_frontier = authority.get(
+        "conditional_compiler_policy_authority", {}
+    )
+    if authority_frontier.get("frontier_id") != frontier.get("frontier_id"):
+        raise SamplingNullError("action authority binds another compiler frontier")
+    frontier_labels = {
+        item.get("label") for item in frontier.get("conditional_frontier", [])
+    }
+    unresolved = authority_frontier.get("unresolved_conditional_entries")
+    realized = authority_frontier.get("realized_current_entries")
+    if unresolved is None and realized is None:
+        if frontier.get("suite_id") != suite_id:
+            raise SamplingNullError("conditional frontier binds another suite")
+        return set(frontier_labels), set()
+    if (not isinstance(unresolved, list) or not isinstance(realized, list)
+            or any(not isinstance(label, str)
+                   for label in [*unresolved, *realized])):
+        raise SamplingNullError("action authority has invalid frontier routing")
+    unresolved_set = set(unresolved)
+    realized_set = set(realized)
+    if (unresolved_set & realized_set
+            or unresolved_set | realized_set != frontier_labels
+            or authority_frontier.get("frontier_suite_id")
+            != frontier.get("suite_id")):
+        raise SamplingNullError(
+            "action authority does not partition the frozen frontier"
+        )
+    return unresolved_set, realized_set
+
+
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
     suite_path = args.suite.resolve()
     suite = decision_suite.verified_suite(
@@ -220,8 +254,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     frontier_path = args.conditional_frontier.resolve()
     frontier = action_frontier.verify_report(read_json(frontier_path))
     action_authority.verify_recorded_evidence(frontier.get("evidence"))
-    if frontier.get("suite_id") != suite["suite_id"]:
-        raise SamplingNullError("conditional frontier binds another suite")
+    unresolved_set, realized_set = resolved_frontier_sets(
+        authority, frontier, suite["suite_id"],
+    )
 
     historical_path = args.historical.resolve()
     historical = verified_historical(read_json(historical_path))
@@ -237,6 +272,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
 
     conditional = {}
     for item in frontier["conditional_frontier"]:
+        if item["label"] in realized_set:
+            continue
         count = item["conditional_independent_policy_count"]
         conditional[item["label"]] = {
             **uniform_oracle_null(count, TRIALS_PER_VIEW),
@@ -289,6 +326,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "current_suite_uniform_null": current,
         "conditional_frontier_uniform_null": {
             label: conditional[label] for label in sorted(conditional)
+        },
+        "frontier_resolution": {
+            "unresolved_conditional_entries": sorted(unresolved_set),
+            "realized_current_entries": sorted(realized_set),
+            "realized_entries_are_calibrated_in_current_suite": True,
         },
         "historical_empirical_support_null": historical_null,
         "claim_separation": {
