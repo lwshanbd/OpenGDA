@@ -7,6 +7,16 @@
 #include "gicc/platform/ofi/runtime_helpers.h"
 #include "gicc/platform/ofi/ofi_runtime.hpp"
 
+namespace {
+
+__global__ void gicc_set_schedule_phase_kernel(gicc::DeviceCtx *ctx,
+                                                std::uint32_t phase) {
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+        ctx->schedule_phase_ = phase;
+}
+
+}  // namespace
+
 extern "C" {
 
 void *gicc_runtime_peer_ipc_base(gicc::Runtime *rt, int peer, int buf_idx) {
@@ -127,6 +137,16 @@ volatile std::uint64_t *gicc_runtime_trigger_addr(gicc::Runtime *rt) {
 
 std::uint64_t gicc_runtime_trigger_val(gicc::Runtime *rt) {
     return rt ? rt->mono_total_ops_ : 0;
+}
+
+void gicc_runtime_set_schedule_phase_from_kernel_args(
+        void *const *kernel_params, std::uint32_t phase,
+        GpuStream_t stream) {
+    if (!kernel_params || !kernel_params[0]) return;
+    auto *ctx = *static_cast<gicc::DeviceCtx *const *>(kernel_params[0]);
+    if (!ctx) return;
+    gpuLaunchKernel(gicc_set_schedule_phase_kernel, dim3(1), dim3(1),
+                    0, stream, ctx, phase);
 }
 
 #ifdef GICC_CPU_PROXY

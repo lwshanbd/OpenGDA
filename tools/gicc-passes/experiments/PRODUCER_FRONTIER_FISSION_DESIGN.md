@@ -66,6 +66,16 @@ HIP stream order therefore makes each launch observe its own phase. The
 original kernel stub, symbol, formal arguments, and application call remain
 unchanged.
 
+The runtime-owned mechanism is now present but dormant: `DeviceCtx` appends a
+zero-defaulted phase word, every `Runtime::prepare*` path restores
+`original`, and the C ABI helper
+`gicc_runtime_set_schedule_phase_from_kernel_args` launches a one-thread
+setter on the supplied stream. Host/device IR audit confirms that the helper
+dereferences kernel-argument slot zero, forwards the stream to HIP, and that
+the setter performs one 32-bit store to the appended context field. No pass
+calls the helper and no kernel reads the phase yet, so this milestone cannot
+change application behavior by itself.
+
 Device LTO rewrites the original kernel body:
 
 - boundary phase skips PUT/flush/quiet and executes only iterations whose

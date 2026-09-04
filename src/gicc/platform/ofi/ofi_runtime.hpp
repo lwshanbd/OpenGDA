@@ -946,6 +946,7 @@ public:
         // Locality-aware collectives: hand the device the peer IPC table.
         h_dev_ctx_->peer_ipc_base = d_peer_ipc_;
         h_dev_ctx_->ipc_n_bufs    = n_bufs_;
+        h_dev_ctx_->schedule_phase_ = GICC_SCHEDULE_PHASE_ORIGINAL;
 #ifdef GICC_CPU_PROXY
         // Lazy-start the CPU proxy fleet on first prepare(). Stash both
         // the single ring 0 (DeviceCtx::proxy_ring, for back-compat with
@@ -976,6 +977,7 @@ public:
     DeviceCtx* prepare_trigger(Token /*tok*/) {
         h_dev_ctx_->trigger_addr_ = comm_->get_trigger_addr();
         h_dev_ctx_->trigger_val_  = my_n_remote_ops_;
+        h_dev_ctx_->schedule_phase_ = GICC_SCHEDULE_PHASE_ORIGINAL;
 #ifdef GICC_CPU_PROXY
         h_dev_ctx_->proxy_ring = proxy_dispatch_disabled_
             ? nullptr

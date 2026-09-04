@@ -22,6 +22,7 @@ EXPECTED=(
     gicc_runtime_dwq_enqueue_batched
     gicc_runtime_trigger_addr
     gicc_runtime_trigger_val
+    gicc_runtime_set_schedule_phase_from_kernel_args
 )
 
 PRESENT=$(/opt/rocm-6.4.0/lib/llvm/bin/llvm-nm "${OBJ_PATH}")
@@ -36,7 +37,7 @@ for sym in "${EXPECTED[@]}"; do
 done
 
 if [[ "${missing}" -eq 0 ]]; then
-    echo "PASS: all 7 runtime helpers exported"
+    echo "PASS: all ${#EXPECTED[@]} runtime helpers exported"
     exit 0
 fi
 echo "FAIL: ${missing} runtime helper(s) missing from .o"

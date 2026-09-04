@@ -62,6 +62,16 @@
 
 namespace gicc {
 
+// Compiler-owned execution phases. Application kernels ignore this word
+// unless a verified LTO schedule has rewritten their control flow. Keeping
+// ORIGINAL as zero preserves the behavior of every unmodified kernel and of
+// contexts allocated before producer-frontier fission is enabled.
+enum : std::uint32_t {
+    GICC_SCHEDULE_PHASE_ORIGINAL = 0,
+    GICC_SCHEDULE_PHASE_PRODUCER_FRONTIER = 1,
+    GICC_SCHEDULE_PHASE_REMAINDER = 2,
+};
+
 //==============================================================================
 // DeviceCtx — GPU-accessible context for the libfabric/CXI backend.
 // Shrunk per spec §7.3: only the trigger MMIO addr + threshold value
@@ -89,6 +99,11 @@ struct DeviceCtx {
     // => not local/mapped => fall back to put/proxy. Set by prepare().
     void**             peer_ipc_base = nullptr;
     int                ipc_n_bufs    = 0;
+    // Written by a one-thread GICC-owned setter kernel on the application's
+    // launch stream. A following compiler-cloned launch therefore observes
+    // the selected phase without a racing host store or a source-level ABI
+    // change. Appended to preserve all existing field offsets.
+    std::uint32_t       schedule_phase_ = GICC_SCHEDULE_PHASE_ORIGINAL;
 };
 
 #ifdef GICC_CPU_PROXY

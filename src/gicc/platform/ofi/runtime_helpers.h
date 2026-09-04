@@ -60,6 +60,14 @@ void gicc_runtime_dwq_enqueue_batched(gicc::Runtime    *rt,
 volatile std::uint64_t *gicc_runtime_trigger_addr(gicc::Runtime *rt);
 std::uint64_t           gicc_runtime_trigger_val (gicc::Runtime *rt);
 
+// Compiler-only phase switch used by producer-frontier fission. The first
+// kernel parameter array entry points at the host-side DeviceCtx* argument
+// slot materialized by HIP. The implementation dereferences that slot and
+// launches a one-thread setter kernel on `stream`; it never edits application
+// source or changes the original kernel ABI.
+void gicc_runtime_set_schedule_phase_from_kernel_args(
+    void *const *kernel_params, std::uint32_t phase, GpuStream_t stream);
+
 // Host-mirror lookup (used by the pass-synthesized DWQ trace function when
 // a kernel formal carries a "host-mirrored" annotation: at trace time the
 // pass needs to read the array's contents to pre-stage one DWQ descriptor
