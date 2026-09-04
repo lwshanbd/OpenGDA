@@ -28,6 +28,15 @@ class CompilerCollectiveModelTrialTests(unittest.TestCase):
                 } for index, view in enumerate(
                     ("relational", "descriptors", "opaque"), 4
                 )],
+                "trial_order": {
+                    "kind": "response_index_major_rotating_views",
+                    "base_view_order": [
+                        "relational", "descriptors", "opaque",
+                    ],
+                    "rotation_offset_for_trial": (
+                        "(trial - 1) modulo view count"
+                    ),
+                },
             },
         }
         payload = {
@@ -106,8 +115,19 @@ class CompilerCollectiveModelTrialTests(unittest.TestCase):
     def test_trial_order_is_three_views_times_twenty(self):
         order = trials.expected_trials(self.request)
         self.assertEqual(60, len(order))
-        self.assertEqual(("relational", 1), order[0])
-        self.assertEqual(("opaque", 20), order[-1])
+        self.assertEqual([
+            ("relational", 1), ("descriptors", 1), ("opaque", 1),
+            ("descriptors", 2), ("opaque", 2), ("relational", 2),
+            ("opaque", 3), ("relational", 3), ("descriptors", 3),
+        ], order[:9])
+        self.assertEqual([
+            ("descriptors", 20), ("opaque", 20), ("relational", 20),
+        ], order[-3:])
+
+        changed = copy.deepcopy(self.request)
+        changed["provider_delivery"].pop("trial_order")
+        with self.assertRaisesRegex(trials.TrialError, "rotating view order"):
+            trials.expected_trials(changed)
 
     @mock.patch.object(trials.subprocess, "run")
     def test_malformed_successful_output_is_scored_once_and_archived(self, run):

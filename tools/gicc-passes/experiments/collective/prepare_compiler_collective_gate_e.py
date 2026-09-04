@@ -243,6 +243,11 @@ def build_request(inputs: dict[str, Any], response_schema_path: Path,
             "response_schema_sha256": schema_sha,
             "views": views,
             "calls_are_sequential": True,
+            "trial_order": {
+                "kind": "response_index_major_rotating_views",
+                "base_view_order": list(plans.MODEL_VIEW_KINDS),
+                "rotation_offset_for_trial": "(trial - 1) modulo view count",
+            },
             "total_provider_calls": TRIALS_PER_VIEW * len(views),
         },
         "authorization": {

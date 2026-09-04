@@ -321,11 +321,28 @@ def run_one(*, view: str, trial: int, prompt: str, graph: dict[str, Any],
 
 
 def expected_trials(request: dict[str, Any]) -> list[tuple[str, int]]:
-    return [
-        (row["view"], trial)
-        for row in request["provider_delivery"]["views"]
-        for trial in range(1, row["independent_responses"] + 1)
-    ]
+    delivery = request["provider_delivery"]
+    rows = delivery["views"]
+    order = delivery.get("trial_order")
+    views = [row["view"] for row in rows]
+    if order != {
+        "kind": "response_index_major_rotating_views",
+        "base_view_order": views,
+        "rotation_offset_for_trial": "(trial - 1) modulo view count",
+    }:
+        raise TrialError("request lacks the frozen rotating view order")
+    counts = {row["independent_responses"] for row in rows}
+    if len(views) != len(set(views)) or not views or len(counts) != 1:
+        raise TrialError("request views or response counts are inconsistent")
+    count = next(iter(counts))
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        raise TrialError("independent response count must be positive")
+    result = []
+    for trial in range(1, count + 1):
+        offset = (trial - 1) % len(views)
+        rotated = views[offset:] + views[:offset]
+        result.extend((view, trial) for view in rotated)
+    return result
 
 
 def verify_archived_run(record: Any, output_dir: Path,

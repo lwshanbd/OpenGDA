@@ -127,6 +127,15 @@ class CompilerCollectiveGateETests(unittest.TestCase):
             self.assertTrue(
                 request["provider_delivery"]["calls_are_sequential"]
             )
+            self.assertEqual({
+                "kind": "response_index_major_rotating_views",
+                "base_view_order": [
+                    "relational", "descriptors", "opaque",
+                ],
+                "rotation_offset_for_trial": (
+                    "(trial - 1) modulo view count"
+                ),
+            }, request["provider_delivery"]["trial_order"])
             self.assertIn("ineligible", request["comparators"]["gbt"])
             payload = dict(request)
             request_id = payload.pop("request_id")

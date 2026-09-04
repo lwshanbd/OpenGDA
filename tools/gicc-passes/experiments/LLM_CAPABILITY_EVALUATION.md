@@ -48,7 +48,10 @@ expand the compiler graph, and be refrozen before it can appear in a prompt.
 
 For each eligible entry, the conditional protocol specifies 20 independent,
 stateless responses per view. Calls are sequential and use a deterministic
-rotating view order. This is 60 conditional calls for one eligible graph, but
+response-index-major rotating view order: trial 1 uses
+relational/descriptors/opaque, trial 2 starts with descriptors, and trial 3
+starts with opaque before the cycle repeats. This is 60 conditional calls for
+one eligible graph, but
 still zero permitted calls until a separate request binds the exact prompt,
 schema, provider executable/version/model/effort, and retry policy and the user
 explicitly authorizes that content-addressed request.
