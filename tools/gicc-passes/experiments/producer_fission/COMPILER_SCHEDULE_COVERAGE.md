@@ -19,9 +19,9 @@ runtime or LLM-quality result.
   headroom and a later request explicitly authorizes a provider call.
 
 The stable source-free graph ID for this snapshot is
-`sha256:6264bb8d57dbb563c2af9f8dea30024cc4eb1102d86c013c2458cb87074b8f02`.
+`sha256:905d2b063a7b82a9afdca5ac0c5674cc4fc85dba96e1f5b7dda6b8cd8bfadd82`.
 The only materializable two-phase oracle is
-`sha256:dae68f7745980e8aa4f6a1fdc338898c36c66b611e97e5301636aeaf54269baf`;
+`sha256:f0b4cb2a9ac13094c46d88ce7d706094e25ac95a33657b8e58031df6bfcac5e2`;
 it is deliberately absent from the model-visible candidate lists.
 
 ## Coverage result
@@ -30,7 +30,7 @@ it is deliberately absent from the model-visible candidate lists.
 |---|---|---|---|
 | Jacobi | `0f94ca074a4d9c3efdf3935051ae55afaf61d1d94ce52077ea362f58ae29f332` | `intra_kernel_exact_partition` | none for the guarded two-phase oracle |
 | Minimod | `67950e39e52de4307072a3032644e23feda5beabbb14f0e997f6d8c052f34a33` | `conditional_communication_only` | guarded completion region; cross-launch producer pipeline |
-| minimal matrix multiply | `42edd118e147a7af658cbdd7366bf60a2fd8d5114ce19079a9bcd98c6425fda3` | `guarded_source_identity_candidate` | whole-write-allocation disjointness; guarded early-trigger materialization |
+| minimal matrix multiply | `42edd118e147a7af658cbdd7366bf60a2fd8d5114ce19079a9bcd98c6425fda3` | `guarded_source_identity_candidate` | whole-write-allocation disjointness; communication-side-effect ordering; guarded early-trigger materialization |
 | mixed-side-effect LTO | `b45161addf18a307cc78e67e35202b0cda7f015cff2e39b653bde35267c6d879` | `unknown_side_effect_frontier` | side-effect alias partition |
 | loop-carried LTO | `c139fa05703d764d5e691611ab6ed2649b71cb973ca1025e126b3043cd43caf4` | `loop_carried_communication` | guarded loop phase schedule |
 
@@ -85,7 +85,9 @@ whole-allocation disjointness claim: LLVM `noalias` alone is insufficient for
 transfer bytes not otherwise accessed through the candidate pointer. A future
 host materializer must both match source identity and prove or check that the
 full transfer interval misses every write-root allocation; otherwise it must
-retain the fused schedule. No executable candidate is exposed yet.
+retain the fused schedule. Because the write is atomic, the compiler must also
+establish that relocating communication across it preserves observable
+side-effect order. No executable candidate is exposed yet.
 
 ## Reproduction
 

@@ -287,9 +287,12 @@ that host LTO could compare with the shared registered source-buffer slot.
 LLVM `noalias` constrains memory locations accessed during the invocation; it
 does not prove that the entire registered source allocation misses every
 write-root allocation. A later materializer must separately prove or check
-that whole-allocation relation, and must retain the untouched original
-schedule on every false or unknown edge. Until then, the fact neither moves a
-trigger nor adds a legal model action.
+that whole-allocation relation. If an intervening write is atomic or another
+non-duplicable side effect is present, it must also prove that moving
+communication across the effect preserves its observable ordering; memory
+disjointness alone is insufficient. The materializer must retain the untouched
+original schedule on every false or unknown edge. Until then, the fact neither
+moves a trigger nor adds a legal model action.
 
 `transfer_interval` is the compiler-recovered half-open source byte interval
 `[byte_offset, byte_offset + byte_size)` within `source_buffer`. Its nested

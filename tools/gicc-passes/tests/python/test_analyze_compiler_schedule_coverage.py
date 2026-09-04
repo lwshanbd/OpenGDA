@@ -176,11 +176,16 @@ class CompilerScheduleCoverageTests(unittest.TestCase):
                 "pointer_formals": [1, 2],
                 "write_pointer_formals": [3],
                 "proof": "runtime_source_identity_candidate",
-                "required_proof": "whole_write_allocation_disjointness",
+                "required_proofs": [
+                    "whole_write_allocation_disjointness",
+                    "communication_side_effect_ordering",
+                ],
             }], facts["source_identity_relations"])
             self.assertIn("write_allocation_disjointness",
                           facts["missing_proof_families"])
             self.assertIn("guarded_early_trigger_materialization",
+                          facts["missing_proof_families"])
+            self.assertIn("communication_side_effect_ordering",
                           facts["missing_proof_families"])
             self.assertEqual(facts, model["compiler_facts"])
 

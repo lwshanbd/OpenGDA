@@ -111,6 +111,9 @@ misses every write-root allocation. A future materializer must separately
 prove or check that whole-allocation relation, keep the original fused
 schedule on false or unknown edges, and final device LTO must re-prove the
 same identity-candidate and write-root facts before relocating the trigger.
+For matrix multiply the write is atomic, so allocation disjointness still does
+not authorize reordering: an additional compiler/runtime contract must prove
+that the communication/atomic ordering is unobservable or otherwise preserved.
 
 Device discovery now emits this guard shape only for the narrow case of one
 ordinary producer pointer and one shared i32 source-buffer formal across the

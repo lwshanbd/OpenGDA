@@ -208,6 +208,11 @@ def load_case(label: str, features_path: Path) -> tuple[dict[str, Any], dict[str
         [int(frontier.get("atomic_write_sites", 0)) for frontier in frontiers]
         or [0]
     )
+    phase_sensitive = max(
+        [int(frontier.get("phase_sensitive_sites", 0))
+         for frontier in frontiers]
+        or [0]
+    )
     unknown = max(
         [int(frontier.get("unknown_write_sites", 0)) for frontier in frontiers]
         or [0]
@@ -236,6 +241,10 @@ def load_case(label: str, features_path: Path) -> tuple[dict[str, Any], dict[str
     for frontier in frontiers:
         if frontier.get("source_identity_guardable") is not True:
             continue
+        required_proofs = ["whole_write_allocation_disjointness"]
+        if (int(frontier.get("atomic_write_sites", 0)) > 0 or
+                int(frontier.get("phase_sensitive_sites", 0)) > 0):
+            required_proofs.append("communication_side_effect_ordering")
         relation = {
             "source_buffer_formal":
                 frontier.get("source_identity_buffer_index_param"),
@@ -247,7 +256,7 @@ def load_case(label: str, features_path: Path) -> tuple[dict[str, Any], dict[str
                 frontier.get("atomic_write_params", [])
             ),
             "proof": "runtime_source_identity_candidate",
-            "required_proof": "whole_write_allocation_disjointness",
+            "required_proofs": required_proofs,
         }
         relation_map[json.dumps(
             relation, sort_keys=True, separators=(",", ":")
@@ -305,6 +314,10 @@ def load_case(label: str, features_path: Path) -> tuple[dict[str, Any], dict[str
         missing_proof_families.append(
             "write_allocation_disjointness"
         )
+        if atomic > 0 or phase_sensitive > 0:
+            missing_proof_families.append(
+                "communication_side_effect_ordering"
+            )
         missing_proof_families.append(
             "guarded_early_trigger_materialization"
         )
@@ -332,6 +345,7 @@ def load_case(label: str, features_path: Path) -> tuple[dict[str, Any], dict[str
         "frontier_analyzed_sites": len(frontiers),
         "ordinary_store_sites": ordinary,
         "atomic_write_sites": atomic,
+        "phase_sensitive_sites": phase_sensitive,
         "unknown_write_sites": unknown,
         "atomic_domains_known": atomic_domains_known,
         "buffer_identity_guardable": buffer_identity_guardable,
