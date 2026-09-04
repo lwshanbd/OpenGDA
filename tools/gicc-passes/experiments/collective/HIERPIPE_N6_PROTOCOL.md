@@ -34,6 +34,10 @@ currently usable nodes; choosing six rather than seven also avoids adding an
 odd-node tree imbalance to the scale comparison. The cancelled n8 allocation
 produced no runtime observations and is not evidence.
 
+The read-only scheduler and bundle binding is independently machine-audited in
+`../PDEBUG_COLLECTIVE_FEASIBILITY.md`, with audit ID
+`sha256:88d726fcd7b87d5fc83a46881800a99682d49bceac3d81f5c3f2bb5a0a3b0d3c`.
+
 ## Hypothesis
 
 At n4, pipe4 was only 3.6% slower than the unpipelined hierarchical tree at
