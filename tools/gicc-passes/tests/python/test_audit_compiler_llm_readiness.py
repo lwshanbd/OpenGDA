@@ -453,6 +453,102 @@ class CompilerLlmReadinessTests(unittest.TestCase):
                     suite, confirmation,
                 ))
 
+    def test_reused_refreeze_binds_suite_expansion_and_predecessor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            suite_path = root / "suite.json"
+            expansion_path = root / "expansion.json"
+            refreeze_path = root / "refreeze.json"
+            for path in (suite_path, expansion_path, refreeze_path):
+                path.write_text("{}\n", encoding="utf-8")
+            confirmation = {"result_id": "sha256:" + "1" * 64}
+            graph_id = "sha256:" + "2" * 64
+            candidate_id = "candidate:" + "3" * 24
+            jacobi = entry("jacobi", "sha256:" + "4" * 64)
+            loop = entry("loop_lto", graph_id)
+            suite = {
+                "suite_id": "sha256:" + "5" * 64,
+                "entries": [jacobi, loop],
+            }
+            predecessor = {
+                "suite_id": "sha256:" + "6" * 64,
+                "entries": [jacobi, entry("loop_lto")],
+            }
+            expansion_manifest = {
+                "status": "expanded_graph_ready_for_suite_refreeze",
+                "confirmation": {
+                    "result_id": confirmation["result_id"],
+                    "confirmation_gate_passed": True,
+                    "correctness_gate_passed": True,
+                },
+                "graph_transition": {
+                    "expanded_graph_id": graph_id,
+                    "candidate_id": candidate_id,
+                },
+                "boundary": {
+                    "compiler_lto_decisions_only": True,
+                    "application_source_hash_verified": True,
+                    "application_source_visible_to_model": False,
+                    "application_source_modified": False,
+                    "model_invoked": False,
+                    "provider_call_authorized": False,
+                    "scheduler_job_submitted": False,
+                    "frozen_current_graph_modified": False,
+                    "current_decision_suite_modified": False,
+                },
+            }
+            manifest = {
+                "status": "refrozen_suite_ready_for_readiness_audit",
+                "refrozen_suite_id": suite["suite_id"],
+                "boundary": {
+                    "compiler_lto_decisions_only": True,
+                    "application_source_hash_verified": True,
+                    "application_source_visible_to_model": False,
+                    "application_source_modified": False,
+                    "model_invoked": False,
+                    "provider_call_authorized": False,
+                    "scheduler_job_submitted": False,
+                    "current_suite_modified": False,
+                },
+                "inputs": [{
+                    "role": "reused_expansion_manifest",
+                    "path": str(expansion_path),
+                    "sha256": readiness.sha256_file(expansion_path),
+                    "bytes": expansion_path.stat().st_size,
+                }],
+                "outputs": [{
+                    "role": "refrozen_suite",
+                    "path": "suite.json",
+                    "sha256": readiness.sha256_file(suite_path),
+                    "bytes": suite_path.stat().st_size,
+                }],
+                "entry_transition": {
+                    "label": "loop_lto",
+                    "new_graph_id": graph_id,
+                    "new_candidate_id": candidate_id,
+                    "all_other_entries_preserved": True,
+                },
+            }
+            with (
+                mock.patch.object(
+                    readiness.reused_refreeze, "verify_contained",
+                    return_value=manifest,
+                ),
+                mock.patch.object(
+                    readiness.reused_expansion, "verify_contained",
+                    return_value=expansion_manifest,
+                ),
+                mock.patch.object(
+                    readiness, "verified_refreeze_predecessor",
+                    return_value=(root / "old.json", root / "prompts",
+                                  predecessor),
+                ),
+            ):
+                self.assertEqual(manifest, readiness.verified_reused_refreeze(
+                    refreeze_path, expansion_path, suite_path,
+                    suite, confirmation,
+                ))
+
     def test_refreeze_predecessor_is_content_addressed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -582,10 +678,34 @@ class CompilerLlmReadinessTests(unittest.TestCase):
         self.assertFalse(confirmed["current_suite_graph_expanded"])
         self.assertFalse(confirmed["provider_protocol_permitted"])
 
+        bundled = readiness.classify_reused_loop_descriptor(
+            entry(), "promising", analysis, "confirmed", True,
+            "bundle_ready",
+        )
+        self.assertEqual("suite_refreeze_required", bundled["status"])
+        self.assertTrue(bundled["expanded_graph_bundle_verified"])
+        self.assertFalse(bundled["candidate_model_visible"])
+        self.assertFalse(bundled["provider_protocol_permitted"])
+
+        refrozen = readiness.classify_reused_loop_descriptor(
+            entry(), "promising", analysis, "confirmed", True,
+            "suite_refrozen",
+        )
+        self.assertEqual("provider_protocol_permitted", refrozen["status"])
+        self.assertTrue(refrozen["candidate_model_visible"])
+        self.assertTrue(refrozen["current_suite_graph_expanded"])
+        self.assertTrue(refrozen["provider_protocol_permitted"])
+        self.assertFalse(refrozen["provider_call_authorized"])
+
         negative = readiness.classify_reused_loop_descriptor(
             entry(), "promising", analysis, "negative", False,
         )
         self.assertEqual("closed_negative", negative["status"])
+        with self.assertRaisesRegex(readiness.ReadinessError, "negative"):
+            readiness.classify_reused_loop_descriptor(
+                entry(), "promising", analysis, "negative", False,
+                "bundle_ready",
+            )
         with self.assertRaisesRegex(
             readiness.ReadinessError, "confirmation state disagrees"
         ):

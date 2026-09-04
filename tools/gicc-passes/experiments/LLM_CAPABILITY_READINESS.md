@@ -35,9 +35,9 @@ and fails closed at every transition. Its current output is:
 | `loop_lto` | `awaiting_predecessor` | run the frozen reused-descriptor scout after the serial campaign |
 
 The report has readiness ID
-`sha256:a224533826148f79c33d792bfea6423d48439d3f96ec95b21171ffc00fdbc506`
+`sha256:79867ef65a0c1e1b22882b2c56f0bab22cd3057d64520e6f1134ba332b437d81`
 and serialized SHA-256
-`57353bb9918d1193776a31533102e8e300628420dc316a64448628f63e2b34bd`.
+`066a908d98e157136deaf938c765fa2fecf7aebeb767f6411e3e9dfa872f1f9d`.
 It reports zero provider-protocol-permitted entries, zero authorized provider
 calls, zero measured LLM policies, and
 `paper_llm_performance_claim_ready=false`.
@@ -96,6 +96,12 @@ capacity but cannot support an LLM-selection benefit.
   and compiler-IR/enqueue-count audits. Its preparer freezes evidence but has
   no scheduler path; the separate controller waits for scheduler idleness and
   submits/finishes exactly one `pdebug` allocation before considering the next.
+  A passed confirmation can expose only `REUSE_LOOP_DESCRIPTOR`, after adding
+  only the confirmed `i32` loop-bound type to the dossier. A separate suite
+  refreeze must preserve every other entry. If all three hidden candidates
+  pass, readiness requires the serial hash lineage
+  `original → producer → guarded → reused`; disconnected expansion/refreeze
+  manifests cannot make an entry eligible.
 - A graph without runtime labels remains a capability-inventory entry, not a
   performance test.
 - Only a positive confirmatory headroom result may permit preparation of an
@@ -223,6 +229,8 @@ python3 tools/gicc-passes/experiments/audit_compiler_llm_readiness.py emit \
   --reused-analysis build_ofi/reused_loop_descriptor_scout_aff76f9_20260904/analysis.json \
   --reused-confirmation-state build_ofi/reused_loop_descriptor_confirmation_aff76f9_20260904.state \
   --reused-confirmation-analysis build_ofi/reused_loop_descriptor_confirmation_aff76f9_20260904/analysis.json \
+  --reused-expansion-manifest build_ofi/reused_loop_descriptor_graph_expansion_20260904/manifest.json \
+  --reused-refreeze-manifest build_ofi/reused_loop_descriptor_suite_refreeze_20260904/manifest.json \
   --out build_ofi/compiler_llm_readiness_20260904/report.json
 ```
 

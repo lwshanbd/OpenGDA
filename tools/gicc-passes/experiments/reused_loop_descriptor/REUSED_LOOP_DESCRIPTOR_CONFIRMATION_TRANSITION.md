@@ -107,3 +107,23 @@ The successor hashes all confirmation code and frozen binaries before waiting,
 then rechecks those hashes before either transition preparation or execution.
 Its own state is written beside the confirmation output with the suffix
 `.chain.state`; it contains no provider or model path.
+
+After—and only after—a positive three-allocation confirmation, the graph
+expansion can be prepared from the frozen `loop_lto` compiler bundle:
+
+```sh
+python3 tools/gicc-passes/experiments/reused_loop_descriptor/prepare_confirmed_reused_loop_descriptor_graph.py prepare \
+  --confirmation-analysis build_ofi/reused_loop_descriptor_confirmation_aff76f9_20260904/analysis.json \
+  --dossier build_ofi/compiler_fact_coverage_20260904/portfolio/loop_lto/dossier.json \
+  --template build_ofi/compiler_fact_coverage_20260904/bench_pingpong_lto/meta/_Z15dwq_loop_kernelPN4gicc9DeviceCtxEiimi.json \
+  --graph build_ofi/compiler_fact_coverage_20260904/portfolio/loop_lto/group-graph.json \
+  --output-dir build_ofi/reused_loop_descriptor_graph_expansion_20260904
+```
+
+The expansion replays all raw confirmation monitors, rechecks the source hash
+through the frozen transition, and proves an exact graph delta: the two old
+candidate IDs remain unchanged, only `bound_param_type=i32` is added to the
+compiler dossier, and only `REUSE_LOOP_DESCRIPTOR` becomes selectable. It
+does not modify the old graph or authorize a model call. A separate
+`prepare_reused_loop_descriptor_suite_refreeze.py` step must then replace only
+the `loop_lto` entry and preserve every other suite entry and prompt binding.

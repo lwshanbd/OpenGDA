@@ -38,6 +38,8 @@ import prepare_confirmed_guarded_early_graph as guarded_expansion  # noqa: E402
 import prepare_guarded_early_suite_refreeze as guarded_refreeze  # noqa: E402
 import prepare_confirmed_producer_fission_graph as producer_expansion  # noqa: E402
 import prepare_producer_fission_suite_refreeze as producer_refreeze  # noqa: E402
+import prepare_confirmed_reused_loop_descriptor_graph as reused_expansion  # noqa: E402
+import prepare_reused_loop_descriptor_suite_refreeze as reused_refreeze  # noqa: E402
 
 
 REPORT_SCHEMA = "gicc-compiler-llm-readiness-v1"
@@ -693,6 +695,112 @@ def verified_guarded_refreeze(
     return manifest
 
 
+def verified_reused_expansion(
+    path: Path, confirmation_value: dict[str, Any],
+) -> dict[str, Any]:
+    """Replay and bind descriptor-reuse expansion to its confirmation."""
+    manifest = reused_expansion.verify_contained(path)
+    confirmation = manifest.get("confirmation", {})
+    if (manifest.get("status")
+            != "expanded_graph_ready_for_suite_refreeze"
+            or confirmation.get("result_id")
+            != confirmation_value.get("result_id")
+            or confirmation.get("confirmation_gate_passed") is not True
+            or confirmation.get("correctness_gate_passed") is not True):
+        raise ReadinessError(
+            "reused-descriptor expansion binds another confirmation"
+        )
+    boundary = manifest.get("boundary", {})
+    for key, expected in {
+        "compiler_lto_decisions_only": True,
+        "application_source_hash_verified": True,
+        "application_source_visible_to_model": False,
+        "application_source_modified": False,
+        "model_invoked": False,
+        "provider_call_authorized": False,
+        "scheduler_job_submitted": False,
+        "frozen_current_graph_modified": False,
+        "current_decision_suite_modified": False,
+    }.items():
+        if boundary.get(key) is not expected:
+            raise ReadinessError(
+                f"reused-descriptor expansion boundary changed: {key}"
+            )
+    return manifest
+
+
+def verified_reused_refreeze(
+    path: Path, expansion_path: Path, suite_path: Path,
+    suite: dict[str, Any], confirmation_value: dict[str, Any],
+) -> dict[str, Any]:
+    """Replay the descriptor-reuse suite transition and full lineage."""
+    manifest = reused_refreeze.verify_contained(path)
+    if (manifest.get("status")
+            != "refrozen_suite_ready_for_readiness_audit"
+            or manifest.get("refrozen_suite_id") != suite.get("suite_id")):
+        raise ReadinessError("reused-descriptor refreeze binds another suite")
+    boundary = manifest.get("boundary", {})
+    for key, expected in {
+        "compiler_lto_decisions_only": True,
+        "application_source_hash_verified": True,
+        "application_source_visible_to_model": False,
+        "application_source_modified": False,
+        "model_invoked": False,
+        "provider_call_authorized": False,
+        "scheduler_job_submitted": False,
+        "current_suite_modified": False,
+    }.items():
+        if boundary.get(key) is not expected:
+            raise ReadinessError(
+                f"reused-descriptor refreeze boundary changed: {key}"
+            )
+    expansion_record = _record_by_role(
+        manifest.get("inputs"), "reused_expansion_manifest",
+        label="reused-descriptor refreeze",
+    )
+    recorded_expansion = _recorded_path(
+        expansion_record, label="reused-descriptor refreeze expansion",
+    )
+    if recorded_expansion != expansion_path.resolve():
+        raise ReadinessError("reused-descriptor refreeze uses another expansion")
+    expansion_manifest = verified_reused_expansion(
+        expansion_path, confirmation_value,
+    )
+    suite_record = _record_by_role(
+        manifest.get("outputs"), "refrozen_suite",
+        label="reused-descriptor refreeze",
+    )
+    if (sha256_file(suite_path) != suite_record.get("sha256")
+            or suite_path.stat().st_size != suite_record.get("bytes")):
+        raise ReadinessError("readiness suite differs from reused refreeze")
+    _, _, predecessor = verified_refreeze_predecessor(
+        manifest, label="reused-descriptor refreeze",
+    )
+    entries = {entry["label"]: entry for entry in suite["entries"]}
+    old_entries = {
+        entry["label"]: entry for entry in predecessor["entries"]
+    }
+    if (set(entries) != set(old_entries)
+            or any(entries[label] != old_entries[label]
+                   for label in set(entries) - {"loop_lto"})):
+        raise ReadinessError(
+            "reused-descriptor refreeze changed an unrelated suite entry"
+        )
+    loop_entry = entries.get("loop_lto", {})
+    transition = expansion_manifest.get("graph_transition", {})
+    delta = manifest.get("entry_transition", {})
+    if (delta.get("label") != "loop_lto"
+            or loop_entry.get("graph_id")
+            != transition.get("expanded_graph_id")
+            or delta.get("new_graph_id") != loop_entry.get("graph_id")
+            or delta.get("new_candidate_id") != transition.get("candidate_id")
+            or delta.get("all_other_entries_preserved") is not True):
+        raise ReadinessError(
+            "refrozen loop_lto entry changed after descriptor expansion"
+        )
+    return manifest
+
+
 def classify_guarded_early_trigger(
     entry: dict[str, Any], phase: str, analysis: Any | None,
     confirmation_phase: str = "missing",
@@ -858,12 +966,13 @@ def classify_reused_loop_descriptor(
     entry: dict[str, Any], phase: str, analysis: Any | None,
     confirmation_phase: str = "missing",
     confirmation_passed: bool | None = None,
+    graph_expansion_phase: str = "missing",
 ) -> dict[str, Any]:
     """Classify the model-invisible loop graph-expansion oracle."""
     if analysis is None:
-        if confirmation_passed is not None:
+        if confirmation_passed is not None or graph_expansion_phase != "missing":
             raise ReadinessError(
-                "reused-loop confirmation exists without a passed scout"
+                "reused-loop downstream evidence exists without a passed scout"
             )
         status = {
             "waiting_predecessor": "awaiting_predecessor",
@@ -912,6 +1021,10 @@ def classify_reused_loop_descriptor(
             )
         if gate["passed"]:
             if confirmation_passed is None:
+                if graph_expansion_phase != "missing":
+                    raise ReadinessError(
+                        "reused-loop graph expanded without confirmation"
+                    )
                 result = _confirmation_pending_result(
                     entry, phase=confirmation_phase,
                     label="reused_loop_descriptor",
@@ -924,24 +1037,55 @@ def classify_reused_loop_descriptor(
                     raise ReadinessError(
                         "reused-loop confirmation state disagrees with analysis"
                     )
-                result = _hidden_candidate_result(
-                    entry, confirmation_passed=confirmation_passed,
-                )
+                if not confirmation_passed and graph_expansion_phase != "missing":
+                    raise ReadinessError(
+                        "reused-loop graph expanded after negative confirmation"
+                    )
+                if not confirmation_passed or graph_expansion_phase == "missing":
+                    result = _hidden_candidate_result(
+                        entry, confirmation_passed=confirmation_passed,
+                    )
+                elif graph_expansion_phase == "bundle_ready":
+                    result = _base_entry(
+                        entry, "suite_refreeze_required",
+                        "refreeze_and_audit_suite_with_expanded_graph",
+                    )
+                    result.update({
+                        "runtime_confirmation_gate_passed": True,
+                        "candidate_model_visible": False,
+                        "expanded_graph_bundle_verified": True,
+                        "current_suite_graph_expanded": False,
+                    })
+                elif graph_expansion_phase == "suite_refrozen":
+                    result = _base_entry(
+                        entry, "provider_protocol_permitted",
+                        "freeze_exact_provider_request_and_request_authorization",
+                    )
+                    result.update({
+                        "runtime_confirmation_gate_passed": True,
+                        "candidate_model_visible": True,
+                        "expanded_graph_bundle_verified": True,
+                        "current_suite_graph_expanded": True,
+                    })
+                else:
+                    raise ReadinessError(
+                        f"unknown reused-loop graph phase "
+                        f"{graph_expansion_phase!r}"
+                    )
         else:
-            if confirmation_passed is not None:
+            if (confirmation_passed is not None
+                    or graph_expansion_phase != "missing"):
                 raise ReadinessError(
-                    "reused-loop confirmation exists after a negative scout"
+                    "reused-loop downstream evidence exists after a negative scout"
                 )
             result = _base_entry(
                 entry, "closed_negative",
                 "keep_reused_loop_descriptor_model_invisible",
             )
         result["runtime_gate_passed"] = gate["passed"]
-    result.update({
-        "candidate_kind": "trigger_reused_descriptor_loop",
-        "candidate_model_visible": False,
-        "current_suite_graph_expanded": False,
-    })
+    result.setdefault("candidate_model_visible", False)
+    result.setdefault("current_suite_graph_expanded", False)
+    result["candidate_kind"] = "trigger_reused_descriptor_loop"
     return result
 
 
@@ -1048,6 +1192,52 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         )
         if reused_confirmation_analysis is not None else None
     )
+    reused_graph_phase = "missing"
+    reused_expansion_present = args.reused_expansion_manifest.is_file()
+    reused_refreeze_present = args.reused_refreeze_manifest.is_file()
+    if reused_refreeze_present and not reused_expansion_present:
+        raise ReadinessError(
+            "reused-descriptor suite refreeze lacks its expansion manifest"
+        )
+    if ((reused_expansion_present or reused_refreeze_present)
+            and reused_confirmation_passed is not True):
+        raise ReadinessError(
+            "reused-descriptor graph evidence exists without passed confirmation"
+        )
+
+    # Reused descriptor is the final serialized suite transition.  Peel its
+    # exact predecessor before auditing guarded-trigger and producer-fission
+    # lineage, so every positive expansion remains a hash-linked A -> B step.
+    guarded_suite_path = args.suite
+    guarded_suite = suite
+    if reused_refreeze_present:
+        reused_manifest = verified_reused_refreeze(
+            args.reused_refreeze_manifest,
+            args.reused_expansion_manifest,
+            args.suite, suite, reused_confirmation_analysis,
+        )
+        guarded_suite_path, _, guarded_suite = (
+            verified_refreeze_predecessor(
+                reused_manifest, label="reused-descriptor refreeze",
+            )
+        )
+        reused_graph_phase = "suite_refrozen"
+    elif reused_expansion_present:
+        expansion_manifest = verified_reused_expansion(
+            args.reused_expansion_manifest, reused_confirmation_analysis,
+        )
+        if entries["loop_lto"]["graph_id"] != expansion_manifest[
+                "graph_transition"]["current_graph_id"]:
+            raise ReadinessError(
+                "suite changed before reused-descriptor refreeze was audited"
+            )
+        reused_graph_phase = "bundle_ready"
+
+    guarded_entries = {
+        entry["label"]: entry for entry in guarded_suite["entries"]
+    }
+    if set(guarded_entries) != EXPECTED_LABELS:
+        raise ReadinessError("reused refreeze predecessor labels changed")
     guarded_graph_phase = "missing"
     guarded_expansion_present = args.guarded_expansion_manifest.is_file()
     guarded_refreeze_present = args.guarded_refreeze_manifest.is_file()
@@ -1065,13 +1255,14 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     # trigger is the final transition, its exact predecessor is the suite that
     # producer fission must bind.  This accepts only an A -> B hash lineage; it
     # does not treat either final graph as proof of the missing transition.
-    producer_suite_path = args.suite
-    producer_suite = suite
+    producer_suite_path = guarded_suite_path
+    producer_suite = guarded_suite
     if guarded_refreeze_present:
         guarded_manifest = verified_guarded_refreeze(
             args.guarded_refreeze_manifest,
             args.guarded_expansion_manifest,
-            args.suite, suite, guarded_confirmation_analysis,
+            guarded_suite_path, guarded_suite,
+            guarded_confirmation_analysis,
         )
         producer_suite_path, _, producer_suite = (
             verified_refreeze_predecessor(
@@ -1084,7 +1275,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             args.guarded_expansion_manifest,
             guarded_confirmation_analysis,
         )
-        if entries["mm_minimal"]["graph_id"] != expansion_manifest[
+        if guarded_entries["mm_minimal"]["graph_id"] != expansion_manifest[
                 "graph_transition"]["current_graph_id"]:
             raise ReadinessError(
                 "suite changed before guarded-trigger refreeze was audited"
@@ -1156,6 +1347,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             reused_analysis,
             state_phase(args.reused_confirmation_state),
             reused_confirmation_passed,
+            reused_graph_phase,
         ),
     }
     for label in CAPACITY_ONLY_LABELS:
@@ -1310,6 +1502,22 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 / "reused_loop_descriptor/"
                 "prepare_reused_loop_descriptor_confirmation.py"
             ),
+            "reused_expansion_manifest": evidence(
+                args.reused_expansion_manifest
+            ),
+            "reused_expansion_preparer": evidence(
+                HERE
+                / "reused_loop_descriptor/"
+                "prepare_confirmed_reused_loop_descriptor_graph.py"
+            ),
+            "reused_refreeze_manifest": evidence(
+                args.reused_refreeze_manifest
+            ),
+            "reused_refreeze_preparer": evidence(
+                HERE
+                / "reused_loop_descriptor/"
+                "prepare_reused_loop_descriptor_suite_refreeze.py"
+            ),
         },
     }
     result = dict(payload)
@@ -1435,6 +1643,20 @@ def add_inputs(parser: argparse.ArgumentParser) -> None:
             "analysis.json"
         ),
     )
+    parser.add_argument(
+        "--reused-expansion-manifest", type=Path,
+        default=(
+            ROOT / "build_ofi/reused_loop_descriptor_graph_expansion_20260904/"
+            "manifest.json"
+        ),
+    )
+    parser.add_argument(
+        "--reused-refreeze-manifest", type=Path,
+        default=(
+            ROOT / "build_ofi/reused_loop_descriptor_suite_refreeze_20260904/"
+            "manifest.json"
+        ),
+    )
 
 
 def main() -> int:
@@ -1486,6 +1708,8 @@ def main() -> int:
         guarded_confirmation.common.MonitorError,
         reused_confirmation.ConfirmError,
         reused_confirmation.common.MonitorError,
+        reused_expansion.ExpansionError,
+        reused_refreeze.RefreezeError,
         OSError, KeyError, TypeError, ValueError,
     ) as exc:
         print(f"compiler-llm-readiness: ERROR: {exc}", file=sys.stderr)
