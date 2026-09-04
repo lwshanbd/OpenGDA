@@ -53,6 +53,9 @@ def feature(site_id, *, hk=True, locality=None, batched_loop=False):
                 "phase_launch_stream": "explicit",
                 "phase_launch_materialization": "device_stub",
                 "phase_launch_reason": "compiler-proved wrapper shape",
+                "kernel_argument_slots_exact": True,
+                "kernel_argument_slot_count": 18,
+                "kernel_argument_slot_reason": "compiler-proved slots",
                 "size_bytes": 4096,
                 "trip_count": 64,
             }
@@ -65,6 +68,9 @@ def feature(site_id, *, hk=True, locality=None, batched_loop=False):
         "phase_launch_stream": "explicit",
         "phase_launch_materialization": "device_stub",
         "phase_launch_reason": "compiler-proved wrapper shape",
+        "kernel_argument_slots_exact": True,
+        "kernel_argument_slot_count": 18,
+        "kernel_argument_slot_reason": "compiler-proved slots",
         "compute_before_flops": 0,
         "flops_to_first_use": 0,
         "trip_count": 64,
@@ -121,6 +127,16 @@ def feature(site_id, *, hk=True, locality=None, batched_loop=False):
                     "reason": "compiler-recovered local store domain",
                 }
             ],
+            "overlap_partition": {
+                "analyzed": True,
+                "exact": True,
+                "mode": "checked_store_interval_overlap",
+                "formal_binding": "same_kernel_formal_indices",
+                "store_instance_partition_disjoint": True,
+                "store_instance_partition_complete": True,
+                "full_compute_region_partition_proved": False,
+                "side_effect_partition_proved": False,
+            },
             "ordinary_store_sites": 1,
             "atomic_write_sites": 1,
             "unknown_write_sites": 0,
@@ -215,6 +231,17 @@ class LlmBridgeTests(unittest.TestCase):
         )
         self.assertTrue(
             self.dossier["sites"][0]["phase_launch_supported"]
+        )
+        self.assertTrue(
+            self.dossier["sites"][0]["kernel_argument_slots_exact"]
+        )
+        self.assertEqual(
+            18, self.dossier["sites"][0]["kernel_argument_slot_count"]
+        )
+        self.assertTrue(
+            self.dossier["sites"][0]["producer_frontier"]
+                        ["overlap_partition"]
+                        ["store_instance_partition_complete"]
         )
 
     def test_unknown_locality_removes_forced_ipc_but_keeps_safe_default(self):

@@ -97,10 +97,7 @@ Feature extraction now also preserves every transfer's symbolic source
 interval as a half-open byte range over compiler formal indices. It reports
 separate `symbolically_exact`, `affine`, and `host_knowable` facts, and the
 source-free bridge forwards the nested expression unchanged. This closes the
-previous information-loss gap between device metadata and the model dossier,
-but deliberately does not discharge `exact_transfer_intervals`: runtime
-formal binding, buffer identity, and the matching producer domain still have
-to be proved and replayed by LTO.
+previous information-loss gap between device metadata and the model dossier.
 
 Device discovery now preserves the matching local store semantics as well.
 For each ordinary producer store it records a formal-rooted byte address and
@@ -109,9 +106,27 @@ expression nodes plus explicit GPU coordinate builtins. On unchanged Jacobi,
 the real O3 HIP pipeline recovers the one `a_new` store as
 `4 * ((global_y + iy_start) * nx + global_x + 1)` under
 `global_y + iy_start < iy_end` and `global_x + 1 < nx - 1`. This is marked
-`domain_exact` only as a local device-IR fact. Relating its formal values to
-the two transfer intervals and proving a disjoint/complete two-phase
-partition remain separate fail-closed obligations.
+`domain_exact` only as a local device-IR fact; the host ABI binding and
+cross-operation partition are proved separately below.
+
+Host LTO now audits every entry in the `hipLaunchKernel` parameter array. On
+unchanged Jacobi it proves all 18 slots are distinct launch-local cells with
+the storage types recorded by device metadata. This supplies a stronger
+binding than attempting to reverse a source lambda: transfer expressions and
+producer expressions name the same runtime kernel-formal slots, and both
+phase launches reuse that exact array.
+
+That shared formal namespace also removes the need to guess static scalar
+identities such as `top_offset = 4 * nx`. For the first one-store PUT group,
+the compiler constructs the boundary predicate directly as checked byte
+overlap between the exact producer-store interval and either exact transfer
+interval; the interior predicate is its logical complement. This proves a
+disjoint and complete partition of ordinary store instances for unchanged
+Jacobi, including the important fact that the transferred boundary columns
+need not be producer writes. It deliberately does not yet claim a full
+compute-region or atomic/reduction partition, so the candidate remains
+masked. Checked interval-end and buffer-identity guards must retain an
+untouched fused-launch fallback.
 
 Device LTO rewrites the original kernel body:
 
@@ -135,7 +150,8 @@ directly in the wrapper.
 
 The feature pass now recognizes both forms and fails closed unless the stub
 dispatch (when present), push/pop chain, launch target, return-value use, and
-parameter-array lifetime are unique. It reports the exact recomputation point
+parameter-array lifetime are unique. It additionally proves every parameter
+slot is distinct, launch-local, and metadata-typed. It reports the exact recomputation point
 as `phase_launch_materialization: device_stub|wrapper`. On the unchanged
 Jacobi source, the real early pass proves `device_stub`; it also rejects a
 synthetic stub shared by another launch. Host LTO can insert a pre-authored

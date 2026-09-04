@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "kernel_mangled": "_Z11k_partition",
+  "kernel_simple": "k_partition",
+  "params": [
+    {"idx": 0, "name": "ctx", "type": "ptr"},
+    {"idx": 1, "name": "out", "type": "ptr"},
+    {"idx": 2, "name": "buf", "type": "i32"},
+    {"idx": 3, "name": "top", "type": "i64"},
+    {"idx": 4, "name": "bottom", "type": "i64"},
+    {"idx": 5, "name": "size", "type": "i64"},
+    {"idx": 6, "name": "stride", "type": "i64"}
+  ],
+  "ops": [
+    {
+      "site_id": "unit.cpp:10:k_partition::0",
+      "kind": "put_no_db",
+      "guard": {"kind": "always"},
+      "completion_site_id": "unit.cpp:20:k_partition::2",
+      "args": {
+        "target_rank": {"kind": "const_i64", "value": 0},
+        "dst_buf": {"kind": "param", "param": 2},
+        "dst_off": {"kind": "const_i64", "value": 0},
+        "src_buf": {"kind": "param", "param": 2},
+        "src_off": {"kind": "param", "param": 3},
+        "size": {"kind": "param", "param": 5}
+      },
+      "producer_frontier": {
+        "analyzed": true,
+        "write_footprint_known": true,
+        "completion_site_id": "unit.cpp:20:k_partition::2",
+        "ordinary_store_params": [1],
+        "atomic_write_params": [],
+        "buffer_identity_guardable": true,
+        "producer_pointer_param": 1,
+        "source_buffer_index_param": 2,
+        "buffer_identity_guard_reason": "unit guard",
+        "producer_domains_known": true,
+        "producer_store_domains": [{
+          "pointer_param": 1,
+          "byte_offset": {
+            "kind": "binop", "op": "mul", "type": "i64",
+            "children": [
+              {"kind": "builtin", "name": "thread_id_x", "type": "i64"},
+              {"kind": "const", "value": 4, "type": "i64"}
+            ]
+          },
+          "byte_size": 4,
+          "address_exact": true,
+          "predicates": [],
+          "predicates_exact": true,
+          "domain_exact": true,
+          "reason": "unit exact store"
+        }],
+        "ordinary_store_sites": 1,
+        "atomic_write_sites": 0,
+        "unknown_write_sites": 0,
+        "reason": "unit exact frontier"
+      }
+    },
+    {
+      "site_id": "unit.cpp:11:k_partition::1",
+      "kind": "put_no_db",
+      "guard": {"kind": "always"},
+      "completion_site_id": "unit.cpp:20:k_partition::2",
+      "args": {
+        "target_rank": {"kind": "const_i64", "value": 1},
+        "dst_buf": {"kind": "param", "param": 2},
+        "dst_off": {"kind": "const_i64", "value": 0},
+        "src_buf": {"kind": "param", "param": 2},
+        "src_off": {"kind": "param", "param": 4},
+        "size": {"kind": "param", "param": 5}
+      },
+      "producer_frontier": {
+        "analyzed": true,
+        "write_footprint_known": true,
+        "completion_site_id": "unit.cpp:20:k_partition::2",
+        "ordinary_store_params": [1],
+        "atomic_write_params": [],
+        "buffer_identity_guardable": true,
+        "producer_pointer_param": 1,
+        "source_buffer_index_param": 2,
+        "buffer_identity_guard_reason": "unit guard",
+        "producer_domains_known": true,
+        "producer_store_domains": [{
+          "pointer_param": 1,
+          "byte_offset": {
+            "kind": "binop", "op": "mul", "type": "i64",
+            "children": [
+              {"kind": "builtin", "name": "thread_id_x", "type": "i64"},
+              {"kind": "const", "value": 4, "type": "i64"}
+            ]
+          },
+          "byte_size": 4,
+          "address_exact": true,
+          "predicates": [],
+          "predicates_exact": true,
+          "domain_exact": true,
+          "reason": "unit exact store"
+        }],
+        "ordinary_store_sites": 1,
+        "atomic_write_sites": 0,
+        "unknown_write_sites": 0,
+        "reason": "unit exact frontier"
+      }
+    }
+  ]
+}

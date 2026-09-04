@@ -70,6 +70,9 @@ entry:
 }
 
 ; JSON: "launch_contexts": [
+; JSON: "kernel_argument_slot_count": 1
+; JSON: "kernel_argument_slot_reason": "every HIP parameter slot has distinct launch-local, metadata-typed storage"
+; JSON: "kernel_argument_slots_exact": true
 ; JSON: "phase_launch_materialization": "device_stub"
 ; JSON: "phase_launch_reason": "one original kernel launch with reusable parameters and unchanged stream"
 ; JSON: "phase_launch_stream": "explicit"

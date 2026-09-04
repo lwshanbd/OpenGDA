@@ -15,6 +15,7 @@
 #include "llvm/TargetParser/Triple.h"
 
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/ValueTracking.h"
 
 #include <algorithm>
@@ -50,6 +51,10 @@ struct LaunchContextFacts {
     std::string phaseLaunchStream = "unknown";
     std::string phaseLaunchMaterialization = "none";
     std::string phaseLaunchReason = "launch wrapper was not analyzed";
+    bool kernelArgumentSlotsExact = false;
+    unsigned kernelArgumentSlotCount = 0;
+    std::string kernelArgumentSlotReason =
+        "HIP kernel parameter array was not analyzed";
     unsigned staticCallsites = 1;
 };
 
@@ -58,7 +63,151 @@ struct PhaseLaunchShape {
     std::string stream = "unknown";
     std::string materialization = "none";
     std::string reason;
+    bool kernelArgumentSlotsExact = false;
+    unsigned kernelArgumentSlotCount = 0;
+    std::string kernelArgumentSlotReason;
 };
+
+struct OverlapTransferFact {
+    std::string siteId;
+    ArgRef sourceBuffer;
+    ArgRef byteOffset;
+    ArgRef byteSize;
+};
+
+struct ProducerOverlapPartitionFacts {
+    bool analyzed = false;
+    bool exact = false;
+    unsigned producerPointerParam = 0;
+    unsigned sourceBufferParam = 0;
+    ProducerStoreDomainFact producerStore;
+    std::vector<OverlapTransferFact> transfers;
+    std::string reason;
+};
+
+std::optional<unsigned> metadataIntegerBits(StringRef metadataType) {
+    if (metadataType.consume_front("i")) {
+        unsigned bits = 0;
+        if (!metadataType.empty() &&
+            !metadataType.getAsInteger(10, bits) && bits > 0)
+            return bits;
+    }
+    return std::nullopt;
+}
+
+bool parameterCellTypeMatches(const Type *cellType, StringRef metadataType) {
+    if (metadataType == "ptr") return cellType->isPointerTy();
+    if (auto bits = metadataIntegerBits(metadataType)) {
+        if (cellType->isIntegerTy(*bits)) return true;
+        // Clang materializes a by-value i1 kernel argument in an i8 host ABI
+        // cell before handing its address to hipLaunchKernel.
+        return *bits == 1 && cellType->isIntegerTy(8);
+    }
+
+    std::string printed;
+    raw_string_ostream out(printed);
+    cellType->print(out);
+    out.flush();
+    return printed == metadataType;
+}
+
+struct KernelArgumentSlotShape {
+    bool exact = false;
+    unsigned count = 0;
+    std::string reason;
+};
+
+// Prove the ABI fact needed by compiler-owned runtime guards and repeated
+// launches: slot i in hipLaunchKernel's void** parameter array is a distinct,
+// launch-owner-local cell whose storage type matches device formal i.  The
+// values need not be compile-time constants.  Device and host LTO therefore
+// refer to the same runtime formal namespace without reconstructing source
+// expressions such as a lambda capture.
+KernelArgumentSlotShape kernelArgumentSlotShape(
+        const CallInst &launch, const AllocaInst &params,
+        const KernelTemplate &kernel) {
+    KernelArgumentSlotShape result;
+    result.count = kernel.params.size();
+    if (kernel.params.empty()) {
+        result.reason = "kernel parameter metadata is empty";
+        return result;
+    }
+
+    const DataLayout &layout = launch.getModule()->getDataLayout();
+    const uint64_t pointerBytes = layout.getPointerSize(
+        params.getType()->getPointerAddressSpace());
+    if (pointerBytes == 0) {
+        result.reason = "target pointer size is unknown";
+        return result;
+    }
+    const auto allocationSize = params.getAllocationSize(layout);
+    const uint64_t requiredBytes =
+        pointerBytes * static_cast<uint64_t>(kernel.params.size());
+    if (!allocationSize || allocationSize->isScalable() ||
+        allocationSize->getFixedValue() < requiredBytes) {
+        result.reason = "kernel parameter array is smaller than metadata";
+        return result;
+    }
+
+    std::vector<const AllocaInst *> cells(kernel.params.size(), nullptr);
+    for (const BasicBlock &BB : *params.getFunction()) {
+        for (const Instruction &I : BB) {
+            const auto *store = dyn_cast<StoreInst>(&I);
+            if (!store || store->getParent() != launch.getParent() ||
+                !store->comesBefore(&launch))
+                continue;
+            int64_t offset = 0;
+            const Value *base = GetPointerBaseWithConstantOffset(
+                store->getPointerOperand(), offset, layout);
+            if (base != &params || offset < 0 ||
+                static_cast<uint64_t>(offset) % pointerBytes != 0)
+                continue;
+            const uint64_t slot =
+                static_cast<uint64_t>(offset) / pointerBytes;
+            if (slot >= cells.size()) {
+                result.reason =
+                    "kernel parameter array has an out-of-range slot store";
+                return result;
+            }
+            const auto *cell = dyn_cast<AllocaInst>(
+                store->getValueOperand()->stripPointerCasts());
+            if (!cell || cell->getFunction() != params.getFunction()) {
+                result.reason =
+                    "kernel parameter slot does not name launch-local storage";
+                return result;
+            }
+            if (cells[slot] && cells[slot] != cell) {
+                result.reason = "kernel parameter slot is initialized twice";
+                return result;
+            }
+            cells[slot] = cell;
+        }
+    }
+
+    SmallPtrSet<const AllocaInst *, 16> distinct;
+    for (unsigned slot = 0; slot < cells.size(); ++slot) {
+        const AllocaInst *cell = cells[slot];
+        if (!cell) {
+            result.reason = "kernel parameter array has an uninitialized slot";
+            return result;
+        }
+        if (!distinct.insert(cell).second) {
+            result.reason = "kernel parameter slots alias the same value cell";
+            return result;
+        }
+        if (!parameterCellTypeMatches(cell->getAllocatedType(),
+                                      kernel.params[slot].typeStr)) {
+            result.reason =
+                "kernel parameter slot type disagrees with device metadata";
+            return result;
+        }
+    }
+
+    result.exact = true;
+    result.reason =
+        "every HIP parameter slot has distinct launch-local, metadata-typed storage";
+    return result;
+}
 
 bool isBeforeInBlock(const Instruction &candidate,
                      const Instruction &limit) {
@@ -400,6 +549,16 @@ PhaseLaunchShape phaseLaunchShape(const GICCLaunchSite &site) {
         return result;
     }
 
+    const KernelArgumentSlotShape slots =
+        kernelArgumentSlotShape(*launch, *alloca, site.kernelTemplate);
+    result.kernelArgumentSlotsExact = slots.exact;
+    result.kernelArgumentSlotCount = slots.count;
+    result.kernelArgumentSlotReason = slots.reason;
+    if (!slots.exact) {
+        result.reason = slots.reason;
+        return result;
+    }
+
     result.supported = true;
     result.materialization = materialization;
     result.reason =
@@ -538,6 +697,9 @@ LaunchContextFacts launchContext(const GICCLaunchSite &site,
     context.phaseLaunchStream = phase.stream;
     context.phaseLaunchMaterialization = phase.materialization;
     context.phaseLaunchReason = phase.reason;
+    context.kernelArgumentSlotsExact = phase.kernelArgumentSlotsExact;
+    context.kernelArgumentSlotCount = phase.kernelArgumentSlotCount;
+    context.kernelArgumentSlotReason = phase.kernelArgumentSlotReason;
     if (auto size = op.args.find("size"); size != op.args.end())
         context.sizeBytes = argConstantAtLaunch(size->second, site);
     context.tripCount = tripCountAtLaunch(op, site);
@@ -551,7 +713,10 @@ auto contextKey(const LaunchContextFacts &context) {
         context.geometry.block.y, context.geometry.block.z,
         context.sizeBytes, context.tripCount,
         context.phaseLaunchSupported, context.phaseLaunchStream,
-        context.phaseLaunchMaterialization, context.phaseLaunchReason);
+        context.phaseLaunchMaterialization, context.phaseLaunchReason,
+        context.kernelArgumentSlotsExact,
+        context.kernelArgumentSlotCount,
+        context.kernelArgumentSlotReason);
 }
 
 std::vector<LaunchContextFacts> coalesceContexts(
@@ -622,6 +787,12 @@ json::Value launchContextRecord(const LaunchContextFacts &context) {
     record["phase_launch_materialization"] =
         context.phaseLaunchMaterialization;
     record["phase_launch_reason"] = context.phaseLaunchReason;
+    record["kernel_argument_slots_exact"] =
+        context.kernelArgumentSlotsExact;
+    record["kernel_argument_slot_count"] =
+        static_cast<int64_t>(context.kernelArgumentSlotCount);
+    record["kernel_argument_slot_reason"] =
+        context.kernelArgumentSlotReason;
     return json::Value(std::move(record));
 }
 
@@ -759,6 +930,174 @@ bool affineArgRef(const ArgRef &arg, const OpTemplate &op) {
             return false;
     }
     return false;
+}
+
+bool kernelIntegerExpr(const ArgRef &arg, const KernelTemplate &kernel) {
+    switch (arg.kind) {
+        case ArgRef::Kind::Param:
+            return arg.paramIdx < kernel.params.size() &&
+                   metadataIntegerBits(
+                       kernel.params[arg.paramIdx].typeStr).has_value();
+        case ArgRef::Kind::ConstI64:
+            return true;
+        case ArgRef::Kind::BinOp:
+        case ArgRef::Kind::Cast:
+            return std::all_of(arg.children.begin(), arg.children.end(),
+                               [&](const auto &child) {
+                                   return kernelIntegerExpr(child, kernel);
+                               });
+        case ArgRef::Kind::Derived:
+        case ArgRef::Kind::LoopIv:
+        case ArgRef::Kind::FieldLoad:
+            return false;
+    }
+    return false;
+}
+
+bool sameDeviceExpr(const DeviceExpr &left, const DeviceExpr &right) {
+    if (left.kind != right.kind || left.paramIdx != right.paramIdx ||
+        left.constVal != right.constVal || left.opStr != right.opStr ||
+        left.typeStr != right.typeStr ||
+        left.children.size() != right.children.size())
+        return false;
+    for (size_t i = 0; i < left.children.size(); ++i)
+        if (!sameDeviceExpr(left.children[i], right.children[i]))
+            return false;
+    return true;
+}
+
+bool deviceExprFormalsValid(const DeviceExpr &expr,
+                            const KernelTemplate &kernel) {
+    if (expr.kind == DeviceExpr::Kind::Unknown || expr.typeStr.empty())
+        return false;
+    if (expr.kind == DeviceExpr::Kind::Param &&
+        (expr.paramIdx >= kernel.params.size() ||
+         kernel.params[expr.paramIdx].typeStr != expr.typeStr))
+        return false;
+    return std::all_of(expr.children.begin(), expr.children.end(),
+                       [&](const auto &child) {
+                           return deviceExprFormalsValid(child, kernel);
+                       });
+}
+
+bool sameProducerDomain(const ProducerStoreDomainFact &left,
+                        const ProducerStoreDomainFact &right) {
+    if (left.pointerParam != right.pointerParam ||
+        left.byteSize != right.byteSize ||
+        left.addressExact != right.addressExact ||
+        left.predicatesExact != right.predicatesExact ||
+        left.domainExact != right.domainExact ||
+        !sameDeviceExpr(left.byteOffset, right.byteOffset) ||
+        left.predicates.size() != right.predicates.size())
+        return false;
+    for (size_t i = 0; i < left.predicates.size(); ++i) {
+        if (left.predicates[i].requiredValue !=
+                right.predicates[i].requiredValue ||
+            !sameDeviceExpr(left.predicates[i].condition,
+                            right.predicates[i].condition))
+            return false;
+    }
+    return true;
+}
+
+ProducerOverlapPartitionFacts producerOverlapPartition(
+        const KernelTemplate &kernel, const OpTemplate &member) {
+    ProducerOverlapPartitionFacts result;
+    if (member.kind != "put_no_db" || member.completion_site_id.empty()) {
+        result.reason = "operation is not a completed PUT group member";
+        return result;
+    }
+    result.analyzed = true;
+
+    const ProducerFrontierFacts &frontier = member.producer_frontier;
+    if (!frontier.analyzed || !frontier.buffer_identity_guardable) {
+        result.reason =
+            "producer pointer and transfer buffer lack a compiler guard shape";
+        return result;
+    }
+    if (!frontier.producer_domains_known ||
+        frontier.ordinary_store_sites != 1 ||
+        frontier.producer_store_domains.size() != 1 ||
+        !frontier.producer_store_domains.front().domainExact) {
+        result.reason =
+            "first overlap partition requires one exact ordinary producer store";
+        return result;
+    }
+
+    result.producerPointerParam = frontier.producer_pointer_param;
+    result.sourceBufferParam = frontier.source_buffer_index_param;
+    result.producerStore = frontier.producer_store_domains.front();
+    if (result.producerStore.pointerParam != result.producerPointerParam ||
+        result.producerPointerParam >= kernel.params.size() ||
+        kernel.params[result.producerPointerParam].typeStr != "ptr" ||
+        result.sourceBufferParam >= kernel.params.size() ||
+        kernel.params[result.sourceBufferParam].typeStr != "i32" ||
+        !deviceExprFormalsValid(result.producerStore.byteOffset, kernel) ||
+        !std::all_of(result.producerStore.predicates.begin(),
+                     result.producerStore.predicates.end(),
+                     [&](const auto &predicate) {
+                         return predicate.condition.typeStr == "i1" &&
+                             deviceExprFormalsValid(predicate.condition,
+                                                    kernel);
+                     })) {
+        result.reason =
+            "producer store formals disagree with typed kernel metadata";
+        return result;
+    }
+
+    for (const OpTemplate &op : kernel.ops) {
+        if (op.completion_site_id != member.completion_site_id ||
+            (op.kind != "put_no_db" && op.kind != "get_no_db"))
+            continue;
+        if (op.kind != "put_no_db") {
+            result.reason =
+                "mixed PUT/GET completion groups are not partitioned";
+            return result;
+        }
+        const ProducerFrontierFacts &other = op.producer_frontier;
+        if (!other.analyzed || !other.buffer_identity_guardable ||
+            !other.producer_domains_known ||
+            other.ordinary_store_sites != 1 ||
+            other.producer_pointer_param != result.producerPointerParam ||
+            other.source_buffer_index_param != result.sourceBufferParam ||
+            other.producer_store_domains.size() != 1 ||
+            !sameProducerDomain(other.producer_store_domains.front(),
+                                result.producerStore)) {
+            result.reason =
+                "completion-group members disagree on the producer domain";
+            return result;
+        }
+
+        const auto source = op.args.find("src_buf");
+        const auto offset = op.args.find("src_off");
+        const auto size = op.args.find("size");
+        if (source == op.args.end() || offset == op.args.end() ||
+            size == op.args.end() ||
+            source->second.kind != ArgRef::Kind::Param ||
+            source->second.paramIdx != result.sourceBufferParam ||
+            !symbolicallyExact(offset->second, op) ||
+            !symbolicallyExact(size->second, op) ||
+            !affineArgRef(offset->second, op) ||
+            !affineArgRef(size->second, op) ||
+            !kernelIntegerExpr(offset->second, kernel) ||
+            !kernelIntegerExpr(size->second, kernel)) {
+            result.reason =
+                "a group transfer lacks an exact kernel-formal byte interval";
+            return result;
+        }
+        result.transfers.push_back({op.siteId, source->second,
+                                    offset->second, size->second});
+    }
+
+    if (result.transfers.empty()) {
+        result.reason = "completion group contains no transfer intervals";
+        return result;
+    }
+
+    result.exact = true;
+    result.reason =
+        "exact store instances split by checked byte overlap and its logical complement";
+    return result;
 }
 
 std::optional<json::Value> transferIntervalRecord(const OpTemplate &op) {
@@ -900,7 +1239,61 @@ json::Value producerStoreDomainRecord(
     return json::Value(std::move(record));
 }
 
-json::Value producerFrontierRecord(const ProducerFrontierFacts &facts) {
+json::Value producerOverlapPartitionRecord(
+        const ProducerOverlapPartitionFacts &partition) {
+    json::Object record;
+    record["analyzed"] = partition.analyzed;
+    record["exact"] = partition.exact;
+    record["mode"] = partition.exact
+        ? "checked_store_interval_overlap"
+        : "none";
+    record["formal_binding"] = partition.exact
+        ? "same_kernel_formal_indices"
+        : "unproved";
+    if (partition.exact) {
+        record["producer_pointer_param"] =
+            static_cast<int64_t>(partition.producerPointerParam);
+        record["source_buffer_index_param"] =
+            static_cast<int64_t>(partition.sourceBufferParam);
+        record["producer_store"] =
+            producerStoreDomainRecord(partition.producerStore);
+    } else {
+        record["producer_pointer_param"] = nullptr;
+        record["source_buffer_index_param"] = nullptr;
+        record["producer_store"] = nullptr;
+    }
+
+    json::Array intervals;
+    for (const auto &transfer : partition.transfers) {
+        json::Object interval;
+        interval["site_id"] = transfer.siteId;
+        interval["source_buffer"] =
+            argRefFactRecord(transfer.sourceBuffer);
+        interval["byte_offset"] = argRefFactRecord(transfer.byteOffset);
+        interval["byte_size"] = argRefFactRecord(transfer.byteSize);
+        intervals.push_back(std::move(interval));
+    }
+    record["transfer_intervals"] = std::move(intervals);
+    record["boundary_predicate"] = partition.exact
+        ? "store_interval_overlaps_any_transfer_interval"
+        : "unavailable";
+    record["remainder_predicate"] = partition.exact
+        ? "logical_complement_of_boundary"
+        : "unavailable";
+    record["checked_interval_ends_required"] = partition.exact;
+    record["buffer_identity_guard_required"] = partition.exact;
+    record["store_instance_partition_disjoint"] = partition.exact;
+    record["store_instance_partition_complete"] = partition.exact;
+    record["proof_scope"] = "ordinary_producer_store_instances";
+    record["full_compute_region_partition_proved"] = false;
+    record["side_effect_partition_proved"] = false;
+    record["reason"] = partition.reason;
+    return json::Value(std::move(record));
+}
+
+json::Value producerFrontierRecord(
+        const ProducerFrontierFacts &facts,
+        const ProducerOverlapPartitionFacts &partition) {
     json::Object record;
     record["analyzed"] = facts.analyzed;
     record["write_footprint_known"] = facts.write_footprint_known;
@@ -931,6 +1324,8 @@ json::Value producerFrontierRecord(const ProducerFrontierFacts &facts) {
     for (const auto &domain : facts.producer_store_domains)
         domains.push_back(producerStoreDomainRecord(domain));
     record["producer_store_domains"] = std::move(domains);
+    record["overlap_partition"] =
+        producerOverlapPartitionRecord(partition);
     record["ordinary_store_sites"] =
         static_cast<int64_t>(facts.ordinary_store_sites);
     record["atomic_write_sites"] =
@@ -942,10 +1337,16 @@ json::Value producerFrontierRecord(const ProducerFrontierFacts &facts) {
     const char *identityProof = facts.buffer_identity_guardable
         ? "buffer_identity_guarded_fallback_materialization"
         : "registered_buffer_identity";
+    remaining.push_back(identityProof);
+    if (!partition.exact) {
+        remaining.push_back("exact_transfer_intervals");
+        remaining.push_back("exact_producer_domains");
+    } else {
+        remaining.push_back("checked_interval_guard_materialization");
+    }
     for (const char *proof : {
-             identityProof, "exact_transfer_intervals",
-             "exact_producer_domains", "complete_disjoint_partition",
-             "side_effect_partition", "launch_phase_materialization"})
+             "complete_disjoint_partition", "side_effect_partition",
+             "launch_phase_materialization"})
         remaining.push_back(proof);
     record["remaining_proofs"] = std::move(remaining);
     return json::Value(std::move(record));
@@ -955,6 +1356,7 @@ json::Value toRecord(const std::string &siteId,
                      const std::string &simpleKernel,
                      const OpTemplate  &op,
                      int                fanOut,
+                     const ProducerOverlapPartitionFacts &partition,
                      std::vector<LaunchContextFacts> contexts) {
     contexts = coalesceContexts(std::move(contexts));
     const auto geometry = commonGeometry(contexts);
@@ -1037,11 +1439,26 @@ json::Value toRecord(const std::string &siteId,
             return context.phaseLaunchSupported;
         });
     r["phase_launch_supported"] = phaseLaunchSupported;
+    const bool kernelArgumentSlotsExact = !contexts.empty() &&
+        std::all_of(contexts.begin(), contexts.end(), [](const auto &context) {
+            return context.kernelArgumentSlotsExact;
+        });
+    r["kernel_argument_slots_exact"] = kernelArgumentSlotsExact;
+    if (auto count = commonKnownValue<unsigned>(
+            contexts, [](const auto &context) {
+                return std::optional<unsigned>(
+                    context.kernelArgumentSlotCount);
+            }))
+        r["kernel_argument_slot_count"] = static_cast<int64_t>(*count);
+    else
+        r["kernel_argument_slot_count"] = nullptr;
     if (!contexts.empty()) {
         const std::string &stream = contexts.front().phaseLaunchStream;
         const std::string &materialization =
             contexts.front().phaseLaunchMaterialization;
         const std::string &reason = contexts.front().phaseLaunchReason;
+        const std::string &slotReason =
+            contexts.front().kernelArgumentSlotReason;
         bool sameStream = std::all_of(
             contexts.begin(), contexts.end(), [&](const auto &context) {
                 return context.phaseLaunchStream == stream;
@@ -1054,15 +1471,22 @@ json::Value toRecord(const std::string &siteId,
             contexts.begin(), contexts.end(), [&](const auto &context) {
                 return context.phaseLaunchMaterialization == materialization;
             });
+        bool sameSlotReason = std::all_of(
+            contexts.begin(), contexts.end(), [&](const auto &context) {
+                return context.kernelArgumentSlotReason == slotReason;
+            });
         r["phase_launch_stream"] = sameStream ? stream : "mixed";
         r["phase_launch_materialization"] =
             sameMaterialization ? materialization : "mixed";
         r["phase_launch_reason"] =
             sameReason ? reason : "launch contexts disagree";
+        r["kernel_argument_slot_reason"] = sameSlotReason
+            ? slotReason : "launch contexts disagree";
     } else {
         r["phase_launch_stream"] = "unknown";
         r["phase_launch_materialization"] = "none";
         r["phase_launch_reason"] = "no host launch context";
+        r["kernel_argument_slot_reason"] = "no host launch context";
     }
 
     r["launch_grid"]  = dim3Record(geometry.grid);
@@ -1104,7 +1528,7 @@ json::Value toRecord(const std::string &siteId,
 
     if (op.producer_frontier.analyzed)
         r["producer_frontier"] =
-            producerFrontierRecord(op.producer_frontier);
+            producerFrontierRecord(op.producer_frontier, partition);
 
     if (op.trip_count < 0 && launchTripCount)
         r["iter_estimate"] = *launchTripCount;
@@ -1184,6 +1608,7 @@ PreservedAnalyses GICCFeatureExtractionPass::run(Module &M,
         OpTemplate op;
         int fanOut = 0;
         bool initialized = false;
+        ProducerOverlapPartitionFacts overlapPartition;
         std::vector<LaunchContextFacts> contexts;
     };
     std::map<std::string, PendingRecord> pending;
@@ -1197,6 +1622,8 @@ PreservedAnalyses GICCFeatureExtractionPass::run(Module &M,
                 record.kernel = s.kernelTemplate.simpleName;
                 record.op = op;
                 record.fanOut = fanOut;
+                record.overlapPartition =
+                    producerOverlapPartition(s.kernelTemplate, op);
                 record.initialized = true;
             } else if (record.kernel != s.kernelTemplate.simpleName ||
                        record.op.kind != op.kind) {
@@ -1214,6 +1641,7 @@ PreservedAnalyses GICCFeatureExtractionPass::run(Module &M,
     for (auto &[siteId, record] : pending)
         records.push_back(toRecord(siteId, record.kernel, record.op,
                                    record.fanOut,
+                                   record.overlapPartition,
                                    std::move(record.contexts)));
     if (records.empty()) return PreservedAnalyses::all();
 

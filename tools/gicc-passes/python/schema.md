@@ -69,6 +69,9 @@ for all of them.
       "phase_launch_stream": "explicit",
       "phase_launch_materialization": "device_stub",
       "phase_launch_reason": "one original kernel launch with reusable parameters and unchanged stream",
+      "kernel_argument_slots_exact": true,
+      "kernel_argument_slot_count": 18,
+      "kernel_argument_slot_reason": "every HIP parameter slot has distinct launch-local, metadata-typed storage",
       "launch_grid":      {"x": 8, "y": 1, "z": 1},
       "launch_block":     {"x": 1, "y": 1, "z": 1}
     }],
@@ -85,6 +88,9 @@ for all of them.
     "phase_launch_stream": "explicit",        //   wrapper launch is cloneable
     "phase_launch_materialization": "device_stub", // exact rewrite owner
     "phase_launch_reason": "one original ...",//   on one unchanged stream
+    "kernel_argument_slots_exact": true,       // every void** slot is distinct,
+    "kernel_argument_slot_count": 18,          //   launch-local and metadata-typed
+    "kernel_argument_slot_reason": "every HIP ...",
     "compute_before_flops": 17,              // arith ops in BBs dominating the call;
                                              //   null if not measured
     "flops_to_first_use": 205,               // arith ops between the call and the
@@ -147,14 +153,39 @@ for all of them.
         "domain_exact": true,                 // local IR recovery only
         "reason": "exact formal-rooted byte interval and controlling predicates recovered"
       }],
+      "overlap_partition": {
+        "analyzed": true,
+        "exact": true,
+        "mode": "checked_store_interval_overlap",
+        "formal_binding": "same_kernel_formal_indices",
+        "producer_pointer_param": 1,
+        "source_buffer_index_param": 12,
+        "producer_store": {"...": "same exact store domain"},
+        "transfer_intervals": [
+          {"site_id": "<put0>", "source_buffer": {"kind": "param", "param": 12},
+           "byte_offset": {"kind": "param", "param": 13},
+           "byte_size": {"kind": "param", "param": 17}},
+          {"site_id": "<put1>", "source_buffer": {"kind": "param", "param": 12},
+           "byte_offset": {"kind": "param", "param": 14},
+           "byte_size": {"kind": "param", "param": 17}}
+        ],
+        "boundary_predicate": "store_interval_overlaps_any_transfer_interval",
+        "remainder_predicate": "logical_complement_of_boundary",
+        "checked_interval_ends_required": true,
+        "buffer_identity_guard_required": true,
+        "store_instance_partition_disjoint": true,
+        "store_instance_partition_complete": true,
+        "proof_scope": "ordinary_producer_store_instances",
+        "full_compute_region_partition_proved": false,
+        "side_effect_partition_proved": false
+      },
       "ordinary_store_sites": 1,
       "atomic_write_sites": 1,
       "unknown_write_sites": 0,
       "reason": "formal-rooted writes recovered; ...",
       "remaining_proofs": [
         "buffer_identity_guarded_fallback_materialization",
-        "exact_transfer_intervals",
-        "exact_producer_domains",
+        "checked_interval_guard_materialization",
         "complete_disjoint_partition",
         "side_effect_partition",
         "launch_phase_materialization"
@@ -230,6 +261,26 @@ in this local form; it still does not prove that a registered transfer buffer
 is the pointer, that its interval equals a producer subset, or that the
 boundary/remainder partition is complete.
 
+`kernel_argument_slots_exact` closes the host/device formal-namespace gap
+without reverse-engineering source expressions or lambda captures. It is true
+only when every metadata formal has a distinct launch-owner-local value cell
+at the same `hipLaunchKernel` parameter-array index and its storage type
+matches device metadata (including the audited i1-to-i8 host ABI case). The
+phase launches reuse this exact array, so a device expression referring to
+formal `i` and a transfer expression referring to formal `i` consume the same
+runtime value even when that value is dynamic.
+
+`overlap_partition` is emitted only for the first narrow case: one exact
+ordinary producer store and one all-PUT completion group whose source-buffer
+and producer facts agree. Rather than requiring a source-derived algebraic
+identity such as `offset = row * stride`, device LTO can classify a store
+instance with checked half-open byte-interval overlap against the exact
+transfer intervals. The boundary predicate and its logical complement are
+therefore disjoint and complete for ordinary producer-store instances by
+construction. This does not yet prove that the whole compute region follows
+the store's control domain or that atomics/reductions partition safely; both
+remain explicit false fields and legality obligations.
+
 `phase_launch_supported` is also a compiler proof, not a model assertion. It
 is true only when every aggregated host call is a non-throwing direct call to
 an annotated wrapper and the compiler finds exactly one matching
@@ -239,7 +290,9 @@ exclusive HIP device stub reached through the kernel's constant global; the
 compiler then additionally proves the unique push/pop configuration chain and
 reports `phase_launch_materialization: "device_stub"`. After inlining, the
 equivalent location is `"wrapper"`. The materializer must recompute the same
-shape on final host IR before cloning anything.
+shape on final host IR before cloning anything. The proof now also rejects an
+undersized, missing, aliased, non-local, or metadata-type-mismatched kernel
+parameter slot.
 
 Schema v4 → v5 changes:
 - `launch_grid`, `launch_block`, `grid_blocks`, and `threads_per_block`
