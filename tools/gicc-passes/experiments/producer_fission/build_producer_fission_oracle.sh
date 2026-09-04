@@ -118,7 +118,15 @@ baseline_kernel=$(find "$output_dir/baseline/meta" -maxdepth 1 -type f \
     -name '*.json' ! -name features.json -print)
 fission_kernel=$(find "$output_dir/fission/meta" -maxdepth 1 -type f \
     -name '*.json' ! -name features.json -print)
-cmp "$baseline_kernel" "$fission_kernel"
+if rg -q '"producer_fission_device_materialized"' "$baseline_kernel"; then
+    echo "baseline unexpectedly carries a device-fission attestation" >&2
+    exit 1
+fi
+rg -q '"producer_fission_device_materialized": true' "$fission_kernel"
+cmp <(sed '/"producer_fission_device_materialized": true/d' \
+          "$baseline_kernel") \
+    <(sed '/"producer_fission_device_materialized": true/d' \
+          "$fission_kernel")
 if cmp -s "$output_dir/baseline/jacobi" "$output_dir/fission/jacobi"; then
     echo "baseline and fission executables are unexpectedly identical" >&2
     exit 1

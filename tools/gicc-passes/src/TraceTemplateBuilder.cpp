@@ -1405,9 +1405,9 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
     }
 
     // Prove the narrow completion-group early-trigger shape and recover the
-    // matching producer frontier. The group bridge currently advertises only
-    // multi-site choices, but producer facts are equally meaningful for one
-    // transfer and must not disappear merely because its group has one member.
+    // matching producer frontier. Producer facts are equally meaningful for
+    // one transfer and must not disappear merely because its group has one
+    // member.
     // A registered buffer is represented in the
     // device API by an integer handle, so LLVM AA cannot relate it to ordinary
     // pointer stores.  Refuse to move the trigger across *any* instruction

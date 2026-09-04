@@ -2,6 +2,7 @@
   "version": 1,
   "kernel_mangled": "_Z11k_partition",
   "kernel_simple": "k_partition",
+  "producer_fission_device_materialized": true,
   "params": [
     {"idx": 0, "name": "ctx", "type": "ptr"},
     {"idx": 1, "name": "out", "type": "ptr"},

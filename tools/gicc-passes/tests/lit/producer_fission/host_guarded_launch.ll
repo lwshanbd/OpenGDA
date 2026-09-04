@@ -1,6 +1,6 @@
 ; The dormant host half of producer-frontier fission must re-prove the final
-; HIP launch ABI and emit a fail-closed runtime guard.  It is available only
-; by explicit pass name until the matching device-body phase partition exists.
+; HIP launch ABI and emit a fail-closed runtime guard.  Even an explicitly
+; named pass requires the compiler-owned transform in its site hint.
 ;
 ; REQUIRES: gicc_lowering
 ; RUN: rm -rf %t.metadir && mkdir -p %t.metadir
@@ -25,6 +25,28 @@
 ; RUN:          -passes='gicc-producer-fission-host' -S %s 2>%t.reject.err | \
 ; RUN:     %FileCheck %s --check-prefix=REJECT
 ; RUN: %FileCheck %s --check-prefix=REJECT-LOG < %t.reject.err
+;
+; A DWQ route alone is not permission to change the schedule.  Without the
+; compiler-owned two-phase transform, the named pass must remain a no-op.
+; RUN: env GICC_MODE=lower GICC_META_DIR=%t.metadir \
+; RUN:     GICC_HINT_IN=%S/../Inputs/hint_fission_unselected_dwq.json \
+; RUN:     %opt -load-pass-plugin=%gicc_passes_so \
+; RUN:          -passes='gicc-producer-fission-host' -S %s 2>%t.unselected.err | \
+; RUN:     %FileCheck %s --check-prefix=UNSELECTED
+; RUN: %FileCheck %s --check-prefix=UNSELECTED-LOG < %t.unselected.err
+;
+; A selected transform without a successful final-device attestation must not
+; split the host launch. This prevents a host-only partial materialization.
+; RUN: rm -rf %t.noattest.metadir && mkdir -p %t.noattest.metadir
+; RUN: python3 %S/../Inputs/remove_fission_attestation.py \
+; RUN:   %S/../Inputs/k_overlap_partition_meta.json \
+; RUN:   %t.noattest.metadir/_Z11k_partition.json
+; RUN: env GICC_MODE=lower GICC_META_DIR=%t.noattest.metadir \
+; RUN:     GICC_HINT_IN=%S/../Inputs/hint_fission_dwq.json \
+; RUN:     %opt -load-pass-plugin=%gicc_passes_so \
+; RUN:          -passes='gicc-producer-fission-host' -S %s 2>%t.noattest.err | \
+; RUN:     %FileCheck %s --check-prefix=NOATTEST
+; RUN: %FileCheck %s --check-prefix=NOATTEST-LOG < %t.noattest.err
 ;
 ; An eager IPC route would read the halo source before the producer phase.
 ; Even otherwise-valid compiler facts must therefore keep the fused launch.
@@ -137,8 +159,24 @@ entry:
 ; REJECT: ret void
 ; REJECT-LOG: [producer-fission-host] _Z11k_partition: rejected: non-duplicable operations have no shared disabling guard
 
+; UNSELECTED-LABEL: define linkonce_odr void @_ZN4gicc6launchIXadL_Z11k_partitionEEEv(
+; UNSELECTED-NOT: @gicc_runtime_kernel_arg_matches_local_buffer
+; UNSELECTED-NOT: @gicc_runtime_local_buffer_contains_interval
+; UNSELECTED-NOT: @gicc_runtime_set_schedule_phase_from_kernel_args
+; UNSELECTED-COUNT-1: call i32 @hipLaunchKernel(
+; UNSELECTED: ret void
+; UNSELECTED-LOG: [producer-fission-host] _Z11k_partition: rejected: every fission transfer must request the compiler-owned PRODUCER_FRONTIER_TWO_PHASE transform
+
+; NOATTEST-LABEL: define linkonce_odr void @_ZN4gicc6launchIXadL_Z11k_partitionEEEv(
+; NOATTEST-NOT: @gicc_runtime_kernel_arg_matches_local_buffer
+; NOATTEST-NOT: @gicc_runtime_local_buffer_contains_interval
+; NOATTEST-NOT: @gicc_runtime_set_schedule_phase_from_kernel_args
+; NOATTEST-COUNT-1: call i32 @hipLaunchKernel(
+; NOATTEST: ret void
+; NOATTEST-LOG: [producer-fission-host] _Z11k_partition: rejected: final device LTO did not attest the producer/remainder partition
+
 ; ROUTE-LABEL: define linkonce_odr void @_ZN4gicc6launchIXadL_Z11k_partitionEEEv(
 ; ROUTE-NOT: @gicc_runtime_kernel_arg_matches_local_buffer
 ; ROUTE-COUNT-1: call i32 @hipLaunchKernel(
 ; ROUTE: ret void
-; ROUTE-LOG: [producer-fission-host] _Z11k_partition: rejected: every fission transfer must use untransformed DWQ_TRIGGER
+; ROUTE-LOG: [producer-fission-host] _Z11k_partition: rejected: every fission transfer must use DWQ_TRIGGER

@@ -40,6 +40,8 @@ CommunicationTransform parseCommunicationTransform(llvm::StringRef s) {
     if (s == "COALESCE_LOOP")       return CommunicationTransform::CoalesceLoop;
     if (s == "COALESCE_LOOP_EARLY") return CommunicationTransform::CoalesceLoopEarly;
     if (s == "TRIGGER_GROUP_EARLY") return CommunicationTransform::TriggerGroupEarly;
+    if (s == "PRODUCER_FRONTIER_TWO_PHASE")
+        return CommunicationTransform::ProducerFrontierTwoPhase;
     return CommunicationTransform::Unknown;
 }
 
@@ -51,6 +53,8 @@ const char *communicationTransformName(CommunicationTransform t) {
             return "COALESCE_LOOP_EARLY";
         case CommunicationTransform::TriggerGroupEarly:
             return "TRIGGER_GROUP_EARLY";
+        case CommunicationTransform::ProducerFrontierTwoPhase:
+            return "PRODUCER_FRONTIER_TWO_PHASE";
         case CommunicationTransform::Unknown:      return "UNKNOWN";
     }
     return "UNKNOWN";

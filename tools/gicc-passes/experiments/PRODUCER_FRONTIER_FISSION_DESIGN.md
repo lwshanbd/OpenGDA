@@ -185,10 +185,17 @@ It materializes the overlap/complement compute partition, gates the original
 PUTs, and clones one synthetic early flush after the final PUT. The synthetic
 flush carries compiler metadata so site-ID assignment ignores it while ordinary
 device lowering still converts it to the same DWQ trigger operation. Both passes
-are available as explicitly named test pipelines. Automatic host/device LTO
-attachment requires the opt-in `GICC_PRODUCER_FISSION_ORACLE=1`; its default is
-false, and this candidate remains absent from the model-visible legal action
-set.
+are available as explicitly named test pipelines. The unified compiler graph
+can now translate a selected opaque candidate into the narrow
+`PRODUCER_FRONTIER_TWO_PHASE` site transform; that transform automatically
+attaches both LTO halves. A DWQ route alone is insufficient. The legacy
+`GICC_PRODUCER_FISSION_ORACLE=1` switch remains for the frozen runtime A/B, but
+the base platform profile keeps the candidate masked until that oracle passes
+its preregistered gate. On the explicit hint path, successful final device LTO
+writes a fresh metadata attestation and host LTO requires it before cloning the
+launch. Device discovery clears the bit on every rebuild. Thus a device-side
+rejection can leave only the safe original-phase kernel; it cannot produce a
+host-only two-launch artifact.
 
 Device LTO rewrites the original kernel body:
 

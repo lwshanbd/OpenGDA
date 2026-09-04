@@ -822,6 +822,8 @@ json::Value templateToJSON(const KernelTemplate &t) {
     root["version"]         = 1;
     root["kernel_mangled"]  = t.mangledName;
     root["kernel_simple"]   = t.simpleName;
+    if (t.producer_fission_device_materialized)
+        root["producer_fission_device_materialized"] = true;
     // Per-kernel CPU-proxy flag. Always serialize so device-lowering can
     // rely on its presence; defaults to false on read.
     root["proxy_aware"]     = t.proxy_aware;
@@ -900,6 +902,9 @@ bool templateFromJSON(const json::Value &v, KernelTemplate &out) {
     out.mangledName = mangled->str();
     if (auto simple = o->getString("kernel_simple"))
         out.simpleName = simple->str();
+    if (auto materialized =
+            o->getBoolean("producer_fission_device_materialized"))
+        out.producer_fission_device_materialized = *materialized;
     // Default to false so older JSON files (without the field) keep
     // their pre-Task 2 semantics.
     if (auto p = o->getBoolean("proxy_aware")) out.proxy_aware = *p;

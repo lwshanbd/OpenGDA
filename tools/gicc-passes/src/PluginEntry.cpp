@@ -6,11 +6,13 @@
 #include "GICCTraceSynthesis.h"
 #include "GICCCollectivePlanning.h"
 #ifndef GICC_PASSES_ANALYZE_ONLY
+#  include "DispatchDecision.h"
 #  include "GICCDeviceLowering.h"
 #  include "GICCDispatchLowering.h"
 #  include "GICCProducerFission.h"
 #endif
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -35,6 +37,20 @@ using namespace gicc::pass;
 #endif
 
 namespace {
+
+#ifndef GICC_PASSES_ANALYZE_ONLY
+bool producerFissionPipelineEnabled() {
+    const auto &config = getConfig();
+    if (config.producerFissionOracle) return true;
+    if (config.hintIn.empty()) return false;
+    HintFile hint;
+    if (!readHintFile(config.hintIn, hint)) return false;
+    return llvm::any_of(hint.sites, [](const auto &entry) {
+        return entry.second.transform ==
+            CommunicationTransform::ProducerFrontierTwoPhase;
+    });
+}
+#endif
 
 struct GICCSentinelPass : PassInfoMixin<GICCSentinelPass> {
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
@@ -101,7 +117,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
 #ifndef GICC_PASSES_ANALYZE_ONLY
                     if (!cfg.collectiveOnly) {
                         MPM.addPass(GICCDispatchLoweringPass());
-                        if (cfg.producerFissionOracle)
+                        if (producerFissionPipelineEnabled())
                             MPM.addPass(GICCProducerFissionDevicePass());
                         MPM.addPass(GICCDeviceLoweringPass());
                     }
@@ -113,7 +129,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                 GICC_EP_LAMBDA_HEAD(MPM) {
                     MPM.addPass(GICCSentinelPass());
 #ifndef GICC_PASSES_ANALYZE_ONLY
-                    if (getConfig().producerFissionOracle)
+                    if (producerFissionPipelineEnabled())
                         MPM.addPass(GICCProducerFissionHostPass());
 #endif
                 });

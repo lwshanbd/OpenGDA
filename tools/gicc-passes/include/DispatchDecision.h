@@ -70,6 +70,11 @@ enum class CommunicationTransform {
     // proves a mandatory later flush and that moving it crosses no operation
     // which may write memory.
     TriggerGroupEarly,
+    // Split one compiler-proved producer region from its remainder, launching
+    // the same kernel twice under runtime identity/interval guards.  Both the
+    // host and device LTO passes independently rebuild and validate the
+    // persisted producer-frontier proof before changing the schedule.
+    ProducerFrontierTwoPhase,
     Unknown,
 };
 

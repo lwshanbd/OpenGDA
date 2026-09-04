@@ -121,6 +121,35 @@ def template(*, early_legal=True):
     }
 
 
+def fission_feature(site_id):
+    row = feature(site_id)
+    row["phase_launch_supported"] = True
+    row["producer_frontier"] = {
+        "analyzed": True,
+        "write_footprint_known": True,
+        "unknown_write_sites": 0,
+        "buffer_identity_guardable": True,
+        "producer_domains_known": True,
+        "ordinary_store_sites": 1,
+        "producer_pointer_param": 1,
+        "source_buffer_index_param": 12,
+        "completion_site_id": "unit.cpp:20:group_kernel::2",
+        "producer_store_domains": [{
+            "domain_exact": True,
+            "partition_region_exact": True,
+        }],
+        "overlap_partition": {
+            "exact": True,
+            "full_compute_region_partition_proved": True,
+            "store_instance_partition_complete": True,
+            "store_instance_partition_disjoint": True,
+            "side_effect_safety_exact": True,
+            "side_effects_excluded_on_optimized_path": True,
+        },
+    }
+    return row
+
+
 class CommunicationGroupPlanBridgeTests(unittest.TestCase):
     def setUp(self):
         self.site_ids = [
@@ -211,6 +240,50 @@ class CommunicationGroupPlanBridgeTests(unittest.TestCase):
             "group_trigger_early",
             {candidate["kind"] for candidate in graph["opportunities"][0]["candidates"]},
         )
+
+    def test_two_phase_candidate_requires_profile_gate_and_becomes_lto_hint(self):
+        rows = [fission_feature(site_id) for site_id in self.site_ids]
+        gated = groups.make_group_graph(
+            bridge.make_dossier(rows, PLATFORM), [template()]
+        )
+        opportunity = gated["opportunities"][0]
+        self.assertNotIn(
+            "group_producer_frontier_two_phase",
+            {candidate["kind"] for candidate in opportunity["candidates"]},
+        )
+        self.assertIn(
+            "group_producer_frontier_two_phase",
+            {candidate["kind"] for candidate in opportunity["masked_candidates"]},
+        )
+
+        platform = copy.deepcopy(PLATFORM)
+        platform["compiler_transforms"]["producer_frontier_fission"] = True
+        graph = groups.make_group_graph(
+            bridge.make_dossier(rows, platform), [template()]
+        )
+        opportunity = graph["opportunities"][0]
+        candidate = next(
+            candidate for candidate in opportunity["candidates"]
+            if candidate["kind"] == "group_producer_frontier_two_phase"
+        )
+        decision = {
+            "schema_version": groups.DECISION_SCHEMA,
+            "graph_id": graph["graph_id"],
+            "selections": {
+                opportunity["opportunity_id"]: {
+                    "candidate_id": candidate["candidate_id"],
+                    "confidence": 0.9,
+                    "rationale": "select the compiler-proved two-phase schedule",
+                }
+            },
+        }
+        hint, accepted, errors = groups.plan_to_hint(graph, decision)
+        self.assertTrue(accepted, errors)
+        for site_id in self.site_ids:
+            self.assertEqual(
+                "PRODUCER_FRONTIER_TWO_PHASE",
+                hint["sites"][site_id]["transform"],
+            )
 
     def test_invented_candidate_or_code_payload_fails_closed(self):
         decision = self.decision()

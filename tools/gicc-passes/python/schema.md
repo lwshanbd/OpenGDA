@@ -512,6 +512,20 @@ flush would cross *any* instruction that may write memory. The final device
 lowering repeats dominance, post-dominance, group-completeness, operand
 dominance, and intervening-write checks before moving the MMIO trigger.
 
+`PRODUCER_FRONTIER_TWO_PHASE` is a separate compiler-owned transform for a
+completion group whose `producer_frontier.overlap_partition.exact` proof is
+complete. The group bridge exposes it only when every member is an
+unconditional, non-loop, host-knowable PUT; the host launch shape is reusable;
+the checked producer/remainder partition excludes non-duplicable effects; and
+the platform profile explicitly enables `producer_frontier_fission` after a
+runtime oracle gate. Selecting its opaque candidate ID emits the transform on
+every group member with `DWQ_TRIGGER`. Both final LTO halves rebuild the facts,
+successful device LTO records `producer_fission_device_materialized: true` in
+the freshly regenerated kernel template, and explicit-transform host LTO
+requires that attestation before cloning a launch. Host runtime
+identity/interval checks then retain the original fused launch on every false
+edge. A route-only hint cannot activate this schedule.
+
 
 ## Decider invocation
 

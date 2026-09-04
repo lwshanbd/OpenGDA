@@ -11,6 +11,8 @@
 ; RUN:          -passes='gicc-device-discovery,gicc-producer-fission-device,verify' \
 ; RUN:          -S %s 2>%t.err | %FileCheck %s --check-prefix=PHASE
 ; RUN: %FileCheck %s --check-prefix=LOG < %t.err
+; RUN: %FileCheck %s --check-prefix=ATTEST \
+; RUN:     < %t.metadir/k_partition.json
 ;
 ; The synthetic remainder-only flush is hidden from source-site numbering but
 ; must still be consumed by ordinary device lowering.  Both it and the
@@ -74,6 +76,7 @@ merge:
 ; PHASE: br i1 {{%.*}}, label %gicc.fission.original_flush.do, label %gicc.fission.original_flush.cont
 ; PHASE: br i1 %gicc.phase.communication, label %gicc.fission.quiet.do, label %gicc.fission.quiet.cont
 ; LOG: [producer-fission-device] k_partition: materialized exact producer/remainder partition
+; ATTEST: "producer_fission_device_materialized": true
 
 ; LOWER-LABEL: define amdgpu_kernel void @k_partition(
 ; LOWER-NOT: call void @_ZN4gicc3putE

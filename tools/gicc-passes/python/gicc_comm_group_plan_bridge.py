@@ -152,27 +152,32 @@ def _expression_relation(expressions: list[Any]) -> str:
 
 
 def _materializer_for_actions(
-    site_ids: list[str], actions: tuple[str, ...], *, early: bool = False,
+    site_ids: list[str], actions: tuple[str, ...], *,
+    transform: str | None = None,
 ) -> dict[str, Any]:
     sites: dict[str, Any] = {}
     for site_id, action in zip(site_ids, actions):
         materializer = dict(ACTION_TO_MATERIALIZER[action])
-        if early:
+        if transform is not None:
+            if action != "trigger":
+                raise GroupPlanError(
+                    f"{transform} requires every bound route to be trigger"
+                )
             materializer["dispatch"] = "DWQ_TRIGGER"
-            materializer["transform"] = "TRIGGER_GROUP_EARLY"
+            materializer["transform"] = transform
         sites[site_id] = materializer
     return {"sites": sites}
 
 
 def _candidate(
     kind: str, site_ids: list[str], actions: tuple[str, ...], summary: str,
-    proof: list[str], effects: dict[str, Any], *, early: bool = False,
+    proof: list[str], effects: dict[str, Any], *, transform: str | None = None,
 ) -> dict[str, Any]:
     payload = {
         "kind": kind,
         "site_ids": site_ids,
         "materializer": _materializer_for_actions(
-            site_ids, actions, early=early,
+            site_ids, actions, transform=transform,
         ),
         "summary": summary,
         "compiler_proof": proof,
@@ -235,6 +240,64 @@ def _semantic_facts(site: dict[str, Any]) -> dict[str, Any]:
     return {key: site.get(key) for key in _SEMANTIC_FACT_FIELDS}
 
 
+def _producer_fission_proof(
+    site_ids: list[str], dossier_by_site: dict[str, dict[str, Any]],
+    *, materializer_shape_legal: bool,
+) -> list[str] | None:
+    """Recognize the already-materializable two-phase compiler proof."""
+    if not materializer_shape_legal:
+        return None
+    identities = set()
+    for site_id in site_ids:
+        site = dossier_by_site[site_id]
+        frontier = site.get("producer_frontier")
+        if not isinstance(frontier, dict):
+            return None
+        partition = frontier.get("overlap_partition")
+        stores = frontier.get("producer_store_domains")
+        if (
+            site.get("op_kind") != "put_no_db"
+            or site.get("hk_capable") is not True
+            or site.get("in_loop") is True
+            or site.get("guard_kind") != "always"
+            or site.get("phase_launch_supported") is not True
+            or frontier.get("analyzed") is not True
+            or frontier.get("write_footprint_known") is not True
+            or frontier.get("unknown_write_sites") != 0
+            or frontier.get("buffer_identity_guardable") is not True
+            or frontier.get("producer_domains_known") is not True
+            or frontier.get("ordinary_store_sites") != 1
+            or not isinstance(stores, list)
+            or len(stores) != 1
+            or not isinstance(stores[0], dict)
+            or stores[0].get("domain_exact") is not True
+            or stores[0].get("partition_region_exact") is not True
+            or not isinstance(partition, dict)
+            or partition.get("exact") is not True
+            or partition.get("full_compute_region_partition_proved") is not True
+            or partition.get("store_instance_partition_complete") is not True
+            or partition.get("store_instance_partition_disjoint") is not True
+            or partition.get("side_effect_safety_exact") is not True
+            or partition.get("side_effects_excluded_on_optimized_path") is not True
+        ):
+            return None
+        identities.add((
+            frontier.get("producer_pointer_param"),
+            frontier.get("source_buffer_index_param"),
+            frontier.get("completion_site_id"),
+        ))
+    if len(identities) != 1:
+        return None
+    return [
+        "all members are unconditional non-loop host-knowable PUTs",
+        "the compiler proved one exact source-buffer producer region",
+        "checked transfer intervals partition producer and remainder stores",
+        "non-duplicable operations are excluded from both optimized phases",
+        "the final host and device LTO passes independently rebuild the proof",
+        "runtime identity and interval guards retain the original fused fallback",
+    ]
+
+
 def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
         -> dict[str, Any]:
     dossier = bridge._verified_dossier(dossier_value)
@@ -258,6 +321,10 @@ def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
     early_enabled = (
         isinstance(transform_profile, dict)
         and transform_profile.get("group_early_trigger") is True
+    )
+    fission_enabled = (
+        isinstance(transform_profile, dict)
+        and transform_profile.get("producer_frontier_fission") is True
     )
     opportunities: list[dict[str, Any]] = []
     opportunity_sites: set[str] = set()
@@ -357,7 +424,7 @@ def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
                     "host_descriptor_sites": len(site_ids),
                     "device_proxy_sites": 0,
                 },
-                early=True,
+                transform="TRIGGER_GROUP_EARLY",
             ))
 
         completion_meta = meta_by_site.get(completion)
@@ -374,6 +441,46 @@ def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
                 "kind": "group_trigger_early",
                 "reason": reasons or [
                     "compiler did not prove group early-trigger legality"
+                ],
+            })
+        fission_proof = _producer_fission_proof(
+            site_ids, dossier_by_site,
+            materializer_shape_legal=materializer_shape_legal,
+        )
+        compiler_fission_legal = (
+            fission_proof is not None
+            and all("trigger" in legal_by_site[site_id]
+                    for site_id in site_ids)
+        )
+        if fission_enabled and compiler_fission_legal:
+            actions = tuple("trigger" for _ in site_ids)
+            candidates.append(_candidate(
+                "group_producer_frontier_two_phase",
+                site_ids,
+                actions,
+                (
+                    "Split the exact producer region from its remainder and "
+                    "launch both compiler-owned phases under fail-closed "
+                    "runtime guards."
+                ),
+                fission_proof,
+                {
+                    "site_actions": dict(zip(site_ids, actions)),
+                    "schedule": "producer_frontier_then_remainder",
+                    "phase_count": 2,
+                    "kernel_launches_per_original": 2,
+                    "runtime_fallback": "original_fused",
+                    "host_descriptor_sites": len(site_ids),
+                    "device_proxy_sites": 0,
+                },
+                transform="PRODUCER_FRONTIER_TWO_PHASE",
+            ))
+        elif compiler_fission_legal:
+            masked.append({
+                "kind": "group_producer_frontier_two_phase",
+                "reason": [
+                    "platform profile has not enabled the transform after "
+                    "its runtime oracle gate"
                 ],
             })
         compiler_facts = {
@@ -417,6 +524,7 @@ def make_group_graph(dossier_value: Any, template_values: Iterable[Any]) \
                 ),
                 "final_materializer_shape_legal": materializer_shape_legal,
                 "group_early_trigger_legal": compiler_early_legal,
+                "producer_frontier_fission_legal": compiler_fission_legal,
                 "compiler_reasons": sorted(
                     reason for reason in early_reasons if isinstance(reason, str)
                 ),
@@ -635,6 +743,20 @@ def verified_graph(value: Any) -> dict[str, Any]:
                         and opportunity["compiler_facts"]["dependence_legality"].get(
                             "group_early_trigger_legal"
                         ) is True
+                    )
+                elif transform == "PRODUCER_FRONTIER_TWO_PHASE":
+                    transforms = value.get("platform_profile", {}).get(
+                        "compiler_transforms", {}
+                    )
+                    legal = (
+                        dispatch == "DWQ_TRIGGER"
+                        and candidate.get("kind") ==
+                            "group_producer_frontier_two_phase"
+                        and opportunity["compiler_facts"]["dependence_legality"].get(
+                            "producer_frontier_fission_legal"
+                        ) is True
+                        and isinstance(transforms, dict)
+                        and transforms.get("producer_frontier_fission") is True
                     )
                 else:
                     action = next(

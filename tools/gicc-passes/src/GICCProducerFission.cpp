@@ -480,10 +480,20 @@ bool auditDelayedDwqRoute(const FissionPlan &plan, std::string &reason) {
     }
     for (const std::string &siteId : plan.transferSiteIds) {
         SiteHint selected = hintFor(hint, siteId);
-        if (selected.dispatch != DispatchKind::DwqTrigger ||
-            selected.transform != CommunicationTransform::None) {
+        if (selected.dispatch != DispatchKind::DwqTrigger) {
             reason =
-                "every fission transfer must use untransformed DWQ_TRIGGER";
+                "every fission transfer must use DWQ_TRIGGER";
+            return false;
+        }
+        const bool explicitRequest = selected.transform ==
+            CommunicationTransform::ProducerFrontierTwoPhase;
+        if ((!config.producerFissionOracle && !explicitRequest) ||
+            (config.producerFissionOracle &&
+             selected.transform != CommunicationTransform::None &&
+             !explicitRequest)) {
+            reason =
+                "every fission transfer must request the compiler-owned "
+                "PRODUCER_FRONTIER_TWO_PHASE transform";
             return false;
         }
     }
@@ -1145,6 +1155,13 @@ PreservedAnalyses GICCProducerFissionHostPass::run(
             !visited.insert(wrapper).second)
             continue;
         std::string reason;
+        if (!config.producerFissionOracle &&
+            !site.kernelTemplate.producer_fission_device_materialized) {
+            errs() << "[producer-fission-host] " << site.kernelMangled
+                   << ": rejected: final device LTO did not attest the "
+                      "producer/remainder partition\n";
+            continue;
+        }
         auto plan = buildFissionPlan(site.kernelTemplate, reason);
         if (!plan) {
             errs() << "[producer-fission-host] " << site.kernelMangled
@@ -1240,6 +1257,12 @@ PreservedAnalyses GICCProducerFissionDevicePass::run(
             errs() << "[producer-fission-device] " << kernel.getName()
                    << ": rejected: device expressions are not materializable\n";
             continue;
+        }
+        current.producer_fission_device_materialized = true;
+        if (!writeKernelTemplate(config.metaDir, current)) {
+            errs() << "[producer-fission-device] " << kernel.getName()
+                   << ": warning: could not persist device materialization "
+                      "attestation; host fission will remain disabled\n";
         }
         errs() << "[producer-fission-device] " << kernel.getName()
                << ": materialized exact producer/remainder partition\n";

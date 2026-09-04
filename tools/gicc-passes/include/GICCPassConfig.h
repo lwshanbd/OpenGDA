@@ -47,9 +47,10 @@ struct Config {
     // in that situation would erase proxy put/quiet calls without replacing
     // them. Named passes remain available for focused tests.
     bool        collectiveOnly = false;
-    // Explicit research-oracle switch. The producer-fission passes remain
-    // absent from the automatic pipeline unless this is true, and still
-    // re-prove a DWQ-only hint plus all compiler legality facts.
+    // Backward-compatible research-oracle switch. The production selector
+    // instead activates the passes with an explicit
+    // PRODUCER_FRONTIER_TWO_PHASE site transform. Both paths still re-prove
+    // the DWQ route and every compiler legality fact.
     bool        producerFissionOracle = false;
 };
 

@@ -570,6 +570,13 @@ struct KernelTemplate {
     std::string             simpleName;
     std::vector<ParamInfo>  params;
     std::vector<OpTemplate> ops;
+    // Written only after the final device LTO pass successfully materializes
+    // the exact producer/remainder partition. The explicit hint-driven host
+    // pass requires this one-way attestation before cloning a launch, so a
+    // device-side rejection cannot leave a host-only two-phase schedule.
+    // Device discovery rewrites the template with the default false value on
+    // every compile, preventing an earlier failed attempt from inheriting it.
+    bool                    producer_fission_device_materialized = false;
     // Set to true by GICCDispatchLowering when at least one of this
     // kernel's call sites was lowered to CPU_PROXY_ENQUEUE. The
     // device-side lowering pass (Task 8) reads this bit to decide

@@ -5,8 +5,8 @@
 namespace gicc::pass {
 
 // Final-host-IR materializer for the compiler-owned two-phase producer
-// schedule. This pass is intentionally available only by its explicit
-// pipeline name until the matching device-body materializer is complete.
+// schedule. The automatic pipeline includes it only for an explicit
+// compiler-owned transform request or the backward-compatible oracle switch.
 class GICCProducerFissionHostPass
     : public llvm::PassInfoMixin<GICCProducerFissionHostPass> {
 public:
@@ -17,9 +17,9 @@ public:
     }
 };
 
-// Early device-IR half of the same schedule. Automatic attachment is guarded
-// by the default-off research-oracle switch; named pipelines remain available
-// for focused proof tests.
+// Early device-IR half of the same schedule. Named pipelines remain available
+// for focused proof tests, but they still require either the explicit site
+// transform or the research-oracle switch before changing IR.
 class GICCProducerFissionDevicePass
     : public llvm::PassInfoMixin<GICCProducerFissionDevicePass> {
 public:

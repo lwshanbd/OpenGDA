@@ -2,5 +2,22 @@
   "version": 1,
   "schema_version": "gicc-hint-v1",
   "default_dispatch": "DWQ_TRIGGER",
-  "sites": {}
+  "sites": {
+    "unit.cpp:10:k_partition::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "transform": "PRODUCER_FRONTIER_TWO_PHASE"
+    },
+    "unit.cpp:11:k_partition::1": {
+      "dispatch": "DWQ_TRIGGER",
+      "transform": "PRODUCER_FRONTIER_TWO_PHASE"
+    },
+    "?:?:k_partition::0": {
+      "dispatch": "DWQ_TRIGGER",
+      "transform": "PRODUCER_FRONTIER_TWO_PHASE"
+    },
+    "?:?:k_partition::1": {
+      "dispatch": "DWQ_TRIGGER",
+      "transform": "PRODUCER_FRONTIER_TWO_PHASE"
+    }
+  }
 }

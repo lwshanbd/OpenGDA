@@ -41,10 +41,10 @@ per-workload portfolios under platform profile SHA-256
 
 | Case | Opportunity shape | Materializable route plans | Private graph ID | Model-prompt SHA-256 |
 |---|---|---:|---|---|
-| Jacobi | two-transfer completion group | 9 | `sha256:14cde78ee49478bae91ef42f9dcf711064f9e4a9187d1f7dca0aa9d390c78c6d` | `c3ab1b8a8f911e75d14a7a685a0f95c5f872c4589973cb1589b1ea388ada4b4c` |
-| Minimod | two-transfer completion group | 9 | `sha256:5766ac7cf068d3a0878054ce87d8655cb2967d352a2053f4d75e7f565406c864` | `b4708dd6c1a4c3f745d4185a36608f8c9ecd199e9409fb26adeebeca43bf5f86` |
+| Jacobi | two-transfer completion group | 9 | `sha256:1f7a4f9adeddc978846484d938cbd3d545bb6d3a758188e53a6b6528bb9a72dd` | `da520e8ec701cec38a8ea84bf339bd557fb0c33d602e2b50537c9973a41dcf8c` |
+| Minimod | two-transfer completion group | 9 | `sha256:635f115d1fdcc65e48b49ef8de94d29734edfaf22f6a66b035e3e57c4396889d` | `4fbc8f029c5a0f237226c76067dd4f636fca10a991d596141dfed9d22d13e178` |
 | minimal matrix multiply | singleton transfer | 3 | `sha256:e8ba0ec787b531a9f900e09334dd938a5c805c3b2be79e29876e9fcb2d700987` | `f8d51838bd326aadab6efac8a0589b3ac7a63d5f20c005e3ed4d99ce8c9175a3` |
-| mixed-side-effect LTO | two-transfer completion group | 9 | `sha256:4c9e9ea773e2ae2f560bf89434e19a762cd27277fcb98b0597a9a84bf498e731` | `83f543591047a25f1ea36c19dbacdec7cdf651fa970b889e7b43d8736e1a7099` |
+| mixed-side-effect LTO | two-transfer completion group | 9 | `sha256:b3e137e2fe3f2cad2807eb534383066f285182c7588e8a895b73675087c0f5a5` | `1c208c409dd1055d420a3c79910cd95f0019b845104ab17d0cde9e3a59a6482f` |
 | loop-carried LTO | singleton transfer | 2 | `sha256:0e53a7261a7be87fc9ba363c56d203db661cf99400c3f781efbc10510bb431e9` | `788c7aaaac36373f0b9fb43ec06b13482c48ad356206a2e3ccd3f809b37454a9` |
 
 These are 32 catalog entries across five separate workload decisions, not one
@@ -52,10 +52,16 @@ These are 32 catalog entries across five separate workload decisions, not one
 compiler-legal transport routing (`default`, proxy, or trigger, with the loop
 shape restricted to proxy/trigger). The structural axis remains narrower:
 the original phase layout is visible in every case, while the Jacobi
-producer-fission layout remains dormant pending its preregistered runtime
-gate. A future composed portfolio must enumerate and revalidate only route ×
-schedule combinations that the corresponding LTO materializers jointly
-support; it must not assume a Cartesian product.
+producer-fission layout is now represented by one compiler-generated masked
+candidate. Its opaque selection maps only to
+`PRODUCER_FRONTIER_TWO_PHASE`; the host and device LTO passes independently
+re-prove it, and host LTO additionally requires the successful final-device
+materialization attestation. The base platform profile keeps it non-selectable
+pending its preregistered runtime gate. Enabling that gate would make the
+Jacobi portfolio 10 candidates and the five-workload total 33, without
+inventing another transformation. A future composed portfolio must enumerate
+and revalidate only route × schedule combinations that the corresponding LTO
+materializers jointly support; it must not assume a Cartesian product.
 
 The model prompts above contain the richer compiler relations needed for that
 study—formal argument expressions, transfer intervals, producer-frontier
