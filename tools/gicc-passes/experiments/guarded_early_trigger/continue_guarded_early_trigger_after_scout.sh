@@ -6,12 +6,13 @@ if [[ $# -ne 5 ]]; then
     echo "usage: $0 SCOUT_STATE SCOUT_DIR BINARY_DIR TRANSITION OUT_DIR" >&2
     exit 2
 fi
-scout_state=$1
-scout_dir=$(cd -- "$2" && pwd)
-binary_dir=$(cd -- "$3" && pwd)
-transition=$4
-output_dir=$5
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/../../../.." && pwd)
+case $1 in /*) scout_state=$1 ;; *) scout_state="$repo_root/$1" ;; esac
+case $2 in /*) scout_dir=$2 ;; *) scout_dir="$repo_root/$2" ;; esac
+binary_dir=$(cd -- "$3" && pwd)
+case $4 in /*) transition=$4 ;; *) transition="$repo_root/$4" ;; esac
+case $5 in /*) output_dir=$5 ;; *) output_dir="$repo_root/$5" ;; esac
 preparer="$script_dir/prepare_guarded_early_trigger_confirmation.py"
 protocol="$script_dir/GUARDED_EARLY_CONFIRMATION_TRANSITION.md"
 runner="$script_dir/run_guarded_early_trigger_confirmation.sh"
