@@ -35,9 +35,9 @@ and fails closed at every transition. Its current output is:
 | `loop_lto` | `awaiting_predecessor` | run the frozen reused-descriptor scout after the serial campaign |
 
 The report has readiness ID
-`sha256:c20068a37c24b50f27e4ab3f10445af9d2550aed796bc208cc699ae0f06f930f`
+`sha256:13507a04131c82bd25c8a15e301aded5590e92e3106c051b502d87d9ce35454d`
 and serialized SHA-256
-`e9669d86c1011386a6720da531a6d6c8b8411068421e2044eb47c8c0c6068891`.
+`f8b8f99c826574a738692c930d5a48990659ed96d2fdd6a860ba8fd56cabe88c`.
 It reports zero provider-protocol-permitted entries, zero authorized provider
 calls, zero measured LLM policies, and
 `paper_llm_performance_claim_ready=false`.
@@ -56,6 +56,12 @@ capacity but cannot support an LLM-selection benefit.
 - A positive exploratory N8 or producer-fission scout advances only to a
   separately frozen confirmatory compiler-oracle experiment. It never
   authorizes a provider request.
+- For the already model-visible N8 collective graph, a positive confirmation
+  advances to `provider_protocol_permitted` only after the readiness audit
+  replays all three raw N8 allocation monitors and verifies the exact graph,
+  transition, `pdebug` contract, artifact hashes, and confirmation gate. A
+  positive result permits only request freezing; provider calls remain zero
+  until a separate content-addressed authorization exists.
 - The guarded early-trigger scout is subject to the same rule and remains
   absent from model-visible candidates while it waits or until confirmation.
 - The reused-loop-descriptor scout is a graph-expansion oracle. Its candidate
@@ -170,6 +176,8 @@ python3 tools/gicc-passes/experiments/audit_compiler_llm_readiness.py emit \
   --placement-current-graph build_ofi/compiler_comm_plan_placement_current_20260904/generated/opportunity-graph.json \
   --collective-state build_ofi/compiler_collective_hierpipe_n8_scout_20260903.state \
   --collective-analysis build_ofi/compiler_collective_hierpipe_n8_scout_20260903/analysis.json \
+  --collective-confirmation-state build_ofi/compiler_collective_n8_confirmation_20260904.state \
+  --collective-confirmation-analysis build_ofi/compiler_collective_n8_confirmation_20260904/analysis.json \
   --producer-state build_ofi/producer_fission_oracle_scout_7687377_20260904.state \
   --producer-analysis build_ofi/producer_fission_oracle_scout_7687377_20260904/analysis.json \
   --guarded-state build_ofi/guarded_early_trigger_scout_77897d9_20260904.state \

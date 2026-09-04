@@ -1,6 +1,9 @@
 import copy
+import json
 import sys
+import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -53,6 +56,98 @@ class CompilerLlmReadinessTests(unittest.TestCase):
         self.assertEqual("confirmation_required", result["status"])
         self.assertFalse(result["provider_protocol_permitted"])
         self.assertFalse(result["provider_call_authorized"])
+
+    def test_passed_collective_confirmation_permits_request_not_provider(self):
+        graph_id = "sha256:" + "3" * 64
+        payload = {
+            "schema_version": "gicc-collective-hierpipe-n8-scout-v1",
+            "graph_id": graph_id,
+            "model_invoked": False,
+            "application_source_modified": False,
+            "n8_capacity_gate": {"passed": True},
+        }
+        analysis = {**payload, "result_id": bridge._fingerprint(payload)}
+        result = readiness.classify_collective(
+            entry(graph_id=graph_id), "promising", analysis,
+            "confirmed", True,
+        )
+        self.assertEqual("provider_protocol_permitted", result["status"])
+        self.assertTrue(result["provider_protocol_permitted"])
+        self.assertTrue(result["runtime_confirmation_gate_passed"])
+        self.assertFalse(result["provider_call_authorized"])
+
+        negative = readiness.classify_collective(
+            entry(graph_id=graph_id), "promising", analysis,
+            "negative", False,
+        )
+        self.assertEqual("closed_negative", negative["status"])
+        self.assertFalse(negative["provider_protocol_permitted"])
+
+    def test_collective_confirmation_state_must_match_result(self):
+        graph_id = "sha256:" + "3" * 64
+        payload = {
+            "schema_version": "gicc-collective-hierpipe-n8-scout-v1",
+            "graph_id": graph_id,
+            "model_invoked": False,
+            "application_source_modified": False,
+            "n8_capacity_gate": {"passed": True},
+        }
+        analysis = {**payload, "result_id": bridge._fingerprint(payload)}
+        with self.assertRaisesRegex(
+            readiness.ReadinessError, "confirmation state disagrees"
+        ):
+            readiness.classify_collective(
+                entry(graph_id=graph_id), "promising", analysis,
+                "negative", True,
+            )
+
+    def test_collective_confirmation_replays_before_eligibility(self):
+        graph_id = "sha256:" + "4" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transition = root / "transition.json"
+            graph = root / "graph.json"
+            transition.write_text("{}\n", encoding="utf-8")
+            graph.write_text(
+                json.dumps({"graph_id": graph_id}) + "\n",
+                encoding="utf-8",
+            )
+            monitors = [root / f"monitor{number}.json" for number in (1, 2, 3)]
+            for path in monitors:
+                path.write_text("{}\n", encoding="utf-8")
+            payload = {
+                "schema_version": "gicc-collective-n8-confirmation-v1",
+                "model_invoked": False,
+                "application_source_modified": False,
+                "provider_call_authorized": False,
+                "transition": str(transition),
+                "transition_sha256": readiness.sha256_file(transition),
+                "allocation_monitors": [
+                    {"monitor": str(path)} for path in monitors
+                ],
+                "confirmation_gate": {"passed": True},
+            }
+            confirmation = {
+                **payload, "result_id": bridge._fingerprint(payload),
+            }
+            confirmation_path = root / "confirmation.json"
+            confirmation_path.write_text(
+                json.dumps(confirmation) + "\n", encoding="utf-8",
+            )
+            with (
+                mock.patch.object(
+                    readiness.n8_confirmation, "validate_transition",
+                    return_value=({}, {"compiler_graph": graph}),
+                ),
+                mock.patch.object(
+                    readiness.n8_confirmation, "analyze_monitors",
+                    return_value=confirmation,
+                ) as replay,
+            ):
+                self.assertTrue(readiness.verified_collective_confirmation(
+                    confirmation_path, graph_id,
+                ))
+                replay.assert_called_once_with(transition, monitors)
 
     def test_collective_wait_and_negative_paths(self):
         waiting = readiness.classify_collective(entry(), "monitoring", None)

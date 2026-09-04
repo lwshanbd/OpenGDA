@@ -22,7 +22,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 PASS_PYTHON = HERE.parent / "python"
 sys.path.insert(0, str(PASS_PYTHON))
+sys.path.insert(0, str(HERE / "collective"))
 
+import analyze_compiler_collective_n8_confirmation as n8_confirmation  # noqa: E402
 import gicc_comm_plan_bridge as structural  # noqa: E402
 import gicc_compiler_decision_suite as decision_suite  # noqa: E402
 import gicc_llm_bridge as bridge  # noqa: E402
@@ -132,9 +134,16 @@ def classify_placement(entry: dict[str, Any], summary: Any,
     return result
 
 
-def classify_collective(entry: dict[str, Any], phase: str,
-                        analysis: Any | None) -> dict[str, Any]:
+def classify_collective(
+    entry: dict[str, Any], phase: str, analysis: Any | None,
+    confirmation_phase: str = "missing",
+    confirmation_passed: bool | None = None,
+) -> dict[str, Any]:
     if analysis is None:
+        if confirmation_passed is not None:
+            raise ReadinessError(
+                "collective confirmation exists without a passed scout"
+            )
         status = {
             "submitting": "awaiting_scout",
             "monitoring": "awaiting_scout",
@@ -170,16 +179,113 @@ def classify_collective(entry: dict[str, Any], phase: str,
             "collective controller state disagrees with scout analysis"
         )
     if gate["passed"]:
-        result = _base_entry(
-            entry, "confirmation_required",
-            "freeze_and_run_confirmatory_compiler_oracle",
-        )
+        if confirmation_passed is None:
+            status = {
+                "missing": "confirmation_required",
+                "building": "awaiting_confirmation",
+                "submitting": "awaiting_confirmation",
+                "monitoring": "awaiting_confirmation",
+                "analyzing": "awaiting_confirmation",
+                "failed": "confirmation_failed",
+            }.get(confirmation_phase)
+            if status is None:
+                raise ReadinessError(
+                    "collective confirmation state requires an analysis"
+                )
+            next_stage = {
+                "confirmation_required": (
+                    "freeze_and_run_confirmatory_compiler_oracle"
+                ),
+                "awaiting_confirmation": (
+                    "wait_for_existing_n8_pdebug_confirmation"
+                ),
+                "confirmation_failed": "diagnose_without_model_call",
+            }[status]
+            result = _base_entry(entry, status, next_stage)
+        else:
+            expected_confirmation_phase = (
+                "confirmed" if confirmation_passed else "negative"
+            )
+            if confirmation_phase != expected_confirmation_phase:
+                raise ReadinessError(
+                    "collective confirmation state disagrees with analysis"
+                )
+            if confirmation_passed:
+                result = _base_entry(
+                    entry, "provider_protocol_permitted",
+                    "freeze_exact_provider_request_and_request_authorization",
+                )
+            else:
+                result = _base_entry(
+                    entry, "closed_negative",
+                    "do_not_run_model_for_this_graph",
+                )
+            result["runtime_confirmation_gate_passed"] = confirmation_passed
     else:
+        if confirmation_passed is not None:
+            raise ReadinessError(
+                "collective confirmation exists after a negative scout"
+            )
         result = _base_entry(
             entry, "closed_negative", "do_not_run_model_for_this_graph",
         )
     result["runtime_gate_passed"] = gate["passed"]
     return result
+
+
+def verified_collective_confirmation(
+    path: Path, expected_graph_id: str,
+) -> bool:
+    """Replay a completed N8 confirmation before granting request eligibility."""
+    value = read_json(path)
+    if (not isinstance(value, dict)
+            or value.get("schema_version")
+            != "gicc-collective-n8-confirmation-v1"):
+        raise ReadinessError("wrong collective confirmation schema")
+    payload = dict(value)
+    result_id = payload.pop("result_id", None)
+    if result_id != bridge._fingerprint(payload):
+        raise ReadinessError("collective confirmation result ID changed")
+    for key, expected in {
+        "model_invoked": False,
+        "application_source_modified": False,
+        "provider_call_authorized": False,
+    }.items():
+        if value.get(key) is not expected:
+            raise ReadinessError(
+                f"collective confirmation boundary changed: {key}"
+            )
+    transition_path = Path(value.get("transition", ""))
+    if (not transition_path.is_absolute() or not transition_path.is_file()
+            or sha256_file(transition_path) != value.get("transition_sha256")):
+        raise ReadinessError("collective confirmation transition changed")
+    _, transition_files = n8_confirmation.validate_transition(transition_path)
+    confirmed_graph = read_json(transition_files["compiler_graph"])
+    if confirmed_graph.get("graph_id") != expected_graph_id:
+        raise ReadinessError(
+            "collective confirmation binds another compiler graph"
+        )
+    summaries = value.get("allocation_monitors")
+    if not isinstance(summaries, list) or len(summaries) != 3:
+        raise ReadinessError(
+            "collective confirmation lacks three allocation monitors"
+        )
+    monitors = [Path(item.get("monitor", "")) for item in summaries]
+    if any(not monitor.is_absolute() for monitor in monitors):
+        raise ReadinessError(
+            "collective confirmation monitor path is not absolute"
+        )
+    regenerated = n8_confirmation.analyze_monitors(
+        transition_path, monitors,
+    )
+    if regenerated != value:
+        raise ReadinessError(
+            "collective confirmation does not replay from raw evidence"
+        )
+    gate = value.get("confirmation_gate")
+    if not isinstance(gate, dict) or not isinstance(gate.get("passed"), bool):
+        raise ReadinessError("collective confirmation lacks its gate")
+    return gate["passed"]
 
 
 def classify_producer(entry: dict[str, Any], phase: str,
@@ -392,6 +498,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         read_json(args.collective_analysis)
         if args.collective_analysis.is_file() else None
     )
+    collective_confirmation_analysis = (
+        read_json(args.collective_confirmation_analysis)
+        if args.collective_confirmation_analysis.is_file() else None
+    )
     producer_analysis = (
         read_json(args.producer_analysis)
         if args.producer_analysis.is_file() else None
@@ -404,6 +514,13 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         read_json(args.reused_analysis)
         if args.reused_analysis.is_file() else None
     )
+    collective_confirmation_passed = (
+        verified_collective_confirmation(
+            args.collective_confirmation_analysis,
+            entries["collective_n8"]["graph_id"],
+        )
+        if collective_confirmation_analysis is not None else None
+    )
     records = {
         "coalescing_placement": classify_placement(
             placement_entry, placement_summary, graphs_equivalent,
@@ -411,6 +528,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "collective_n8": classify_collective(
             entries["collective_n8"], state_phase(args.collective_state),
             collective_analysis,
+            state_phase(args.collective_confirmation_state),
+            collective_confirmation_passed,
         ),
         "jacobi": classify_producer(
             entries["jacobi"], state_phase(args.producer_state),
@@ -471,6 +590,15 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "placement_current_graph": evidence(args.placement_current_graph),
             "collective_state": evidence(args.collective_state),
             "collective_analysis": evidence(args.collective_analysis),
+            "collective_confirmation_state": evidence(
+                args.collective_confirmation_state
+            ),
+            "collective_confirmation_analysis": evidence(
+                args.collective_confirmation_analysis
+            ),
+            "collective_confirmation_analyzer": evidence(
+                HERE / "collective/analyze_compiler_collective_n8_confirmation.py"
+            ),
             "producer_state": evidence(args.producer_state),
             "producer_analysis": evidence(args.producer_analysis),
             "guarded_state": evidence(args.guarded_state),
@@ -512,6 +640,19 @@ def add_inputs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--placement-current-graph", type=Path, required=True)
     parser.add_argument("--collective-state", type=Path, required=True)
     parser.add_argument("--collective-analysis", type=Path, required=True)
+    parser.add_argument(
+        "--collective-confirmation-state", type=Path,
+        default=(
+            ROOT / "build_ofi/compiler_collective_n8_confirmation_20260904.state"
+        ),
+    )
+    parser.add_argument(
+        "--collective-confirmation-analysis", type=Path,
+        default=(
+            ROOT
+            / "build_ofi/compiler_collective_n8_confirmation_20260904/analysis.json"
+        ),
+    )
     parser.add_argument("--producer-state", type=Path, required=True)
     parser.add_argument("--producer-analysis", type=Path, required=True)
     parser.add_argument("--guarded-state", type=Path, required=True)
@@ -548,9 +689,12 @@ def main() -> int:
             f"{result['readiness_id']}"
         )
         return 0
-    except (ReadinessError, decision_suite.SuiteError,
-            structural.PlanBridgeError, OSError, KeyError, TypeError,
-            ValueError) as exc:
+    except (
+        ReadinessError, decision_suite.SuiteError,
+        structural.PlanBridgeError, n8_confirmation.ConfirmError,
+        n8_confirmation.monitor_base.MonitorError,
+        OSError, KeyError, TypeError, ValueError,
+    ) as exc:
         print(f"compiler-llm-readiness: ERROR: {exc}", file=sys.stderr)
         return 2
 
