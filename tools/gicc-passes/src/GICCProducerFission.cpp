@@ -66,6 +66,7 @@ bool parameterCellTypeMatches(const Type *cellType, StringRef metadataType) {
 
 struct AuditedLaunch {
     CallInst *launch = nullptr;
+    CallInst *configurationPush = nullptr;
     AllocaInst *params = nullptr;
     Value *paramsValue = nullptr;
     Value *runtime = nullptr;
@@ -194,6 +195,7 @@ AuditedLaunch auditFinalLaunch(Function &wrapper,
 
 struct AuditedHipStubDispatch {
     CallInst *dispatch = nullptr;
+    CallInst *push = nullptr;
     Value *stream = nullptr;
     std::string reason;
 };
@@ -298,6 +300,7 @@ AuditedHipStubDispatch auditEarlyHipStubDispatch(
         return result;
     }
     result.dispatch = dispatch;
+    result.push = push;
     result.stream = push->getArgOperand(5);
     result.reason = "compiler HIP push/stub/launch chain re-proved";
     return result;
@@ -336,6 +339,7 @@ AuditedLaunch materializeStubParameterView(
         valueBuilder.CreateStore(result.cells[i], slot);
     }
     result.launch = audited.dispatch;
+    result.configurationPush = audited.push;
     result.params = params;
     result.paramsValue = params;
     result.runtime = wrapper.getArg(0);
@@ -1006,6 +1010,14 @@ bool materializeHostFission(Function &wrapper, const FissionPlan &plan,
     phasedBuilder.CreateCall(
         setPhase,
         {params, phasedBuilder.getInt32(kScheduleRemainder), stream});
+    // A compiler HIP stub consumes the thread-local launch configuration via
+    // __hipPopCallConfiguration on every invocation.  The original push
+    // dominates both the fused edge and the first phased dispatch, but a
+    // second phased stub dispatch needs its own identical push.  A final
+    // direct hipLaunchKernel call has already materialized explicit grid and
+    // stream operands and therefore has no push to replay.
+    if (audited.configurationPush)
+        cloneLaunch(phasedBuilder, *audited.configurationPush);
     cloneLaunch(phasedBuilder, *launch);
     phasedBuilder.CreateCall(
         setPhase,

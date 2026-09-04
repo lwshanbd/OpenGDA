@@ -121,6 +121,7 @@ entry:
 ; STUB-NEXT: call void @gicc_runtime_set_schedule_phase_from_kernel_args(ptr %gicc.guard.params, i32 1, ptr null)
 ; STUB: call void %stub(
 ; STUB: call void @gicc_runtime_set_schedule_phase_from_kernel_args(ptr %gicc.guard.params, i32 2, ptr null)
+; STUB-NEXT: call i32 @__hipPushCallConfiguration(i64 %grid.xy, i32 %grid.z, i64 %block.xy, i32 %block.z, i64 0, ptr null)
 ; STUB: call void %stub(
 ; STUB: call void @gicc_runtime_set_schedule_phase_from_kernel_args(ptr %gicc.guard.params, i32 0, ptr null)
 ; STUB: gicc.fission.fused:
