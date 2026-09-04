@@ -33,6 +33,14 @@ therefore post-selection and unadjusted, and four allocation replicates give
 an exact sign-test p-value of 0.125. It is a useful observed capability ceiling,
 not confirmatory evidence or typical model performance.
 
+`LLM_SAMPLING_NULL.md` adds a chance calibration without reinterpreting the
+archive as a uniform sample from the unknown legal space. Conditional only on
+uniform draws over the five *observed* policies, 20 draws hit a predesignated
+best policy with 98.8471% probability and cover all five with 94.2719%
+probability. The observed 10/20 modal count is less compatible with that narrow
+null (1.2974% probability that any policy reaches at least ten), indicating a
+response preference but not a runtime benefit.
+
 Mapping each of the 20 responses to its policy's separately measured point
 estimate gives a frequency-weighted geometric mean of 1.022550x over compiler
 default. This number is descriptive only: the five campaigns did not share

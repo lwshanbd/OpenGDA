@@ -109,6 +109,9 @@ The paper claims remain separated:
 - the modal representative can support a stable-policy claim only after paired
   runtime validation;
 - best-of-20 can support only a labeled capability-ceiling claim;
+- exact-oracle and best-of-20 rates must be interpreted against the analytic
+  20-draw chance calibration in `LLM_SAMPLING_NULL.md`; a single oracle hit is
+  already rare in a 4096-policy graph but expected in the 2–9-policy graphs;
 - value from relational language understanding requires improvement over the
   equal-authority `descriptors` and `opaque` views;
 - portfolio generalization requires at least two independent eligible entries
