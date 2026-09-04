@@ -274,6 +274,17 @@ also have a complete hidden-screen/LTO/paired-runtime adapter.  The current
 route/schedule family has no such post-archive adapter, so eligibility alone
 does not recommend freezing another request and never authorizes one.
 
+The family-independent first stage of that follow-up adapter is now provided
+by `prepare_communication_llm_policy_catalog.py`. Only after a complete model
+archive exists, it enumerates the full Cartesian product of the selected
+communication graph's existing candidate IDs, revalidates every policy through
+the compiler bridge, and writes contained private LTO hints. It is an offline
+catalog operation: it has no application-source path and invokes no provider,
+compiler, scheduler, runtime, or oracle. This stage alone does not mark the
+route/schedule family executable; the application-specific LTO audit, hidden
+runtime screen, and paired validation must still be attached for whichever
+different-family candidate passes its preregistered runtime gate.
+
 ## Historical feasibility versus the upgraded claim
 
 The earlier `llm-zero-shot-v1` archive is now independently re-audited in
