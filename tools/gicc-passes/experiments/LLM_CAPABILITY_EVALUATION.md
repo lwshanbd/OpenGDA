@@ -24,6 +24,14 @@ The frozen scalar GBT and the relational LLM do not have the same input or
 transformation authority. The GBT remains a useful route baseline, but it is
 not an action-controlled model comparison.
 
+`COMPILER_ACTION_AUTHORITY.md` verifies the output-side difference rather
+than merely asserting it: the frozen GBT emits one of three route labels,
+whereas the suite includes structural-transform candidate IDs and collective
+algorithm/size-policy option IDs.  That wider authority comes from the
+compiler interface, not from LLM identity; a structured ML baseline could use
+the same interface.  Consequently, no result may attribute the interface's
+extra actions to language reasoning.
+
 The controlled experiment is instead the three LLM views already frozen for
 every suite entry:
 

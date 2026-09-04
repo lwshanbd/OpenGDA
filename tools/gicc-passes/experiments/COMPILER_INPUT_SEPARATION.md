@@ -63,6 +63,13 @@ performance. A performance claim still requires stable compiler-oracle
 headroom, held-out labels, the exact frozen prompt protocol, explicit provider
 authorization, and runtime validation of the compiler-materialized plan.
 
+`COMPILER_ACTION_AUTHORITY.md` separately audits the output side.  It proves
+that the upgraded compiler-policy interface contains structural and collective
+actions absent from the frozen route GBT, while explicitly recording that this
+width comes from the interface rather than the identity of the model.  A
+structured ML method could use the same compiler candidate IDs; only an
+equal-authority evaluation can isolate LLM reasoning quality.
+
 ## Frozen result
 
 - audit ID:
