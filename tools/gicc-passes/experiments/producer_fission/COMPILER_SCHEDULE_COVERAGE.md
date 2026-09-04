@@ -93,6 +93,16 @@ because the application-side wrapper call used LLVM `invoke`; the compiler
 now correctly audits the independent HIP launch inside the wrapper without
 changing the caller's normal or unwind edge.
 
+The runtime materializer uses a stricter rule than that analysis-only audit.
+A 2026-09-04 final-IR review found that rewriting the annotated wrapper at
+`OptimizerLast` can occur after O3 has already copied an unguarded HIP stub
+into application callers. Producer fission now audits and wraps the unique
+compiler HIP stub dispatch at the pre-inliner extension point, so every
+expanded caller inherits the guarded phase schedule; the host pass also
+requires the device attestation in oracle mode. Any producer-fission binary
+built with the earlier late-wrapper implementation is therefore invalidated
+and must be rebuilt before runtime evidence is admitted.
+
 The matrix-multiply atomic is not assumed to produce the communicated
 buffer. Device IR identifies its root as the `Cs` pointer formal, whereas the
 transfer names a registered-buffer index. A conservative use-chain proof

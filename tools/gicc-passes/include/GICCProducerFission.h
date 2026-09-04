@@ -4,9 +4,11 @@
 
 namespace gicc::pass {
 
-// Final-host-IR materializer for the compiler-owned two-phase producer
-// schedule. The automatic pipeline includes it only for an explicit
-// compiler-owned transform request or the backward-compatible oracle switch.
+// Host materializer for the compiler-owned two-phase producer schedule. It
+// runs before general inlining so every expanded callsite inherits the phase
+// guard, while still auditing either the compiler HIP stub or a direct final
+// launch. The automatic pipeline includes it only for an explicit transform
+// request or the backward-compatible oracle switch.
 class GICCProducerFissionHostPass
     : public llvm::PassInfoMixin<GICCProducerFissionHostPass> {
 public:

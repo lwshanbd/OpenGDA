@@ -128,8 +128,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
 #ifndef GICC_PASSES_ANALYZE_ONLY
                     if (!cfg.collectiveOnly) {
                         MPM.addPass(GICCDispatchLoweringPass());
-                        if (producerFissionPipelineEnabled())
+                        if (producerFissionPipelineEnabled()) {
                             MPM.addPass(GICCProducerFissionDevicePass());
+                            MPM.addPass(GICCProducerFissionHostPass());
+                        }
                         if (guardedEarlyTriggerPipelineEnabled()) {
                             MPM.addPass(GICCGuardedEarlyTriggerDevicePass());
                             // Host wrappers must be guarded before the O3
@@ -149,8 +151,6 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                 GICC_EP_LAMBDA_HEAD(MPM) {
                     MPM.addPass(GICCSentinelPass());
 #ifndef GICC_PASSES_ANALYZE_ONLY
-                    if (producerFissionPipelineEnabled())
-                        MPM.addPass(GICCProducerFissionHostPass());
 #endif
                 });
             // Named-pass registration so tests can drive the plugin via

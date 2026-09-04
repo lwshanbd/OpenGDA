@@ -923,8 +923,10 @@ CallInst *cloneLaunch(IRBuilder<> &builder, const CallInst &launch) {
 
 bool materializeHostFission(Function &wrapper, const FissionPlan &plan,
                             const AuditedLaunch &audited) {
-    if (!audited.launch || wrapper.arg_empty() ||
-        !wrapper.getArg(0)->getType()->isPointerTy())
+    if (!audited.launch || !audited.paramsValue || !audited.runtime ||
+        !audited.stream || !audited.runtime->getType()->isPointerTy() ||
+        !audited.paramsValue->getType()->isPointerTy() ||
+        !audited.stream->getType()->isPointerTy())
         return false;
     CallInst *launch = audited.launch;
     IRBuilder<> guardBuilder(launch);
@@ -942,9 +944,9 @@ bool materializeHostFission(Function &wrapper, const FissionPlan &plan,
         "gicc_runtime_set_schedule_phase_from_kernel_args",
         FunctionType::get(guardBuilder.getVoidTy(), {ptr, i32, ptr}, false));
 
-    Value *runtime = wrapper.getArg(0);
-    Value *params = launch->getArgOperand(5);
-    Value *stream = launch->getArgOperand(7);
+    Value *runtime = audited.runtime;
+    Value *params = audited.paramsValue;
+    Value *stream = audited.stream;
     Value *guard = guardBuilder.CreateICmpNE(
         guardBuilder.CreateCall(
             identity,
@@ -1664,8 +1666,7 @@ PreservedAnalyses GICCProducerFissionHostPass::run(
             !visited.insert(wrapper).second)
             continue;
         std::string reason;
-        if (!config.producerFissionOracle &&
-            !site.kernelTemplate.producer_fission_device_materialized) {
+        if (!site.kernelTemplate.producer_fission_device_materialized) {
             errs() << "[producer-fission-host] " << site.kernelMangled
                    << ": rejected: final device LTO did not attest the "
                       "producer/remainder partition\n";
@@ -1685,9 +1686,21 @@ PreservedAnalyses GICCProducerFissionHostPass::run(
         AuditedLaunch launch = auditFinalLaunch(*wrapper,
                                                 site.kernelTemplate);
         if (!launch.launch) {
-            errs() << "[producer-fission-host] " << site.kernelMangled
-                   << ": rejected: " << launch.reason << "\n";
-            continue;
+            AuditedHipStubDispatch stub = auditEarlyHipStubDispatch(
+                *wrapper, site.kernelTemplate);
+            if (!stub.dispatch) {
+                errs() << "[producer-fission-host] " << site.kernelMangled
+                       << ": rejected: " << launch.reason << "; "
+                       << stub.reason << "\n";
+                continue;
+            }
+            launch = materializeStubParameterView(
+                *wrapper, site.kernelTemplate, stub);
+            if (!launch.launch) {
+                errs() << "[producer-fission-host] " << site.kernelMangled
+                       << ": rejected: " << launch.reason << "\n";
+                continue;
+            }
         }
         if (!materializeHostFission(*wrapper, *plan, launch)) {
             errs() << "[producer-fission-host] " << site.kernelMangled
