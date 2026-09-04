@@ -112,10 +112,15 @@ def verify_separation(value: Any, suite: dict[str, Any],
         raise CapabilityProtocolError("input audit binds different suite bytes")
     if report.get("boundary") != {
         "application_source_visible": False,
+        "source_locations_visible": False,
+        "llvm_ir_visible": False,
+        "private_materializers_visible": False,
         "application_source_modified": False,
         "model_invoked": False,
         "provider_invoked": False,
         "compiler_lto_decisions_only": True,
+        "provider_prompt_surface_structurally_audited": True,
+        "response_schemas_closed_and_graph_bound": True,
     }:
         raise CapabilityProtocolError("input audit violates compiler-only boundary")
     interpretation = report.get("controlled_interpretation", {})

@@ -35,6 +35,14 @@ This is the intended role of the LLM: reason over relationships already
 proved and bounded by the compiler. It does not receive source and cannot
 invent a transformation, legality fact, materializer, or code.
 
+The audit checks this boundary from the serialized provider surface, not only
+from declarations. For every prompt it rejects source/IR filenames, absolute
+filesystem paths, raw LLVM IR syntax, source/debug-location keys, private
+site/target identities, and materializer fields. It also parses every response
+schema, requires every object to set `additionalProperties=false`, binds
+`graph_id` to the suite, and proves that the authoritative choice fields
+enumerate exactly the IDs visible in the corresponding prompts.
+
 ## Controlled information ablation
 
 Each LLM task has three prompt views: `relational`, `descriptors`, and
@@ -72,15 +80,16 @@ equal-authority evaluation can isolate LLM reasoning quality.
 
 ## Frozen result
 
-- audit ID:
-  `sha256:af214761ac85e72bf872ee4165b803f92d811bf1e1abf0feddd521b339aa2859`;
-- serialized report SHA-256:
-  `6c7fc4f63b07e480f96ab0e9473a8abdb65f2de90b92527b9ba8b9b9e5446fb4`;
+- audit ID and serialized report SHA-256: regenerate with the commands below
+  after selecting the terminal N8 or confirmed N6 suite;
 - suite entries: 7;
 - scalar GBT features: 7;
 - relational compiler semantic families: 9;
 - identical selectable IDs across every LLM information ablation: true;
 - application source visible or modified: false;
+- source locations, raw LLVM IR, filesystem paths, and private materializers
+  visible: false;
+- response schemas closed and graph-bound: true;
 - model/provider invoked: false;
 - performance superiority claimed: false.
 

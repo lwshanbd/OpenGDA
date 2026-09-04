@@ -1,5 +1,8 @@
+import copy
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,8 +18,6 @@ SPEC.loader.exec_module(audit)
 
 class CompilerInputSeparationTests(unittest.TestCase):
     def test_extracts_embedded_graph_and_selectable_ids(self):
-        import tempfile
-
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "relational.txt"
             path.write_text(
@@ -80,6 +81,109 @@ class CompilerInputSeparationTests(unittest.TestCase):
         families = audit.semantic_families({"size_bytes": 4096})
         self.assertFalse(families["operation_and_cross_opportunity_relations"])
         self.assertFalse(families["dependence_and_legality_proofs"])
+
+    def test_provider_surface_rejects_private_source_and_ir_payloads(self):
+        safe = {
+            "view_kind": "relational",
+            "boundary": {
+                "source_visible": False,
+                "model_may_generate_code": False,
+                "model_may_generate_ir": False,
+                "model_output": "candidate IDs only",
+                "compiler_revalidates_before_materialization": True,
+            },
+            "opportunities": [{
+                "opportunity_id": "opportunity:a",
+                "candidates": [{"candidate_id": "candidate:a"}],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "relational.txt"
+            path.write_text("compiler facts only", encoding="utf-8")
+            checked = audit.verify_provider_prompt_surface(path, safe)
+            self.assertFalse(checked["raw_llvm_ir_present"])
+
+            cases = (
+                ("source_path", "/tmp/kernel.cpp", "private/source-bearing"),
+                ("note", "/tmp/kernel.cpp", "filesystem path"),
+                ("note", "kernel.cpp", "source/IR filename"),
+                ("note", "define void @kernel() { ret void }", "raw LLVM IR"),
+            )
+            for key, value, error in cases:
+                with self.subTest(key=key, value=value):
+                    changed = copy.deepcopy(safe)
+                    changed["opportunities"][0][key] = value
+                    with self.assertRaisesRegex(audit.SeparationError, error):
+                        audit.verify_provider_prompt_surface(path, changed)
+
+    def test_response_schema_must_be_closed_and_graph_bound(self):
+        graph = {
+            "opportunities": [{"opportunity_id": "opportunity:a"}],
+        }
+        entry = {
+            "graph_id": "sha256:abc",
+            "decision_family": "communication_route_or_schedule",
+        }
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "schema_version": {"const": "decision-v1"},
+                "graph_id": {"const": "sha256:abc"},
+                "selections": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "opportunity:a": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "candidate_id": {
+                                    "type": "string", "enum": ["candidate:a"],
+                                },
+                                "confidence": {
+                                    "type": "number", "minimum": 0.0,
+                                    "maximum": 1.0,
+                                },
+                                "rationale": {
+                                    "type": "string", "maxLength": 512,
+                                },
+                            },
+                            "required": [
+                                "candidate_id", "confidence", "rationale",
+                            ],
+                        },
+                    },
+                    "required": ["opportunity:a"],
+                },
+            },
+            "required": ["schema_version", "graph_id", "selections"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "response-schema.json"
+            path.write_text(json.dumps(schema), encoding="utf-8")
+            checked = audit.verify_response_schema(
+                path, entry, graph, {"candidate:a"},
+            )
+            self.assertTrue(checked["selectable_ids_equal_prompt"])
+
+            changed = copy.deepcopy(schema)
+            changed["properties"]["selections"]["additionalProperties"] = True
+            path.write_text(json.dumps(changed), encoding="utf-8")
+            with self.assertRaisesRegex(audit.SeparationError, "additionalProperties"):
+                audit.verify_response_schema(
+                    path, entry, graph, {"candidate:a"},
+                )
+
+            changed = copy.deepcopy(schema)
+            changed["properties"]["selections"]["properties"][
+                "opportunity:a"
+            ]["properties"]["candidate_id"]["enum"] = ["candidate:invented"]
+            path.write_text(json.dumps(changed), encoding="utf-8")
+            with self.assertRaisesRegex(audit.SeparationError, "enums differ"):
+                audit.verify_response_schema(
+                    path, entry, graph, {"candidate:a"},
+                )
 
 
 if __name__ == "__main__":

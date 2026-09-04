@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 from typing import Any
@@ -45,6 +46,29 @@ PROMPT_MARKERS = (
     "Compiler opportunity graph:\n",
 )
 VIEWS = ("relational", "descriptors", "opaque")
+PROVIDER_PRIVATE_KEYS = frozenset({
+    "bitcode", "completion_site_id", "debug_location", "debug_locations",
+    "debug_loc", "directory", "filename", "kernel", "kernel_mangled",
+    "llvm_ir", "materializer", "module_ir", "operation_order", "path",
+    "provenance", "site_id", "site_ids", "source_code", "source_file",
+    "source_location", "source_locations", "source_path", "target_id",
+})
+SOURCE_FILENAME_RE = re.compile(
+    r"(?i)(?:^|[\\/\s])[^\\/\s]+\."
+    r"(?:c|cc|cpp|cxx|cu|hip|h|hh|hpp|hxx|f|f90|f95|ll|bc)"
+    r"(?=$|[:\s,;])"
+)
+ABSOLUTE_PATH_RE = re.compile(
+    r"(?:^|\s)(?:/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+"
+    r"|[A-Za-z]:[\\/][^\s]+|\\\\[^\s]+)"
+)
+RAW_LLVM_IR_RES = (
+    re.compile(r"source_filename\s*="),
+    re.compile(r"(?:^|\n)\s*(?:define|declare)\b[^@\n]*@[-$._A-Za-z0-9]+"),
+    re.compile(r"(?:^|\n)\s*%[-$._A-Za-z0-9]+\s*="),
+    re.compile(r"!dbg\b"),
+    re.compile(r"(?:^|\n)\s*target\s+(?:triple|datalayout)\s*="),
+)
 
 
 class SeparationError(RuntimeError):
@@ -126,6 +150,184 @@ def all_keys(value: Any) -> set[str]:
         if isinstance(item, dict):
             result.update(item)
     return result
+
+
+def strings_with_paths(value: Any, path: str = "$"):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield from strings_with_paths(child, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from strings_with_paths(child, f"{path}[{index}]")
+    elif isinstance(value, str):
+        yield path, value
+
+
+def verify_provider_prompt_surface(path: Path,
+                                   graph: dict[str, Any]) -> dict[str, Any]:
+    """Reject source/IR/private compiler payloads from one provider prompt."""
+    boundary = graph.get("boundary")
+    if not isinstance(boundary, dict):
+        raise SeparationError(f"{path}: embedded graph lacks a boundary")
+    expected_boundary = {
+        "source_visible": False,
+        "model_may_generate_code": False,
+        "model_may_generate_ir": False,
+        "compiler_revalidates_before_materialization": True,
+    }
+    for key, expected in expected_boundary.items():
+        if boundary.get(key) is not expected:
+            raise SeparationError(
+                f"{path}: compiler-only boundary {key} is not {expected}"
+            )
+    if boundary.get("model_output") not in {
+        "candidate IDs only", "compiler-generated option IDs only",
+    }:
+        raise SeparationError(f"{path}: model output is not graph-bound IDs")
+    for key, value in boundary.items():
+        if key.startswith("model_may_") and value is not False:
+            raise SeparationError(f"{path}: permissive boundary field {key}")
+
+    escaped_keys = sorted(PROVIDER_PRIVATE_KEYS & all_keys(graph))
+    if escaped_keys:
+        raise SeparationError(
+            f"{path}: private/source-bearing key(s) escaped: {escaped_keys}"
+        )
+    try:
+        prompt = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SeparationError(f"cannot read prompt {path}: {exc}") from exc
+    surfaces = [("prompt", prompt), *strings_with_paths(graph)]
+    for location, text in surfaces:
+        if ABSOLUTE_PATH_RE.search(text):
+            raise SeparationError(
+                f"{path}: filesystem path escaped at {location}"
+            )
+        if SOURCE_FILENAME_RE.search(text):
+            raise SeparationError(
+                f"{path}: source/IR filename escaped at {location}"
+            )
+        if any(pattern.search(text) for pattern in RAW_LLVM_IR_RES):
+            raise SeparationError(f"{path}: raw LLVM IR escaped at {location}")
+    return {
+        "compiler_only_boundary_verified": True,
+        "application_source_or_source_locations_present": False,
+        "raw_llvm_ir_present": False,
+        "filesystem_paths_present": False,
+        "private_materializer_or_identity_keys_present": False,
+    }
+
+
+def _closed_object(value: Any, properties: set[str], context: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("type") != "object":
+        raise SeparationError(f"{context}: expected object schema")
+    if value.get("additionalProperties") is not False:
+        raise SeparationError(f"{context}: additionalProperties is not false")
+    children = value.get("properties")
+    required = value.get("required")
+    if (not isinstance(children, dict) or set(children) != properties
+            or not isinstance(required, list) or set(required) != properties
+            or len(required) != len(properties)):
+        raise SeparationError(f"{context}: properties/required are not exact")
+    return children
+
+
+def verify_response_schema(path: Path, entry: dict[str, Any],
+                           graph: dict[str, Any],
+                           selectable: set[str]) -> dict[str, Any]:
+    """Verify that provider output authority is a closed graph-ID choice."""
+    schema = read_json(path)
+    top = _closed_object(
+        schema, {"schema_version", "graph_id", "selections"}, str(path),
+    )
+    if (not isinstance(top["schema_version"], dict)
+            or set(top["schema_version"]) != {"const"}
+            or not isinstance(top["schema_version"].get("const"), str)):
+        raise SeparationError(f"{path}: decision schema version is not constant")
+    if top["graph_id"] != {"const": entry.get("graph_id")}:
+        raise SeparationError(f"{path}: response graph_id is not suite-bound")
+    opportunities = graph.get("opportunities")
+    if not isinstance(opportunities, list) or not opportunities:
+        raise SeparationError(f"{path}: prompt graph has no opportunities")
+    opportunity_ids = {
+        item.get("opportunity_id") for item in opportunities
+        if isinstance(item, dict) and isinstance(item.get("opportunity_id"), str)
+    }
+    if len(opportunity_ids) != len(opportunities):
+        raise SeparationError(f"{path}: prompt opportunity IDs are invalid")
+    selections = _closed_object(
+        top["selections"], opportunity_ids, f"{path}: selections",
+    )
+
+    observed: list[str] = []
+    family = entry.get("decision_family")
+    for opportunity_id, selection in selections.items():
+        context = f"{path}: selection {opportunity_id}"
+        if family == "collective_algorithm_and_size_policy":
+            children = _closed_object(
+                selection,
+                {"slot_candidate_ids", "confidence", "rationale"}, context,
+            )
+            slots = children["slot_candidate_ids"]
+            if (not isinstance(slots, dict) or slots.get("type") != "object"
+                    or slots.get("additionalProperties") is not False
+                    or not isinstance(slots.get("properties"), dict)
+                    or not isinstance(slots.get("required"), list)
+                    or set(slots["properties"]) != set(slots["required"])
+                    or len(slots["properties"]) != len(slots["required"])):
+                raise SeparationError(f"{context}: slot schema is not closed")
+            for slot_id, slot in slots["properties"].items():
+                if (not isinstance(slot, dict) or set(slot) != {"type", "enum"}
+                        or slot.get("type") != "string"
+                        or not isinstance(slot.get("enum"), list)
+                        or not slot["enum"]):
+                    raise SeparationError(
+                        f"{context}/{slot_id}: option enum is not exact"
+                    )
+                observed.extend(slot["enum"])
+        elif family in {
+            "communication_route_or_schedule",
+            "communication_coalescing_and_trigger_placement",
+        }:
+            children = _closed_object(
+                selection, {"candidate_id", "confidence", "rationale"}, context,
+            )
+            candidate = children["candidate_id"]
+            if (not isinstance(candidate, dict)
+                    or set(candidate) != {"type", "enum"}
+                    or candidate.get("type") != "string"
+                    or not isinstance(candidate.get("enum"), list)
+                    or not candidate["enum"]):
+                raise SeparationError(f"{context}: candidate enum is not exact")
+            observed.extend(candidate["enum"])
+        else:
+            raise SeparationError(f"{path}: unknown decision family {family!r}")
+        if children["confidence"] != {
+            "type": "number", "minimum": 0.0, "maximum": 1.0,
+        }:
+            raise SeparationError(f"{context}: confidence schema changed")
+        if children["rationale"] != {"type": "string", "maxLength": 512}:
+            raise SeparationError(f"{context}: rationale schema changed")
+
+    if (any(not isinstance(value, str) for value in observed)
+            or len(observed) != len(set(observed))
+            or set(observed) != selectable):
+        raise SeparationError(
+            f"{path}: response enums differ from provider-visible graph IDs"
+        )
+    return {
+        "schema": evidence(path),
+        "all_object_schemas_closed": True,
+        "graph_id_is_constant": True,
+        "authoritative_choice_fields": (
+            ["slot_candidate_ids"]
+            if family == "collective_algorithm_and_size_policy"
+            else ["candidate_id"]
+        ),
+        "bounded_metadata_fields": ["confidence", "rationale"],
+        "selectable_id_count": len(observed),
+        "selectable_ids_equal_prompt": True,
+    }
 
 
 def relation_kinds(value: Any) -> set[str]:
@@ -249,17 +451,20 @@ def build_report(suite_path: Path, prompt_dir: Path,
         label = entry["label"]
         views: dict[str, Any] = {}
         ids_by_view: dict[str, set[str]] = {}
+        graphs_by_view: dict[str, dict[str, Any]] = {}
         for view_name in VIEWS:
             path = prompt_dir / label / f"{view_name}.txt"
             graph = prompt_graph(path)
             if graph.get("view_kind") != view_name:
                 raise SeparationError(f"{path}: wrong embedded view_kind")
+            surface = verify_provider_prompt_surface(path, graph)
             ids = selectable_ids(graph)
             if len(ids) != expected_selectable_count(entry):
                 raise SeparationError(
                     f"{path}: selectable-ID count disagrees with suite"
                 )
             ids_by_view[view_name] = ids
+            graphs_by_view[view_name] = graph
             families = semantic_families(graph)
             if view_name == "relational":
                 suite_families.update(
@@ -271,17 +476,24 @@ def build_report(suite_path: Path, prompt_dir: Path,
                 "semantic_key_count": len(all_keys(graph)),
                 "relation_kinds": sorted(relation_kinds(graph)),
                 "semantic_families": families,
+                "provider_surface": surface,
             }
         same_authority = all(
             ids_by_view[name] == ids_by_view["relational"] for name in VIEWS
         )
         all_authority_equal = all_authority_equal and same_authority
+        schema_path = prompt_dir / label / "response-schema.json"
+        schema_contract = verify_response_schema(
+            schema_path, entry, graphs_by_view["relational"],
+            ids_by_view["relational"],
+        )
         entries[label] = {
             "decision_family": entry["decision_family"],
             "same_selectable_ids_across_llm_views": same_authority,
             "selectable_id_set_id": fingerprint(
                 sorted(ids_by_view["relational"])
             ),
+            "response_contract": schema_contract,
             "views": views,
         }
 
@@ -310,10 +522,15 @@ def build_report(suite_path: Path, prompt_dir: Path,
         ),
         "boundary": {
             "application_source_visible": False,
+            "source_locations_visible": False,
+            "llvm_ir_visible": False,
+            "private_materializers_visible": False,
             "application_source_modified": False,
             "model_invoked": False,
             "provider_invoked": False,
             "compiler_lto_decisions_only": True,
+            "provider_prompt_surface_structurally_audited": True,
+            "response_schemas_closed_and_graph_bound": True,
         },
         "suite_id": suite["suite_id"],
         "gbt": gbt,
