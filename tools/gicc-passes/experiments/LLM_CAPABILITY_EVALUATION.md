@@ -138,6 +138,26 @@ from being counted as LLM evidence. The existing N8 collective, Jacobi
 producer-fission, guarded early-trigger, and reused-descriptor campaigns must
 finish their serial runtime gates before the report can advance.
 
+## Historical feasibility versus the upgraded claim
+
+The earlier `llm-zero-shot-v1` archive is now independently re-audited in
+`HISTORICAL_COMPILER_LLM_CEILING.md`. Its 20 source-free responses were all
+accepted, collapsed to five legal route policies, and were materialized by LTO
+from unchanged application source. The frequency-selected policy was 1.021570x
+over compiler default with paired interval [0.980814, 1.048598], so it does not
+support a stable speedup claim. The post-hoc best policy was observed at
+1.054465x with interval [1.038120, 1.071642], but appeared once in 20 responses,
+has only four allocation replicates (exact sign p=0.125), and was selected after
+comparing all five runtime campaigns.
+
+That archive therefore supplies compiler-only feasibility and an explicitly
+post-hoc capability ceiling. It does not supply the relational/descriptors/
+opaque information ablation, cross-program generalization, or current `pdebug`
+runtime evidence. Every historical job ledger names `pci`, and the audit leaves
+the upgraded suite at zero eligible graphs and zero permitted provider calls.
+The audit ID is
+`sha256:0ae3dd141caff01b179788483c13b0f6d1d3081ee66cdb8f9b0c5397784a1aba`.
+
 ## Reproduction
 
 ```sh

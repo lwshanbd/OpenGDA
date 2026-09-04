@@ -229,6 +229,13 @@ ablation. Its current result has zero runtime-eligible entries and therefore
 permits zero provider calls; protocol ID
 `sha256:0976e6f974779e34364be9872f7d810d2df4aa08b8e712ee941a9dc288f40b52`.
 
+The separate historical 20-trial LLM archive now has a machine-audited,
+strictly scoped interpretation in `HISTORICAL_COMPILER_LLM_CEILING.md`. It
+supports compiler-only feasibility and records a 1.054465x post-hoc best-of-20
+observation, but not stable performance, relational-context value, current
+`pdebug` evidence, or eligibility for this upgraded suite. The audit ID is
+`sha256:0ae3dd141caff01b179788483c13b0f6d1d3081ee66cdb8f9b0c5397784a1aba`.
+
 ## Reproduction
 
 From the repository root, after producing the already documented private
