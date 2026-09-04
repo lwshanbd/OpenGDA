@@ -101,7 +101,7 @@ fi
 rg -q 'producer-fission-device.*materialized exact producer/remainder' \
     "$output_dir/fission/compile-jacobi.log"
 rg -q 'producer-fission-host.*materialized guarded two-phase' \
-    "$output_dir/fission/link.log"
+    "$output_dir/fission/compile-jacobi.log"
 cmp "$output_dir/baseline/meta/features.json" \
     "$output_dir/fission/meta/features.json"
 kernel_metadata=("$output_dir/baseline/meta/"*.json)
