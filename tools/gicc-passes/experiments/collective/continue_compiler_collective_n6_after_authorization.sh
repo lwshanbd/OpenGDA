@@ -23,6 +23,7 @@ control_dir="$output_root/hidden-controls"
 analysis_path="$output_root/capability-analysis.json"
 plan_dir="$output_root/runtime-plan"
 runtime_dir="$output_root/paired-runtime"
+paper_audit="$output_root/paper-claim-audit.json"
 state_path="$output_root.chain.state"
 events_path="$output_root.chain.events"
 lock_path="$output_root.chain.lock"
@@ -35,6 +36,7 @@ runtime_preparer="$script_dir/prepare_collective_n6_llm_runtime_validation.py"
 runtime_builder="$script_dir/build_collective_n6_llm_runtime_validation.sh"
 runtime_controller="$script_dir/continue_collective_n6_llm_runtime_validation.sh"
 runtime_analyzer="$script_dir/analyze_collective_n6_llm_runtime_validation.py"
+paper_auditor="$experiment_dir/audit_collective_n6_llm_paper_claims.py"
 successor="$script_dir/continue_compiler_collective_n6_after_authorization.sh"
 
 mkdir -p "$(dirname -- "$output_root")"
@@ -119,7 +121,7 @@ artifacts=(
     "$trial_runner" "$capability_analyzer"
     "$screen_controller" "$screen_adapter"
     "$runtime_preparer" "$runtime_builder"
-    "$runtime_controller" "$runtime_analyzer"
+    "$runtime_controller" "$runtime_analyzer" "$paper_auditor"
 )
 hashes=()
 for artifact in "${artifacts[@]}"; do
@@ -225,10 +227,25 @@ else
 fi
 verify_artifacts
 
-gates=$(python3 -c '
+paper_args=(
+    --capability-analysis "$analysis_path"
+    --runtime-analysis "$runtime_dir/analysis.json"
+    --repo-root "$repo_root" --out "$paper_audit"
+)
+if [[ -f $paper_audit ]]; then
+    set_state verifying_paper_claims "$paper_audit"
+    python3 "$paper_auditor" verify "${paper_args[@]}"
+else
+    set_state auditing_paper_claims "$paper_audit"
+    python3 "$paper_auditor" emit "${paper_args[@]}"
+fi
+verify_artifacts
+
+detail=$(python3 -c '
 import json,sys
-g=json.load(open(sys.argv[1]))["claim_gates"]
-print("stable="+str(g["stable_relational_modal_runtime_improvement_supported"]).lower()+" context="+str(g["relational_context_runtime_effect_supported"]).lower()+" ceiling="+str(g["posthoc_capability_ceiling_runtime_potential_observed"]).lower())
-' "$runtime_dir/analysis.json")
-set_state complete "$gates"
+x=json.load(open(sys.argv[1]))
+g=x["claim_matrix"]
+print("status="+x["status"]+" stable="+str(g["stable_relational_modal_runtime_improvement_supported"]).lower()+" context="+str(g["relational_context_runtime_effect_supported"]).lower()+" ceiling="+str(g["posthoc_capability_ceiling_runtime_potential_observed"]).lower()+" generalization=false")
+' "$paper_audit")
+set_state complete "$detail"
 trap - EXIT

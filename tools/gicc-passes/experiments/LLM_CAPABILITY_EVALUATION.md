@@ -242,6 +242,14 @@ best-of-20 representative remains a labeled capability ceiling.  A single N6
 family result cannot establish portfolio generalization or complete the paper
 claim, regardless of its speedup.
 
+The post-authorization controller finishes by running
+`audit_collective_n6_llm_paper_claims.py`.  That auditor regenerates the
+capability analysis from the raw provider archive and hidden policy screen,
+regenerates the runtime analysis from the LTO bundle and three raw Flux
+monitors, and then emits a conservative claim matrix.  It also lists only
+currently eligible suite entries from a different compiler decision family as
+possible follow-ups; this list never authorizes another request.
+
 ## Historical feasibility versus the upgraded claim
 
 The earlier `llm-zero-shot-v1` archive is now independently re-audited in
