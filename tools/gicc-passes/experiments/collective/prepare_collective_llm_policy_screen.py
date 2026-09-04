@@ -3,7 +3,7 @@
 
 The adapter never invokes a provider, compiler, scheduler, or application
 source path.  It revalidates the complete compiler-only response archive, a
-passed eight-node confirmation, and three same-allocation rotated blocks of
+passed topology confirmation, and three same-allocation rotated blocks of
 all uniform compiler-catalog arms.  Only then does it compose per-message-size
 costs for every observed graph-bound policy.
 
@@ -46,6 +46,9 @@ import monitor_compiler_collective_job as monitor_base  # noqa: E402
 import run_compiler_llm_capability_trials as trial_runner  # noqa: E402
 
 
+CONFIRMATION_ANALYZER = n8_confirmation
+CONFIRMATION_SCHEMA = "gicc-collective-n8-confirmation-v1"
+TOPOLOGY_LABEL = "N8"
 CONTROL_BLOCKS = 3
 CONTROL_RUNS = 7
 CONTROL_WARMUP = 2
@@ -228,51 +231,51 @@ def verify_request_archive(
 def verify_confirmation(
     path: Path, graph: dict[str, Any],
 ) -> dict[str, Any]:
-    """Replay the exact three-allocation N8 confirmation from raw monitors."""
+    """Replay the exact three-allocation topology confirmation."""
     value = read_json(path)
     require(
         isinstance(value, dict)
-        and value.get("schema_version") == "gicc-collective-n8-confirmation-v1",
-        "collective policy screen requires an N8 confirmation",
+        and value.get("schema_version") == CONFIRMATION_SCHEMA,
+        f"collective policy screen requires an {TOPOLOGY_LABEL} confirmation",
     )
     payload = dict(value)
     result_id = payload.pop("result_id", None)
     require(result_id == bridge._fingerprint(payload),
-            "N8 confirmation ID does not match content")
+            f"{TOPOLOGY_LABEL} confirmation ID does not match content")
     require(value.get("confirmation_gate", {}).get("passed") is True,
-            "N8 confirmation gate did not pass")
+            f"{TOPOLOGY_LABEL} confirmation gate did not pass")
     for key, expected in {
         "model_invoked": False,
         "application_source_modified": False,
         "provider_call_authorized": False,
     }.items():
         require(value.get(key) is expected,
-                f"N8 confirmation boundary changed: {key}")
+                f"{TOPOLOGY_LABEL} confirmation boundary changed: {key}")
     transition_path = Path(value.get("transition", ""))
     require(
         transition_path.is_absolute() and transition_path.is_file()
         and sha256_file(transition_path) == value.get("transition_sha256"),
-        "N8 confirmation transition changed",
+        f"{TOPOLOGY_LABEL} confirmation transition changed",
     )
-    transition, transition_files = n8_confirmation.validate_transition(
+    transition, transition_files = CONFIRMATION_ANALYZER.validate_transition(
         transition_path
     )
     confirmed_graph = policy_bridge.verified_graph(
         read_json(transition_files["compiler_graph"])
     )
     require(confirmed_graph["graph_id"] == graph["graph_id"],
-            "N8 confirmation binds another compiler graph")
+            f"{TOPOLOGY_LABEL} confirmation binds another compiler graph")
     monitors = value.get("allocation_monitors")
     require(isinstance(monitors, list) and len(monitors) == 3,
-            "N8 confirmation lacks three allocation monitors")
+            f"{TOPOLOGY_LABEL} confirmation lacks three allocation monitors")
     monitor_paths = [Path(item.get("monitor", "")) for item in monitors]
     require(all(item.is_absolute() for item in monitor_paths),
-            "N8 confirmation monitor path is not absolute")
-    regenerated = n8_confirmation.analyze_monitors(
+            f"{TOPOLOGY_LABEL} confirmation monitor path is not absolute")
+    regenerated = CONFIRMATION_ANALYZER.analyze_monitors(
         transition_path, monitor_paths,
     )
     require(regenerated == value,
-            "N8 confirmation does not replay from current raw evidence")
+            f"{TOPOLOGY_LABEL} confirmation does not replay from raw evidence")
     require(transition.get("transition_id") == value.get("transition_id"),
             "N8 confirmation transition identity changed")
     return value
@@ -393,7 +396,7 @@ def control_rows_from_monitors(
     graph: dict[str, Any], graph_path: Path, bundle: Path,
     monitor_paths: list[Path], repo_root: Path,
 ) -> tuple[dict[int, dict[str, dict[str, float]]], list[dict[str, Any]]]:
-    """Reparse all raw logs under the frozen N8 full-catalog contract."""
+    """Reparse all raw logs under the frozen full-catalog contract."""
     _, _, algorithms = collective_catalog(graph)
     require(len(monitor_paths) == CONTROL_BLOCKS,
             "full-catalog screen requires exactly three control monitors")
@@ -449,7 +452,7 @@ def control_rows_from_monitors(
             and jobspec.get("queue") == "pdebug"
             and jobspec.get("duration_seconds") == CONTROL_DURATION_SECONDS
             and jobspec.get("resources") == _expected_resources(),
-            f"control block {replicate} changed the N8 pdebug contract",
+            f"control block {replicate} changed the {TOPOLOGY_LABEL} contract",
         )
         nodelist = value.get("resource_set", {}).get("nodelist")
         require(isinstance(nodelist, list) and nodelist,
@@ -857,7 +860,8 @@ def main() -> int:
         )
         if args.command == "preflight":
             print(
-                "collective-llm-policy-screen: ready for one hidden N8 "
+                "collective-llm-policy-screen: ready for one hidden "
+                f"{TOPOLOGY_LABEL} "
                 "full-catalog control allocation; provider_calls=0 "
                 "scheduler_jobs=0"
             )
@@ -889,7 +893,7 @@ def main() -> int:
         CollectivePolicyScreenError,
         capability_analysis.CapabilityAnalysisError,
         trial_runner.CapabilityTrialError,
-        n8_confirmation.ConfirmError,
+        CONFIRMATION_ANALYZER.ConfirmError,
         collective_eval.EvalError,
         structural_heuristic.HeuristicError,
         policy_bridge.CompilerPolicyBridgeError,
