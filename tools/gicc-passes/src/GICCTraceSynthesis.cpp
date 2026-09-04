@@ -642,6 +642,9 @@ void emitReusedLoopDescriptor(Module &M, IRBuilder<> &B, Function *traceFn,
     CI->setMetadata(
         "gicc.communication_transform",
         MDNode::get(Ctx, MDString::get(Ctx, transform)));
+    errs() << "[trace-synthesis] " << op.siteId
+           << ": materialized one invariant descriptor with a runtime "
+              "repeat count\n";
 }
 
 void emitOp(Module &M, IRBuilder<> &B, Function *traceFn,

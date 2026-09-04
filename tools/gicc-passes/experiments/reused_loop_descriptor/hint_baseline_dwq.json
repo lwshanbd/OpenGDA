@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "schema_version": "gicc-hint-v1",
+  "default_dispatch": "IPC_OR_DWQ",
+  "sites": {
+    "?:?:_Z15dwq_loop_kernelPN4gicc9DeviceCtxEiimi::2": {
+      "dispatch": "DWQ_TRIGGER",
+      "transform": "NONE"
+    }
+  }
+}
