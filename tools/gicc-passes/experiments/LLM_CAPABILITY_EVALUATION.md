@@ -125,7 +125,14 @@ also checks every entry/graph/prompt binding and refuses any source-visible,
 already-authorized, already-measured, unequal-authority, or model-invisible
 configuration.
 
-The post-N8-cancellation report is
+The post-N8-cancellation report below is the historical pre-recovery snapshot;
+the canonical terminal report will be produced by
+`continue_compiler_final_suite_audit_v2.sh` after the N6 chain finishes. The
+v2 chain additionally closes producer fission, guarded early trigger, and
+reused descriptor through their replayable terminal-negative evidence instead
+of leaving them as unresolved conditional actions.
+
+The historical snapshot is
 `build_ofi/compiler_llm_capability_protocol_after_n8_cancel_20260904/report.json`:
 
 - protocol ID:
@@ -207,19 +214,21 @@ confirmation all stop the screen. These composed costs select policies for
 later validation and are explicitly not runtime measurements of the composed
 LLM policies.
 
-That N8 path is currently unavailable: the only eighth `pdebug` node has been
-drained since 2026-07-21, so the scout was cancelled without producing runtime
-rows. The N8-specific adapter and confirmation cannot consume N6 evidence. A
-separately frozen N6/48-rank graph retains the 4096-policy compiler action
-interface and is queued last in the serial recovery campaign. Even if its
-scout passes, it requires a topology-matched N6 confirmation, policy-screen
-adapter, suite refreeze, readiness audit, and new request ID before any model
-call can be considered.
+That N8 path is unavailable: the only eighth `pdebug` node has been drained
+since 2026-07-21, so the scout was cancelled without producing runtime rows.
+The N8-specific adapter and confirmation cannot consume N6 evidence. The
+current content-addressed N6/48-rank graph retains the 4096-policy compiler
+action interface and its sole scout is queued on `pdebug`. If the scout passes,
+it still requires a topology-matched N6 confirmation, suite refreeze,
+readiness audit, and new request ID before any model call can be considered.
 
-This zero-eligible readiness result is important: it prevents rich prompts,
-an infrastructure failure, or an offline N6 graph from being counted as LLM
-evidence. The reused-descriptor and recovery campaigns must finish their
-serial runtime gates before the report can advance.
+The reused-descriptor scout has now closed negative. Producer fission also
+closed because its repaired compiler transformation failed the numerical
+equivalence gate, and the interrupted guarded-trigger scout closed because its
+positive gate is mathematically unreachable even under a favorable missing
+pair. None was added to a provider-visible graph. This zero-eligible state is
+important: it prevents rich prompts, an infrastructure failure, an unsafe
+compiler transform, or an offline N6 graph from being counted as LLM evidence.
 
 The topology-matched N6 post-authorization path is now implemented but not
 launched.  `collective/continue_compiler_collective_n6_after_authorization.sh`
