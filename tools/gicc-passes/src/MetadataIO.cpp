@@ -7,6 +7,8 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <limits>
+
 using namespace llvm;
 
 namespace gicc::pass {
@@ -238,6 +240,81 @@ bool loopFromJSON(const json::Value &v, OpLoopInfo &out) {
     return true;
 }
 
+json::Value producerFrontierToJSON(const ProducerFrontierFacts &facts) {
+    json::Object o;
+    o["analyzed"] = facts.analyzed;
+    o["write_footprint_known"] = facts.write_footprint_known;
+    o["completion_site_id"] = facts.completion_site_id;
+    json::Array stores;
+    for (unsigned param : facts.ordinary_store_params)
+        stores.push_back(static_cast<int64_t>(param));
+    o["ordinary_store_params"] = std::move(stores);
+    json::Array atomics;
+    for (unsigned param : facts.atomic_write_params)
+        atomics.push_back(static_cast<int64_t>(param));
+    o["atomic_write_params"] = std::move(atomics);
+    o["ordinary_store_sites"] =
+        static_cast<int64_t>(facts.ordinary_store_sites);
+    o["atomic_write_sites"] =
+        static_cast<int64_t>(facts.atomic_write_sites);
+    o["unknown_write_sites"] =
+        static_cast<int64_t>(facts.unknown_write_sites);
+    o["reason"] = facts.reason;
+    return json::Value(std::move(o));
+}
+
+bool producerFrontierFromJSON(const json::Value &v,
+                              ProducerFrontierFacts &out) {
+    const auto *o = v.getAsObject();
+    if (!o) return false;
+    auto analyzed = o->getBoolean("analyzed");
+    auto known = o->getBoolean("write_footprint_known");
+    auto completion = o->getString("completion_site_id");
+    auto stores = o->getArray("ordinary_store_params");
+    auto atomics = o->getArray("atomic_write_params");
+    auto storeSites = o->getInteger("ordinary_store_sites");
+    auto atomicSites = o->getInteger("atomic_write_sites");
+    auto unknownSites = o->getInteger("unknown_write_sites");
+    auto reason = o->getString("reason");
+    if (!analyzed || !known || !completion || !stores || !atomics ||
+        !storeSites || !atomicSites || !unknownSites || !reason ||
+        *storeSites < 0 || *atomicSites < 0 || *unknownSites < 0 ||
+        static_cast<uint64_t>(*storeSites) >
+            std::numeric_limits<unsigned>::max() ||
+        static_cast<uint64_t>(*atomicSites) >
+            std::numeric_limits<unsigned>::max() ||
+        static_cast<uint64_t>(*unknownSites) >
+            std::numeric_limits<unsigned>::max())
+        return false;
+
+    ProducerFrontierFacts parsed;
+    parsed.analyzed = *analyzed;
+    parsed.write_footprint_known = *known;
+    parsed.completion_site_id = completion->str();
+    parsed.ordinary_store_sites = static_cast<unsigned>(*storeSites);
+    parsed.atomic_write_sites = static_cast<unsigned>(*atomicSites);
+    parsed.unknown_write_sites = static_cast<unsigned>(*unknownSites);
+    parsed.reason = reason->str();
+    for (const json::Value &value : *stores) {
+        auto param = value.getAsInteger();
+        if (!param || *param < 0 || static_cast<uint64_t>(*param) >
+                                         std::numeric_limits<unsigned>::max())
+            return false;
+        parsed.ordinary_store_params.push_back(
+            static_cast<unsigned>(*param));
+    }
+    for (const json::Value &value : *atomics) {
+        auto param = value.getAsInteger();
+        if (!param || *param < 0 || static_cast<uint64_t>(*param) >
+                                         std::numeric_limits<unsigned>::max())
+            return false;
+        parsed.atomic_write_params.push_back(
+            static_cast<unsigned>(*param));
+    }
+    out = std::move(parsed);
+    return true;
+}
+
 json::Value templateToJSON(const KernelTemplate &t) {
     json::Object root;
     root["version"]         = 1;
@@ -294,6 +371,9 @@ json::Value templateToJSON(const KernelTemplate &t) {
             o["group_early_trigger_reason"] =
                 op.group_early_trigger_reason;
         }
+        if (op.producer_frontier.analyzed)
+            o["producer_frontier"] =
+                producerFrontierToJSON(op.producer_frontier);
         if (op.fence_scope != 3) o["fence_scope"] = op.fence_scope;
         if (op.block_slot >= 0) o["block_slot"] = op.block_slot;
 
@@ -380,6 +460,11 @@ bool templateFromJSON(const json::Value &v, KernelTemplate &out) {
             }
             if (auto r = oo->getString("group_early_trigger_reason"))
                 op.group_early_trigger_reason = r->str();
+            if (const auto *facts = oo->get("producer_frontier")) {
+                if (!producerFrontierFromJSON(*facts,
+                                              op.producer_frontier))
+                    return false;
+            }
             if (auto c = oo->getInteger("trip_count"))
                 op.trip_count = static_cast<long long>(*c);
             else

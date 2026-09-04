@@ -87,6 +87,7 @@ FACT_FIELDS = (
     "coalescable",
     "max_vector_bytes",
     "batch_size",
+    "producer_frontier",
 )
 
 

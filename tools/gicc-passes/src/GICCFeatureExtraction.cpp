@@ -442,6 +442,36 @@ json::Value loopDescriptor(const OpLoopInfo &L) {
     return json::Value(std::move(o));
 }
 
+json::Value producerFrontierRecord(const ProducerFrontierFacts &facts) {
+    json::Object record;
+    record["analyzed"] = facts.analyzed;
+    record["write_footprint_known"] = facts.write_footprint_known;
+    record["completion_site_id"] = facts.completion_site_id;
+    json::Array stores;
+    for (unsigned param : facts.ordinary_store_params)
+        stores.push_back(static_cast<int64_t>(param));
+    record["ordinary_store_params"] = std::move(stores);
+    json::Array atomics;
+    for (unsigned param : facts.atomic_write_params)
+        atomics.push_back(static_cast<int64_t>(param));
+    record["atomic_write_params"] = std::move(atomics);
+    record["ordinary_store_sites"] =
+        static_cast<int64_t>(facts.ordinary_store_sites);
+    record["atomic_write_sites"] =
+        static_cast<int64_t>(facts.atomic_write_sites);
+    record["unknown_write_sites"] =
+        static_cast<int64_t>(facts.unknown_write_sites);
+    record["reason"] = facts.reason;
+    json::Array remaining;
+    for (const char *proof : {
+             "registered_buffer_identity", "exact_transfer_intervals",
+             "exact_producer_domains", "complete_disjoint_partition",
+             "side_effect_partition", "launch_phase_materialization"})
+        remaining.push_back(proof);
+    record["remaining_proofs"] = std::move(remaining);
+    return json::Value(std::move(record));
+}
+
 json::Value toRecord(const std::string &siteId,
                      const std::string &simpleKernel,
                      const OpTemplate  &op,
@@ -554,6 +584,10 @@ json::Value toRecord(const std::string &siteId,
     if (launchTripCount) r["trip_count"] = *launchTripCount;
     else                 r["trip_count"] = nullptr;
     r["distance_exact"] = op.distance_exact;
+
+    if (op.producer_frontier.analyzed)
+        r["producer_frontier"] =
+            producerFrontierRecord(op.producer_frontier);
 
     if (op.trip_count < 0 && launchTripCount)
         r["iter_estimate"] = *launchTripCount;

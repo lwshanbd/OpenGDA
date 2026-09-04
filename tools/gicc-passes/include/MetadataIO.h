@@ -80,6 +80,24 @@ struct OpLoopInfo {
                                      // wrong code.
 };
 
+// Source-free facts about the writes between one compiler-discovered PUT
+// group and its mandatory flush.  These facts deliberately stop short of a
+// legality claim: formal-rooted writes are only the first prerequisite for
+// producer-frontier fission.  Host buffer identity, exact byte intervals,
+// an exhaustive/disjoint iteration-domain partition, and side-effect
+// partitioning must still be proved before a transform can be advertised.
+struct ProducerFrontierFacts {
+    bool                  analyzed = false;
+    bool                  write_footprint_known = false;
+    std::string           completion_site_id;
+    std::vector<unsigned> ordinary_store_params;
+    std::vector<unsigned> atomic_write_params;
+    unsigned              ordinary_store_sites = 0;
+    unsigned              atomic_write_sites = 0;
+    unsigned              unknown_write_sites = 0;
+    std::string           reason;
+};
+
 struct OpTemplate {
     std::string                  siteId;
     std::string                  kind;          // "put_no_db" / "get_no_db" / "flush" / "quiet"
@@ -138,6 +156,9 @@ struct OpTemplate {
     bool                         group_early_trigger_analyzed = false;
     bool                         group_early_trigger_legal    = false;
     std::string                  group_early_trigger_reason;
+    // Compiler-recovered write footprint between this transfer's group and
+    // its flush.  This is richer model input, not permission to transform.
+    ProducerFrontierFacts        producer_frontier;
     // For a flush/quiet: the weakest memory fence scope that is still
     // sound here (0 none, 1 block, 2 device, 3 system). Needs forward
     // reachability, so it is carried rather than derived. Defaults to the

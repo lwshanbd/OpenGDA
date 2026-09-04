@@ -76,6 +76,32 @@ Device LTO rewrites the original kernel body:
 - reductions or other side effects are partitioned across the two phases and
   must be proven composable; otherwise the candidate is masked.
 
+### Audited host-IR materialization shape
+
+The real Jacobi host IR retains one annotated launch wrapper containing one
+`hipLaunchKernel` call. Its kernel-parameter array, packed grid/block values,
+shared-memory size, and stream are all explicit operands. Host LTO can insert
+a pre-authored runtime helper around that call and clone the call while it is
+still inside the parameter-array lifetime:
+
+```text
+set_phase_from_kernel_args(kernel_params, boundary, stream)
+hipLaunchKernel(original symbol, original geometry, kernel_params, shmem, stream)
+set_phase_from_kernel_args(kernel_params, interior, stream)
+hipLaunchKernel(original symbol, original geometry, kernel_params, shmem, stream)
+```
+
+The helper reads the already-materialized `DeviceCtx*` from kernel argument
+zero and launches the GICC-owned setter kernel on the supplied stream. This
+avoids reverse-engineering `Runtime::prepare()` internals in the pass and
+does not require a new application-visible kernel stub.
+
+Trace synthesis currently executes before the annotated wrapper. An IPC
+route may therefore enqueue a copy before boundary producers run. The first
+fission candidate must force every group member to a trigger-delayed DWQ or
+device-proxy route; `IPC_PUSH` and `IPC_OR_DWQ` are masked until trace
+synthesis itself can be phase-split.
+
 ## Required compiler proofs
 
 Candidate generation is fail-closed and requires all of the following:

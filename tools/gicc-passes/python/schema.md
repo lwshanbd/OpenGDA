@@ -94,6 +94,25 @@ for all of them.
                                              //   completion point, a looped one
                                              //   counted trip_count times. null when
                                              //   not measured.
+    "producer_frontier": {                   // optional source-free write facts;
+      "analyzed": true,                      //   NOT a legality assertion
+      "write_footprint_known": true,
+      "completion_site_id": "<site_id>",
+      "ordinary_store_params": [1],          // kernel formal indices only
+      "atomic_write_params": [3],
+      "ordinary_store_sites": 1,
+      "atomic_write_sites": 1,
+      "unknown_write_sites": 0,
+      "reason": "formal-rooted writes recovered; ...",
+      "remaining_proofs": [
+        "registered_buffer_identity",
+        "exact_transfer_intervals",
+        "exact_producer_domains",
+        "complete_disjoint_partition",
+        "side_effect_partition",
+        "launch_phase_materialization"
+      ]
+    },
     "legal_paths":        ["proxy", "trigger", "ipc"]
                                              // LEGALITY, not preference. See below.
   }
@@ -128,6 +147,13 @@ Schema v5 → v6 changes:
   constant host wrapper operands back to device kernel formals. Top-level
   values are present only when every launch context agrees; disagreement or
   dynamic operands remain `null`.
+
+Optional `producer_frontier` facts are a forward-compatible v6 extension.
+They summarize only writes between a compiler-discovered transfer group and
+its mandatory flush. `write_footprint_known` means those writes are rooted in
+named kernel pointer formals; it does **not** authorize fission. The listed
+remaining proofs must all be discharged by later host/device LTO before a
+candidate may enter the model-visible legal set.
 
 Schema v4 → v5 changes:
 - `launch_grid`, `launch_block`, `grid_blocks`, and `threads_per_block`

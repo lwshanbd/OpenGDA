@@ -12,6 +12,7 @@
 
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -22,6 +23,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Type.h"
 
+#include <algorithm>
 #include <array>
 
 using namespace llvm;
@@ -632,6 +634,55 @@ int fenceScopeFor(const CallInst *CI, const Function *K) {
     return 0;                                      // FENCE_NONE
 }
 
+// Some HIP builtin accessors and shuffle helpers have not yet acquired
+// readnone attributes at the early-simplification extension point even
+// though their available IR bodies contain no externally visible write.
+// Inspect those bodies recursively instead of treating every such call as an
+// unknown producer. Unknown/indirect/recursive calls remain writes. Stores to
+// a callee's own allocas are compiler-local scratch and do not contribute to
+// the kernel's producer footprint.
+bool functionMayWriteNonLocalMemory(
+        const Function *F, SmallPtrSetImpl<const Function *> &visiting) {
+    if (!F) return true;
+    if (F->doesNotAccessMemory() || F->onlyReadsMemory()) return false;
+    if (F->isDeclaration() || !visiting.insert(F).second) return true;
+
+    bool mayWrite = false;
+    for (const BasicBlock &BB : *F) {
+        for (const Instruction &I : BB) {
+            if (!I.mayWriteToMemory()) continue;
+            const Value *pointer = nullptr;
+            if (const auto *store = dyn_cast<StoreInst>(&I))
+                pointer = store->getPointerOperand();
+            else if (const auto *rmw = dyn_cast<AtomicRMWInst>(&I))
+                pointer = rmw->getPointerOperand();
+            else if (const auto *cmp = dyn_cast<AtomicCmpXchgInst>(&I))
+                pointer = cmp->getPointerOperand();
+            if (pointer) {
+                const Value *root = getUnderlyingObject(
+                    pointer->stripPointerCasts())->stripPointerCasts();
+                if (isa<AllocaInst>(root)) continue;
+                mayWrite = true;
+                break;
+            }
+            const auto *call = dyn_cast<CallBase>(&I);
+            if (!call || functionMayWriteNonLocalMemory(
+                             call->getCalledFunction(), visiting)) {
+                mayWrite = true;
+                break;
+            }
+        }
+        if (mayWrite) break;
+    }
+    visiting.erase(F);
+    return mayWrite;
+}
+
+bool callMayWriteNonLocalMemory(const CallBase &call) {
+    SmallPtrSet<const Function *, 16> visiting;
+    return functionMayWriteNonLocalMemory(call.getCalledFunction(), visiting);
+}
+
 // How many transfers share a completion point.
 //
 // A flush or quiet is what actually releases staged work, so a transfer
@@ -795,13 +846,140 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
             finish(false, "a flush operand does not dominate the group frontier");
             continue;
         }
+        BasicBlock *startBB = last->getParent();
+        BasicBlock *flushBB = flush->getParent();
+
+        // Recover the memory-write footprint crossed by the tempting early
+        // trigger.  Unlike the old binary mayWrite result, this preserves
+        // which kernel pointer formals receive ordinary stores and which
+        // receive atomics.  It remains only a source-free analysis fact:
+        // without a host proof connecting src_buf to one of these pointer
+        // formals, and without exact byte/domain proofs, fission is not legal.
+        ProducerFrontierFacts frontier;
+        frontier.analyzed = true;
+        frontier.completion_site_id =
+            t.ops[static_cast<unsigned>(completion)].siteId;
+        SmallVector<unsigned, 4> ordinaryParams;
+        SmallVector<unsigned, 4> atomicParams;
+        SmallPtrSet<const Instruction *, 32> classified;
+
+        auto pointerFormal = [&](const Value *pointer)
+                -> const Argument * {
+            if (!pointer || !info.kernel) return nullptr;
+            const Value *root = getUnderlyingObject(
+                pointer->stripPointerCasts())->stripPointerCasts();
+            const auto *arg = dyn_cast<Argument>(root);
+            if (!arg || arg->getParent() != info.kernel ||
+                !arg->getType()->isPointerTy())
+                return nullptr;
+            return arg;
+        };
+        auto classifyWrite = [&](const Instruction &I) {
+            if (!I.mayWriteToMemory() || !classified.insert(&I).second)
+                return;
+            const Value *pointer = nullptr;
+            bool atomic = false;
+            if (const auto *store = dyn_cast<StoreInst>(&I)) {
+                pointer = store->getPointerOperand();
+            } else if (const auto *rmw = dyn_cast<AtomicRMWInst>(&I)) {
+                pointer = rmw->getPointerOperand();
+                atomic = true;
+            } else if (const auto *cmp = dyn_cast<AtomicCmpXchgInst>(&I)) {
+                pointer = cmp->getPointerOperand();
+                atomic = true;
+            } else if (const auto *call = dyn_cast<CallBase>(&I)) {
+                // HIP keeps source-level atomicAdd as a small device helper
+                // until after this pre-inlining analysis point. Recognize
+                // only its exact Itanium base name and pointer operand;
+                // every other memory-writing call remains unknown.
+                const Function *callee = call->getCalledFunction();
+                if (!callee || !callee->getName().starts_with("_Z9atomicAdd") ||
+                    call->arg_empty() ||
+                    !call->getArgOperand(0)->getType()->isPointerTy()) {
+                    if (!callMayWriteNonLocalMemory(*call)) return;
+                    ++frontier.unknown_write_sites;
+                    return;
+                }
+                pointer = call->getArgOperand(0);
+                atomic = true;
+            } else {
+                ++frontier.unknown_write_sites;
+                return;
+            }
+
+            const Value *root = getUnderlyingObject(
+                pointer->stripPointerCasts())->stripPointerCasts();
+            if (isa<AllocaInst>(root)) return;  // compiler-local scratch
+            const Argument *arg = pointerFormal(pointer);
+            if (!arg) {
+                ++frontier.unknown_write_sites;
+                return;
+            }
+            if (atomic) {
+                ++frontier.atomic_write_sites;
+                atomicParams.push_back(arg->getArgNo());
+            } else {
+                ++frontier.ordinary_store_sites;
+                ordinaryParams.push_back(arg->getArgNo());
+            }
+        };
+
+        bool afterLastForFacts = false;
+        for (const Instruction &I : *startBB) {
+            if (&I == last) {
+                afterLastForFacts = true;
+                continue;
+            }
+            if (&I == flush) break;
+            if (afterLastForFacts) classifyWrite(I);
+        }
+        if (startBB != flushBB) {
+            SmallPtrSet<const BasicBlock *, 32> visited;
+            SmallVector<const BasicBlock *, 32> work(succ_begin(startBB),
+                                                       succ_end(startBB));
+            while (!work.empty()) {
+                const BasicBlock *BB = work.pop_back_val();
+                if (!visited.insert(BB).second) continue;
+                for (const Instruction &I : *BB) {
+                    if (&I == flush) break;
+                    classifyWrite(I);
+                }
+                if (BB != flushBB)
+                    work.append(succ_begin(BB), succ_end(BB));
+            }
+        }
+        llvm::sort(ordinaryParams);
+        ordinaryParams.erase(
+            std::unique(ordinaryParams.begin(), ordinaryParams.end()),
+            ordinaryParams.end());
+        llvm::sort(atomicParams);
+        atomicParams.erase(
+            std::unique(atomicParams.begin(), atomicParams.end()),
+            atomicParams.end());
+        frontier.ordinary_store_params.assign(ordinaryParams.begin(),
+                                               ordinaryParams.end());
+        frontier.atomic_write_params.assign(atomicParams.begin(),
+                                             atomicParams.end());
+        frontier.write_footprint_known =
+            frontier.ordinary_store_sites > 0 &&
+            frontier.unknown_write_sites == 0;
+        if (frontier.unknown_write_sites != 0) {
+            frontier.reason =
+                "an intervening write is not rooted in a kernel pointer formal";
+        } else if (frontier.ordinary_store_sites == 0) {
+            frontier.reason =
+                "no ordinary producer store exists between the transfer group and flush";
+        } else {
+            frontier.reason =
+                "formal-rooted writes recovered; exact domains and host buffer identity remain unproved";
+        }
+        for (unsigned i : members)
+            t.ops[i].producer_frontier = frontier;
 
         auto mayWrite = [](const Instruction &I) {
             return I.mayWriteToMemory();
         };
         bool interveningWrite = false;
-        BasicBlock *startBB = last->getParent();
-        BasicBlock *flushBB = flush->getParent();
         bool afterLast = false;
         for (const Instruction &I : *startBB) {
             if (&I == last) {

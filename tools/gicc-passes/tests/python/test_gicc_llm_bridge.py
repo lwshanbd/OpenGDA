@@ -58,6 +58,18 @@ def feature(site_id, *, hk=True, locality=None, batched_loop=False):
         "coalescable": False,
         "max_vector_bytes": 16,
         "batch_size": 64,
+        "producer_frontier": {
+            "analyzed": True,
+            "write_footprint_known": True,
+            "completion_site_id": "unit.cpp:12:kernel_from_ir::2",
+            "ordinary_store_params": [1],
+            "atomic_write_params": [3],
+            "ordinary_store_sites": 1,
+            "atomic_write_sites": 1,
+            "unknown_write_sites": 0,
+            "reason": "compiler fact only",
+            "remaining_proofs": ["registered_buffer_identity"],
+        },
         "legal_paths": legal,
     }
 
@@ -112,6 +124,10 @@ class LlmBridgeTests(unittest.TestCase):
         self.assertEqual(
             {"x": 8, "y": 1, "z": 1},
             self.dossier["sites"][0]["launch_grid"],
+        )
+        self.assertTrue(
+            self.dossier["sites"][0]["producer_frontier"]
+                        ["write_footprint_known"]
         )
 
     def test_unknown_locality_removes_forced_ipc_but_keeps_safe_default(self):
