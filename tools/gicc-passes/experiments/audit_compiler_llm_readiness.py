@@ -43,7 +43,7 @@ import prepare_reused_loop_descriptor_suite_refreeze as reused_refreeze  # noqa:
 
 
 REPORT_SCHEMA = "gicc-compiler-llm-readiness-v1"
-EXPECTED_LABELS = {
+BASE_EXPECTED_LABELS = {
     "coalescing_placement",
     "collective_n8",
     "jacobi",
@@ -52,11 +52,36 @@ EXPECTED_LABELS = {
     "mixed_lto",
     "mm_minimal",
 }
+EXPECTED_LABELS = set(BASE_EXPECTED_LABELS)
 CAPACITY_ONLY_LABELS = ("minimod", "mixed_lto")
+COLLECTIVE_LABEL = "collective_n8"
+COLLECTIVE_TOPOLOGY_LABEL = "n8"
+COLLECTIVE_SCOUT_SCHEMA = "gicc-collective-hierpipe-n8-scout-v1"
+COLLECTIVE_CAPACITY_GATE_KEY = "n8_capacity_gate"
+COLLECTIVE_CONFIRMATION_SCHEMA = "gicc-collective-n8-confirmation-v1"
+COLLECTIVE_CONFIRMATION = n8_confirmation
+COLLECTIVE_CONFIRMATION_ANALYZER = (
+    HERE / "collective/analyze_compiler_collective_n8_confirmation.py"
+)
+COLLECTIVE_REFREEZE = None
+COLLECTIVE_REFREEZER = HERE / "collective/prepare_collective_n6_suite_refreeze.py"
+COLLECTIVE_CONFIRMATION_STATE_DEFAULT = (
+    ROOT / "build_ofi/compiler_collective_n8_confirmation_20260904.state"
+)
+COLLECTIVE_CONFIRMATION_ANALYSIS_DEFAULT = (
+    ROOT / "build_ofi/compiler_collective_n8_confirmation_20260904/analysis.json"
+)
+COLLECTIVE_REFREEZE_MANIFEST_DEFAULT = (
+    ROOT / "build_ofi/compiler_collective_n6_suite_refreeze_20260904/manifest.json"
+)
+PROGRAM_NAME = "compiler-llm-readiness"
 
 
 class ReadinessError(RuntimeError):
     """The suite or its runtime evidence cannot support a readiness claim."""
+
+
+COLLECTIVE_REFREEZE_ERROR = ReadinessError
 
 
 def read_json(path: Path) -> Any:
@@ -167,13 +192,13 @@ def classify_collective(
                 f"collective state {phase!r} requires a matching analysis"
             )
         next_stage = (
-            "wait_for_existing_n8_pdebug_scout"
+            f"wait_for_existing_{COLLECTIVE_TOPOLOGY_LABEL}_pdebug_scout"
             if status == "awaiting_scout" else "diagnose_without_model_call"
         )
         return _base_entry(entry, status, next_stage)
     if (not isinstance(analysis, dict)
             or analysis.get("schema_version")
-            != "gicc-collective-hierpipe-n8-scout-v1"
+            != COLLECTIVE_SCOUT_SCHEMA
             or analysis.get("graph_id") != entry["graph_id"]
             or analysis.get("model_invoked") is not False
             or analysis.get("application_source_modified") is not False):
@@ -182,7 +207,7 @@ def classify_collective(
     result_id = payload.pop("result_id", None)
     if result_id != bridge._fingerprint(payload):
         raise ReadinessError("collective scout result ID does not match content")
-    gate = analysis.get("n8_capacity_gate")
+    gate = analysis.get(COLLECTIVE_CAPACITY_GATE_KEY)
     if not isinstance(gate, dict) or not isinstance(gate.get("passed"), bool):
         raise ReadinessError("collective scout lacks its preregistered gate")
     expected_phase = "promising" if gate["passed"] else "negative"
@@ -209,7 +234,8 @@ def classify_collective(
                     "freeze_and_run_confirmatory_compiler_oracle"
                 ),
                 "awaiting_confirmation": (
-                    "wait_for_existing_n8_pdebug_confirmation"
+                    "wait_for_existing_"
+                    f"{COLLECTIVE_TOPOLOGY_LABEL}_pdebug_confirmation"
                 ),
                 "confirmation_failed": "diagnose_without_model_call",
             }[status]
@@ -248,11 +274,11 @@ def classify_collective(
 def verified_collective_confirmation(
     path: Path, expected_graph_id: str,
 ) -> bool:
-    """Replay a completed N8 confirmation before granting request eligibility."""
+    """Replay the topology-matched confirmation before granting eligibility."""
     value = read_json(path)
     if (not isinstance(value, dict)
             or value.get("schema_version")
-            != "gicc-collective-n8-confirmation-v1"):
+            != COLLECTIVE_CONFIRMATION_SCHEMA):
         raise ReadinessError("wrong collective confirmation schema")
     payload = dict(value)
     result_id = payload.pop("result_id", None)
@@ -271,7 +297,9 @@ def verified_collective_confirmation(
     if (not transition_path.is_absolute() or not transition_path.is_file()
             or sha256_file(transition_path) != value.get("transition_sha256")):
         raise ReadinessError("collective confirmation transition changed")
-    _, transition_files = n8_confirmation.validate_transition(transition_path)
+    _, transition_files = COLLECTIVE_CONFIRMATION.validate_transition(
+        transition_path
+    )
     confirmed_graph = read_json(transition_files["compiler_graph"])
     if confirmed_graph.get("graph_id") != expected_graph_id:
         raise ReadinessError(
@@ -287,7 +315,7 @@ def verified_collective_confirmation(
         raise ReadinessError(
             "collective confirmation monitor path is not absolute"
         )
-    regenerated = n8_confirmation.analyze_monitors(
+    regenerated = COLLECTIVE_CONFIRMATION.analyze_monitors(
         transition_path, monitors,
     )
     if regenerated != value:
@@ -496,6 +524,61 @@ def verified_refreeze_predecessor(
     if suite.get("suite_id") != manifest.get("current_suite_id"):
         raise ReadinessError(f"{label} predecessor suite ID changed")
     return suite_path, prompt_dir, suite
+
+
+def verified_collective_refreeze(
+    path: Path, suite_path: Path, suite: dict[str, Any],
+    confirmation_value: dict[str, Any],
+) -> dict[str, Any]:
+    """Replay the optional topology replacement and bind its outer lineage."""
+    if COLLECTIVE_REFREEZE is None:
+        raise ReadinessError("collective suite refreeze is not configured")
+    manifest = COLLECTIVE_REFREEZE.verify_contained(path)
+    if (manifest.get("status")
+            != "refrozen_suite_ready_for_readiness_audit"
+            or manifest.get("refrozen_suite_id") != suite.get("suite_id")
+            or manifest.get("confirmation_result_id")
+            != confirmation_value.get("result_id")):
+        raise ReadinessError(
+            "collective topology refreeze binds another suite or confirmation"
+        )
+    boundary = manifest.get("boundary", {})
+    for key, expected in {
+        "compiler_lto_decisions_only": True,
+        "application_source_input": False,
+        "application_source_visible_to_model": False,
+        "application_source_modified": False,
+        "model_invoked": False,
+        "provider_call_authorized": False,
+        "scheduler_job_submitted": False,
+        "current_suite_modified": False,
+    }.items():
+        if boundary.get(key) is not expected:
+            raise ReadinessError(
+                f"collective topology refreeze boundary changed: {key}"
+            )
+    suite_record = _record_by_role(
+        manifest.get("outputs"), "refrozen_suite",
+        label="collective topology refreeze",
+    )
+    suite_name = suite_record.get("path")
+    if not isinstance(suite_name, str):
+        raise ReadinessError("collective refreeze lacks its suite path")
+    recorded_suite = (path.resolve().parent / suite_name).resolve()
+    if (recorded_suite != suite_path.resolve()
+            or sha256_file(recorded_suite) != suite_record.get("sha256")
+            or recorded_suite.stat().st_size != suite_record.get("bytes")):
+        raise ReadinessError("readiness suite differs from collective refreeze")
+    transition = manifest.get("entry_transition", {})
+    entries = {entry["label"]: entry for entry in suite["entries"]}
+    collective = entries.get(COLLECTIVE_LABEL, {})
+    if (transition.get("old_label") != "collective_n8"
+            or transition.get("new_label") != COLLECTIVE_LABEL
+            or transition.get("new_graph_id") != collective.get("graph_id")
+            or transition.get("all_noncollective_entries_preserved") is not True
+            or transition.get("action_capacity_preserved") is not True):
+        raise ReadinessError("collective topology transition changed")
+    return manifest
 
 
 def verified_producer_expansion(
@@ -1162,7 +1245,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     collective_confirmation_passed = (
         verified_collective_confirmation(
             args.collective_confirmation_analysis,
-            entries["collective_n8"]["graph_id"],
+            entries[COLLECTIVE_LABEL]["graph_id"],
         )
         if collective_confirmation_analysis is not None else None
     )
@@ -1192,6 +1275,36 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         )
         if reused_confirmation_analysis is not None else None
     )
+
+    # A topology replacement is the outermost serialized suite transition.
+    # Peel it before replaying the existing reused -> guarded -> producer
+    # lineage, while retaining the replacement entry for collective readiness.
+    lineage_suite_path = args.suite
+    lineage_suite = suite
+    if COLLECTIVE_REFREEZE is not None:
+        if collective_confirmation_passed is not True:
+            raise ReadinessError(
+                "collective topology refreeze requires passed confirmation"
+            )
+        if not args.collective_refreeze_manifest.is_file():
+            raise ReadinessError(
+                "collective topology refreeze manifest is absent"
+            )
+        collective_refreeze_manifest = verified_collective_refreeze(
+            args.collective_refreeze_manifest, args.suite, suite,
+            collective_confirmation_analysis,
+        )
+        lineage_suite_path, _, lineage_suite = verified_refreeze_predecessor(
+            collective_refreeze_manifest,
+            label="collective topology refreeze",
+        )
+        lineage_entries = {
+            entry["label"]: entry for entry in lineage_suite["entries"]
+        }
+        if set(lineage_entries) != BASE_EXPECTED_LABELS:
+            raise ReadinessError(
+                "collective refreeze predecessor labels changed"
+            )
     reused_graph_phase = "missing"
     reused_expansion_present = args.reused_expansion_manifest.is_file()
     reused_refreeze_present = args.reused_refreeze_manifest.is_file()
@@ -1208,13 +1321,13 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     # Reused descriptor is the final serialized suite transition.  Peel its
     # exact predecessor before auditing guarded-trigger and producer-fission
     # lineage, so every positive expansion remains a hash-linked A -> B step.
-    guarded_suite_path = args.suite
-    guarded_suite = suite
+    guarded_suite_path = lineage_suite_path
+    guarded_suite = lineage_suite
     if reused_refreeze_present:
         reused_manifest = verified_reused_refreeze(
             args.reused_refreeze_manifest,
             args.reused_expansion_manifest,
-            args.suite, suite, reused_confirmation_analysis,
+            guarded_suite_path, guarded_suite, reused_confirmation_analysis,
         )
         guarded_suite_path, _, guarded_suite = (
             verified_refreeze_predecessor(
@@ -1236,7 +1349,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     guarded_entries = {
         entry["label"]: entry for entry in guarded_suite["entries"]
     }
-    if set(guarded_entries) != EXPECTED_LABELS:
+    if set(guarded_entries) != BASE_EXPECTED_LABELS:
         raise ReadinessError("reused refreeze predecessor labels changed")
     guarded_graph_phase = "missing"
     guarded_expansion_present = args.guarded_expansion_manifest.is_file()
@@ -1285,7 +1398,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     producer_entries = {
         entry["label"]: entry for entry in producer_suite["entries"]
     }
-    if set(producer_entries) != EXPECTED_LABELS:
+    if set(producer_entries) != BASE_EXPECTED_LABELS:
         raise ReadinessError("guarded refreeze predecessor labels changed")
     producer_graph_phase = "missing"
     producer_expansion_present = args.producer_expansion_manifest.is_file()
@@ -1322,8 +1435,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "coalescing_placement": classify_placement(
             placement_entry, placement_summary, graphs_equivalent,
         ),
-        "collective_n8": classify_collective(
-            entries["collective_n8"], state_phase(args.collective_state),
+        COLLECTIVE_LABEL: classify_collective(
+            entries[COLLECTIVE_LABEL], state_phase(args.collective_state),
             collective_analysis,
             state_phase(args.collective_confirmation_state),
             collective_confirmation_passed,
@@ -1406,8 +1519,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 args.collective_confirmation_analysis
             ),
             "collective_confirmation_analyzer": evidence(
-                HERE / "collective/analyze_compiler_collective_n8_confirmation.py"
+                COLLECTIVE_CONFIRMATION_ANALYZER
             ),
+            **({
+                "collective_refreeze_manifest": evidence(
+                    args.collective_refreeze_manifest
+                ),
+                "collective_refreeze_preparer": evidence(
+                    COLLECTIVE_REFREEZER
+                ),
+            } if COLLECTIVE_REFREEZE is not None else {}),
             "producer_state": evidence(args.producer_state),
             "producer_analysis": evidence(args.producer_analysis),
             "producer_confirmation_state": evidence(
@@ -1558,16 +1679,15 @@ def add_inputs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--collective-analysis", type=Path, required=True)
     parser.add_argument(
         "--collective-confirmation-state", type=Path,
-        default=(
-            ROOT / "build_ofi/compiler_collective_n8_confirmation_20260904.state"
-        ),
+        default=COLLECTIVE_CONFIRMATION_STATE_DEFAULT,
     )
     parser.add_argument(
         "--collective-confirmation-analysis", type=Path,
-        default=(
-            ROOT
-            / "build_ofi/compiler_collective_n8_confirmation_20260904/analysis.json"
-        ),
+        default=COLLECTIVE_CONFIRMATION_ANALYSIS_DEFAULT,
+    )
+    parser.add_argument(
+        "--collective-refreeze-manifest", type=Path,
+        default=COLLECTIVE_REFREEZE_MANIFEST_DEFAULT,
     )
     parser.add_argument("--producer-state", type=Path, required=True)
     parser.add_argument("--producer-analysis", type=Path, required=True)
@@ -1683,7 +1803,7 @@ def main() -> int:
             action = "verified"
         summary = result["summary"]
         print(
-            f"compiler-llm-readiness: {action} {len(result['entries'])} entries; "
+            f"{PROGRAM_NAME}: {action} {len(result['entries'])} entries; "
             f"provider_protocol_permitted="
             f"{summary['provider_protocol_permitted_count']}; "
             f"provider_calls_authorized=0; readiness_id="
@@ -1692,8 +1812,8 @@ def main() -> int:
         return 0
     except (
         ReadinessError, decision_suite.SuiteError,
-        structural.PlanBridgeError, n8_confirmation.ConfirmError,
-        n8_confirmation.monitor_base.MonitorError,
+        structural.PlanBridgeError, COLLECTIVE_CONFIRMATION.ConfirmError,
+        COLLECTIVE_CONFIRMATION.monitor_base.MonitorError,
         producer_confirmation.ConfirmError,
         producer_confirmation.common.MonitorError,
         producer_expansion.ExpansionError,
@@ -1713,9 +1833,10 @@ def main() -> int:
         reused_confirmation.common.MonitorError,
         reused_expansion.ExpansionError,
         reused_refreeze.RefreezeError,
+        COLLECTIVE_REFREEZE_ERROR,
         OSError, KeyError, TypeError, ValueError,
     ) as exc:
-        print(f"compiler-llm-readiness: ERROR: {exc}", file=sys.stderr)
+        print(f"{PROGRAM_NAME}: ERROR: {exc}", file=sys.stderr)
         return 2
 
 

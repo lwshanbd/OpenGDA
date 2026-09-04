@@ -2,6 +2,7 @@ import copy
 import json
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -165,6 +166,140 @@ class CompilerLlmReadinessTests(unittest.TestCase):
             {**payload, "result_id": bridge._fingerprint(payload)},
         )
         self.assertEqual("closed_negative", negative["status"])
+
+    def test_n6_collective_schema_and_gate_are_topology_matched(self):
+        graph_id = "sha256:" + "6" * 64
+        payload = {
+            "schema_version": "gicc-collective-hierpipe-n6-scout-v1",
+            "graph_id": graph_id,
+            "model_invoked": False,
+            "application_source_modified": False,
+            "n6_capacity_gate": {"passed": True},
+        }
+        analysis = {**payload, "result_id": bridge._fingerprint(payload)}
+        with (
+            mock.patch.object(
+                readiness, "COLLECTIVE_SCOUT_SCHEMA",
+                "gicc-collective-hierpipe-n6-scout-v1",
+            ),
+            mock.patch.object(
+                readiness, "COLLECTIVE_CAPACITY_GATE_KEY", "n6_capacity_gate",
+            ),
+            mock.patch.object(
+                readiness, "COLLECTIVE_TOPOLOGY_LABEL", "n6",
+            ),
+        ):
+            result = readiness.classify_collective(
+                entry(label="collective_n6", graph_id=graph_id),
+                "promising", analysis,
+            )
+        self.assertEqual("confirmation_required", result["status"])
+        self.assertFalse(result["provider_call_authorized"])
+
+    def test_topology_matched_confirmation_analyzer_is_used(self):
+        graph_id = "sha256:" + "7" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transition = root / "transition.json"
+            graph = root / "graph.json"
+            transition.write_text("{}\n", encoding="utf-8")
+            graph.write_text(json.dumps({"graph_id": graph_id}) + "\n")
+            monitors = [root / f"monitor{number}.json" for number in (1, 2, 3)]
+            for path in monitors:
+                path.write_text("{}\n", encoding="utf-8")
+            payload = {
+                "schema_version": "gicc-collective-n6-confirmation-v1",
+                "model_invoked": False,
+                "application_source_modified": False,
+                "provider_call_authorized": False,
+                "transition": str(transition),
+                "transition_sha256": readiness.sha256_file(transition),
+                "allocation_monitors": [
+                    {"monitor": str(path)} for path in monitors
+                ],
+                "confirmation_gate": {"passed": True},
+            }
+            value = {**payload, "result_id": bridge._fingerprint(payload)}
+            confirmation_path = root / "confirmation.json"
+            confirmation_path.write_text(json.dumps(value) + "\n")
+            analyzer = types.SimpleNamespace(
+                validate_transition=mock.Mock(
+                    return_value=({}, {"compiler_graph": graph})
+                ),
+                analyze_monitors=mock.Mock(return_value=value),
+            )
+            with (
+                mock.patch.object(
+                    readiness, "COLLECTIVE_CONFIRMATION_SCHEMA",
+                    "gicc-collective-n6-confirmation-v1",
+                ),
+                mock.patch.object(
+                    readiness, "COLLECTIVE_CONFIRMATION", analyzer,
+                ),
+            ):
+                self.assertTrue(readiness.verified_collective_confirmation(
+                    confirmation_path, graph_id,
+                ))
+            analyzer.analyze_monitors.assert_called_once_with(
+                transition, monitors
+            )
+
+    def test_collective_refreeze_binds_outer_suite_lineage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            suite_path = root / "suite.json"
+            suite_path.write_text("{}\n", encoding="utf-8")
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text("{}\n", encoding="utf-8")
+            graph_id = "sha256:" + "8" * 64
+            suite = {
+                "suite_id": "sha256:" + "9" * 64,
+                "entries": [{"label": "collective_n6", "graph_id": graph_id}],
+            }
+            confirmation = {"result_id": "sha256:" + "a" * 64}
+            manifest = {
+                "status": "refrozen_suite_ready_for_readiness_audit",
+                "refrozen_suite_id": suite["suite_id"],
+                "confirmation_result_id": confirmation["result_id"],
+                "boundary": {
+                    "compiler_lto_decisions_only": True,
+                    "application_source_input": False,
+                    "application_source_visible_to_model": False,
+                    "application_source_modified": False,
+                    "model_invoked": False,
+                    "provider_call_authorized": False,
+                    "scheduler_job_submitted": False,
+                    "current_suite_modified": False,
+                },
+                "outputs": [{
+                    "role": "refrozen_suite",
+                    "path": suite_path.name,
+                    "sha256": readiness.sha256_file(suite_path),
+                    "bytes": suite_path.stat().st_size,
+                }],
+                "entry_transition": {
+                    "old_label": "collective_n8",
+                    "new_label": "collective_n6",
+                    "new_graph_id": graph_id,
+                    "all_noncollective_entries_preserved": True,
+                    "action_capacity_preserved": True,
+                },
+            }
+            module = types.SimpleNamespace(
+                verify_contained=mock.Mock(return_value=manifest)
+            )
+            with (
+                mock.patch.object(readiness, "COLLECTIVE_REFREEZE", module),
+                mock.patch.object(
+                    readiness, "COLLECTIVE_LABEL", "collective_n6",
+                ),
+            ):
+                self.assertEqual(
+                    manifest,
+                    readiness.verified_collective_refreeze(
+                        manifest_path, suite_path, suite, confirmation,
+                    ),
+                )
 
     def test_producer_scout_pass_never_authorizes_provider(self):
         analysis = {
