@@ -151,6 +151,16 @@ class UnifiedCompilerPolicyBridgeTests(unittest.TestCase):
         ):
             unified.decision_to_policy({"schema_version": "invented"}, {})
 
+    def test_public_graph_and_schema_dispatch_match_family_bridge(self):
+        graph = collective.make_graph(
+            collective_fixture.inventory(), collective_fixture.PROFILE,
+        )
+        self.assertEqual(graph, unified.verified_graph(graph))
+        self.assertEqual(
+            collective.decision_response_schema(graph),
+            unified.decision_response_schema(graph),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

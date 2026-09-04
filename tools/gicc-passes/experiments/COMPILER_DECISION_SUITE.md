@@ -227,7 +227,7 @@ representatives, isolates best-of-20 as a post-hoc capability upper bound, and
 uses `relational`/`descriptors`/`opaque` as the equal-authority information
 ablation. Its current result has zero runtime-eligible entries and therefore
 permits zero provider calls; protocol ID
-`sha256:0976e6f974779e34364be9872f7d810d2df4aa08b8e712ee941a9dc288f40b52`.
+`sha256:c6447eb5d35260671b6f40c40fea532c6774f2bdccfcfd2ce0d22508e3cece53`.
 
 The separate historical 20-trial LLM archive now has a machine-audited,
 strictly scoped interpretation in `HISTORICAL_COMPILER_LLM_CEILING.md`. It

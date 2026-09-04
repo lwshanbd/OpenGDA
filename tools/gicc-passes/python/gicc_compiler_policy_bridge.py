@@ -61,6 +61,17 @@ def _adapter(graph_value: Any) -> _Adapter:
     return adapter
 
 
+def verified_graph(graph_value: Any) -> dict[str, Any]:
+    """Verify any supported compiler graph without selecting a policy."""
+    return _adapter(graph_value).verify(graph_value)
+
+
+def decision_response_schema(graph_value: Any) -> dict[str, Any]:
+    """Return the exact graph-bound response schema for any suite family."""
+    adapter = _adapter(graph_value)
+    return adapter.response_schema(adapter.verify(graph_value))
+
+
 def _fallback_selection(family: str,
                         graph: dict[str, Any]) -> dict[str, str]:
     selected: dict[str, str] = {}
@@ -181,8 +192,8 @@ def _validate_selection(family: str, graph: dict[str, Any],
 def decision_to_policy(graph_value: Any, decision: Any) -> dict[str, Any]:
     """Strictly bridge one response and return its uniform compiler policy."""
     adapter = _adapter(graph_value)
-    graph = adapter.verify(graph_value)
-    schema = adapter.response_schema(graph)
+    graph = verified_graph(graph_value)
+    schema = decision_response_schema(graph)
     hint, accepted, errors = adapter.accept(graph, decision)
     if not isinstance(accepted, bool) or not isinstance(errors, list):
         raise CompilerPolicyBridgeError("family bridge returned an invalid outcome")

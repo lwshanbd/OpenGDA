@@ -118,13 +118,13 @@ The current report is
 `build_ofi/compiler_llm_capability_protocol_20260904/report.json`:
 
 - protocol ID:
-  `sha256:0976e6f974779e34364be9872f7d810d2df4aa08b8e712ee941a9dc288f40b52`;
+  `sha256:c6447eb5d35260671b6f40c40fea532c6774f2bdccfcfd2ce0d22508e3cece53`;
 - serialized report SHA-256:
-  `3feb02766b955b328999c40bbf283b59082e906888a80781348ecff5f18fad8b`;
+  `67f4ac8f8e46e489bdbffa096787d14caacf959a061cc5994026ff5803603899`;
 - frozen metrics implementation SHA-256:
   `fcc5858af4498ad39daa0efcdce4934fc7dd470e3e654189a8bb29a5d4c1250e`;
 - frozen unified bridge SHA-256:
-  `b7ea9e96cfefcb585bb3324325a613654ef8d2633428aedeae28051d1034365a`;
+  `b992d518c7d71297f659074c3f6fe901ae9bd9c07d6d222cf9c11a85c980c219`;
 - status: `blocked_no_runtime_eligible_entries`;
 - suite entries: 7;
 - runtime-eligible entries: 0;
@@ -135,6 +135,17 @@ The current report is
 The report additionally binds the exact protocol auditor and all three
 authoritative family bridges, so changing validation or fallback semantics
 invalidates the protocol identity even when the graph bytes do not change.
+
+`prepare_compiler_llm_capability_request.py` is the common request-freezing
+boundary for all three decision families. It re-runs this protocol audit from
+the readiness and input-separation evidence and refuses an entry unless its
+status is exactly `provider_protocol_permitted`. A successful future freeze
+copies only the source-free prompts, exact response schema, and system prompt
+into the provider-visible bundle; the compiler graph remains a private
+downstream bridge input. The generated request starts with zero permitted calls
+and still requires a separate authorization bound to its exact request ID and
+provider settings. With the current zero-eligible report, no request can be
+created.
 
 This negative readiness result is important: it prevents rich prompts alone
 from being counted as LLM evidence. The existing N8 collective, Jacobi
