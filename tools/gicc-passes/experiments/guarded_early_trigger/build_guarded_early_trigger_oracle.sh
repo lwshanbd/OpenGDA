@@ -57,7 +57,7 @@ compile_flags=(
 link_flags=(
     -O3 "--offload-arch=gfx90a" -flto --hip-link
     "--rtlib=compiler-rt" "-unwindlib=libgcc"
-    "-fpass-plugin=$plugin" "-Wl,--wrap=hipMemcpy"
+    "-fpass-plugin=$plugin" "-Wl,--wrap=hipMemcpy,--wrap=hipLaunchKernel"
     "-Wl,--whole-archive,-lhugetlbfs,--no-whole-archive"
     "-Wl,-rpath,/opt/cray/libfabric/2.1/lib64:/opt/cray/pe/mpich/9.0.1/ofi/cray/20.0/lib"
 )

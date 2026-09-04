@@ -26,11 +26,12 @@ AVERAGE_RE = re.compile(
 )
 CHECKSUM_RE = re.compile(
     r"^GICC_MM_CHECKSUM rank=(?P<rank>-?[0-9]+) "
-    r"bytes=(?P<bytes>[0-9]+) fnv64=(?P<hash>[0-9a-f]{16})$"
+    r"bytes=(?P<bytes>[0-9]+) fnv64=(?P<hash>[0-9a-f]{16}) "
+    r"launches=(?P<launches>[0-9]+)$"
 )
 
 
-def parse_run(stdout: Path, stderr: Path, size: int) -> dict[str, Any]:
+def parse_run(stdout: Path, stderr: Path, size: int, arm: str) -> dict[str, Any]:
     if not stdout.is_file() or not stderr.is_file():
         raise common.MonitorError(f"missing mm_minimal logs: {stdout}, {stderr}")
     timings: dict[int, float] = {}
@@ -58,7 +59,11 @@ def parse_run(stdout: Path, stderr: Path, size: int) -> dict[str, Any]:
         )
 
     expected_bytes = size * (size // 16) * 4
+    if arm not in ("baseline", "guarded"):
+        raise common.MonitorError(f"invalid experiment arm {arm!r}")
+    expected_launches = 161 if arm == "baseline" else 483
     checksums: dict[int, str] = {}
+    launches: dict[int, int] = {}
     for line in stderr.read_text(encoding="utf-8", errors="replace").splitlines():
         match = CHECKSUM_RE.match(line)
         if not match or int(match.group("bytes")) != expected_bytes:
@@ -67,9 +72,15 @@ def parse_run(stdout: Path, stderr: Path, size: int) -> dict[str, Any]:
         if rank in checksums:
             raise common.MonitorError(f"duplicate checksum for rank {rank} in {stderr}")
         checksums[rank] = match.group("hash")
+        launches[rank] = int(match.group("launches"))
     if sorted(checksums) != list(range(16)):
         raise common.MonitorError(
             f"{stderr} checksum ranks {sorted(checksums)}, expected 0..15"
+        )
+    if set(launches.values()) != {expected_launches}:
+        raise common.MonitorError(
+            f"{stderr} {arm} launch counts {sorted(set(launches.values()))}, "
+            f"expected {expected_launches}"
         )
     return {
         "requested_size": size,
@@ -77,6 +88,14 @@ def parse_run(stdout: Path, stderr: Path, size: int) -> dict[str, Any]:
         "run_us": [timings[index] for index in range(10)],
         "measured_mean_us": averages[0],
         "checksums": {str(rank): checksums[rank] for rank in sorted(checksums)},
+        "successful_kernel_launches": {
+            str(rank): launches[rank] for rank in sorted(launches)
+        },
+        "runtime_guard_attestation": (
+            "161 application launches plus 322 phase setter launches"
+            if arm == "guarded"
+            else "161 application launches and no phase setter launches"
+        ),
         "stdout": {
             "path": str(stdout.resolve()),
             "bytes": stdout.stat().st_size,
@@ -140,7 +159,8 @@ def main() -> int:
                 run_dir = args.output_dir / f"rep{replicate}" / f"size{size}"
                 pair = {
                     arm: parse_run(
-                        run_dir / f"{arm}.out", run_dir / f"{arm}.err", size
+                        run_dir / f"{arm}.out", run_dir / f"{arm}.err", size,
+                        arm,
                     )
                     for arm in ("baseline", "guarded")
                 }

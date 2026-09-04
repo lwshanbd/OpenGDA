@@ -18,7 +18,9 @@ import monitor_guarded_early_trigger_scout as monitor
 
 
 class GuardedEarlyTriggerScoutTests(unittest.TestCase):
-    def write_run(self, directory: Path, size: int, delta: float = 0.0) -> None:
+    def write_run(
+        self, directory: Path, size: int, arm: str, delta: float = 0.0
+    ) -> None:
         stdout = []
         for run in range(10):
             suffix = " (warmup)" if run < 2 else ""
@@ -26,9 +28,10 @@ class GuardedEarlyTriggerScoutTests(unittest.TestCase):
         stdout.append(f"gicc::launch average (runs 2-9): {105.5 + delta} us")
         (directory / "run.out").write_text("\n".join(stdout) + "\n")
         bytes_per_rank = size * (size // 16) * 4
+        launches = 161 if arm == "baseline" else 483
         stderr = [
             f"GICC_MM_CHECKSUM rank={rank} bytes={bytes_per_rank} "
-            f"fnv64={rank:016x}"
+            f"fnv64={rank:016x} launches={launches}"
             for rank in range(16)
         ]
         (directory / "run.err").write_text("\n".join(stderr) + "\n")
@@ -36,18 +39,36 @@ class GuardedEarlyTriggerScoutTests(unittest.TestCase):
     def test_parse_run_checks_timing_and_all_rank_checksums(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            self.write_run(directory, 4096)
+            self.write_run(directory, 4096, "baseline")
             result = monitor.parse_run(
-                directory / "run.out", directory / "run.err", 4096
+                directory / "run.out", directory / "run.err", 4096,
+                "baseline",
             )
             self.assertEqual(105.5, result["measured_mean_us"])
             self.assertEqual(16, len(result["checksums"]))
+            self.assertEqual(
+                {161}, set(result["successful_kernel_launches"].values())
+            )
             (directory / "run.err").write_text(
                 (directory / "run.err").read_text().replace("rank=15", "rank=14")
             )
             with self.assertRaisesRegex(monitor.common.MonitorError, "duplicate"):
                 monitor.parse_run(
-                    directory / "run.out", directory / "run.err", 4096
+                    directory / "run.out", directory / "run.err", 4096,
+                    "baseline",
+                )
+
+    def test_parse_run_rejects_silent_guard_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.write_run(directory, 8192, "guarded")
+            error = directory / "run.err"
+            error.write_text(
+                error.read_text().replace("launches=483", "launches=161")
+            )
+            with self.assertRaisesRegex(monitor.common.MonitorError, "launch counts"):
+                monitor.parse_run(
+                    directory / "run.out", error, 8192, "guarded"
                 )
 
     def test_analyzer_applies_preregistered_headroom_gate(self):

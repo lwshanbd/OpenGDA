@@ -20,6 +20,13 @@ final D2H matrix copy on every rank. A pair is valid only when all 16 rank
 hashes match exactly. This wrapper is outside the measured interval and does
 not alter the application source or select a schedule.
 
+The same wrapper counts successful direct `hipLaunchKernel` calls. Each rank
+must report exactly 161 launches in the baseline (one warmup plus 16 steps in
+each of ten runs) and 483 in the guarded arm (the same 161 application kernels
+plus a phase-3 setter and phase-0 reset for every launch). Thus the runtime
+record proves that the allocation guard selected the compiler schedule on
+every measured launch; a silent fallback cannot be mistaken for a valid arm.
+
 ## Runtime design
 
 - Queue: `pdebug` only.

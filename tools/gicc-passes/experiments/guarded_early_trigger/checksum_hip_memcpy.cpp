@@ -1,7 +1,7 @@
 // Identical post-timing correctness instrumentation for both experiment arms.
-// The application source is unchanged; --wrap=hipMemcpy redirects only direct
-// executable calls through this harness.  The final D2H result copy is hashed
-// after HIP reports success.
+// The application source is unchanged; linker wrapping redirects only direct
+// executable HIP calls through this harness. The final D2H result copy is
+// hashed after HIP reports success, and launch counts attest the guard path.
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -10,8 +10,29 @@
 #include <hip/hip_runtime_api.h>
 #include <mpi.h>
 
+namespace {
+
+std::uint64_t successful_kernel_launches = 0;
+
+}  // namespace
+
 extern "C" hipError_t __real_hipMemcpy(
     void *dst, const void *src, std::size_t bytes, hipMemcpyKind kind);
+extern "C" hipError_t __real_hipLaunchKernel(
+    const void *function_address, dim3 num_blocks, dim3 dim_blocks,
+    void **args, std::size_t shared_memory_bytes, hipStream_t stream);
+
+extern "C" hipError_t __wrap_hipLaunchKernel(
+    const void *function_address, dim3 num_blocks, dim3 dim_blocks,
+    void **args, std::size_t shared_memory_bytes, hipStream_t stream) {
+    const hipError_t status = __real_hipLaunchKernel(
+        function_address, num_blocks, dim_blocks, args, shared_memory_bytes,
+        stream);
+    if (status == hipSuccess) {
+        ++successful_kernel_launches;
+    }
+    return status;
+}
 
 extern "C" hipError_t __wrap_hipMemcpy(
     void *dst, const void *src, std::size_t bytes, hipMemcpyKind kind) {
@@ -36,8 +57,9 @@ extern "C" hipError_t __wrap_hipMemcpy(
     char line[160];
     const int length = std::snprintf(
         line, sizeof(line),
-        "GICC_MM_CHECKSUM rank=%d bytes=%zu fnv64=%016llx\n",
-        rank, bytes, static_cast<unsigned long long>(hash));
+        "GICC_MM_CHECKSUM rank=%d bytes=%zu fnv64=%016llx launches=%llu\n",
+        rank, bytes, static_cast<unsigned long long>(hash),
+        static_cast<unsigned long long>(successful_kernel_launches));
     if (length > 0) {
         const std::size_t output_bytes =
             static_cast<std::size_t>(length) < sizeof(line)
