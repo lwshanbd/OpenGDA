@@ -92,50 +92,9 @@ def write_json_atomic(path: Path, value: Any) -> None:
 
 def exact_response_schema(graph_value: Any) -> dict[str, Any]:
     graph = plans.verified_graph(graph_value)
-    opportunities = graph["opportunities"]
-    if len(opportunities) != 1:
+    if len(graph["opportunities"]) != 1:
         raise GateEError("Gate E v1 requires exactly one opportunity")
-    opportunity = opportunities[0]
-    slot_properties = {}
-    slot_names = []
-    for slot in opportunity["decision_slots"]:
-        slot_id = slot["slot_id"]
-        slot_names.append(slot_id)
-        slot_properties[slot_id] = {
-            "type": "string",
-            "enum": [option["option_id"] for option in slot["options"]],
-        }
-    selection = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "slot_candidate_ids": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": slot_properties,
-                "required": slot_names,
-            },
-            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-            "rationale": {"type": "string", "maxLength": 512},
-        },
-        "required": ["slot_candidate_ids", "confidence", "rationale"],
-    }
-    opportunity_id = opportunity["opportunity_id"]
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "schema_version": {"const": plans.DECISION_SCHEMA},
-            "graph_id": {"const": graph["graph_id"]},
-            "selections": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {opportunity_id: selection},
-                "required": [opportunity_id],
-            },
-        },
-        "required": ["schema_version", "graph_id", "selections"],
-    }
+    return plans.decision_response_schema(graph)
 
 
 def validate_gate_d_result(value: Any, graph: dict[str, Any],

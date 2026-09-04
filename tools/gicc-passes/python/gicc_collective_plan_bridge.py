@@ -587,6 +587,59 @@ def render_prompt(
     )
 
 
+def decision_response_schema(graph_value: Any) -> dict[str, Any]:
+    """Return an exact JSON schema whose enums come only from the graph."""
+    graph = verified_graph(graph_value)
+    selections = {}
+    required_opportunities = []
+    for opportunity in graph["opportunities"]:
+        opportunity_id = opportunity["opportunity_id"]
+        required_opportunities.append(opportunity_id)
+        slots = {}
+        required_slots = []
+        for slot in opportunity["decision_slots"]:
+            slot_id = slot["slot_id"]
+            required_slots.append(slot_id)
+            slots[slot_id] = {
+                "type": "string",
+                "enum": [option["option_id"] for option in slot["options"]],
+            }
+        selections[opportunity_id] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "slot_candidate_ids": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": slots,
+                    "required": required_slots,
+                },
+                "confidence": {
+                    "type": "number", "minimum": 0.0, "maximum": 1.0,
+                },
+                "rationale": {"type": "string", "maxLength": 512},
+            },
+            "required": [
+                "slot_candidate_ids", "confidence", "rationale",
+            ],
+        }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "schema_version": {"const": DECISION_SCHEMA},
+            "graph_id": {"const": graph["graph_id"]},
+            "selections": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": selections,
+                "required": required_opportunities,
+            },
+        },
+        "required": ["schema_version", "graph_id", "selections"],
+    }
+
+
 def _baseline_options(opportunity: dict[str, Any]) -> dict[str, dict[str, Any]]:
     selected = {}
     for slot in opportunity["decision_slots"]:

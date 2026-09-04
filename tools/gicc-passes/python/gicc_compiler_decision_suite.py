@@ -94,6 +94,23 @@ def _prompt_views(
     return records
 
 
+def _response_schema_record(
+    schema: dict[str, Any], *, label: str, prompt_dir: Path | None,
+) -> dict[str, Any]:
+    rendered = json.dumps(schema, indent=2, sort_keys=True) + "\n"
+    encoded = rendered.encode("utf-8")
+    record = {
+        "response_schema_id": bridge._fingerprint(schema),
+        "file_sha256": _sha256_bytes(encoded),
+        "bytes": len(encoded),
+    }
+    if prompt_dir is not None:
+        bridge._write_text_atomic(
+            prompt_dir / label / "response-schema.json", rendered
+        )
+    return record
+
+
 def _communication_entry(
     label: str, path: Path, prompt_dir: Path | None,
 ) -> dict[str, Any]:
@@ -134,6 +151,11 @@ def _communication_entry(
                 item["masked_candidate_count"] for item in per_opportunity
             ),
         },
+        "response_schema": _response_schema_record(
+            communication.decision_response_schema(graph),
+            label=label,
+            prompt_dir=prompt_dir,
+        ),
         "views": _prompt_views(
             graph,
             model_view=communication.model_view,
@@ -190,6 +212,11 @@ def _collective_entry(
             "selectable_option_id_count": len(option_ids),
             "selectable_option_id_set_sha256": _id_set_sha256(option_ids),
         },
+        "response_schema": _response_schema_record(
+            collective.decision_response_schema(graph),
+            label=label,
+            prompt_dir=prompt_dir,
+        ),
         "views": _prompt_views(
             graph,
             model_view=collective._model_view,
@@ -304,6 +331,34 @@ def verified_suite(value: Any, prompt_dir: Path | None = None) -> dict[str, Any]
                     raise SuiteError(
                         f"{entry['label']}/{view_kind}: prompt content mismatch"
                     )
+        response_schema = entry.get("response_schema")
+        schema_id = (
+            response_schema.get("response_schema_id")
+            if isinstance(response_schema, dict) else None
+        )
+        digest = (
+            response_schema.get("file_sha256")
+            if isinstance(response_schema, dict) else None
+        )
+        size = (
+            response_schema.get("bytes")
+            if isinstance(response_schema, dict) else None
+        )
+        if (not isinstance(schema_id, str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", schema_id)
+                or not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or isinstance(size, bool) or not isinstance(size, int)
+                or size <= 0):
+            raise SuiteError(
+                f"{entry.get('label')}: invalid response schema record"
+            )
+        if prompt_dir is not None:
+            path = prompt_dir / entry["label"] / "response-schema.json"
+            if _file_sha256(path) != digest or path.stat().st_size != size:
+                raise SuiteError(
+                    f"{entry['label']}: response schema content mismatch"
+                )
     if value.get("decision_family_counts") != dict(
         sorted(observed_families.items())
     ):

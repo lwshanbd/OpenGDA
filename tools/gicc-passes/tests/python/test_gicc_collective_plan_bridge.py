@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import json
 import sys
 import tempfile
 import unittest
@@ -174,6 +175,29 @@ class CollectivePlanBridgeTests(unittest.TestCase):
                          [rule["max_bytes"] for rule in selection["rules"]])
         self.assertTrue(hint["llm_metadata"]["compiler_only_output"])
         self.assertTrue(selection["candidate_id"].startswith("candidate:"))
+
+    def test_response_schema_allows_only_graph_bound_options(self):
+        schema = collective.decision_response_schema(self.graph)
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            {"const": self.graph["graph_id"]},
+            schema["properties"]["graph_id"],
+        )
+        selections = schema["properties"]["selections"]
+        self.assertEqual(
+            [self.opportunity["opportunity_id"]], selections["required"]
+        )
+        selection = selections["properties"][
+            self.opportunity["opportunity_id"]
+        ]
+        slots = selection["properties"]["slot_candidate_ids"]
+        for slot in self.opportunity["decision_slots"]:
+            self.assertEqual(
+                [option["option_id"] for option in slot["options"]],
+                slots["properties"][slot["slot_id"]]["enum"],
+            )
+        rendered = json.dumps(schema, sort_keys=True)
+        self.assertNotIn("target_id", rendered)
 
     def test_invented_option_and_code_fail_closed_to_anchor(self):
         decision = self.decision()

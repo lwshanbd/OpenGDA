@@ -993,6 +993,49 @@ def render_prompt(
     )
 
 
+def decision_response_schema(graph_value: Any) -> dict[str, Any]:
+    """Return an exact JSON schema whose enums come only from the graph."""
+    graph = verified_graph(graph_value)
+    selections = {}
+    required = []
+    for opportunity in graph["opportunities"]:
+        opportunity_id = opportunity["opportunity_id"]
+        required.append(opportunity_id)
+        selections[opportunity_id] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "candidate_id": {
+                    "type": "string",
+                    "enum": [
+                        candidate["candidate_id"]
+                        for candidate in opportunity["candidates"]
+                    ],
+                },
+                "confidence": {
+                    "type": "number", "minimum": 0.0, "maximum": 1.0,
+                },
+                "rationale": {"type": "string", "maxLength": 512},
+            },
+            "required": ["candidate_id", "confidence", "rationale"],
+        }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "schema_version": {"const": DECISION_SCHEMA},
+            "graph_id": {"const": graph["graph_id"]},
+            "selections": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": selections,
+                "required": required,
+            },
+        },
+        "required": ["schema_version", "graph_id", "selections"],
+    }
+
+
 def _baseline_candidate(opportunity: dict[str, Any]) -> dict[str, Any]:
     preference = (
         "group_uniform_default", "site_default",

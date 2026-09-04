@@ -272,6 +272,34 @@ class CommunicationGroupPlanBridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(groups.GroupPlanError, "unknown model view"):
             groups.model_view(self.graph, "invented")
 
+    def test_response_schema_allows_only_graph_bound_candidates(self):
+        schema = groups.decision_response_schema(self.graph)
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            {"const": groups.DECISION_SCHEMA},
+            schema["properties"]["schema_version"],
+        )
+        self.assertEqual(
+            {"const": self.graph["graph_id"]},
+            schema["properties"]["graph_id"],
+        )
+        selections = schema["properties"]["selections"]
+        self.assertEqual(
+            [self.opportunity["opportunity_id"]], selections["required"]
+        )
+        selection = selections["properties"][
+            self.opportunity["opportunity_id"]
+        ]
+        self.assertEqual(
+            [candidate["candidate_id"]
+             for candidate in self.opportunity["candidates"]],
+            selection["properties"]["candidate_id"]["enum"],
+        )
+        rendered = json.dumps(schema, sort_keys=True)
+        self.assertNotIn("unit.cpp", rendered)
+        self.assertNotIn("group_kernel", rendered)
+        self.assertNotIn("materializer", rendered)
+
     def test_early_candidate_becomes_only_a_narrow_lto_hint(self):
         hint, accepted, errors = groups.plan_to_hint(
             self.graph, self.decision()

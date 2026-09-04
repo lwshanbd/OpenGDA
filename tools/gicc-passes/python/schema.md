@@ -677,6 +677,9 @@ The response contains only one existing candidate ID per opportunity. `accept`
 content-validates the graph and candidate, then emits `gicc-hint-v1`; source,
 model-authored code/IR, dispatch strings, site IDs, or new legality assertions
 are rejected.
+`decision_response_schema()` derives an exact structured-output schema from
+the same graph: every opportunity is required, every candidate field is an
+enum of the graph's opaque IDs, and additional fields are forbidden.
 
 ### Relational collective algorithm and size-policy bridge
 
@@ -737,6 +740,9 @@ It cannot output a target symbol, algorithm string, threshold, source, code,
 IR, or legality. `accept` converts valid option IDs to a narrow
 `gicc-collective-hint-v1`; malformed or invented content falls back atomically
 to the semantic anchor unless `--strict` is requested.
+`decision_response_schema()` derives the matching exact structured-output
+schema directly from every opportunity, message slot, and graph-bound option
+ID. The Gate-E preparation path delegates to this common implementation.
 
 During the second LTO build, set
 `GICC_COLLECTIVE_HINT_IN=<collective-hint.json>` and
@@ -764,7 +770,8 @@ changing the benchmark source.
 communication and collective graphs without merging their selections or
 claiming a cross-program Cartesian product. It deterministically renders all
 three information views, records graph/selectable-ID/view/prompt hashes, and
-can verify the resulting suite plus the exact prompt bytes. The suite is a
+records the graph-derived exact response schema for each entry. It can verify
+the resulting suite plus the exact prompt and schema bytes. The suite is a
 local capability inventory only: it has no provider, scheduler, compiler, or
 source-edit path. The current frozen inventory and its scientific limits are
 documented in `experiments/COMPILER_DECISION_SUITE.md`.

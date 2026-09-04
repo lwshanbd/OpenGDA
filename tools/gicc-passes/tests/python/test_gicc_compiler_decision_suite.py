@@ -183,10 +183,25 @@ class CompilerDecisionSuiteTests(unittest.TestCase):
                 prompt = self.root / "prompts" / entry["label"] / f"{view_kind}.txt"
                 self.assertTrue(prompt.is_file())
                 self.assertEqual(record["prompt_bytes"], prompt.stat().st_size)
+            schema_record = entry["response_schema"]
+            schema = (
+                prompt_dir / entry["label"] / "response-schema.json"
+            )
+            self.assertTrue(schema.is_file())
+            self.assertEqual(schema_record["bytes"], schema.stat().st_size)
+            self.assertEqual(
+                schema_record["file_sha256"], suite._file_sha256(schema)
+            )
 
         prompt = prompt_dir / "unit-communication" / "opaque.txt"
         prompt.write_text(prompt.read_text() + "tampered", encoding="utf-8")
         with self.assertRaisesRegex(suite.SuiteError, "prompt content"):
+            suite.verified_suite(value, prompt_dir)
+
+        self.make(prompt_dir=prompt_dir)
+        schema = prompt_dir / "unit-collective" / "response-schema.json"
+        schema.write_text(schema.read_text() + "tampered", encoding="utf-8")
+        with self.assertRaisesRegex(suite.SuiteError, "response schema content"):
             suite.verified_suite(value, prompt_dir)
 
     def test_suite_is_deterministic(self):

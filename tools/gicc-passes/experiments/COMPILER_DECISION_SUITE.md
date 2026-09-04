@@ -25,19 +25,22 @@ independently, and no compiler materializer composes their decisions.
 ## Frozen identity
 
 - suite ID:
-  `sha256:0c6392c716646f0de444ca4916b115ab1e81aa118b45641ca4c8c85a01e214c2`
+  `sha256:1ed321f82348a58dc9ee910889925092f7e6f037bf098c394271c0babc9ab40b`
 - serialized suite SHA-256:
-  `59afd8a18469afceef4dc9def741a0efde40d1e4adead42a8a3d21a719a50602`
+  `cd24754920d6f2f3de8ba158d56de7ca30876b0b654895f0ce0b2a845deba828`
 - decision-family counts: one collective size-policy graph and five
   communication route/schedule graphs;
 - selectable compiler IDs: 32 collective option IDs over four slots and 32
   communication candidate IDs over five separate tasks;
 - prompt views: `relational`, `descriptors`, and `opaque` for every entry.
+- one graph-derived exact response schema per entry; every selectable field is
+  an enum of existing option/candidate IDs and every unknown field is rejected.
 
 The suite manifest content-addresses every private graph, selectable-ID set,
-model view, and rendered prompt.  Its verifier checks the suite and entry IDs,
-all prompt hashes and byte counts, and the independence declaration.  The tool
-has no provider, scheduler, compiler, or source-edit code path.
+model view, rendered prompt, and exact response schema. Its verifier checks the
+suite and entry IDs, all prompt/schema hashes and byte counts, and the
+independence declaration. The tool has no provider, scheduler, compiler, or
+source-edit code path.
 
 The communication views normalize identical per-transfer facts into shared
 compiler entities. This retains every semantic field and all ordinal-specific
