@@ -7,8 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ---------------------------------------------------------------------------
 # Build modes
 # ---------------------------------------------------------------------------
-# GICC_PASSES_ANALYZE_ONLY=ON drops the two lowering passes that hard-code
-# DWQ / MMIO codegen (GICCDeviceLowering, GICCDispatchLowering). The rest
+# GICC_PASSES_ANALYZE_ONLY=ON drops lowering passes that hard-code DWQ / MMIO
+# codegen or runtime ABI calls. The rest
 # of the plugin — discovery, HK analysis, feature extraction, host
 # discovery, trace synthesis — is target-agnostic IR-level code that
 # already recognizes both AMDGPU and NVPTX intrinsics. Use this on
@@ -85,10 +85,11 @@ if(NOT GICC_PASSES_ANALYZE_ONLY)
         src/DispatchDecision.cpp
         src/GICCDeviceLowering.cpp
         src/GICCDispatchLowering.cpp
+        src/GICCProducerFission.cpp
     )
 else()
     message(STATUS "gicc-passes: ANALYZE_ONLY build — skipping "
-                   "GICCDeviceLowering / GICCDispatchLowering")
+        "GICCDeviceLowering / GICCDispatchLowering / GICCProducerFission")
 endif()
 
 add_library(gicc-passes MODULE ${_GICC_PASS_SOURCES})

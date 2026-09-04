@@ -150,10 +150,15 @@ path only under formal 7 equal to false and retains the untouched fused launch
 when it is true. It performs no floating-point reassociation and assumes no
 subgroup law. A negative compiler test with opposite guards is rejected.
 
-These are still facts, not an enabled schedule. Checked interval-end,
-buffer-identity, side-effect-guard, device-region, and launch materializers
-must all retain an untouched fused-launch fallback where applicable. Until
-they exist, the candidate remains masked.
+These are still not an enabled schedule. A dormant, explicitly named final
+host-IR pass now re-proves the launch and parameter-array shape, checks buffer
+identity plus every interval bound at runtime, gates the optimized edge on the
+shared side-effect-disabling formal, and emits two same-stream launches with
+an untouched fused-launch fallback. It rejects dynamic/cross-block parameter
+array writes and interval casts whose bit-width semantics cannot be replayed
+from the v1 metadata. The pass is intentionally absent from the automatic LTO
+pipeline: the matching device-region materializer and end-to-end oracle must
+exist before the candidate can be enabled or exposed to a model.
 
 Device LTO rewrites the original kernel body:
 

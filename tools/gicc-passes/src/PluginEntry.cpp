@@ -8,6 +8,7 @@
 #ifndef GICC_PASSES_ANALYZE_ONLY
 #  include "GICCDeviceLowering.h"
 #  include "GICCDispatchLowering.h"
+#  include "GICCProducerFission.h"
 #endif
 
 #include "llvm/Config/llvm-config.h"
@@ -150,6 +151,14 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-dispatch-lowering") {
                         MPM.addPass(GICCDispatchLoweringPass());
+                        return true;
+                    }
+                    // Deliberately named-only until the device-body phase
+                    // partition pass is implemented and tested. Running the
+                    // host half alone is useful for IR proof tests but is not
+                    // a valid executable transformation.
+                    if (Name == "gicc-producer-fission-host") {
+                        MPM.addPass(GICCProducerFissionHostPass());
                         return true;
                     }
 #endif
