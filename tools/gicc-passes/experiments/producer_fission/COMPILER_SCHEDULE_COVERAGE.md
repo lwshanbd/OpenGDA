@@ -166,3 +166,27 @@ generated legal candidates, held-out decisions from the source-free graph, and
 runtime regret against compiler oracles.  Until those conditions exist, this
 snapshot supports investment in richer compiler proofs and candidate
 generation, but it makes no claim that an LLM improves performance.
+
+## Confirmation-gated graph expansion
+
+A positive scout is not enough to expose the Jacobi schedule candidate. After
+three independent order-balanced confirmation allocations pass, the raw logs
+can be replayed and a separate content-addressed compiler bundle generated:
+
+```sh
+python3 tools/gicc-passes/experiments/producer_fission/prepare_confirmed_producer_fission_graph.py prepare \
+  --confirmation-analysis build_ofi/producer_fission_confirmation_7687377_20260904/analysis.json \
+  --dossier build_ofi/compiler_fact_coverage_20260904/portfolio/jacobi/dossier.json \
+  --template build_ofi/compiler_fact_coverage_20260904/jacobi_disjoint/meta/_Z18jacobi_step_kernelILi32ELi32EEvPN4gicc9DeviceCtxEPfPKfS3_iiibiiiiimmmmm.json \
+  --graph build_ofi/compiler_fact_coverage_20260904/portfolio/jacobi/group-graph.json \
+  --output-dir build_ofi/producer_fission_graph_expansion_20260904
+```
+
+The preparer refuses a failed, stale, or non-replayable confirmation; verifies
+that the old graph exactly regenerates from its dossier and compiler template;
+preserves all nine prior candidate IDs; and exposes only the compiler-owned
+`PRODUCER_FRONTIER_TWO_PHASE` candidate. It writes relational, descriptor, and
+opaque prompts plus their exact response schema, but neither refreezes the
+decision suite nor authorizes a provider call. The frozen input graph is never
+overwritten. The completed bundle can be independently checked with
+`verify-contained --manifest <bundle>/manifest.json`.
