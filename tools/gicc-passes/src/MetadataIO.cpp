@@ -7,6 +7,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
 #include <limits>
 
 using namespace llvm;
@@ -157,6 +158,191 @@ bool argRefFromJSON(const json::Value &v, ArgRef &out) {
     return true;
 }
 
+const char *deviceExprKindStr(DeviceExpr::Kind kind) {
+    switch (kind) {
+        case DeviceExpr::Kind::Param:   return "param";
+        case DeviceExpr::Kind::ConstI64:return "const";
+        case DeviceExpr::Kind::Builtin: return "builtin";
+        case DeviceExpr::Kind::BinOp:   return "binop";
+        case DeviceExpr::Kind::Cast:    return "cast";
+        case DeviceExpr::Kind::Compare: return "compare";
+        case DeviceExpr::Kind::Select:  return "select";
+        case DeviceExpr::Kind::Unknown: return "unknown";
+    }
+    return "unknown";
+}
+
+bool parseDeviceExprKind(StringRef value, DeviceExpr::Kind &kind) {
+    if (value == "param")   { kind = DeviceExpr::Kind::Param; return true; }
+    if (value == "const")   { kind = DeviceExpr::Kind::ConstI64; return true; }
+    if (value == "builtin") { kind = DeviceExpr::Kind::Builtin; return true; }
+    if (value == "binop")   { kind = DeviceExpr::Kind::BinOp; return true; }
+    if (value == "cast")    { kind = DeviceExpr::Kind::Cast; return true; }
+    if (value == "compare") { kind = DeviceExpr::Kind::Compare; return true; }
+    if (value == "select")  { kind = DeviceExpr::Kind::Select; return true; }
+    if (value == "unknown") { kind = DeviceExpr::Kind::Unknown; return true; }
+    return false;
+}
+
+json::Value deviceExprToJSON(const DeviceExpr &expr) {
+    json::Object o;
+    o["kind"] = deviceExprKindStr(expr.kind);
+    if (!expr.typeStr.empty()) o["type"] = expr.typeStr;
+    if (expr.kind == DeviceExpr::Kind::Param)
+        o["param"] = static_cast<int64_t>(expr.paramIdx);
+    if (expr.kind == DeviceExpr::Kind::ConstI64)
+        o["value"] = expr.constVal;
+    if (expr.kind == DeviceExpr::Kind::Builtin)
+        o["name"] = expr.opStr;
+    if (expr.kind == DeviceExpr::Kind::BinOp ||
+        expr.kind == DeviceExpr::Kind::Cast ||
+        expr.kind == DeviceExpr::Kind::Compare)
+        o["op"] = expr.opStr;
+    if (!expr.children.empty()) {
+        json::Array children;
+        for (const auto &child : expr.children)
+            children.push_back(deviceExprToJSON(child));
+        o["children"] = std::move(children);
+    }
+    return json::Value(std::move(o));
+}
+
+bool deviceExprFromJSON(const json::Value &value, DeviceExpr &out) {
+    const auto *o = value.getAsObject();
+    if (!o) return false;
+    auto kindValue = o->getString("kind");
+    if (!kindValue || !parseDeviceExprKind(*kindValue, out.kind)) return false;
+    if (auto type = o->getString("type")) out.typeStr = type->str();
+    if (out.kind != DeviceExpr::Kind::Unknown && out.typeStr.empty())
+        return false;
+    if (out.kind == DeviceExpr::Kind::Param) {
+        auto param = o->getInteger("param");
+        if (!param || *param < 0 || static_cast<uint64_t>(*param) >
+                                     std::numeric_limits<unsigned>::max())
+            return false;
+        out.paramIdx = static_cast<unsigned>(*param);
+    }
+    if (out.kind == DeviceExpr::Kind::ConstI64) {
+        auto constant = o->getInteger("value");
+        if (!constant) return false;
+        out.constVal = *constant;
+    }
+    if (out.kind == DeviceExpr::Kind::Builtin) {
+        auto name = o->getString("name");
+        if (!name) return false;
+        out.opStr = name->str();
+    }
+    if (out.kind == DeviceExpr::Kind::BinOp ||
+        out.kind == DeviceExpr::Kind::Cast ||
+        out.kind == DeviceExpr::Kind::Compare) {
+        auto op = o->getString("op");
+        if (!op) return false;
+        out.opStr = op->str();
+    }
+    if (const auto *children = o->getArray("children")) {
+        for (const auto &childValue : *children) {
+            DeviceExpr child;
+            if (!deviceExprFromJSON(childValue, child)) return false;
+            out.children.push_back(std::move(child));
+        }
+    }
+    switch (out.kind) {
+        case DeviceExpr::Kind::Param:
+        case DeviceExpr::Kind::ConstI64:
+        case DeviceExpr::Kind::Builtin:
+            return out.children.empty();
+        case DeviceExpr::Kind::BinOp:
+        case DeviceExpr::Kind::Compare:
+            return out.children.size() == 2;
+        case DeviceExpr::Kind::Cast:
+            return out.children.size() == 1;
+        case DeviceExpr::Kind::Select:
+            return out.children.size() == 3;
+        case DeviceExpr::Kind::Unknown:
+            return out.children.empty();
+    }
+    return false;
+}
+
+bool deviceExprComplete(const DeviceExpr &expr) {
+    if (expr.kind == DeviceExpr::Kind::Unknown || expr.typeStr.empty())
+        return false;
+    return std::all_of(expr.children.begin(), expr.children.end(),
+                       deviceExprComplete);
+}
+
+json::Value producerStoreDomainToJSON(
+        const ProducerStoreDomainFact &domain) {
+    json::Object o;
+    o["pointer_param"] = static_cast<int64_t>(domain.pointerParam);
+    o["byte_offset"] = deviceExprToJSON(domain.byteOffset);
+    o["byte_size"] = static_cast<int64_t>(domain.byteSize);
+    o["address_exact"] = domain.addressExact;
+    json::Array predicates;
+    for (const auto &predicate : domain.predicates) {
+        json::Object p;
+        p["condition"] = deviceExprToJSON(predicate.condition);
+        p["required_value"] = predicate.requiredValue;
+        predicates.push_back(std::move(p));
+    }
+    o["predicates"] = std::move(predicates);
+    o["predicates_exact"] = domain.predicatesExact;
+    o["domain_exact"] = domain.domainExact;
+    o["reason"] = domain.reason;
+    return json::Value(std::move(o));
+}
+
+bool producerStoreDomainFromJSON(const json::Value &value,
+                                 ProducerStoreDomainFact &out) {
+    const auto *o = value.getAsObject();
+    if (!o) return false;
+    auto pointer = o->getInteger("pointer_param");
+    const auto *offset = o->get("byte_offset");
+    auto size = o->getInteger("byte_size");
+    auto addressExact = o->getBoolean("address_exact");
+    const auto *predicates = o->getArray("predicates");
+    auto predicatesExact = o->getBoolean("predicates_exact");
+    auto domainExact = o->getBoolean("domain_exact");
+    auto reason = o->getString("reason");
+    if (!pointer || *pointer < 0 || static_cast<uint64_t>(*pointer) >
+                                      std::numeric_limits<unsigned>::max() ||
+        !offset || !size || *size < 0 || !addressExact || !predicates ||
+        !predicatesExact || !domainExact || !reason)
+        return false;
+
+    ProducerStoreDomainFact parsed;
+    parsed.pointerParam = static_cast<unsigned>(*pointer);
+    if (!deviceExprFromJSON(*offset, parsed.byteOffset)) return false;
+    parsed.byteSize = static_cast<uint64_t>(*size);
+    parsed.addressExact = *addressExact;
+    parsed.predicatesExact = *predicatesExact;
+    parsed.domainExact = *domainExact;
+    parsed.reason = reason->str();
+    for (const auto &predicateValue : *predicates) {
+        const auto *predicateObject = predicateValue.getAsObject();
+        if (!predicateObject) return false;
+        const auto *condition = predicateObject->get("condition");
+        auto required = predicateObject->getBoolean("required_value");
+        if (!condition || !required) return false;
+        ProducerPredicateFact predicate;
+        if (!deviceExprFromJSON(*condition, predicate.condition)) return false;
+        predicate.requiredValue = *required;
+        parsed.predicates.push_back(std::move(predicate));
+    }
+    const bool conditionsComplete = std::all_of(
+        parsed.predicates.begin(), parsed.predicates.end(),
+        [](const auto &predicate) {
+            return deviceExprComplete(predicate.condition);
+        });
+    if ((parsed.addressExact && !deviceExprComplete(parsed.byteOffset)) ||
+        (parsed.predicatesExact && !conditionsComplete) ||
+        parsed.domainExact !=
+            (parsed.addressExact && parsed.predicatesExact))
+        return false;
+    out = std::move(parsed);
+    return true;
+}
+
 json::Value guardToJSON(const GuardSpec &g) {
     json::Object o;
     o["kind"] = guardKindStr(g.kind);
@@ -265,6 +451,11 @@ json::Value producerFrontierToJSON(const ProducerFrontierFacts &facts) {
     }
     o["buffer_identity_guard_reason"] =
         facts.buffer_identity_guard_reason;
+    o["producer_domains_known"] = facts.producer_domains_known;
+    json::Array domains;
+    for (const auto &domain : facts.producer_store_domains)
+        domains.push_back(producerStoreDomainToJSON(domain));
+    o["producer_store_domains"] = std::move(domains);
     o["ordinary_store_sites"] =
         static_cast<int64_t>(facts.ordinary_store_sites);
     o["atomic_write_sites"] =
@@ -341,6 +532,25 @@ bool producerFrontierFromJSON(const json::Value &v,
     }
     if (auto guardReason = o->getString("buffer_identity_guard_reason"))
         parsed.buffer_identity_guard_reason = guardReason->str();
+    if (auto knownDomains = o->getBoolean("producer_domains_known"))
+        parsed.producer_domains_known = *knownDomains;
+    if (const auto *domains = o->getArray("producer_store_domains")) {
+        for (const auto &domainValue : *domains) {
+            ProducerStoreDomainFact domain;
+            if (!producerStoreDomainFromJSON(domainValue, domain))
+                return false;
+            parsed.producer_store_domains.push_back(std::move(domain));
+        }
+    }
+    if (parsed.producer_domains_known &&
+        (parsed.producer_store_domains.empty() ||
+         parsed.producer_store_domains.size() != parsed.ordinary_store_sites ||
+         !std::all_of(parsed.producer_store_domains.begin(),
+                      parsed.producer_store_domains.end(),
+                      [](const auto &domain) {
+                          return domain.domainExact;
+                      })))
+        return false;
     out = std::move(parsed);
     return true;
 }

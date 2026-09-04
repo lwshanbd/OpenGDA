@@ -4,6 +4,7 @@
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -16,11 +17,13 @@
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/IR/Type.h"
 
 #include <algorithm>
@@ -691,6 +694,401 @@ bool callMayWriteNonLocalMemory(const CallBase &call) {
     return functionMayWriteNonLocalMemory(call.getCalledFunction(), visiting);
 }
 
+DeviceExpr deviceUnknown(StringRef type = "") {
+    DeviceExpr out;
+    out.kind = DeviceExpr::Kind::Unknown;
+    out.typeStr = type.str();
+    return out;
+}
+
+DeviceExpr deviceConst(int64_t value, StringRef type = "i64") {
+    DeviceExpr out;
+    out.kind = DeviceExpr::Kind::ConstI64;
+    out.constVal = value;
+    out.typeStr = type.str();
+    return out;
+}
+
+DeviceExpr deviceBinOp(StringRef op, DeviceExpr lhs, DeviceExpr rhs) {
+    if (op == "add" && lhs.kind == DeviceExpr::Kind::ConstI64 &&
+        lhs.constVal == 0)
+        return rhs;
+    if (op == "add" && rhs.kind == DeviceExpr::Kind::ConstI64 &&
+        rhs.constVal == 0)
+        return lhs;
+    if (op == "mul" && lhs.kind == DeviceExpr::Kind::ConstI64 &&
+        lhs.constVal == 1)
+        return rhs;
+    if (op == "mul" && rhs.kind == DeviceExpr::Kind::ConstI64 &&
+        rhs.constVal == 1)
+        return lhs;
+    DeviceExpr out;
+    out.kind = DeviceExpr::Kind::BinOp;
+    out.opStr = op.str();
+    out.typeStr = "i64";
+    out.children.push_back(std::move(lhs));
+    out.children.push_back(std::move(rhs));
+    return out;
+}
+
+bool deviceExprExact(const DeviceExpr &expr) {
+    if (expr.typeStr.empty()) return false;
+    switch (expr.kind) {
+        case DeviceExpr::Kind::Param:
+        case DeviceExpr::Kind::ConstI64:
+            if (!expr.children.empty()) return false;
+            break;
+        case DeviceExpr::Kind::Builtin:
+            if (expr.opStr.empty() || !expr.children.empty()) return false;
+            break;
+        case DeviceExpr::Kind::BinOp:
+            if (expr.opStr.empty() || expr.opStr == "binop" ||
+                expr.children.size() != 2)
+                return false;
+            break;
+        case DeviceExpr::Kind::Cast:
+            if (expr.opStr.empty() || expr.opStr == "cast" ||
+                expr.children.size() != 1)
+                return false;
+            break;
+        case DeviceExpr::Kind::Compare:
+            if (expr.opStr.empty() || expr.children.size() != 2)
+                return false;
+            break;
+        case DeviceExpr::Kind::Select:
+            if (expr.children.size() != 3) return false;
+            break;
+        case DeviceExpr::Kind::Unknown:
+            return false;
+    }
+    for (const auto &child : expr.children)
+        if (!deviceExprExact(child)) return false;
+    return true;
+}
+
+bool blockCanReach(const BasicBlock *from, const BasicBlock *target) {
+    SmallPtrSet<const BasicBlock *, 32> visited;
+    SmallVector<const BasicBlock *, 32> work;
+    work.push_back(from);
+    while (!work.empty()) {
+        const BasicBlock *current = work.pop_back_val();
+        if (current == target) return true;
+        if (!visited.insert(current).second) continue;
+        work.append(succ_begin(current), succ_end(current));
+    }
+    return false;
+}
+
+const char *dimensionName(uint64_t dimension) {
+    switch (dimension) {
+        case 0: return "x";
+        case 1: return "y";
+        case 2: return "z";
+        default: return nullptr;
+    }
+}
+
+std::optional<std::string> gpuBuiltinName(const CallBase &call) {
+    const Function *callee = call.getCalledFunction();
+    if (!callee) return std::nullopt;
+    const StringRef name = callee->getName();
+    for (const auto &entry : {
+             std::pair<StringRef, StringRef>{"llvm.amdgcn.workgroup.id.x",
+                                              "block_id_x"},
+             {"llvm.amdgcn.workgroup.id.y", "block_id_y"},
+             {"llvm.amdgcn.workgroup.id.z", "block_id_z"},
+             {"llvm.amdgcn.workitem.id.x", "thread_id_x"},
+             {"llvm.amdgcn.workitem.id.y", "thread_id_y"},
+             {"llvm.amdgcn.workitem.id.z", "thread_id_z"},
+         }) {
+        if (name.starts_with(entry.first)) return entry.second.str();
+    }
+
+    // At the early optimization extension point used by clang, HIP's C++
+    // builtin accessors may still be direct calls.  Match their exact ABI
+    // spellings before they inline to the AMDGPU intrinsics handled above.
+    for (const auto &entry : {
+             std::pair<StringRef, StringRef>{
+                 "_ZN24__hip_builtin_blockIdx_t7__get_xEv", "block_id_x"},
+             {"_ZN24__hip_builtin_blockIdx_t7__get_yEv", "block_id_y"},
+             {"_ZN24__hip_builtin_blockIdx_t7__get_zEv", "block_id_z"},
+             {"_ZN24__hip_builtin_blockDim_t7__get_xEv", "block_size_x"},
+             {"_ZN24__hip_builtin_blockDim_t7__get_yEv", "block_size_y"},
+             {"_ZN24__hip_builtin_blockDim_t7__get_zEv", "block_size_z"},
+             {"_ZN25__hip_builtin_threadIdx_t7__get_xEv", "thread_id_x"},
+             {"_ZN25__hip_builtin_threadIdx_t7__get_yEv", "thread_id_y"},
+             {"_ZN25__hip_builtin_threadIdx_t7__get_zEv", "thread_id_z"},
+         }) {
+        if (name == entry.first) return entry.second.str();
+    }
+
+    StringRef prefix;
+    if (name == "__ockl_get_group_id") prefix = "block_id_";
+    else if (name == "__ockl_get_local_id") prefix = "thread_id_";
+    else if (name == "__ockl_get_local_size") prefix = "block_size_";
+    else return std::nullopt;
+    if (call.arg_size() != 1) return std::nullopt;
+    const auto *dimension = dyn_cast<ConstantInt>(call.getArgOperand(0));
+    if (!dimension) return std::nullopt;
+    const char *suffix = dimensionName(dimension->getZExtValue());
+    if (!suffix) return std::nullopt;
+    return (prefix + suffix).str();
+}
+
+std::optional<std::string> implicitBlockSizeName(const LoadInst &load,
+                                                 const DataLayout &DL) {
+    const Value *pointer = load.getPointerOperand()->stripPointerCasts();
+    const auto *gep = dyn_cast<GEPOperator>(pointer);
+    if (!gep) return std::nullopt;
+    const Value *base = gep->getPointerOperand()->stripPointerCasts();
+    const auto *call = dyn_cast<CallBase>(base);
+    if (!call || !call->getCalledFunction() ||
+        !call->getCalledFunction()->getName().starts_with(
+            "llvm.amdgcn.implicitarg.ptr"))
+        return std::nullopt;
+    const unsigned bitWidth = DL.getIndexSizeInBits(
+        gep->getPointerAddressSpace());
+    APInt offset(bitWidth, 0);
+    if (!gep->accumulateConstantOffset(DL, offset) ||
+        !offset.isSignedIntN(64))
+        return std::nullopt;
+    switch (offset.getSExtValue()) {
+        case 12: return std::string("block_size_x");
+        case 14: return std::string("block_size_y");
+        case 16: return std::string("block_size_z");
+        default: return std::nullopt;
+    }
+}
+
+DeviceExpr buildDeviceExpr(const Value *value, const Function *kernel,
+                           const DataLayout &DL,
+                           SmallPtrSetImpl<const Value *> &visiting) {
+    if (!value) return deviceUnknown();
+    if (!visiting.insert(value).second)
+        return deviceUnknown(typeStr(value->getType()));
+    auto finish = [&](DeviceExpr out) {
+        visiting.erase(value);
+        return out;
+    };
+    if (const auto *constant = dyn_cast<ConstantInt>(value))
+        return finish(deviceConst(constant->getSExtValue(),
+                                  typeStr(constant->getType())));
+    if (const auto *argument = dyn_cast<Argument>(value)) {
+        if (argument->getParent() != kernel)
+            return finish(deviceUnknown(typeStr(argument->getType())));
+        DeviceExpr out;
+        out.kind = DeviceExpr::Kind::Param;
+        out.paramIdx = argument->getArgNo();
+        out.typeStr = typeStr(argument->getType());
+        return finish(std::move(out));
+    }
+    if (const auto *binary = dyn_cast<BinaryOperator>(value)) {
+        DeviceExpr out;
+        out.kind = DeviceExpr::Kind::BinOp;
+        out.opStr = binopName(binary->getOpcode());
+        out.typeStr = typeStr(binary->getType());
+        out.children.push_back(buildDeviceExpr(binary->getOperand(0), kernel,
+                                               DL, visiting));
+        out.children.push_back(buildDeviceExpr(binary->getOperand(1), kernel,
+                                               DL, visiting));
+        return finish(std::move(out));
+    }
+    if (const auto *cast = dyn_cast<CastInst>(value)) {
+        DeviceExpr out;
+        out.kind = DeviceExpr::Kind::Cast;
+        out.opStr = castName(cast->getOpcode());
+        out.typeStr = typeStr(cast->getType());
+        out.children.push_back(buildDeviceExpr(cast->getOperand(0), kernel,
+                                               DL, visiting));
+        return finish(std::move(out));
+    }
+    if (const auto *freeze = dyn_cast<FreezeInst>(value))
+        return finish(buildDeviceExpr(freeze->getOperand(0), kernel, DL,
+                                      visiting));
+    if (const auto *compare = dyn_cast<ICmpInst>(value)) {
+        DeviceExpr out;
+        out.kind = DeviceExpr::Kind::Compare;
+        out.opStr = ICmpInst::getPredicateName(compare->getPredicate()).str();
+        out.typeStr = typeStr(compare->getType());
+        out.children.push_back(buildDeviceExpr(compare->getOperand(0), kernel,
+                                               DL, visiting));
+        out.children.push_back(buildDeviceExpr(compare->getOperand(1), kernel,
+                                               DL, visiting));
+        return finish(std::move(out));
+    }
+    if (const auto *select = dyn_cast<SelectInst>(value)) {
+        DeviceExpr out;
+        out.kind = DeviceExpr::Kind::Select;
+        out.typeStr = typeStr(select->getType());
+        for (const Value *operand : select->operand_values())
+            out.children.push_back(buildDeviceExpr(operand, kernel, DL,
+                                                   visiting));
+        return finish(std::move(out));
+    }
+    if (const auto *call = dyn_cast<CallBase>(value)) {
+        auto builtin = gpuBuiltinName(*call);
+        if (!builtin) return finish(deviceUnknown(typeStr(call->getType())));
+        DeviceExpr out;
+        out.kind = DeviceExpr::Kind::Builtin;
+        out.opStr = std::move(*builtin);
+        out.typeStr = typeStr(call->getType());
+        return finish(std::move(out));
+    }
+    if (const auto *load = dyn_cast<LoadInst>(value)) {
+        auto builtin = implicitBlockSizeName(*load, DL);
+        if (!builtin) return finish(deviceUnknown(typeStr(load->getType())));
+        DeviceExpr out;
+        out.kind = DeviceExpr::Kind::Builtin;
+        out.opStr = std::move(*builtin);
+        out.typeStr = typeStr(load->getType());
+        return finish(std::move(out));
+    }
+    return finish(deviceUnknown(typeStr(value->getType())));
+}
+
+DeviceExpr buildDeviceExpr(const Value *value, const Function *kernel,
+                           const DataLayout &DL) {
+    SmallPtrSet<const Value *, 32> visiting;
+    return buildDeviceExpr(value, kernel, DL, visiting);
+}
+
+struct PointerBytes {
+    const Argument *base = nullptr;
+    DeviceExpr offset = deviceUnknown("i64");
+    bool exact = false;
+};
+
+PointerBytes decomposePointerBytes(const Value *pointer,
+                                   const Function *kernel,
+                                   const DataLayout &DL,
+                                   SmallPtrSetImpl<const Value *> &visiting) {
+    PointerBytes result;
+    if (!pointer || !visiting.insert(pointer).second) return result;
+    const Value *visitedPointer = pointer;
+    auto finish = [&](PointerBytes out) {
+        visiting.erase(visitedPointer);
+        return out;
+    };
+    pointer = pointer->stripPointerCasts();
+    if (const auto *argument = dyn_cast<Argument>(pointer)) {
+        if (argument->getParent() == kernel &&
+            argument->getType()->isPointerTy()) {
+            result.base = argument;
+            result.offset = deviceConst(0);
+            result.exact = true;
+        }
+        return finish(std::move(result));
+    }
+
+    const auto *gep = dyn_cast<GEPOperator>(pointer);
+    if (!gep) return finish(std::move(result));
+    result = decomposePointerBytes(gep->getPointerOperand(), kernel, DL,
+                                   visiting);
+    if (!result.exact) return finish(std::move(result));
+
+    const unsigned bitWidth = DL.getIndexSizeInBits(
+        gep->getPointerAddressSpace());
+    MapVector<Value *, APInt> variables;
+    APInt constant(bitWidth, 0);
+    if (!gep->collectOffset(DL, bitWidth, variables, constant) ||
+        !constant.isSignedIntN(64)) {
+        result.exact = false;
+        result.offset = deviceUnknown("i64");
+        return finish(std::move(result));
+    }
+    DeviceExpr local = deviceConst(constant.getSExtValue());
+    for (const auto &entry : variables) {
+        if (!entry.second.isSignedIntN(64)) {
+            result.exact = false;
+            result.offset = deviceUnknown("i64");
+            return finish(std::move(result));
+        }
+        DeviceExpr variable = buildDeviceExpr(entry.first, kernel, DL);
+        if (!deviceExprExact(variable)) {
+            result.exact = false;
+            result.offset = deviceUnknown("i64");
+            return finish(std::move(result));
+        }
+        DeviceExpr term = deviceBinOp(
+            "mul", std::move(variable),
+            deviceConst(entry.second.getSExtValue()));
+        local = deviceBinOp("add", std::move(local), std::move(term));
+    }
+    result.offset = deviceBinOp("add", std::move(result.offset),
+                                std::move(local));
+    result.exact = deviceExprExact(result.offset);
+    return finish(std::move(result));
+}
+
+PointerBytes decomposePointerBytes(const Value *pointer,
+                                   const Function *kernel,
+                                   const DataLayout &DL) {
+    SmallPtrSet<const Value *, 16> visiting;
+    return decomposePointerBytes(pointer, kernel, DL, visiting);
+}
+
+ProducerStoreDomainFact producerStoreDomain(const StoreInst &store,
+                                             const Function &kernel,
+                                             DominatorTree *DT,
+                                             LoopInfo *LI) {
+    ProducerStoreDomainFact domain;
+    const DataLayout &DL = kernel.getParent()->getDataLayout();
+    PointerBytes address = decomposePointerBytes(
+        store.getPointerOperand(), &kernel, DL);
+    if (address.base) domain.pointerParam = address.base->getArgNo();
+    domain.byteOffset = std::move(address.offset);
+    domain.addressExact = address.exact && address.base;
+
+    TypeSize size = DL.getTypeStoreSize(store.getValueOperand()->getType());
+    if (!size.isScalable()) domain.byteSize = size.getFixedValue();
+    else domain.addressExact = false;
+
+    domain.predicatesExact = DT && LI &&
+        !LI->getLoopFor(store.getParent());
+    if (domain.predicatesExact) {
+        for (const BasicBlock &BB : kernel) {
+            if (&BB == store.getParent() ||
+                !DT->dominates(&BB, store.getParent()))
+                continue;
+            const Instruction *term = BB.getTerminator();
+            if (!term || term->getNumSuccessors() < 2) continue;
+            SmallVector<bool, 4> reachesStore;
+            unsigned reachable = 0;
+            for (const BasicBlock *successor : successors(&BB)) {
+                const bool reaches = blockCanReach(successor,
+                                                   store.getParent());
+                reachesStore.push_back(reaches);
+                if (reaches) ++reachable;
+            }
+            if (reachable == 0 || reachable == term->getNumSuccessors())
+                continue;
+            const auto *branch = dyn_cast<BranchInst>(term);
+            if (!branch || !branch->isConditional() || reachable != 1) {
+                domain.predicatesExact = false;
+                continue;
+            }
+            ProducerPredicateFact predicate;
+            predicate.condition = buildDeviceExpr(
+                branch->getCondition(), &kernel, DL);
+            predicate.requiredValue = reachesStore[0];
+            if (!deviceExprExact(predicate.condition))
+                domain.predicatesExact = false;
+            domain.predicates.push_back(std::move(predicate));
+        }
+    }
+
+    domain.domainExact = domain.addressExact && domain.predicatesExact;
+    if (!domain.addressExact)
+        domain.reason = "store byte address is not an exact formal-rooted expression";
+    else if (LI && LI->getLoopFor(store.getParent()))
+        domain.reason = "producer store is inside an unmodeled device loop";
+    else if (!domain.predicatesExact)
+        domain.reason = "a controlling predicate is not exactly modeled";
+    else
+        domain.reason = "exact formal-rooted byte interval and controlling predicates recovered";
+    return domain;
+}
+
 // How many transfers share a completion point.
 //
 // A flush or quiet is what actually releases staged work, so a transfer
@@ -703,7 +1101,8 @@ bool callMayWriteNonLocalMemory(const CallBase &call) {
 // Transfers with no completion point downstream still form a group — the
 // host's reset() drains them.
 void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
-                      DominatorTree *DT, PostDominatorTree *PDT) {
+                      DominatorTree *DT, PostDominatorTree *PDT,
+                      LoopInfo *LI) {
     if (!info.kernel) return;
 
     // Position within a block, so two sites in the same block can be
@@ -887,8 +1286,10 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
                 return;
             const Value *pointer = nullptr;
             bool atomic = false;
+            const StoreInst *ordinaryStore = nullptr;
             if (const auto *store = dyn_cast<StoreInst>(&I)) {
                 pointer = store->getPointerOperand();
+                ordinaryStore = store;
             } else if (const auto *rmw = dyn_cast<AtomicRMWInst>(&I)) {
                 pointer = rmw->getPointerOperand();
                 atomic = true;
@@ -929,6 +1330,10 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
             } else {
                 ++frontier.ordinary_store_sites;
                 ordinaryParams.push_back(arg->getArgNo());
+                if (ordinaryStore)
+                    frontier.producer_store_domains.push_back(
+                        producerStoreDomain(*ordinaryStore, *info.kernel,
+                                            DT, LI));
             }
         };
 
@@ -971,6 +1376,14 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
         frontier.write_footprint_known =
             frontier.ordinary_store_sites > 0 &&
             frontier.unknown_write_sites == 0;
+        frontier.producer_domains_known =
+            frontier.write_footprint_known &&
+            frontier.producer_store_domains.size() ==
+                frontier.ordinary_store_sites &&
+            llvm::all_of(frontier.producer_store_domains,
+                         [](const auto &domain) {
+                             return domain.domainExact;
+                         });
         SmallVector<unsigned, 4> sourceBufferParams;
         bool sourceBufferShapeKnown = true;
         for (unsigned i : members) {
@@ -1013,9 +1426,12 @@ void assignBatchSizes(const GICCKernelInfo &info, KernelTemplate &t,
         } else if (frontier.ordinary_store_sites == 0) {
             frontier.reason =
                 "no ordinary producer store exists between the transfer group and flush";
-        } else {
+        } else if (!frontier.producer_domains_known) {
             frontier.reason =
                 "formal-rooted writes recovered; exact domains and host buffer identity remain unproved";
+        } else {
+            frontier.reason =
+                "formal-rooted writes and exact local store domains recovered; transfer matching and side-effect partition remain unproved";
         }
         for (unsigned i : members)
             t.ops[i].producer_frontier = frontier;
@@ -1159,7 +1575,7 @@ KernelTemplate buildKernelTemplate(const GICCKernelInfo &info,
         fillArgs(site.CI, site.kind, op, info.kernel, ivPhi, &hostMirrored);
         t.ops.push_back(std::move(op));
     }
-    assignBatchSizes(info, t, DT, PDT);
+    assignBatchSizes(info, t, DT, PDT, LI);
     return t;
 }
 

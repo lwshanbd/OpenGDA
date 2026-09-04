@@ -842,6 +842,64 @@ json::Value loopDescriptor(const OpLoopInfo &L) {
     return json::Value(std::move(o));
 }
 
+const char *deviceExprKindTag(DeviceExpr::Kind kind) {
+    switch (kind) {
+        case DeviceExpr::Kind::Param:    return "param";
+        case DeviceExpr::Kind::ConstI64: return "const";
+        case DeviceExpr::Kind::Builtin:  return "builtin";
+        case DeviceExpr::Kind::BinOp:    return "binop";
+        case DeviceExpr::Kind::Cast:     return "cast";
+        case DeviceExpr::Kind::Compare:  return "compare";
+        case DeviceExpr::Kind::Select:   return "select";
+        case DeviceExpr::Kind::Unknown:  return "unknown";
+    }
+    return "unknown";
+}
+
+json::Value deviceExprFactRecord(const DeviceExpr &expr) {
+    json::Object record;
+    record["kind"] = deviceExprKindTag(expr.kind);
+    if (!expr.typeStr.empty()) record["type"] = expr.typeStr;
+    if (expr.kind == DeviceExpr::Kind::Param)
+        record["param"] = static_cast<int64_t>(expr.paramIdx);
+    if (expr.kind == DeviceExpr::Kind::ConstI64)
+        record["value"] = expr.constVal;
+    if (expr.kind == DeviceExpr::Kind::Builtin)
+        record["name"] = expr.opStr;
+    if (expr.kind == DeviceExpr::Kind::BinOp ||
+        expr.kind == DeviceExpr::Kind::Cast ||
+        expr.kind == DeviceExpr::Kind::Compare)
+        record["op"] = expr.opStr;
+    if (!expr.children.empty()) {
+        json::Array children;
+        for (const auto &child : expr.children)
+            children.push_back(deviceExprFactRecord(child));
+        record["children"] = std::move(children);
+    }
+    return json::Value(std::move(record));
+}
+
+json::Value producerStoreDomainRecord(
+        const ProducerStoreDomainFact &domain) {
+    json::Object record;
+    record["pointer_param"] = static_cast<int64_t>(domain.pointerParam);
+    record["byte_offset"] = deviceExprFactRecord(domain.byteOffset);
+    record["byte_size"] = static_cast<int64_t>(domain.byteSize);
+    record["address_exact"] = domain.addressExact;
+    json::Array predicates;
+    for (const auto &predicate : domain.predicates) {
+        json::Object item;
+        item["condition"] = deviceExprFactRecord(predicate.condition);
+        item["required_value"] = predicate.requiredValue;
+        predicates.push_back(std::move(item));
+    }
+    record["predicates"] = std::move(predicates);
+    record["predicates_exact"] = domain.predicatesExact;
+    record["domain_exact"] = domain.domainExact;
+    record["reason"] = domain.reason;
+    return json::Value(std::move(record));
+}
+
 json::Value producerFrontierRecord(const ProducerFrontierFacts &facts) {
     json::Object record;
     record["analyzed"] = facts.analyzed;
@@ -868,6 +926,11 @@ json::Value producerFrontierRecord(const ProducerFrontierFacts &facts) {
     }
     record["buffer_identity_guard_reason"] =
         facts.buffer_identity_guard_reason;
+    record["producer_domains_known"] = facts.producer_domains_known;
+    json::Array domains;
+    for (const auto &domain : facts.producer_store_domains)
+        domains.push_back(producerStoreDomainRecord(domain));
+    record["producer_store_domains"] = std::move(domains);
     record["ordinary_store_sites"] =
         static_cast<int64_t>(facts.ordinary_store_sites);
     record["atomic_write_sites"] =

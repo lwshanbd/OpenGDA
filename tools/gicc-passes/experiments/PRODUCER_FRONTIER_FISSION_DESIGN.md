@@ -102,6 +102,17 @@ but deliberately does not discharge `exact_transfer_intervals`: runtime
 formal binding, buffer identity, and the matching producer domain still have
 to be proved and replayed by LTO.
 
+Device discovery now preserves the matching local store semantics as well.
+For each ordinary producer store it records a formal-rooted byte address and
+the conjunction of dominating control predicates, using target-independent
+expression nodes plus explicit GPU coordinate builtins. On unchanged Jacobi,
+the real O3 HIP pipeline recovers the one `a_new` store as
+`4 * ((global_y + iy_start) * nx + global_x + 1)` under
+`global_y + iy_start < iy_end` and `global_x + 1 < nx - 1`. This is marked
+`domain_exact` only as a local device-IR fact. Relating its formal values to
+the two transfer intervals and proving a disjoint/complete two-phase
+partition remain separate fail-closed obligations.
+
 Device LTO rewrites the original kernel body:
 
 - boundary phase skips PUT/flush/quiet and executes only iterations whose

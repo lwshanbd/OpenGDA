@@ -121,6 +121,32 @@ for all of them.
       "producer_pointer_param": 1,
       "source_buffer_index_param": 12,
       "buffer_identity_guard_reason": "one producer pointer and one shared i32 source-buffer formal can be guarded at launch",
+      "producer_domains_known": true,         // every ordinary store below is exact
+      "producer_store_domains": [{
+        "pointer_param": 1,                   // destination pointer formal
+        "byte_offset": {                      // source-free device expression
+          "kind": "binop", "op": "mul", "type": "i64",
+          "children": [
+            {"kind": "param", "param": 6, "type": "i64"},
+            {"kind": "const", "value": 4, "type": "i64"}
+          ]
+        },
+        "byte_size": 4,
+        "address_exact": true,
+        "predicates": [{                      // conjunction; all entries required
+          "condition": {
+            "kind": "compare", "op": "ult", "type": "i1",
+            "children": [
+              {"kind": "param", "param": 6, "type": "i64"},
+              {"kind": "const", "value": 1024, "type": "i64"}
+            ]
+          },
+          "required_value": true
+        }],
+        "predicates_exact": true,
+        "domain_exact": true,                 // local IR recovery only
+        "reason": "exact formal-rooted byte interval and controlling predicates recovered"
+      }],
       "ordinary_store_sites": 1,
       "atomic_write_sites": 1,
       "unknown_write_sites": 0,
@@ -192,6 +218,17 @@ expression has no opaque leaf, while `affine` is a stricter, conservative
 classification for the first producer-frontier candidate. Neither flag proves
 buffer identity, binds runtime formal values, proves a producer domain, or
 adds a fission action to `legal_paths`.
+
+`producer_store_domains` is a device-IR slice, not source reconstruction. A
+store is represented by its pointer-formal index, byte offset/size, and the
+conjunction of controlling predicates. Expressions may contain kernel
+formals, typed constants, typed arithmetic/casts/comparisons, selects, and target builtins
+such as `block_id_y`, `block_size_y`, and `thread_id_y`. Any unmodeled leaf,
+loop-carried store, or control terminator makes the corresponding exact flag
+false. `producer_domains_known=true` means every ordinary store was recovered
+in this local form; it still does not prove that a registered transfer buffer
+is the pointer, that its interval equals a producer subset, or that the
+boundary/remainder partition is complete.
 
 `phase_launch_supported` is also a compiler proof, not a model assertion. It
 is true only when every aggregated host call is a non-throwing direct call to

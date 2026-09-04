@@ -85,6 +85,42 @@ def feature(site_id, *, hk=True, locality=None, batched_loop=False):
             "producer_pointer_param": 1,
             "source_buffer_index_param": 12,
             "buffer_identity_guard_reason": "compiler guard shape",
+            "producer_domains_known": True,
+            "producer_store_domains": [
+                {
+                    "pointer_param": 1,
+                    "byte_offset": {
+                        "kind": "binop",
+                        "op": "mul",
+                        "type": "i64",
+                        "children": [
+                            {"kind": "param", "param": 6, "type": "i64"},
+                            {"kind": "const", "value": 4, "type": "i64"},
+                        ],
+                    },
+                    "byte_size": 4,
+                    "address_exact": True,
+                    "predicates": [
+                        {
+                            "condition": {
+                                "kind": "compare",
+                                "op": "ult",
+                                "type": "i1",
+                                "children": [
+                                    {"kind": "param", "param": 6,
+                                     "type": "i64"},
+                                    {"kind": "const", "value": 1024,
+                                     "type": "i64"},
+                                ],
+                            },
+                            "required_value": True,
+                        }
+                    ],
+                    "predicates_exact": True,
+                    "domain_exact": True,
+                    "reason": "compiler-recovered local store domain",
+                }
+            ],
             "ordinary_store_sites": 1,
             "atomic_write_sites": 1,
             "unknown_write_sites": 0,
@@ -170,6 +206,12 @@ class LlmBridgeTests(unittest.TestCase):
         self.assertTrue(
             self.dossier["sites"][0]["transfer_interval"]
                         ["symbolically_exact"]
+        )
+        domain = self.dossier["sites"][0]["producer_frontier"] \
+                             ["producer_store_domains"][0]
+        self.assertTrue(domain["domain_exact"])
+        self.assertEqual(
+            "ult", domain["predicates"][0]["condition"]["op"]
         )
         self.assertTrue(
             self.dossier["sites"][0]["phase_launch_supported"]

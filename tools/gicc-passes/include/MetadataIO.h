@@ -57,6 +57,50 @@ struct GuardSpec {
     std::vector<ArgRef> fieldArg;
 };
 
+// Source-free expression recovered from device IR.  This is separate from
+// ArgRef: ArgRef is intentionally host-evaluable, while a producer address or
+// predicate may depend on GPU launch coordinates.  Unknown leaves are kept in
+// the tree so feature extraction can fail closed without hiding where
+// recovery stopped.
+struct DeviceExpr {
+    enum class Kind {
+        Param,
+        ConstI64,
+        Builtin,
+        BinOp,
+        Cast,
+        Compare,
+        Select,
+        Unknown,
+    };
+    Kind                    kind = Kind::Unknown;
+    unsigned                paramIdx = 0;
+    int64_t                 constVal = 0;
+    std::string             opStr;
+    std::string             typeStr;
+    std::vector<DeviceExpr> children;
+};
+
+struct ProducerPredicateFact {
+    DeviceExpr condition;
+    bool       requiredValue = true;
+};
+
+// One ordinary producer store, expressed as a byte interval rooted in a
+// kernel pointer formal and the exact controlling predicates required to
+// reach it.  `domain_exact` is only a local IR-recovery fact: it does not bind
+// a transfer buffer handle or prove that this domain matches a transfer.
+struct ProducerStoreDomainFact {
+    unsigned                           pointerParam = 0;
+    DeviceExpr                         byteOffset;
+    uint64_t                           byteSize = 0;
+    bool                               addressExact = false;
+    std::vector<ProducerPredicateFact> predicates;
+    bool                               predicatesExact = false;
+    bool                               domainExact = false;
+    std::string                        reason;
+};
+
 // Description of a loop containing a GICC call site. Populated by the
 // TraceTemplateBuilder when it detects that the call's parent BB has a
 // canonical "for (i = start; i < bound; i += step)" loop with the bound
@@ -101,6 +145,8 @@ struct ProducerFrontierFacts {
     unsigned              producer_pointer_param = 0;
     unsigned              source_buffer_index_param = 0;
     std::string           buffer_identity_guard_reason;
+    bool                  producer_domains_known = false;
+    std::vector<ProducerStoreDomainFact> producer_store_domains;
     unsigned              ordinary_store_sites = 0;
     unsigned              atomic_write_sites = 0;
     unsigned              unknown_write_sites = 0;
