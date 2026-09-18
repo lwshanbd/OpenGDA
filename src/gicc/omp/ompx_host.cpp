@@ -284,6 +284,12 @@ void ompx_free(void* ptr) {
 
 size_t ompx_heap_size() { return g_heap_bytes; }
 
+int ompx_heap_index() { return g_heap.index; }
+
+size_t ompx_heap_offset_of(const void* addr) {
+    return offset_of(addr, "ompx_heap_offset_of");
+}
+
 // ---- data movement ----------------------------------------------------------
 
 void* ompx_peer_ptr(int peer, const void* addr) {

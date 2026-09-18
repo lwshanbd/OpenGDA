@@ -57,6 +57,12 @@ void* ompx_bind(void* host_ptr, size_t bytes);     // alloc + associate + copy i
 void  ompx_free(void* ptr);
 size_t ompx_heap_size(void);                       // configured heap bytes
 
+// Escape hatch for the compiler path: the DWQ markers below take the buffer
+// index and heap offset the LTO pass analyses, so an application using them
+// needs to name an allocation that way. Ordinary code never calls these.
+int    ompx_heap_index(void);                      // address-book index of the heap
+size_t ompx_heap_offset_of(const void* addr);      // heap offset of an address
+
 // ---- data movement ----------------------------------------------------------
 // Addresses are local addresses of symmetric objects. `dst` names the object on
 // `peer`; `src` names our own copy.
