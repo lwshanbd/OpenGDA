@@ -229,7 +229,7 @@ target_link_libraries(app PRIVATE gicc::omp)          # or gicc::omp_dwq for the
 ```
 **Or via flags** (non-CMake): `clang++ $(gicc-omp-config --cflags) app.cpp $(gicc-omp-config --libs)` (add `--dwq`).
 
-**API** (`src/gicc/omp.h`, 17 functions). Memory is a **symmetric heap**: one
+**API** (`src/gicc/omp.h`). Memory is a **symmetric heap**: one
 device allocation registered with the NIC and exchanged inside `ompx_init`, so an
 application never registers or exchanges anything. Allocations carve from it and
 land at the same offset on every rank, which is why put/get/peer_ptr take ordinary
@@ -240,7 +240,10 @@ ompx_init/finalize, ompx_get_rank_num/num_ranks            /* control   */
 ompx_alloc(bytes), ompx_bind(host_ptr,bytes), ompx_free     /* memory    */
 ompx_peer_ptr(peer,addr), ompx_put/get(peer,dst,src,bytes)  /* movement  */
 ompx_quiet, ompx_barrier, ompx_fence, ompx_set_transport    /* completion*/
-ompx_prepare, ompx_put_dev/get_dev/quiet_dev                /* device    */
+ompx_dwq_stage_put/stage_get, ompx_dwq_arm/trigger/enabled  /* batched DWQ */
+ompx_prepare, ompx_put_dev/get_dev/get_dev_single           /* device    */
+ompx_quiet_dev, ompx_dwq_fire_dev                           /* device    */
+ompx_heap_index, ompx_heap_offset_of                        /* compiler path */
 ```
 
 `ompx_bind` allocates on the heap, binds it to the application's host pointer with
@@ -252,9 +255,18 @@ store — no transfer at all. `ompx_put` dispatches per call: same-node IPC copy
 else the CPU proxy (host-side ring push, no kernel launch) or a DWQ triggered
 descriptor. `ompx_fence` = quiet + barrier; call it before reading peer writes.
 The `ompx_*_dev` forms take the same addresses inside your own `#pragma omp
-target is_device_ptr(ctx)`, for batching many puts in one kernel.
-Examples: `examples/omp/` (NOT yet ported to this API); the minimod halo in
-`minimod-giomp/targets/omp_gicc/target_3d.c` is the reference user of it.
+target is_device_ptr(ctx)`, for batching many puts in one kernel; each takes an
+optional `lane` so independent transfers ride independent proxy rings. The
+batched DWQ is stage-any-number then fire-once: `ompx_dwq_trigger` launches its
+own kernel, while `ompx_dwq_arm` + `ompx_dwq_fire_dev` let a kernel the
+application is launching anyway carry the trigger, which is what the benchmarks
+measure. `ompx_heap_index` / `ompx_heap_offset_of` exist only for the DWQ
+markers, whose arguments the LTO pass needs in buffer-index form.
+Examples: `examples/omp/`, all ported. Eleven of them are verified on Delta AI;
+`giomp_p2p_eval`, `giomp_streaming_halo` and `giomp_fused_kernel_bench` include
+`hip/hip_runtime_api.h` unconditionally and `halo_dwq` / `e_dwq_single` need the
+pass plugin, so those five build on Tioga only. The minimod halo in
+`minimod-giomp/targets/omp_gicc/target_3d.c` is the reference user of the API.
 
 **Multi-rank SAME-node needs the full launch recipe** (per-rank device select),
 else the compute kernels fault ("write to read-only page") on a mismatched GPU:
