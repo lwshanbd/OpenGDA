@@ -200,8 +200,8 @@ to `MAX_TRIES` (default 4) to ride through it; fixing the race itself is open wo
 
 A friendly repackaging of the GICC-from-OpenMP path: an app includes ONE header
 and links ONE prebuilt library — no application-owned runtime adapter and no
-hand-written multi-TU build. GiOMP = DiOMP + GICC: the API reuses DiOMP names
-(`omp_get_rank_num`, `omp_get_num_ranks`, `ompx_barrier`) where they map 1:1.
+hand-written multi-TU build. GiOMP = DiOMP + GICC. Every entry point is prefixed `ompx_` and is `extern "C"`,
+so C and C++ applications use the same header.
 
 **Toolchain: ROCm 6.4.0 clang** (`/opt/rocm-6.4.0/lib/llvm/bin/clang++`), NOT the
 diomp clang-21. This is deliberate: the LTO pass plugin is built against ROCm
@@ -229,17 +229,32 @@ target_link_libraries(app PRIVATE gicc::omp)          # or gicc::omp_dwq for the
 ```
 **Or via flags** (non-CMake): `clang++ $(gicc-omp-config --cflags) app.cpp $(gicc-omp-config --libs)` (add `--dwq`).
 
-**API:** `ompx_init/finalize`, `omp_get_rank_num/num_ranks`, `ompx_alloc` (returns
-`ompx_buffer{ptr,index,bytes}`, alloc+register) / `ompx_register` / `ompx_free`,
-`ompx_exchange`, `ompx_prepare`, `ompx_barrier`, `ompx_quiet_host` (host).
-`ompx_put(ctx,peer,dbuf,doff,sbuf,soff,bytes,xport)` is a **smart host-side put**:
-IPC (in-kernel xGMI) if the peer is same-node reachable, else the cross-node
-transport `xport` (`OMPX_PROXY` default, or `OMPX_DWQ` runtime-triggered); it
-issues the `#pragma omp target` region itself. For batching many puts in one
-kernel, call the device-side `ompx_put_proxy`/`ompx_get`/`ompx_quiet` inside your
-own `#pragma omp target`. `ompx_dwq_put/flush` markers = the pass-based DWQ.
-Examples: `examples/omp/{hello_giomp,omp_matmul,omp_pingpong}.cpp`; the minimod
-halo (`Minimod_DiOMP/targets/omp_gicc/gicc_halo.cpp`) uses the smart `ompx_put`.
+**API** (`src/gicc/omp.h`, 17 functions). Memory is a **symmetric heap**: one
+device allocation registered with the NIC and exchanged inside `ompx_init`, so an
+application never registers or exchanges anything. Allocations carve from it and
+land at the same offset on every rank, which is why put/get/peer_ptr take ordinary
+addresses — either a heap address or a host pointer bound with `ompx_bind`.
+
+```c
+ompx_init/finalize, ompx_get_rank_num/num_ranks            /* control   */
+ompx_alloc(bytes), ompx_bind(host_ptr,bytes), ompx_free     /* memory    */
+ompx_peer_ptr(peer,addr), ompx_put/get(peer,dst,src,bytes)  /* movement  */
+ompx_quiet, ompx_barrier, ompx_fence, ompx_set_transport    /* completion*/
+ompx_prepare, ompx_put_dev/get_dev/quiet_dev                /* device    */
+```
+
+`ompx_bind` allocates on the heap, binds it to the application's host pointer with
+`omp_target_associate_ptr` and copies the data in, so existing `map` clauses and
+compute kernels keep working unchanged. `ompx_peer_ptr` returns a same-node peer's
+address for the same object (NULL cross-node): pass it into a target region with
+`is_device_ptr` and the thread that computes a boundary cell publishes it with one
+store — no transfer at all. `ompx_put` dispatches per call: same-node IPC copy,
+else the CPU proxy (host-side ring push, no kernel launch) or a DWQ triggered
+descriptor. `ompx_fence` = quiet + barrier; call it before reading peer writes.
+The `ompx_*_dev` forms take the same addresses inside your own `#pragma omp
+target is_device_ptr(ctx)`, for batching many puts in one kernel.
+Examples: `examples/omp/` (NOT yet ported to this API); the minimod halo in
+`minimod-giomp/targets/omp_gicc/target_3d.c` is the reference user of it.
 
 **Multi-rank SAME-node needs the full launch recipe** (per-rank device select),
 else the compute kernels fault ("write to read-only page") on a mismatched GPU:
