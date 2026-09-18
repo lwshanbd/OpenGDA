@@ -1,6 +1,6 @@
 // halo_omp_bench.cpp - GICC-from-OpenMP halo exchange bandwidth/latency sweep.
 // Each rank exchanges `size`-byte faces with its left/right ring neighbors via
-// gicc::omp::put issued from an omp target region. Times the full halo round
+// ompx_put_dev issued from an omp target region. Times the full halo round
 // (region + host drain + barrier), sweeping message size. Run cross-node
 // (-N2 -n2 1/node) for the NIC path or intra-node (-N1 -n2) for IPC.
 #include <omp.h>
@@ -24,16 +24,20 @@ int main() {
     const int    kWarm  = 10;
 
     ompx_init();
-    ompx_buffer buffer = ompx_alloc(nbuf);
-    ompx_exchange();
-    int my = omp_get_rank_num();
-    int nr = omp_get_num_ranks();
+    void* buffer = ompx_alloc(nbuf);
+    int my = ompx_get_rank_num();
+    int nr = ompx_get_num_ranks();
     if (nr < 2) { if (!my) fprintf(stderr, "need >=2 ranks\n"); ompx_free(buffer); ompx_finalize(); return 1; }
     int left  = (my - 1 + nr) % nr;
     int right = (my + 1) % nr;
-    int bidx  = buffer.index;
 
-    const size_t off_lsend = 0, off_rsend = maxface, off_lrecv = 2 * maxface, off_rrecv = 3 * maxface;
+    // The heap is symmetric, so these local face addresses also name the
+    // neighbor's faces on the receiving side.
+    char* base  = (char*)buffer;
+    char* lsend = base;
+    char* rsend = base + maxface;
+    char* lrecv = base + 2 * maxface;
+    char* rrecv = base + 3 * maxface;
 
     if (my == 0) {
         printf("# GICC-from-OpenMP halo: ranks=%d iters=%d\n", nr, kIters);
@@ -42,32 +46,30 @@ int main() {
 
     for (int s = 0; s < nsz; ++s) {
         size_t sz = sizes[s];
-        gicc::DeviceCtx* d_ctx = ompx_prepare();
+        ompx_ctx* d_ctx = ompx_prepare();
 
         for (int it = 0; it < kWarm; ++it) {
-            #pragma omp target is_device_ptr(d_ctx)
+            #pragma omp target is_device_ptr(d_ctx, lsend, rsend, lrecv, rrecv)
             {
-                ompx_put_proxy(d_ctx, right, bidx, off_lrecv, bidx, off_rsend, sz, 0);
-                ompx_put_proxy(d_ctx, left,  bidx, off_rrecv, bidx, off_lsend, sz, 1);
-                ompx_quiet(d_ctx, 0);
-                ompx_quiet(d_ctx, 1);
+                ompx_put_dev(d_ctx, right, lrecv, rsend, sz, 0);
+                ompx_put_dev(d_ctx, left,  rrecv, lsend, sz, 1);
+                ompx_quiet_dev(d_ctx, 0);
+                ompx_quiet_dev(d_ctx, 1);
             }
-            ompx_quiet_host();
-            ompx_barrier();
+            ompx_fence();
         }
 
         ompx_barrier();
         double t0 = omp_get_wtime();
         for (int it = 0; it < kIters; ++it) {
-            #pragma omp target is_device_ptr(d_ctx)
+            #pragma omp target is_device_ptr(d_ctx, lsend, rsend, lrecv, rrecv)
             {
-                ompx_put_proxy(d_ctx, right, bidx, off_lrecv, bidx, off_rsend, sz, 0);
-                ompx_put_proxy(d_ctx, left,  bidx, off_rrecv, bidx, off_lsend, sz, 1);
-                ompx_quiet(d_ctx, 0);
-                ompx_quiet(d_ctx, 1);
+                ompx_put_dev(d_ctx, right, lrecv, rsend, sz, 0);
+                ompx_put_dev(d_ctx, left,  rrecv, lsend, sz, 1);
+                ompx_quiet_dev(d_ctx, 0);
+                ompx_quiet_dev(d_ctx, 1);
             }
-            ompx_quiet_host();
-            ompx_barrier();
+            ompx_fence();
         }
         double t1 = omp_get_wtime();
 

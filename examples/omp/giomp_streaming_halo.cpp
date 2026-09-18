@@ -158,7 +158,7 @@ inline uint64_t run_work(uint64_t value, int iterations) {
 #pragma omp end declare target
 
 void execute_giomp_iteration(Path path, unsigned char* data,
-                             int peer, int buffer_index, size_t bytes,
+                             int peer, size_t bytes,
                              int tiles, int producer_work, int work,
                              int teams, int threads,
                              uint64_t epoch, unsigned char value) {
@@ -169,18 +169,18 @@ void execute_giomp_iteration(Path path, unsigned char* data,
                                  static_cast<size_t>(tiles);
             const size_t end = bytes * static_cast<size_t>(tile + 1) /
                                static_cast<size_t>(tiles);
-            ompx_dwq_stage_put(peer, buffer_index, kRecvOffset + begin,
-                               buffer_index, kSendOffset + begin, end - begin);
+            ompx_dwq_stage_put(peer, data + kRecvOffset + begin,
+                               data + kSendOffset + begin, end - begin);
         }
         // Arm on the host, but fire the doorbell only after the GPU produces
-        // the halo. This avoids the extra target launch in ompx_dwq_trigger().
+        // the halo. This avoids the extra kernel launch in ompx_dwq_trigger().
         ompx_dwq_arm();
     }
 
     const int path_value = static_cast<int>(path);
     #pragma omp target teams num_teams(teams) thread_limit(threads) \
         is_device_ptr(data, ctx) \
-        firstprivate(path_value, peer, buffer_index, bytes, tiles, producer_work, \
+        firstprivate(path_value, peer, bytes, tiles, producer_work, \
                      work, threads, epoch, value)
     {
         const int team = omp_get_team_num();
@@ -211,8 +211,8 @@ void execute_giomp_iteration(Path path, unsigned char* data,
                 #pragma omp barrier
                 if (tid == 0) {
                     if (path_value == static_cast<int>(Path::Proxy)) {
-                        ompx_put_proxy(ctx, peer, buffer_index, kRecvOffset + begin,
-                                       buffer_index, kSendOffset + begin, end - begin);
+                        ompx_put_dev(ctx, peer, data + kRecvOffset + begin,
+                                     data + kSendOffset + begin, end - begin);
                     }
                     __atomic_store_n(&ready[team], epoch, __ATOMIC_RELEASE);
                 }
@@ -228,7 +228,7 @@ void execute_giomp_iteration(Path path, unsigned char* data,
 
             if (path_value == static_cast<int>(Path::Dwq) && team == 0 && tid == 0) {
                 __atomic_thread_fence(__ATOMIC_SEQ_CST);
-                *(ctx->trigger_addr_) = ctx->trigger_val_;
+                ompx_dwq_fire_dev(ctx);
                 __atomic_thread_fence(__ATOMIC_SEQ_CST);
             }
 
@@ -239,10 +239,10 @@ void execute_giomp_iteration(Path path, unsigned char* data,
 
             #pragma omp barrier
             if (path_value == static_cast<int>(Path::Proxy) && team == 0 && tid == 0)
-                ompx_quiet(ctx);
+                ompx_quiet_dev(ctx);
         }
     }
-    ompx_quiet_host();
+    ompx_quiet();
 }
 
 void execute_mpi_compute_only(unsigned char* data, size_t bytes,
@@ -390,7 +390,7 @@ void execute_mpi_iteration(bool communicate, unsigned char* data,
 
 Measurement measure(const Options& options, bool use_mpi,
                     Path path, bool communicate, int measured_work,
-                    unsigned char* data, int rank, int peer, int buffer_index,
+                    unsigned char* data, int rank, int peer,
                     uint64_t& next_epoch) {
     Measurement result;
     for (int i = 0; i < options.warmup; ++i) {
@@ -403,7 +403,7 @@ Measurement measure(const Options& options, bool use_mpi,
                                   epoch, value);
         else
             execute_giomp_iteration(communicate ? path : Path::None, data,
-                                    peer, buffer_index, options.bytes,
+                                    peer, options.bytes,
                                     options.tiles, options.producer_work, measured_work,
                                     options.teams, options.threads,
                                     epoch, value);
@@ -421,7 +421,7 @@ Measurement measure(const Options& options, bool use_mpi,
                                   epoch, value);
         else
             execute_giomp_iteration(communicate ? path : Path::None, data,
-                                    peer, buffer_index, options.bytes,
+                                    peer, options.bytes,
                                     options.tiles, options.producer_work, measured_work,
                                     options.teams, options.threads,
                                     epoch, value);
@@ -468,7 +468,6 @@ int main(int argc, char** argv) {
     int rank = -1;
     int nranks = 0;
     unsigned char* data = nullptr;
-    ompx_buffer giomp_buffer{};
 
     if (use_mpi) {
         int provided = MPI_THREAD_SINGLE;
@@ -492,22 +491,20 @@ int main(int argc, char** argv) {
                   "hipMalloc", rank);
     } else {
         ompx_init();
-        rank = omp_get_rank_num();
-        nranks = omp_get_num_ranks();
+        rank = ompx_get_rank_num();
+        nranks = ompx_get_num_ranks();
         if ((path == Path::Dwq) != ompx_dwq_enabled()) {
             if (rank == 0)
                 std::fprintf(stderr, "%s requires GICC_HALO_DWQ=%d\n",
                              options.transport.c_str(), path == Path::Dwq ? 1 : 0);
             MPI_Abort(MPI_COMM_WORLD, 7);
         }
-        giomp_buffer = ompx_alloc(buffer_bytes);
-        data = static_cast<unsigned char*>(giomp_buffer.ptr);
-        ompx_exchange();
+        data = static_cast<unsigned char*>(ompx_alloc(buffer_bytes));
     }
 
     require_two_distinct_nodes(rank, nranks);
     const int peer = rank ^ 1;
-    if (!use_mpi && ompx_ipc_reachable(peer, giomp_buffer.index)) {
+    if (!use_mpi && ompx_peer_ptr(peer, data) != nullptr) {
         if (rank == 0)
             std::fprintf(stderr, "unexpected IPC-reachable peer\n");
         MPI_Abort(MPI_COMM_WORLD, 8);
@@ -527,17 +524,13 @@ int main(int argc, char** argv) {
 
     uint64_t next_epoch = 1;
     const Measurement producer = measure(options, use_mpi, path, false, 0,
-                                         data, rank, peer, giomp_buffer.index,
-                                         next_epoch);
+                                         data, rank, peer, next_epoch);
     const Measurement compute = measure(options, use_mpi, path, false, options.work,
-                                        data, rank, peer, giomp_buffer.index,
-                                        next_epoch);
+                                        data, rank, peer, next_epoch);
     const Measurement communication = measure(options, use_mpi, path, true, 0,
-                                              data, rank, peer, giomp_buffer.index,
-                                              next_epoch);
+                                              data, rank, peer, next_epoch);
     const Measurement full = measure(options, use_mpi, path, true, options.work,
-                                     data, rank, peer, giomp_buffer.index,
-                                     next_epoch);
+                                     data, rank, peer, next_epoch);
 
     const int verify_error = verify_received(data, options.bytes, rank, peer,
                                              full.final_epoch);
@@ -582,7 +575,7 @@ int main(int argc, char** argv) {
         check_hip(hipFree(data), "hipFree", rank);
         MPI_Finalize();
     } else {
-        ompx_free(giomp_buffer);
+        ompx_free(data);
         ompx_finalize();
     }
     return verify_error == 0 ? 0 : 9;

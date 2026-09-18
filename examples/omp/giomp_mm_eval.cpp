@@ -136,8 +136,8 @@ void runtime_init(int argc, char** argv, int& rank, int& nranks) {
     (void)argc;
     (void)argv;
     ompx_init();
-    rank = omp_get_rank_num();
-    nranks = omp_get_num_ranks();
+    rank = ompx_get_rank_num();
+    nranks = ompx_get_num_ranks();
 #elif defined(MM_BACKEND_DIOMP)
     // DiOMP/GASNet bootstraps through PMI and does not initialize MPI.  MPI is
     // used here only for the benchmark's identical placement check, barrier,
@@ -219,18 +219,17 @@ void compute_block_plain(float* a, float* current_b, float* c,
 template <bool UseDwq>
 __attribute__((noinline))
 void issue_giomp_get(gicc::DeviceCtx* ctx, int right,
-                     int current_index, int next_index,
+                     float* current_b, float* next_b,
                      size_t stripe_bytes) {
     if constexpr (UseDwq) {
         // This is a GET trigger: the host-staged descriptor is ordered before
         // the target launch and the NIC produces the local destination.  No
-        // GPU data needs publishing before the MMIO store, so a pair of
-        // seq_cst system fences would be unnecessary and stronger than
-        // GiOMP's public DWQ trigger API.
-        *(ctx->trigger_addr_) = ctx->trigger_val_;
+        // GPU data needs publishing before the MMIO store, so wrapping this
+        // fire in a pair of seq_cst system fences would be unnecessary and
+        // stronger than the bare store ompx_dwq_fire_dev performs.
+        ompx_dwq_fire_dev(ctx);
     } else {
-        ompx_get_single(ctx, right, current_index, 0,
-                        next_index, 0, stripe_bytes);
+        ompx_get_dev_single(ctx, right, next_b, current_b, stripe_bytes);
     }
 }
 
@@ -241,18 +240,17 @@ template <bool UseDwq>
 void compute_block_fused_loop(float* a, float* current_b, float* c,
                               int n, int ns, int block, int threads,
                               gicc::DeviceCtx* ctx, int right,
-                              int current_index, int next_index,
+                              float* next_b,
                               size_t stripe_bytes) {
     const int column_offset = block * ns;
     #pragma omp target teams distribute parallel for collapse(2) \
-        thread_limit(threads) is_device_ptr(a, current_b, c, ctx) \
-        firstprivate(n, ns, column_offset, right, current_index, next_index, \
-                     stripe_bytes)
+        thread_limit(threads) is_device_ptr(a, current_b, c, ctx, next_b) \
+        firstprivate(n, ns, column_offset, right, stripe_bytes)
     for (int i = 0; i < ns; ++i) {
         for (int j = 0; j < ns; ++j) {
             if (i == 0 && j == 0)
-                issue_giomp_get<UseDwq>(ctx, right, current_index,
-                                        next_index, stripe_bytes);
+                issue_giomp_get<UseDwq>(ctx, right, current_b,
+                                        next_b, stripe_bytes);
             float sum = 0.0f;
             for (int k = 0; k < n; ++k)
                 sum += a[static_cast<size_t>(i) * n + k] *
@@ -268,17 +266,16 @@ void compute_block_fused_loop(float* a, float* current_b, float* c,
 __attribute__((noinline))
 void issue_giomp_get_unified(gicc::DeviceCtx* ctx, int use_dwq,
                              int trigger_fences, int right,
-                             int current_index, int next_index,
+                             float* current_b, float* next_b,
                              size_t stripe_bytes) {
     if (use_dwq) {
         if (trigger_fences)
             __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        *(ctx->trigger_addr_) = ctx->trigger_val_;
+        ompx_dwq_fire_dev(ctx);
         if (trigger_fences)
             __atomic_thread_fence(__ATOMIC_SEQ_CST);
     } else {
-        ompx_get_single(ctx, right, current_index, 0,
-                        next_index, 0, stripe_bytes);
+        ompx_get_dev_single(ctx, right, next_b, current_b, stripe_bytes);
     }
 }
 
@@ -286,18 +283,18 @@ void compute_block_fused_unified(float* a, float* current_b, float* c,
                                  int n, int ns, int block, int threads,
                                  gicc::DeviceCtx* ctx, int use_dwq,
                                  int trigger_fences, int right,
-                                 int current_index, int next_index,
+                                 float* next_b,
                                  size_t stripe_bytes) {
     const int column_offset = block * ns;
     #pragma omp target teams distribute parallel for collapse(2) \
-        thread_limit(threads) is_device_ptr(a, current_b, c, ctx) \
+        thread_limit(threads) is_device_ptr(a, current_b, c, ctx, next_b) \
         firstprivate(n, ns, column_offset, use_dwq, trigger_fences, right, \
-                     current_index, next_index, stripe_bytes)
+                     stripe_bytes)
     for (int i = 0; i < ns; ++i) {
         for (int j = 0; j < ns; ++j) {
             if (i == 0 && j == 0)
                 issue_giomp_get_unified(ctx, use_dwq, trigger_fences, right,
-                                        current_index, next_index,
+                                        current_b, next_b,
                                         stripe_bytes);
             float sum = 0.0f;
             for (int k = 0; k < n; ++k)
@@ -316,17 +313,16 @@ template <bool UseDwq>
 void compute_block_fused_master(float* a, float* current_b, float* c,
                                 int n, int ns, int block, int threads,
                                 gicc::DeviceCtx* ctx, int right,
-                                int current_index, int next_index,
+                                float* next_b,
                                 size_t stripe_bytes) {
     const int column_offset = block * ns;
     #pragma omp target teams thread_limit(threads) \
-        is_device_ptr(a, current_b, c, ctx) \
-        firstprivate(n, ns, column_offset, right, current_index, next_index, \
-                     stripe_bytes)
+        is_device_ptr(a, current_b, c, ctx, next_b) \
+        firstprivate(n, ns, column_offset, right, stripe_bytes)
     {
         if (omp_get_team_num() == 0)
-            issue_giomp_get<UseDwq>(ctx, right, current_index,
-                                    next_index, stripe_bytes);
+            issue_giomp_get<UseDwq>(ctx, right, current_b,
+                                    next_b, stripe_bytes);
 
         #pragma omp distribute parallel for collapse(2)
         for (int i = 0; i < ns; ++i) {
@@ -345,13 +341,13 @@ void compute_block_fused_master(float* a, float* current_b, float* c,
 // whether any remaining cost comes from fusing communication into that kernel.
 template <bool UseDwq>
 void issue_giomp_get_split(gicc::DeviceCtx* ctx, int right,
-                           int current_index, int next_index,
+                           float* current_b, float* next_b,
                            size_t stripe_bytes) {
-    #pragma omp target is_device_ptr(ctx) \
-        firstprivate(right, current_index, next_index, stripe_bytes)
+    #pragma omp target is_device_ptr(ctx, current_b, next_b) \
+        firstprivate(right, stripe_bytes)
     {
-        issue_giomp_get<UseDwq>(ctx, right, current_index,
-                                next_index, stripe_bytes);
+        issue_giomp_get<UseDwq>(ctx, right, current_b,
+                                next_b, stripe_bytes);
     }
 }
 #endif
@@ -455,15 +451,20 @@ int main(int argc, char** argv) {
                     selected_kernel_style, proxy_single_producer);
     }
 
+#if defined(MM_BACKEND_GIOMP)
+    // The two B stripes are the only communicated buffers, so they live on the
+    // symmetric heap. ompx_bind associates each heap block with the host array,
+    // which leaves the map clauses and compute kernels below untouched.
+    ompx_bind(b0, stripe_bytes);
+    ompx_bind(b1, stripe_bytes);
+#endif
+
     #pragma omp target data map(to: a[0:elements], b0[0:elements]) \
         map(alloc: b1[0:elements]) map(from: c[0:elements])
     {
         #pragma omp target data use_device_ptr(a, b0, b1, c)
         {
 #if defined(MM_BACKEND_GIOMP)
-            const int b0_index = ompx_register(b0, stripe_bytes);
-            const int b1_index = ompx_register(b1, stripe_bytes);
-            ompx_exchange();
             const int right = (rank + 1) % nranks;
 #elif defined(MM_BACKEND_DIOMP)
             const int right = (rank + 1) % nranks;
@@ -483,10 +484,6 @@ int main(int argc, char** argv) {
 
                 float* current_b = b0;
                 float* next_b = b1;
-#if defined(MM_BACKEND_GIOMP)
-                int current_index = b0_index;
-                int next_index = b1_index;
-#endif
 
                 MPI_Barrier(MPI_COMM_WORLD);
                 const double start = MPI_Wtime();
@@ -501,53 +498,52 @@ int main(int argc, char** argv) {
                     if (has_next) {
                         gicc::DeviceCtx* ctx = ompx_prepare();
                         if (use_dwq) {
-                            ompx_dwq_stage_get(right, current_index, 0,
-                                               next_index, 0, stripe_bytes);
+                            ompx_dwq_stage_get(right, next_b, current_b,
+                                               stripe_bytes);
                             ompx_dwq_arm();
                         }
                         if (options.kernel_style == "loop") {
                             if (use_dwq)
                                 compute_block_fused_loop<true>(
                                     a, current_b, c, n, ns, block,
-                                    options.threads, ctx, right, current_index,
-                                    next_index, stripe_bytes);
+                                    options.threads, ctx, right, next_b,
+                                    stripe_bytes);
                             else
                                 compute_block_fused_loop<false>(
                                     a, current_b, c, n, ns, block,
-                                    options.threads, ctx, right, current_index,
-                                    next_index, stripe_bytes);
+                                    options.threads, ctx, right, next_b,
+                                    stripe_bytes);
                         } else if (options.kernel_style == "unified" ||
                                    options.kernel_style == "unified-fenced") {
                             compute_block_fused_unified(
                                 a, current_b, c, n, ns, block, options.threads,
                                 ctx, use_dwq,
                                 options.kernel_style == "unified-fenced", right,
-                                current_index, next_index, stripe_bytes);
+                                next_b, stripe_bytes);
                         } else if (options.kernel_style == "master") {
                             if (use_dwq)
                                 compute_block_fused_master<true>(
                                     a, current_b, c, n, ns, block,
-                                    options.threads, ctx, right, current_index,
-                                    next_index, stripe_bytes);
+                                    options.threads, ctx, right, next_b,
+                                    stripe_bytes);
                             else
                                 compute_block_fused_master<false>(
                                     a, current_b, c, n, ns, block,
-                                    options.threads, ctx, right, current_index,
-                                    next_index, stripe_bytes);
+                                    options.threads, ctx, right, next_b,
+                                    stripe_bytes);
                         } else {
                             if (use_dwq)
                                 issue_giomp_get_split<true>(
-                                    ctx, right, current_index, next_index,
+                                    ctx, right, current_b, next_b,
                                     stripe_bytes);
                             else
                                 issue_giomp_get_split<false>(
-                                    ctx, right, current_index, next_index,
+                                    ctx, right, current_b, next_b,
                                     stripe_bytes);
                             compute_block_plain(a, current_b, c, n, ns, block,
                                                 options.threads);
                         }
-                        ompx_quiet_host();
-                        std::swap(current_index, next_index);
+                        ompx_quiet();
                     } else {
                         compute_block_plain(a, current_b, c, n, ns, block,
                                             options.threads);
