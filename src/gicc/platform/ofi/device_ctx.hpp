@@ -38,6 +38,14 @@ struct DeviceCtx {
     // => not local/mapped => fall back to put/proxy. Set by prepare().
     void**             peer_ipc_base = nullptr;
     int                ipc_n_bufs    = 0;
+
+    // Symmetric heap (GiOMP ompx_* API): base of this rank's heap and the
+    // address-book index it was registered under. A device-side put converts an
+    // address to an offset with (addr - heap_base), so the kernel needs no
+    // buffer handle. Set by Runtime::set_symmetric_heap(); zero when the
+    // application does not use the ompx_* allocator.
+    void*              heap_base     = nullptr;
+    int                heap_buf      = -1;
 };
 
 } // namespace gicc

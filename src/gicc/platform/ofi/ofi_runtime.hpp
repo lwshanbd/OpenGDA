@@ -837,6 +837,14 @@ public:
     //--------------------------------------------------------------------------
     // prepare — finalize a batched put_no_db sequence.
     //--------------------------------------------------------------------------
+    // Record the ompx_* symmetric heap so prepare() can publish it to the
+    // device. The heap is an ordinary registered buffer; only its base address
+    // and index are needed for in-kernel address-to-offset translation.
+    void set_symmetric_heap(void* dev_base, int buf_index) {
+        heap_base_ = dev_base;
+        heap_buf_  = buf_index;
+    }
+
     DeviceCtx* prepare(int peer_rank = -1, int remote_buf_index = -1) {
         (void)peer_rank;
         (void)remote_buf_index;
@@ -864,6 +872,8 @@ public:
         // Locality-aware collectives: hand the device the peer IPC table.
         h_dev_ctx_->peer_ipc_base = d_peer_ipc_;
         h_dev_ctx_->ipc_n_bufs    = n_bufs_;
+        h_dev_ctx_->heap_base     = heap_base_;
+        h_dev_ctx_->heap_buf      = heap_buf_;
 #ifdef GICC_CPU_PROXY
         // Lazy-start the CPU proxy fleet on first prepare(). Stash both
         // the single ring 0 (DeviceCtx::proxy_ring, for back-compat with
@@ -1214,6 +1224,8 @@ private:
     // Flat, device-readable (host-pinned mapped) table of peer IPC bases for
     // locality-aware collectives. Indexed [peer * n_bufs_ + buf]; built in
     // exchange(), pointed to by DeviceCtx::peer_ipc_base in prepare().
+    void*                              heap_base_  = nullptr;   // ompx_* heap
+    int                                heap_buf_   = -1;
     void**                             h_peer_ipc_ = nullptr;   // host vaddr
     void**                             d_peer_ipc_ = nullptr;   // device-mapped
 
