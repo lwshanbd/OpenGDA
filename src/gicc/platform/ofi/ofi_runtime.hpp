@@ -1164,6 +1164,39 @@ public:
         return proxy_rings_arr_dev_;
     }
 
+    //--------------------------------------------------------------------------
+    // proxy_push — host-side producer for the CPU-proxy ring. Mirrors the
+    // device-side atomic_push (gicc_omp_device.hpp) so a HOST-issued RMA can
+    // use the same worker fleet: write the payload fields, fence, then publish
+    // cmd_type. Used by the ompx_* host API, whose descriptors are known on the
+    // host and therefore need no kernel launch to enqueue.
+    //--------------------------------------------------------------------------
+    void proxy_push(gicc::proxy::CmdType type, int peer,
+                    int dst_buf, size_t dst_off,
+                    int src_buf, size_t src_off, size_t bytes, int lane = 0) {
+        ensure_proxy_rings();
+        const int n = static_cast<int>(proxy_threads_.size());
+        if (n == 0) return;
+        auto* r = proxy_threads_[((lane % n) + n) % n]->ring_host();
+
+        constexpr uint64_t kCap = gicc::proxy::kProxyRingCapacity;
+        const uint64_t h = __atomic_load_n(&r->head, __ATOMIC_RELAXED);
+        while (h - __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE) == kCap) {
+            // Ring full: the worker has not drained this far yet.
+        }
+        __atomic_store_n(&r->head, h + 1, __ATOMIC_RELAXED);
+
+        const uint32_t idx = static_cast<uint32_t>(h) & r->mask();
+        r->buf[idx].dst_rank   = static_cast<uint8_t>(peer);
+        r->buf[idx].src_buf    = static_cast<uint8_t>(src_buf);
+        r->buf[idx].dst_buf    = static_cast<uint8_t>(dst_buf);
+        r->buf[idx].bytes      = static_cast<uint32_t>(bytes);
+        r->buf[idx].src_offset = src_off;
+        r->buf[idx].dst_offset = dst_off;
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        r->buf[idx].cmd_type   = type;
+    }
+
     int num_proxy_rings() const {
         return static_cast<int>(proxy_threads_.size());
     }
