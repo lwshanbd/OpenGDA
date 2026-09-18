@@ -20,6 +20,12 @@
 #include "gicc/platform/ofi/ofi_runtime.hpp"
 #include "gicc/platform/ofi/runtime_helpers.h"
 
+// One MMIO store to the NIC trigger counter, which fires every descriptor the
+// host staged. A kernel is the only way to reach that mapping from the device.
+__global__ void gicc_omp_fire_trigger(gicc::DeviceCtx* ctx) {
+    *(ctx->trigger_addr_) = ctx->trigger_val_;
+}
+
 namespace {
 
 gicc::Runtime* g_runtime = nullptr;
@@ -378,6 +384,35 @@ void ompx_fence() {
 
 ompx_ctx* ompx_prepare() {
     return g_runtime->prepare();
+}
+
+// ---- explicit batched DWQ ---------------------------------------------------
+// Defined below, next to the other compiler-facing helpers.
+void ompx_dwq_stage_get_impl(int peer, int src_buffer, size_t src_offset,
+                             int dst_buffer, size_t dst_offset, size_t bytes);
+void ompx_dwq_arm(void);
+
+int ompx_dwq_enabled() { return g_dwq_enabled ? 1 : 0; }
+
+void ompx_dwq_stage_put(int peer, void* dst, const void* src, size_t bytes) {
+    gicc_runtime_dwq_enqueue(g_runtime, peer,
+                             g_heap.index, offset_of(dst, "ompx_dwq_stage_put dst"),
+                             g_heap.index, offset_of(src, "ompx_dwq_stage_put src"),
+                             bytes);
+}
+
+void ompx_dwq_stage_get(int peer, void* dst, const void* src, size_t bytes) {
+    ompx_dwq_stage_get_impl(peer,
+                            g_heap.index, offset_of(src, "ompx_dwq_stage_get src"),
+                            g_heap.index, offset_of(dst, "ompx_dwq_stage_get dst"),
+                            bytes);
+}
+
+void ompx_dwq_trigger() {
+    ompx_dwq_arm();
+    gicc::DeviceCtx* ctx = g_runtime->prepare();
+    gicc_omp_fire_trigger<<<1, 1>>>(ctx);
+    require_gpu(gpuDeviceSynchronize(), "fire DWQ trigger");
 }
 
 // ---- compiler-facing helpers ------------------------------------------------
