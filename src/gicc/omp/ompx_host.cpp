@@ -22,8 +22,12 @@
 
 // One MMIO store to the NIC trigger counter, which fires every descriptor the
 // host staged. A kernel is the only way to reach that mapping from the device.
-__global__ void gicc_omp_fire_trigger(gicc::DeviceCtx* ctx) {
-    *(ctx->trigger_addr_) = ctx->trigger_val_;
+// The address and value are passed in rather than read from the DeviceCtx:
+// Runtime::prepare() and the arm helper BOTH consume the pending-op delta, so
+// re-preparing here just to obtain a ctx pointer would zero the value we are
+// about to write and nothing would fire.
+__global__ void gicc_omp_fire_trigger(volatile uint64_t* addr, uint64_t value) {
+    *addr = value;
 }
 
 namespace {
@@ -388,8 +392,6 @@ ompx_ctx* ompx_prepare() {
 
 // ---- explicit batched DWQ ---------------------------------------------------
 // Defined below, next to the other compiler-facing helpers.
-void ompx_dwq_stage_get_impl(int peer, int src_buffer, size_t src_offset,
-                             int dst_buffer, size_t dst_offset, size_t bytes);
 void ompx_dwq_arm(void);
 
 int ompx_dwq_enabled() { return g_dwq_enabled ? 1 : 0; }
@@ -402,16 +404,20 @@ void ompx_dwq_stage_put(int peer, void* dst, const void* src, size_t bytes) {
 }
 
 void ompx_dwq_stage_get(int peer, void* dst, const void* src, size_t bytes) {
-    ompx_dwq_stage_get_impl(peer,
-                            g_heap.index, offset_of(src, "ompx_dwq_stage_get src"),
-                            g_heap.index, offset_of(dst, "ompx_dwq_stage_get dst"),
-                            bytes);
+    // In host-wait mode Runtime::get queues a triggered descriptor rather than
+    // issuing it, which is exactly the staging this call promises.
+    (void)g_runtime->get(g_heap, peer, g_heap.index, bytes,
+                         offset_of(dst, "ompx_dwq_stage_get dst"),
+                         offset_of(src, "ompx_dwq_stage_get src"));
 }
 
 void ompx_dwq_trigger() {
+    g_dwq_pending = 0;
     ompx_dwq_arm();
-    gicc::DeviceCtx* ctx = g_runtime->prepare();
-    gicc_omp_fire_trigger<<<1, 1>>>(ctx);
+    volatile uint64_t* addr = gicc_runtime_trigger_addr(g_runtime);
+    const uint64_t value = gicc_runtime_trigger_val(g_runtime);
+    if (addr == nullptr || value == 0) return;
+    gicc_omp_fire_trigger<<<1, 1>>>(addr, value);
     require_gpu(gpuDeviceSynchronize(), "fire DWQ trigger");
 }
 
