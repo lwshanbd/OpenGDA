@@ -205,6 +205,7 @@ void ompx_init() {
 }
 
 void ompx_finalize() {
+    if (g_runtime != nullptr) g_runtime->reset();
     if (g_heap_base != nullptr) {
         (void)gpuFree(g_heap_base);
         g_heap_base = nullptr;
@@ -331,6 +332,7 @@ void ompx_put(int peer, void* dst, const void* src, size_t bytes) {
     // MMIO write); otherwise hand the descriptor to the CPU proxy fleet.
     if (g_dwq_enabled) {
         (void)g_runtime->put(g_heap, peer, g_heap.index, bytes, src_off, dst_off);
+        ++g_dwq_pending;
     } else {
         g_runtime->proxy_push(gicc::proxy::CmdType::WRITE, peer,
                               g_heap.index, dst_off, g_heap.index, src_off, bytes);
@@ -355,6 +357,7 @@ void ompx_get(int peer, void* dst, const void* src, size_t bytes) {
 
     if (g_dwq_enabled) {
         (void)g_runtime->get(g_heap, peer, g_heap.index, bytes, dst_off, src_off);
+        ++g_dwq_pending;
     } else {
         // src_* names the local slice and dst_* the remote one for every cmd type.
         g_runtime->proxy_push(gicc::proxy::CmdType::READ, peer,
