@@ -958,6 +958,37 @@ public:
     //   - Synchronizes any IPC streams used by the host trace.
     //   - Recycles slots / DwqWorkBuilders for the next batch.
     //--------------------------------------------------------------------------
+    //--------------------------------------------------------------------------
+    // drain — wait for the transfers THIS rank issued, and nothing else.
+    //
+    // This is what a per-step completion call needs: the peer must see our
+    // writes before it reads its ghosts. reset() additionally tears down the
+    // per-batch bookkeeping (frees pending descriptors, zeroes the NIC's
+    // trigger and per-slot counters, clears the op accounting), which belongs
+    // at the end of a batch, not in every iteration of a loop.
+    //--------------------------------------------------------------------------
+    // sync_ipc=false when the caller knows which IPC stream it used and syncs
+    // that one itself: syncing all n_streams_max_ streams costs a driver call
+    // each, every step, even for a rank that never issued an IPC copy.
+    void drain(bool sync_ipc = true) {
+        if (host_wait_mode_ && mono_total_ops_ > 0) {
+            while (fi_cntr_read(shared_completion_cntr_) < mono_total_ops_) {
+                fi_cq_read(comm_->fabric->cq, NULL, 0);
+            }
+            dwq_release_all_pending_to_pool_();
+            my_n_remote_ops_ = 0;
+        }
+#ifdef GICC_CPU_PROXY
+        drain_proxy_ring_();
+#endif
+        // Same-node puts ride the IPC streams; they must land too.
+        if (sync_ipc) {
+            for (auto s : ipc_streams_) {
+                if (s) (void)gpuStreamSynchronize(s);
+            }
+        }
+    }
+
     void reset() {
         if (host_wait_mode_) {
             // Fast path: poll the SHARED completion counter against the

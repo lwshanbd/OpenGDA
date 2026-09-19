@@ -35,6 +35,13 @@ namespace {
 gicc::Runtime* g_runtime = nullptr;
 bool g_initialized_mpi = false;
 bool g_dwq_enabled = false;
+// DWQ descriptors staged by ompx_put but not yet fired. A put is non-blocking,
+// so the trigger belongs to the completion call: ompx_quiet fires whatever is
+// outstanding before it drains.
+int g_dwq_pending = 0;
+// Set when a same-node put/get was issued on the IPC stream. Only then does
+// ompx_quiet have anything to synchronize there.
+bool g_ipc_pending = false;
 bool g_ipc_enabled = false;
 int g_local_device = 0;
 
@@ -212,6 +219,7 @@ void ompx_finalize() {
         g_heap_bytes = 0;
         g_blocks.clear();
         g_binds.clear();
+        g_ipc_pending = false;
     }
     delete g_runtime;
     g_runtime = nullptr;
@@ -325,6 +333,7 @@ void ompx_put(int peer, void* dst, const void* src, size_t bytes) {
                                    gpuMemcpyDeviceToDevice,
                                    gicc_runtime_ipc_stream(g_runtime)),
                     "same-node put");
+        g_ipc_pending = true;
         return;
     }
 
@@ -352,6 +361,7 @@ void ompx_get(int peer, void* dst, const void* src, size_t bytes) {
                                    gpuMemcpyDeviceToDevice,
                                    gicc_runtime_ipc_stream(g_runtime)),
                     "same-node get");
+        g_ipc_pending = true;
         return;
     }
 
@@ -374,8 +384,24 @@ void ompx_set_transport(ompx_xport xport) {
 
 // ---- completion -------------------------------------------------------------
 
+void ompx_dwq_trigger(void);   // defined below, with the rest of the DWQ calls
+
 void ompx_quiet() {
-    if (g_runtime != nullptr) g_runtime->reset();
+    if (g_runtime == nullptr) return;
+    // Descriptors staged by ompx_put sit in the queue until the NIC is told to
+    // go; without this the completion counter below never reaches its threshold.
+    if (g_dwq_pending > 0) {
+        g_dwq_pending = 0;
+        ompx_dwq_trigger();
+    }
+    // Per-step completion only. The batch teardown in Runtime::reset() -- freeing
+    // descriptors, zeroing the NIC counters -- runs once at ompx_finalize.
+    if (g_ipc_pending) {
+        g_ipc_pending = false;
+        require_gpu(gpuStreamSynchronize(gicc_runtime_ipc_stream(g_runtime)),
+                    "drain the IPC stream");
+    }
+    g_runtime->drain(/*sync_ipc=*/false);
 }
 
 void ompx_barrier() {
