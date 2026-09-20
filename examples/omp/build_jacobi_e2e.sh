@@ -1,10 +1,10 @@
 #!/bin/bash
 # build_jacobi_e2e.sh - build BOTH transports of jacobi_e2e.cpp with the same
 # ROCm 6.4.0 clang so the compute kernel is identical:
-#   build_ofi/jacobi_e2e_proxy : no pass, halo puts via ompx_put_proxy
+#   build_ofi/jacobi_e2e_proxy : no pass, halo puts run the marker's Proxy body
 #   build_ofi/jacobi_e2e_dwq   : 2-pass GICC_MODE=omp-dwq LTO pass build; the
 #                                pass synthesizes the per-launch host trace and
-#                                lowers ompx_dwq_flush to the MMIO trigger.
+#                                lowers ompx_dwq_flush_dev to the MMIO trigger.
 # Both keep -foffload-lto and -openmp-opt-disable so codegen matches.
 set -euo pipefail
 GICC_ROOT="${GICC_ROOT:-/p/lustre2/shan4/new-gicc}"
