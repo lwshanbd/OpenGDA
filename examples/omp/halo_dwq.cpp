@@ -23,10 +23,9 @@ int main() {
     const int kIters = env_int("GICC_HALO_ITERS", 50), kWarm = 5;
 
     ompx_init();
-    ompx_buffer buffer = ompx_alloc(nbuf);
-    ompx_exchange();
-    int my = omp_get_rank_num();
-    int nr = omp_get_num_ranks();
+    unsigned char* buffer = static_cast<unsigned char*>(ompx_alloc(nbuf));
+    int my = ompx_get_rank_num();
+    int nr = ompx_get_num_ranks();
     if (nr < 2) {
         if (!my) fprintf(stderr, "need >=2 ranks\n");
         ompx_free(buffer);
@@ -35,9 +34,14 @@ int main() {
     }
     int left  = (my - 1 + nr) % nr;
     int right = (my + 1) % nr;
-    int bidx  = buffer.index;
 
     const size_t off_ls = 0, off_rs = maxface, off_lr = 2 * maxface, off_rr = 3 * maxface;
+
+    // The markers name the heap registration plus a heap-relative offset, as
+    // host scalars: the marker arguments must stay host-knowable for the LTO
+    // pass, so they may only be built from kernel formals and constants.
+    const int    heap_buf  = ompx_heap_index();
+    const size_t heap_base = ompx_heap_offset_of(buffer);
 
     // --- correctness at one size (face = 4096) ---
     {
@@ -50,15 +54,16 @@ int main() {
         giomp_example::fill_region(buffer, off_rr, 0x00, face);
         ompx_barrier();
 
-        gicc::DeviceCtx* d = ompx_prepare();
+        ompx_ctx* d = ompx_prepare();
         #pragma omp target is_device_ptr(d)
         {
-            ompx_dwq_put(d, right, bidx, off_lr, bidx, off_rs, face);
-            ompx_dwq_put(d, left,  bidx, off_rr, bidx, off_ls, face);
-            ompx_dwq_flush(d);
+            ompx_dwq_put_dev(d, right, heap_buf, heap_base + off_lr,
+                                       heap_buf, heap_base + off_rs, face);
+            ompx_dwq_put_dev(d, left,  heap_buf, heap_base + off_rr,
+                                       heap_buf, heap_base + off_ls, face);
+            ompx_dwq_flush_dev(d);
         }
-        ompx_quiet_host();
-        ompx_barrier();
+        ompx_fence();
 
         unsigned char el = (unsigned char)(0x80 + left);
         unsigned char er = (unsigned char)(0x10 + right);
@@ -77,18 +82,19 @@ int main() {
 
     for (int s = 0; s < nsz; ++s) {
         size_t sz = sizes[s];
-        gicc::DeviceCtx* d = ompx_prepare();
+        ompx_ctx* d = ompx_prepare();
 
         // Warmup
         for (int it = 0; it < kWarm; ++it) {
             #pragma omp target is_device_ptr(d)
             {
-                ompx_dwq_put(d, right, bidx, off_lr, bidx, off_rs, sz);
-                ompx_dwq_put(d, left,  bidx, off_rr, bidx, off_ls, sz);
-                ompx_dwq_flush(d);
+                ompx_dwq_put_dev(d, right, heap_buf, heap_base + off_lr,
+                                           heap_buf, heap_base + off_rs, sz);
+                ompx_dwq_put_dev(d, left,  heap_buf, heap_base + off_rr,
+                                           heap_buf, heap_base + off_ls, sz);
+                ompx_dwq_flush_dev(d);
             }
-            ompx_quiet_host();
-            ompx_barrier();
+            ompx_fence();
         }
 
         ompx_barrier();
@@ -96,12 +102,13 @@ int main() {
         for (int it = 0; it < kIters; ++it) {
             #pragma omp target is_device_ptr(d)
             {
-                ompx_dwq_put(d, right, bidx, off_lr, bidx, off_rs, sz);
-                ompx_dwq_put(d, left,  bidx, off_rr, bidx, off_ls, sz);
-                ompx_dwq_flush(d);
+                ompx_dwq_put_dev(d, right, heap_buf, heap_base + off_lr,
+                                           heap_buf, heap_base + off_rs, sz);
+                ompx_dwq_put_dev(d, left,  heap_buf, heap_base + off_rr,
+                                           heap_buf, heap_base + off_ls, sz);
+                ompx_dwq_flush_dev(d);
             }
-            ompx_quiet_host();
-            ompx_barrier();
+            ompx_fence();
         }
         double t1 = omp_get_wtime();
 

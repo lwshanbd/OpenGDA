@@ -202,13 +202,13 @@ void execute_phase_b(unsigned char* data, int work_b, int threads) {
     }
 }
 
-void execute_proxy_fused(unsigned char* data, gicc::DeviceCtx* ctx,
-                         int peer, int buffer_index, size_t bytes,
+void execute_proxy_fused(unsigned char* data, ompx_ctx* ctx,
+                         int peer, size_t bytes,
                          int work_a, int work_b, int threads,
                          uint64_t epoch, unsigned char value) {
     #pragma omp target teams num_teams(1) thread_limit(threads) \
         is_device_ptr(data, ctx) \
-        firstprivate(peer, buffer_index, bytes, work_a, work_b, epoch, value)
+        firstprivate(peer, bytes, work_a, work_b, epoch, value)
     {
         #pragma omp parallel
         {
@@ -223,19 +223,19 @@ void execute_proxy_fused(unsigned char* data, gicc::DeviceCtx* ctx,
             }
             #pragma omp barrier
             if (tid == 0) {
-                ompx_put_proxy(ctx, peer, buffer_index, kRecvOffset,
-                               buffer_index, kSendOffset, bytes);
+                ompx_put_dev(ctx, peer, data + kRecvOffset,
+                             data + kSendOffset, bytes);
             }
             #pragma omp barrier
             state = scratch[tid];
             scratch[tid] = run_work(state, work_b);
             #pragma omp barrier
-            if (tid == 0) ompx_quiet(ctx);
+            if (tid == 0) ompx_quiet_dev(ctx);
         }
     }
 }
 
-void execute_dwq_fused(unsigned char* data, gicc::DeviceCtx* ctx,
+void execute_dwq_fused(unsigned char* data, ompx_ctx* ctx,
                        size_t bytes, int work_a, int work_b, int threads,
                        uint64_t epoch, unsigned char value) {
     #pragma omp target teams num_teams(1) thread_limit(threads) \
@@ -256,7 +256,7 @@ void execute_dwq_fused(unsigned char* data, gicc::DeviceCtx* ctx,
             #pragma omp barrier
             if (tid == 0) {
                 __atomic_thread_fence(__ATOMIC_SEQ_CST);
-                *(ctx->trigger_addr_) = ctx->trigger_val_;
+                ompx_dwq_fire_dev(ctx);
                 __atomic_thread_fence(__ATOMIC_SEQ_CST);
             }
             #pragma omp barrier
@@ -267,22 +267,24 @@ void execute_dwq_fused(unsigned char* data, gicc::DeviceCtx* ctx,
 }
 
 void execute_giomp_full(const Options& options, bool use_dwq,
-                        unsigned char* data, int peer, int buffer_index,
+                        unsigned char* data, int peer,
                         uint64_t epoch, unsigned char value) {
-    gicc::DeviceCtx* ctx = ompx_prepare();
+    ompx_ctx* ctx = ompx_prepare();
     if (use_dwq) {
-        ompx_dwq_stage_put(peer, buffer_index, kRecvOffset,
-                           buffer_index, kSendOffset, options.bytes);
+        // Arm without firing: the fused kernel's lead thread fires the trigger
+        // itself, so the MMIO store stays GPU-issued.
+        ompx_dwq_stage_put(peer, data + kRecvOffset, data + kSendOffset,
+                           options.bytes);
         ompx_dwq_arm();
         execute_dwq_fused(data, ctx, options.bytes,
                           options.work_a, options.work_b, options.threads,
                           epoch, value);
     } else {
-        execute_proxy_fused(data, ctx, peer, buffer_index, options.bytes,
+        execute_proxy_fused(data, ctx, peer, options.bytes,
                             options.work_a, options.work_b, options.threads,
                             epoch, value);
     }
-    ompx_quiet_host();
+    ompx_quiet();
 }
 
 void execute_mpi_full(const Options& options, unsigned char* data,
@@ -352,7 +354,6 @@ int main(int argc, char** argv) {
     int rank = -1;
     int nranks = 0;
     unsigned char* data = nullptr;
-    ompx_buffer giomp_buffer{};
 
     if (use_mpi) {
         int provided = MPI_THREAD_SINGLE;
@@ -375,22 +376,20 @@ int main(int argc, char** argv) {
                   "hipMalloc", rank);
     } else {
         ompx_init();
-        rank = omp_get_rank_num();
-        nranks = omp_get_num_ranks();
+        rank = ompx_get_rank_num();
+        nranks = ompx_get_num_ranks();
         if (use_dwq != ompx_dwq_enabled()) {
             if (rank == 0)
                 std::fprintf(stderr, "%s requires GICC_HALO_DWQ=%d\n",
                              options.transport.c_str(), use_dwq ? 1 : 0);
             MPI_Abort(MPI_COMM_WORLD, 7);
         }
-        giomp_buffer = ompx_alloc(buffer_bytes);
-        data = static_cast<unsigned char*>(giomp_buffer.ptr);
-        ompx_exchange();
+        data = static_cast<unsigned char*>(ompx_alloc(buffer_bytes));
     }
 
     require_two_distinct_nodes(rank, nranks);
     const int peer = rank ^ 1;
-    if (!use_mpi && ompx_ipc_reachable(peer, giomp_buffer.index)) {
+    if (!use_mpi && ompx_peer_ptr(peer, data) != nullptr) {
         if (rank == 0) std::fprintf(stderr, "unexpected IPC-reachable peer\n");
         MPI_Abort(MPI_COMM_WORLD, 8);
     }
@@ -424,7 +423,7 @@ int main(int argc, char** argv) {
                 execute_mpi_full(options, data, peer, epoch, value);
             else
                 execute_giomp_full(options, use_dwq, data, peer,
-                                   giomp_buffer.index, epoch, value);
+                                   epoch, value);
         });
 
     const int verify_error = verify_received(data, options.bytes, rank, peer,
@@ -449,7 +448,7 @@ int main(int argc, char** argv) {
         check_hip(hipFree(data), "hipFree", rank);
         MPI_Finalize();
     } else {
-        ompx_free(giomp_buffer);
+        ompx_free(data);
         ompx_finalize();
     }
     return verify_error == 0 ? 0 : 9;

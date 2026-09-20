@@ -41,7 +41,6 @@ struct Options {
 
 struct Buffer {
     float* ptr = nullptr;
-    int index = -1;
     size_t bytes = 0;
 };
 
@@ -128,8 +127,8 @@ void runtime_init(int argc, char** argv, int& rank, int& nranks) {
     (void)argc;
     (void)argv;
     ompx_init();
-    rank = omp_get_rank_num();
-    nranks = omp_get_num_ranks();
+    rank = ompx_get_rank_num();
+    nranks = ompx_get_num_ranks();
 #elif defined(JACOBI_BACKEND_DIOMP)
     MPI_Init(&argc, &argv);
     __init_diomp_target(2);
@@ -153,21 +152,20 @@ void runtime_finalize() {
 
 Buffer allocate_buffer(size_t bytes) {
 #if defined(JACOBI_BACKEND_GIOMP)
-    ompx_buffer b = ompx_alloc(bytes);
-    return Buffer{static_cast<float*>(b.ptr), b.index, b.bytes};
+    return Buffer{static_cast<float*>(ompx_alloc(bytes)), bytes};
 #else
     void* ptr = omp_target_alloc(bytes, omp_get_default_device());
     if (!ptr) {
         std::fprintf(stderr, "omp_target_alloc failed\n");
         MPI_Abort(MPI_COMM_WORLD, 3);
     }
-    return Buffer{static_cast<float*>(ptr), -1, bytes};
+    return Buffer{static_cast<float*>(ptr), bytes};
 #endif
 }
 
 void free_buffer(Buffer b) {
 #if defined(JACOBI_BACKEND_GIOMP)
-    ompx_free(ompx_buffer{b.ptr, b.index, b.bytes});
+    ompx_free(b.ptr);
 #else
     omp_target_free(b.ptr, omp_get_default_device());
 #endif
@@ -221,39 +219,37 @@ void compute_interior(float* current, float* next, int nx, int rows,
 }
 
 #if defined(JACOBI_BACKEND_GIOMP)
-void giomp_fused_step(float* current, float* next, int next_index,
+void giomp_fused_step(float* current, float* next,
                       int nx, int rows, int top, int bottom,
                       int teams, int threads, int nranks, bool use_dwq) {
     const size_t row_bytes = static_cast<size_t>(nx) * sizeof(float);
     const bool communicate = nranks > 1;
-    const bool top_ipc = communicate && ompx_ipc_reachable(top, next_index);
-    const bool bottom_ipc = communicate && ompx_ipc_reachable(bottom, next_index);
-    float* top_peer = top_ipc
-        ? static_cast<float*>(ompx_peer_ipc_base(top, next_index)) : nullptr;
-    float* bottom_peer = bottom_ipc
-        ? static_cast<float*>(ompx_peer_ipc_base(bottom, next_index)) : nullptr;
+    float* top_peer = communicate
+        ? static_cast<float*>(ompx_peer_ptr(top, next)) : nullptr;
+    float* bottom_peer = communicate
+        ? static_cast<float*>(ompx_peer_ptr(bottom, next)) : nullptr;
+    const bool top_ipc = top_peer != nullptr;
+    const bool bottom_ipc = bottom_peer != nullptr;
     gicc::DeviceCtx* ctx = ompx_prepare();
 
     // DWQ transport: the descriptors are staged HERE, on the host, before the
     // kernel runs. The only device-side work left is a single MMIO store, so
     // team 0 never spins waiting on a host proxy round trip the way
-    // ompx_quiet(ctx, lane) does -- it fires the NIC and returns.
+    // ompx_quiet_dev(ctx, lane) does -- it fires the NIC and returns.
     const bool dwq_top    = use_dwq && communicate && !top_ipc;
     const bool dwq_bottom = use_dwq && communicate && !bottom_ipc;
     if (dwq_top)
-        ompx_dwq_stage_put(top, next_index,
-                           static_cast<size_t>(rows + 1) * row_bytes,
-                           next_index, row_bytes, row_bytes);
+        ompx_dwq_stage_put(top, next + static_cast<size_t>(rows + 1) * nx,
+                           next + nx, row_bytes);
     if (dwq_bottom)
-        ompx_dwq_stage_put(bottom, next_index, 0,
-                           next_index, static_cast<size_t>(rows) * row_bytes,
-                           row_bytes);
+        ompx_dwq_stage_put(bottom, next,
+                           next + static_cast<size_t>(rows) * nx, row_bytes);
     const bool dwq_fire = dwq_top || dwq_bottom;
     if (dwq_fire) ompx_dwq_arm();
 
     #pragma omp target teams num_teams(teams) thread_limit(threads) \
         is_device_ptr(current, next, top_peer, bottom_peer, ctx) \
-        firstprivate(next_index, nx, rows, top, bottom, row_bytes, communicate, top_ipc, bottom_ipc, use_dwq, dwq_fire)
+        firstprivate(nx, rows, top, bottom, row_bytes, communicate, top_ipc, bottom_ipc, use_dwq, dwq_fire)
     {
         const int team = omp_get_team_num();
         const int nteams = omp_get_num_teams();
@@ -279,18 +275,17 @@ void giomp_fused_step(float* current, float* next, int next_index,
                         top_peer[static_cast<size_t>(rows + 1) * nx + x] =
                             next[static_cast<size_t>(nx) + x];
                 } else if (communicate && !use_dwq && tid == 0) {
-                    ompx_put_proxy(ctx, top, next_index,
-                        static_cast<size_t>(rows + 1) * row_bytes,
-                        next_index, row_bytes, row_bytes, 0);
+                    ompx_put_dev(ctx, top,
+                        next + static_cast<size_t>(rows + 1) * nx,
+                        next + nx, row_bytes, 0);
                 }
 
                 if (communicate && bottom_ipc) {
                     for (int x = tid; x < nx; x += nth)
                         bottom_peer[x] = next[static_cast<size_t>(rows) * nx + x];
                 } else if (communicate && !use_dwq && tid == 0) {
-                    ompx_put_proxy(ctx, bottom, next_index, 0,
-                        next_index, static_cast<size_t>(rows) * row_bytes,
-                        row_bytes, 1);
+                    ompx_put_dev(ctx, bottom, next,
+                        next + static_cast<size_t>(rows) * nx, row_bytes, 1);
                 }
 
                 // One store fires both staged halo writes. The barrier above
@@ -298,13 +293,13 @@ void giomp_fused_step(float* current, float* next, int next_index,
                 // publishes them before the NIC reads them.
                 if (dwq_fire && tid == 0) {
                     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-                    *(ctx->trigger_addr_) = ctx->trigger_val_;
+                    ompx_dwq_fire_dev(ctx);
                 }
 
                 #pragma omp barrier
                 if (communicate && !use_dwq && tid == 0) {
-                    if (!top_ipc) ompx_quiet(ctx, 0);
-                    if (!bottom_ipc) ompx_quiet(ctx, 1);
+                    if (!top_ipc) ompx_quiet_dev(ctx, 0);
+                    if (!bottom_ipc) ompx_quiet_dev(ctx, 1);
                 }
             } else {
                 const size_t points = static_cast<size_t>(rows - 2) * (nx - 2);
@@ -321,7 +316,7 @@ void giomp_fused_step(float* current, float* next, int next_index,
             }
         }
     }
-    ompx_quiet_host();
+    ompx_quiet();
 }
 #endif
 
@@ -354,7 +349,10 @@ void split_step(float* current, float* next, int nx, int rows,
     compute_interior(current, next, nx, rows, threads);
 
 #if defined(JACOBI_BACKEND_DIOMP)
-    if (nranks > 1) ompx_fence();
+    // Wait for the two outstanding RMA puts, matching MPI_Waitall below.
+    // giomp_mm_eval.cpp already spells this diomp_waitALLRMA(); ompx_fence()
+    // is not exported by the DiOMP revision vendored under reference/.
+    if (nranks > 1) diomp_waitALLRMA();
 #elif defined(JACOBI_BACKEND_MPI)
     if (nranks > 1) MPI_Waitall(4, req, MPI_STATUSES_IGNORE);
 #endif
@@ -385,9 +383,6 @@ int main(int argc, char** argv) {
     const size_t bytes = static_cast<size_t>(options.nx) *
                          (options.local_rows + 2) * sizeof(float);
     Buffer buffers[2] = {allocate_buffer(bytes), allocate_buffer(bytes)};
-#if defined(JACOBI_BACKEND_GIOMP)
-    ompx_exchange();
-#endif
     const int top = (rank - 1 + nranks) % nranks;
     const int bottom = (rank + 1) % nranks;
 
@@ -416,8 +411,7 @@ int main(int argc, char** argv) {
         for (int iter = 0; iter < options.iterations; ++iter) {
 #if defined(JACOBI_BACKEND_GIOMP)
             giomp_fused_step(buffers[current].ptr, buffers[next].ptr,
-                             buffers[next].index, options.nx,
-                             options.local_rows, top, bottom,
+                             options.nx, options.local_rows, top, bottom,
                              options.teams, options.threads, nranks,
                              options.dwq);
 #else

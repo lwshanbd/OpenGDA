@@ -940,6 +940,14 @@ public:
     //--------------------------------------------------------------------------
     // prepare — finalize a batched put_no_db sequence.
     //--------------------------------------------------------------------------
+    // Record the ompx_* symmetric heap so prepare() can publish it to the
+    // device. The heap is an ordinary registered buffer; only its base address
+    // and index are needed for in-kernel address-to-offset translation.
+    void set_symmetric_heap(void* dev_base, int buf_index) {
+        heap_base_ = dev_base;
+        heap_buf_  = buf_index;
+    }
+
     DeviceCtx* prepare(int peer_rank = -1, int remote_buf_index = -1) {
         (void)peer_rank;
         (void)remote_buf_index;
@@ -967,6 +975,8 @@ public:
         // Locality-aware collectives: hand the device the peer IPC table.
         h_dev_ctx_->peer_ipc_base = d_peer_ipc_;
         h_dev_ctx_->ipc_n_bufs    = n_bufs_;
+        h_dev_ctx_->heap_base     = heap_base_;
+        h_dev_ctx_->heap_buf      = heap_buf_;
 #ifdef GICC_CPU_PROXY
         // Lazy-start the CPU proxy fleet on first prepare(). Stash both
         // the single ring 0 (DeviceCtx::proxy_ring, for back-compat with
@@ -1051,6 +1061,37 @@ public:
     //   - Synchronizes any IPC streams used by the host trace.
     //   - Recycles slots / DwqWorkBuilders for the next batch.
     //--------------------------------------------------------------------------
+    //--------------------------------------------------------------------------
+    // drain — wait for the transfers THIS rank issued, and nothing else.
+    //
+    // This is what a per-step completion call needs: the peer must see our
+    // writes before it reads its ghosts. reset() additionally tears down the
+    // per-batch bookkeeping (frees pending descriptors, zeroes the NIC's
+    // trigger and per-slot counters, clears the op accounting), which belongs
+    // at the end of a batch, not in every iteration of a loop.
+    //--------------------------------------------------------------------------
+    // sync_ipc=false when the caller knows which IPC stream it used and syncs
+    // that one itself: syncing all n_streams_max_ streams costs a driver call
+    // each, every step, even for a rank that never issued an IPC copy.
+    void drain(bool sync_ipc = true) {
+        if (host_wait_mode_ && mono_total_ops_ > 0) {
+            while (fi_cntr_read(shared_completion_cntr_) < mono_total_ops_) {
+                fi_cq_read(comm_->fabric->cq, NULL, 0);
+            }
+            dwq_release_all_pending_to_pool_();
+            my_n_remote_ops_ = 0;
+        }
+#ifdef GICC_CPU_PROXY
+        drain_proxy_ring_();
+#endif
+        // Same-node puts ride the IPC streams; they must land too.
+        if (sync_ipc) {
+            for (auto s : ipc_streams_) {
+                if (s) (void)gpuStreamSynchronize(s);
+            }
+        }
+    }
+
     void reset() {
         if (host_wait_mode_) {
             // Async staging must be fully submitted before we wait on
@@ -1260,6 +1301,39 @@ public:
         return proxy_rings_arr_dev_;
     }
 
+    //--------------------------------------------------------------------------
+    // proxy_push — host-side producer for the CPU-proxy ring. Mirrors the
+    // device-side atomic_push (gicc_omp_device.hpp) so a HOST-issued RMA can
+    // use the same worker fleet: write the payload fields, fence, then publish
+    // cmd_type. Used by the ompx_* host API, whose descriptors are known on the
+    // host and therefore need no kernel launch to enqueue.
+    //--------------------------------------------------------------------------
+    void proxy_push(gicc::proxy::CmdType type, int peer,
+                    int dst_buf, size_t dst_off,
+                    int src_buf, size_t src_off, size_t bytes, int lane = 0) {
+        ensure_proxy_rings();
+        const int n = static_cast<int>(proxy_threads_.size());
+        if (n == 0) return;
+        auto* r = proxy_threads_[((lane % n) + n) % n]->ring_host();
+
+        constexpr uint64_t kCap = gicc::proxy::kProxyRingCapacity;
+        const uint64_t h = __atomic_load_n(&r->head, __ATOMIC_RELAXED);
+        while (h - __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE) == kCap) {
+            // Ring full: the worker has not drained this far yet.
+        }
+        __atomic_store_n(&r->head, h + 1, __ATOMIC_RELAXED);
+
+        const uint32_t idx = static_cast<uint32_t>(h) & r->mask();
+        r->buf[idx].dst_rank   = static_cast<uint8_t>(peer);
+        r->buf[idx].src_buf    = static_cast<uint8_t>(src_buf);
+        r->buf[idx].dst_buf    = static_cast<uint8_t>(dst_buf);
+        r->buf[idx].bytes      = static_cast<uint32_t>(bytes);
+        r->buf[idx].src_offset = src_off;
+        r->buf[idx].dst_offset = dst_off;
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        r->buf[idx].cmd_type   = type;
+    }
+
     int num_proxy_rings() const {
         return static_cast<int>(proxy_threads_.size());
     }
@@ -1320,6 +1394,8 @@ private:
     // Flat, device-readable (host-pinned mapped) table of peer IPC bases for
     // locality-aware collectives. Indexed [peer * n_bufs_ + buf]; built in
     // exchange(), pointed to by DeviceCtx::peer_ipc_base in prepare().
+    void*                              heap_base_  = nullptr;   // ompx_* heap
+    int                                heap_buf_   = -1;
     void**                             h_peer_ipc_ = nullptr;   // host vaddr
     void**                             d_peer_ipc_ = nullptr;   // device-mapped
 

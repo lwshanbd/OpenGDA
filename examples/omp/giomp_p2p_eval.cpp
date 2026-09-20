@@ -168,20 +168,21 @@ void require_two_distinct_nodes(int rank, int nranks) {
 }
 
 void giomp_issue_one(const std::string& transport, const std::string& op,
-                     gicc::DeviceCtx* ctx, int peer, int buf,
-                     size_t offset, size_t bytes) {
+                     gicc::DeviceCtx* ctx, int peer, void* slot, size_t bytes) {
     if (transport == "dwq") {
         if (op == "put")
-            ompx_dwq_stage_put(peer, buf, offset, buf, offset, bytes);
+            ompx_dwq_stage_put(peer, slot, slot, bytes);
         else
-            ompx_dwq_stage_get(peer, buf, offset, buf, offset, bytes);
-        ompx_dwq_trigger(ctx);
+            ompx_dwq_stage_get(peer, slot, slot, bytes);
+        ompx_dwq_arm();
+        #pragma omp target is_device_ptr(ctx)
+        { ompx_dwq_fire_dev(ctx); }
     } else if (op == "put") {
-        #pragma omp target is_device_ptr(ctx) firstprivate(peer, buf, offset, bytes)
-        { ompx_put_proxy(ctx, peer, buf, offset, buf, offset, bytes); }
+        #pragma omp target is_device_ptr(ctx, slot) firstprivate(peer, bytes)
+        { ompx_put_dev(ctx, peer, slot, slot, bytes); }
     } else {
-        #pragma omp target is_device_ptr(ctx) firstprivate(peer, buf, offset, bytes)
-        { ompx_get(ctx, peer, buf, offset, buf, offset, bytes); }
+        #pragma omp target is_device_ptr(ctx, slot) firstprivate(peer, bytes)
+        { ompx_get_dev(ctx, peer, slot, slot, bytes); }
     }
 }
 
@@ -194,7 +195,7 @@ void phase_add(PhaseTimes* phases, double& field, double start) {
 }
 
 void giomp_window(const std::string& transport, const std::string& op,
-                  const std::string& pattern, int rank, int peer, int buf,
+                  const std::string& pattern, int rank, int peer, char* base,
                   size_t bytes, int batch, PhaseTimes* phases = nullptr) {
     if (rank != 0) return;
 
@@ -204,25 +205,25 @@ void giomp_window(const std::string& transport, const std::string& op,
         if (phases) phase_add(phases, phases->prepare, stamp);
         stamp = phase_stamp(phases);
         if (op == "put") {
-            #pragma omp target is_device_ptr(ctx) firstprivate(peer, buf, bytes, batch)
+            #pragma omp target is_device_ptr(ctx, base) firstprivate(peer, bytes, batch)
             {
                 for (int i = 0; i < batch; ++i) {
-                    ompx_put_proxy(ctx, peer, buf, 0, buf, 0, bytes);
-                    ompx_quiet(ctx);
+                    ompx_put_dev(ctx, peer, base, base, bytes);
+                    ompx_quiet_dev(ctx);
                 }
             }
         } else {
-            #pragma omp target is_device_ptr(ctx) firstprivate(peer, buf, bytes, batch)
+            #pragma omp target is_device_ptr(ctx, base) firstprivate(peer, bytes, batch)
             {
                 for (int i = 0; i < batch; ++i) {
-                    ompx_get(ctx, peer, buf, 0, buf, 0, bytes);
-                    ompx_quiet(ctx);
+                    ompx_get_dev(ctx, peer, base, base, bytes);
+                    ompx_quiet_dev(ctx);
                 }
             }
         }
         if (phases) phase_add(phases, phases->target, stamp);
         stamp = phase_stamp(phases);
-        ompx_quiet_host();
+        ompx_quiet();
         if (phases) phase_add(phases, phases->quiet, stamp);
         return;
     }
@@ -235,20 +236,22 @@ void giomp_window(const std::string& transport, const std::string& op,
             if (transport == "dwq") {
                 stamp = phase_stamp(phases);
                 if (op == "put")
-                    ompx_dwq_stage_put(peer, buf, 0, buf, 0, bytes);
+                    ompx_dwq_stage_put(peer, base, base, bytes);
                 else
-                    ompx_dwq_stage_get(peer, buf, 0, buf, 0, bytes);
+                    ompx_dwq_stage_get(peer, base, base, bytes);
                 if (phases) phase_add(phases, phases->enqueue, stamp);
                 stamp = phase_stamp(phases);
-                ompx_dwq_trigger(ctx);
+                ompx_dwq_arm();
+                #pragma omp target is_device_ptr(ctx)
+                { ompx_dwq_fire_dev(ctx); }
                 if (phases) phase_add(phases, phases->target, stamp);
             } else {
                 stamp = phase_stamp(phases);
-                giomp_issue_one(transport, op, ctx, peer, buf, 0, bytes);
+                giomp_issue_one(transport, op, ctx, peer, base, bytes);
                 if (phases) phase_add(phases, phases->target, stamp);
             }
             stamp = phase_stamp(phases);
-            ompx_quiet_host();
+            ompx_quiet();
             if (phases) phase_add(phases, phases->quiet, stamp);
         }
         return;
@@ -260,39 +263,41 @@ void giomp_window(const std::string& transport, const std::string& op,
     if (transport == "dwq") {
         stamp = phase_stamp(phases);
         for (int i = 0; i < batch; ++i) {
-            const size_t offset = static_cast<size_t>(i) * bytes;
+            char* slot = base + static_cast<size_t>(i) * bytes;
             if (op == "put")
-                ompx_dwq_stage_put(peer, buf, offset, buf, offset, bytes);
+                ompx_dwq_stage_put(peer, slot, slot, bytes);
             else
-                ompx_dwq_stage_get(peer, buf, offset, buf, offset, bytes);
+                ompx_dwq_stage_get(peer, slot, slot, bytes);
         }
         if (phases) phase_add(phases, phases->enqueue, stamp);
         stamp = phase_stamp(phases);
-        ompx_dwq_trigger(ctx);
+        ompx_dwq_arm();
+        #pragma omp target is_device_ptr(ctx)
+        { ompx_dwq_fire_dev(ctx); }
         if (phases) phase_add(phases, phases->target, stamp);
     } else if (op == "put") {
         stamp = phase_stamp(phases);
-        #pragma omp target is_device_ptr(ctx) firstprivate(peer, buf, bytes, batch)
+        #pragma omp target is_device_ptr(ctx, base) firstprivate(peer, bytes, batch)
         {
             for (int i = 0; i < batch; ++i) {
-                const size_t offset = static_cast<size_t>(i) * bytes;
-                ompx_put_proxy(ctx, peer, buf, offset, buf, offset, bytes);
+                char* slot = base + static_cast<size_t>(i) * bytes;
+                ompx_put_dev(ctx, peer, slot, slot, bytes);
             }
         }
         if (phases) phase_add(phases, phases->target, stamp);
     } else {
         stamp = phase_stamp(phases);
-        #pragma omp target is_device_ptr(ctx) firstprivate(peer, buf, bytes, batch)
+        #pragma omp target is_device_ptr(ctx, base) firstprivate(peer, bytes, batch)
         {
             for (int i = 0; i < batch; ++i) {
-                const size_t offset = static_cast<size_t>(i) * bytes;
-                ompx_get(ctx, peer, buf, offset, buf, offset, bytes);
+                char* slot = base + static_cast<size_t>(i) * bytes;
+                ompx_get_dev(ctx, peer, slot, slot, bytes);
             }
         }
         if (phases) phase_add(phases, phases->target, stamp);
     }
     stamp = phase_stamp(phases);
-    ompx_quiet_host();
+    ompx_quiet();
     if (phases) phase_add(phases, phases->quiet, stamp);
 }
 
@@ -352,7 +357,8 @@ int verify_destination(const std::string& op, const std::string& pattern,
 }
 
 void run_case(const Options& options, const std::string& op,
-              const std::string& pattern, int rank, void* buffer, int buf) {
+              const std::string& pattern, int rank, void* buffer) {
+    char* const base = static_cast<char*>(buffer);
     std::vector<size_t> sizes;
     if (options.size_override != 0) {
         sizes.push_back(options.size_override);
@@ -393,7 +399,7 @@ void run_case(const Options& options, const std::string& op,
                 mpi_window(op, pattern, rank, buffer, bytes, batch);
             else
                 giomp_window(options.transport, op, pattern,
-                             rank, peer, buf, bytes, batch);
+                             rank, peer, base, bytes, batch);
             MPI_Barrier(MPI_COMM_WORLD);
         }
 
@@ -408,7 +414,7 @@ void run_case(const Options& options, const std::string& op,
                 mpi_window(op, pattern, rank, buffer, bytes, batch);
             else
                 giomp_window(options.transport, op, pattern,
-                             rank, peer, buf, bytes, batch,
+                             rank, peer, base, bytes, batch,
                              options.profile_phases ? &phases : nullptr);
             const double local_elapsed = MPI_Wtime() - start;
             double elapsed = 0.0;
@@ -466,7 +472,7 @@ void profile_control_overheads(int rank) {
                 volatile uint64_t sink = ctx->trigger_val_;
                 (void)sink;
             }
-            ompx_quiet_host();
+            ompx_quiet();
         }
     }
     MPI_Barrier(MPI_COMM_WORLD);
@@ -490,7 +496,7 @@ void profile_control_overheads(int rank) {
             target_us.push_back((MPI_Wtime() - start) * 1.0e6);
 
             start = MPI_Wtime();
-            ompx_quiet_host();
+            ompx_quiet();
             quiet_us.push_back((MPI_Wtime() - start) * 1.0e6);
         }
         std::printf("CONTROL_PROFILE,prepare_us,empty_target_us,empty_quiet_us\n");
@@ -510,7 +516,6 @@ int main(int argc, char** argv) {
     int rank = -1;
     int nranks = 0;
     void* buffer = nullptr;
-    ompx_buffer giomp_buffer{};
 
     if (use_mpi_transport) {
         MPI_Init(&argc, &argv);
@@ -528,8 +533,8 @@ int main(int argc, char** argv) {
         check_hip(hipMalloc(&buffer, kBufferBytes), "hipMalloc", rank);
     } else {
         ompx_init();
-        rank = omp_get_rank_num();
-        nranks = omp_get_num_ranks();
+        rank = ompx_get_rank_num();
+        nranks = ompx_get_num_ranks();
         if ((options.transport == "dwq") != ompx_dwq_enabled()) {
             if (rank == 0)
                 std::fprintf(stderr,
@@ -537,13 +542,11 @@ int main(int argc, char** argv) {
                     options.transport.c_str(), options.transport == "dwq" ? 1 : 0);
             MPI_Abort(MPI_COMM_WORLD, 8);
         }
-        giomp_buffer = ompx_alloc(kBufferBytes);
-        buffer = giomp_buffer.ptr;
-        ompx_exchange();
+        buffer = ompx_alloc(kBufferBytes);
     }
 
     require_two_distinct_nodes(rank, nranks);
-    if (!use_mpi_transport && ompx_ipc_reachable(rank ^ 1, giomp_buffer.index)) {
+    if (!use_mpi_transport && ompx_peer_ptr(rank ^ 1, buffer) != nullptr) {
         if (rank == 0)
             std::fprintf(stderr, "unexpected IPC-reachable peer in cross-node test\n");
         MPI_Abort(MPI_COMM_WORLD, 9);
@@ -570,8 +573,7 @@ int main(int argc, char** argv) {
 
     for (const std::string& op : ops)
         for (const std::string& pattern : patterns)
-            run_case(options, op, pattern, rank, buffer,
-                     use_mpi_transport ? -1 : giomp_buffer.index);
+            run_case(options, op, pattern, rank, buffer);
 
     MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0) std::printf("ALL_CASES_PASS transport=%s\n",
@@ -581,7 +583,7 @@ int main(int argc, char** argv) {
         check_hip(hipFree(buffer), "hipFree", rank);
         MPI_Finalize();
     } else {
-        ompx_free(giomp_buffer);
+        ompx_free(buffer);
         ompx_finalize();
     }
     return 0;

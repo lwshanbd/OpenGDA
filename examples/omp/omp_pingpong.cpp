@@ -1,17 +1,17 @@
 // omp_pingpong.cpp - p2p microbench for the GICC-from-OpenMP path.
 //
 // Mirrors examples/proxy/bench_pingpong.cpp, but instead of the HIP device API
-// (gicc::put inside a __global__ kernel), it issues ompx_put from inside a
+// (gicc::put inside a __global__ kernel), it issues ompx_put_dev from inside a
 // `#pragma omp target` region -- exactly how the OpenMP minimod halo
 // (gicc_halo_issue) drives the proxy. This isolates the cost the omp-target
 // kernel-launch layer adds on top of the raw proxy transport.
 //
-//   --mode=pipelined (default): N puts in ONE omp target region, then one quiet_host
+//   --mode=pipelined (default): N puts in ONE omp target region, then one quiet
 //                               -> throughput (matches gicc_halo_issue's pattern:
-//                               one prepare + one target region + one quiet_host).
-//   --mode=per-msg            : one put per target region + quiet_host, per message
+//                               one prepare + one target region + one quiet).
+//   --mode=per-msg            : one put per target region + quiet, per message
 //                               -> pure per-message latency incl. all per-op cost.
-//   --mode=bulk               : N puts in ONE region, ONE quiet_host at end
+//   --mode=bulk               : N puts in ONE region, ONE quiet at end
 //                               -> amortizes omp-target launch + completion overhead.
 //
 // Build: bash examples/omp/build_omp_pingpong.sh   (clang-21 omp+hip toolchain)
@@ -57,18 +57,21 @@ enum class Xport { Proxy, Dwq };
 static Xport g_xport = Xport::Proxy;
 
 // Issue `n` puts of `bytes` to `peer`. Completion is the caller's job
-// (ompx_quiet_host), so both transports are timed over the same window.
-static void issue_puts(gicc::DeviceCtx* d_ctx, int peer, int buf,
+// (ompx_quiet), so both transports are timed over the same window. The heap is
+// symmetric, so our own `buf` address also names the peer's destination.
+static void issue_puts(ompx_ctx* d_ctx, int peer, void* buf,
                        size_t bytes, int n) {
     if (g_xport == Xport::Dwq) {
         for (int i = 0; i < n; ++i)
-            ompx_dwq_stage_put(peer, buf, 0, buf, 0, bytes);
-        ompx_dwq_trigger(d_ctx);          // one MMIO store fires all n
+            ompx_dwq_stage_put(peer, buf, buf, bytes);
+        ompx_dwq_arm();
+        #pragma omp target is_device_ptr(d_ctx)
+        { ompx_dwq_fire_dev(d_ctx); }     // one MMIO store fires all n
     } else {
-        #pragma omp target is_device_ptr(d_ctx) firstprivate(peer, buf, bytes, n)
+        #pragma omp target is_device_ptr(d_ctx, buf) firstprivate(peer, bytes, n)
         {
             for (int i = 0; i < n; ++i)
-                ompx_put_proxy(d_ctx, peer, buf, 0, buf, 0, bytes);
+                ompx_put_dev(d_ctx, peer, buf, buf, bytes);
         }
     }
 }
@@ -86,20 +89,18 @@ int main(int argc, char** argv) {
     const bool bulk    = (mode == "bulk");   // N puts in ONE region, ONE quiet_host at end
 
     ompx_init();
-    ompx_buffer sbuf = ompx_alloc(kBufBytes);
-    ompx_exchange();
-    const int buf = sbuf.index;
+    void* buf = ompx_alloc(kBufBytes);
 
-    const int rank   = omp_get_rank_num();
-    const int nranks = omp_get_num_ranks();
+    const int rank   = ompx_get_rank_num();
+    const int nranks = ompx_get_num_ranks();
     if (nranks != 2) {
         if (rank == 0) fprintf(stderr, "omp_pingpong needs exactly 2 ranks (got %d)\n", nranks);
-        ompx_free(sbuf);
+        ompx_free(buf);
         ompx_finalize();
         return 1;
     }
     const int peer = rank ^ 1;
-    gicc::DeviceCtx* d_ctx = ompx_prepare();
+    ompx_ctx* d_ctx = ompx_prepare();
 
     if (rank == 0) {
         printf("\n=== omp_pingpong (mode=%s xport=%s) ===\n", mode.c_str(),
@@ -117,23 +118,23 @@ int main(int argc, char** argv) {
             if (rank == 0) {
                 d_ctx = ompx_prepare();
                 issue_puts(d_ctx, peer, buf, bytes, 1);
-                ompx_quiet_host();
+                ompx_quiet();
             }
         }
         ompx_barrier();
 
-        // ---- bulk: N puts in one region, ONE quiet_host at the very end ----
-        // Amortizes BOTH the omp-target launch AND the single quiet_host completion
+        // ---- bulk: N puts in one region, ONE quiet at the very end ----
+        // Amortizes BOTH the omp-target launch AND the single quiet completion
         // barrier over N puts -> exposes the sustained proxy injection rate with
         // no per-window completion barrier. If small-msg per-msg collapses here,
-        // the per-window quiet_host barrier (not the omp path) was the cost.
+        // the per-window quiet barrier (not the omp path) was the cost.
         if (bulk) {
             const int N = 2000;
             double t0 = omp_get_wtime();
             if (rank == 0) {
                 d_ctx = ompx_prepare();
                 issue_puts(d_ctx, peer, buf, bytes, N);
-                ompx_quiet_host();   // single completion barrier for all N
+                ompx_quiet();        // single completion barrier for all N
             }
             double t1 = omp_get_wtime();
             ompx_barrier();
@@ -156,13 +157,13 @@ int main(int argc, char** argv) {
                     for (int i = 0; i < kBatch; ++i) {
                         d_ctx = ompx_prepare();
                         issue_puts(d_ctx, peer, buf, bytes, 1);
-                        ompx_quiet_host();
+                        ompx_quiet();
                     }
                 } else {
-                    // pipelined: one prepare, all puts in one target region, one quiet_host
+                    // pipelined: one prepare, all puts in one target region, one quiet
                     d_ctx = ompx_prepare();
                     issue_puts(d_ctx, peer, buf, bytes, kBatch);
-                    ompx_quiet_host();
+                    ompx_quiet();
                 }
             }
             double t1 = omp_get_wtime();
@@ -181,7 +182,7 @@ int main(int argc, char** argv) {
         ompx_barrier();
     }
 
-    ompx_free(sbuf);
+    ompx_free(buf);
     ompx_finalize();
     return 0;
 }

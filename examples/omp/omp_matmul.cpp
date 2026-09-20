@@ -4,9 +4,9 @@
 // This is the GICC ring matmul (examples/ofi/mm_minimal.cpp) ported to the GiOMP
 // path: each rank owns horizontal stripes of A and C and a vertical stripe of B.
 // Over npes steps the B stripes rotate around the ring; at each step a rank does
-//   ompx_put         (send my B stripe to my left neighbor, from an omp target region)
+//   ompx_put         (send my B stripe to my left neighbor)
 //   omp target       (local block matmul, identical loop to the DiOMP baseline)
-//   ompx_quiet_host  (wait for the in-flight RDMA to land)
+//   ompx_fence       (wait for the in-flight RDMA to land)
 //   swap(Bs, Bn)
 // Put-to-left is equivalent to DiOMP's get-from-right, so the data flow and the
 // per-step compute are identical to DiOMP's diomp_mm.cpp; only the transport
@@ -31,8 +31,8 @@ int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     ompx_init();
 
-    const int mype = omp_get_rank_num();
-    const int npes = omp_get_num_ranks();
+    const int mype = ompx_get_rank_num();
+    const int npes = ompx_get_num_ranks();
     if (npes < 2) { if (mype == 0) fprintf(stderr, "need >=2 ranks\n");
                     ompx_finalize(); return 1; }
 
@@ -46,16 +46,12 @@ int main(int argc, char** argv) {
         printf("GiOMP matmul: N=%d npes=%d stripe=%dx%d (%zu B)\n",
                N, npes, N, Ns, stripe);
 
-    // Allocate all four device buffers via ompx_alloc (IPC-capable, auto-registered).
-    ompx_buffer As = ompx_alloc(stripe), Cs = ompx_alloc(stripe);
-    ompx_buffer Bs = ompx_alloc(stripe), Bn = ompx_alloc(stripe);
-    float* dAs = (float*)As.ptr; float* dCs = (float*)Cs.ptr;
-    float* dBs = (float*)Bs.ptr; float* dBn = (float*)Bn.ptr;
-    int idxBs = Bs.index, idxBn = Bn.index;
-
-    // Publish the RMA address book.
-    ompx_exchange();
-    gicc::DeviceCtx* d_ctx = ompx_prepare();
+    // Carve all four stripes out of the symmetric heap. Every rank allocates in
+    // the same order, so one address names the same stripe on every rank.
+    float* dAs = (float*)ompx_alloc(stripe);
+    float* dCs = (float*)ompx_alloc(stripe);
+    float* dBs = (float*)ompx_alloc(stripe);
+    float* dBn = (float*)ompx_alloc(stripe);
 
     // Fill dAs once before the run loop (same closed-form as the old hAs init).
     #pragma omp target teams distribute parallel for is_device_ptr(dAs) firstprivate(N, Ns, mype)
@@ -74,18 +70,18 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < (size_t)N * Ns; ++i)
             dCs[i] = 0.f;
 
-        float* curBs = dBs; float* curBn = dBn; int iBs = idxBs, iBn = idxBn;
+        float* curBs = dBs; float* curBn = dBn;
 
         ompx_barrier();
         double t0 = omp_get_wtime();
 
         for (int s = 0; s < npes; ++s) {
             const int block_num = (mype + s) % npes;
-            d_ctx = ompx_prepare();
             // (1) send my current B stripe to my left neighbor (-> its Bn).
             //     Smart host-side put: IPC (same-node xGMI) if reachable, else
-            //     proxy; issues the omp target region internally.
-            ompx_put(d_ctx, left, iBn, 0, iBs, 0, stripe);
+            //     the cross-node transport. Symmetric addressing means our own
+            //     curBn address names the neighbor's Bn stripe.
+            ompx_put(left, curBn, curBs, stripe);
 
             // (2) local block matmul, identical loop to DiOMP's diomp_mm.cpp.
             #pragma omp target is_device_ptr(dAs, curBs, dCs) firstprivate(N, Ns, block_num)
@@ -100,9 +96,8 @@ int main(int argc, char** argv) {
             }
 
             // (3) wait for the RDMA to land, then rotate buffers.
-            ompx_quiet_host();
-            std::swap(curBs, curBn); std::swap(iBs, iBn);
-            ompx_barrier();
+            ompx_fence();
+            std::swap(curBs, curBn);
         }
 
         double t1 = omp_get_wtime();
@@ -122,7 +117,7 @@ int main(int argc, char** argv) {
                N, npes, med, (int)times.size(), csum);
     }
 
-    ompx_free(As); ompx_free(Cs); ompx_free(Bs); ompx_free(Bn);
+    ompx_free(dAs); ompx_free(dCs); ompx_free(dBs); ompx_free(dBn);
     ompx_finalize();
     return 0;
 }
