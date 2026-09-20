@@ -1,6 +1,6 @@
 /*
  * gicc_omp_dwq.hpp - the unified device-side communication markers behind
- * ompx_dput / ompx_flush (see src/gicc/omp.h).
+ * ompx_dwq_put_dev / ompx_dwq_flush_dev (see src/gicc/omp.h, GIOMP_ENABLE_DWQ).
  *
  * ONE user-visible API, two lowerings:
  *   - Without the GICC pass, these are ordinary device functions: `put`
