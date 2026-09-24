@@ -282,13 +282,24 @@ needs the pass (2-pass compile, `GICC_MODE=omp-dwq` + `GICC_META_DIR` env,
 `-mllvm -openmp-opt-disable=true`), then it links the prebuilt `libgicc_omp`. Run
 with `GICC_HALO_DWQ=1` and WITHOUT `GICC_SKIP_DWQ_INIT` (so the trigger BAR maps).
 
-**Give DWQ runs cores.** `flux run` defaults to one core per task, and the DWQ
-path runs a background CQ progress thread (`while (!stop) fi_cq_read(cq,NULL,0);`)
-alongside the thread spinning in `Runtime::drain`. On one core those two spinners
-alternate by scheduler luck and the 2-rank jacobi_e2e halo swings between 49 and
-1100 us/iter run to run. With `-c 8` the same binary holds 45.5 us within 1%, and
-`GICC_DWQ_CQ_THREAD=0` makes no further difference. Pass `-c` on every DWQ run
-before reading anything into a timing.
+**Give runs cores AND pin them: `-c 8 -o cpu-affinity=per-task`.** Nothing
+binds CPUs otherwise -- GICC sets no affinity anywhere (no `sched_setaffinity`
+in `src/`), and `-o mpibind=off`, which the IPC recipe requires for GPU
+visibility, also disables flux's own binding. Every rank's threads then float
+over all 64 cores. Two separate failures follow:
+
+* Cores alone. The DWQ path spins in `Runtime::drain` while FabricDwqContext's
+  background poller spins on `fi_cq_read`; on one core they alternate by
+  scheduler luck and the 2-rank jacobi_e2e halo swings between 49 and 1100
+  us/iter. `-c 8` holds it at 45.5 us within 1%.
+* Pinning. Unpinned, minimod at 16 GPU / grid 1200 varies 22% run to run with a
+  different straggler rank every iteration, and comm alone swings 2.2-5.3 s.
+  Adding `-o cpu-affinity=per-task` collapses that to 1.4%, drops comm to
+  ~1.0 s and the total by 17%. Compute is unaffected either way (0.2% spread),
+  so the cost lands entirely on the communication threads.
+
+`-o cpu-affinity=per-task` is independent of mpibind: it binds CPUs without
+touching GPU visibility, so it composes with the IPC recipe.
 
 ## GICC API
 
