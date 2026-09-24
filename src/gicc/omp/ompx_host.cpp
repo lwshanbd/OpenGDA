@@ -45,12 +45,18 @@ int g_local_device = 0;
 // Host-pinned, mapped and registered, so the NIC writes it, a host thread
 // polls it with an ordinary load, and a target region polls the device alias.
 // Symmetric like the heap: slot i means the same thing on every rank.
-//   [0, kSigSlots)          this rank's inbox -- peers write here
-//   [kSigSlots, 2*kSigSlots) this rank's outbox -- the value a signal carries
-constexpr int kSigSlots = 64;
+//   [0, kSigSlots)                   this rank's inbox -- peers write here
+//   [kSigSlots, kSigSlots+kSigCells) source cells for staged DWQ signals
+// A staged descriptor reads its source when it fires, not when it is staged,
+// so every staged signal needs a cell of its own until it completes. The
+// cells are handed out in order and recycled by ompx_quiet, which waits for
+// all of them. The proxy carries the value in its command and needs none.
+constexpr int kSigSlots = gicc::Runtime::kSignalSlots;
+constexpr int kSigCells = 4096;
 gicc::Buffer g_sig{};
 uint64_t*    g_sig_host = nullptr;
 uint64_t*    g_sig_dev  = nullptr;
+int          g_sig_next_cell = 0;
 
 // ---- symmetric heap ---------------------------------------------------------
 gicc::Buffer g_heap{};              // the heap as an address-book entry
@@ -173,18 +179,45 @@ void create_heap() {
     g_blocks.clear();
     g_blocks.push_back(HeapBlock{0, g_heap_bytes, false});
 
+    const size_t sig_bytes = (size_t)(kSigSlots + kSigCells) * sizeof(uint64_t);
     void* sig = nullptr;
-    require_gpu(gpuHostMalloc(&sig, 2 * kSigSlots * sizeof(uint64_t),
-                              gpuHostMallocMapped), "allocate signal table");
-    std::memset(sig, 0, 2 * kSigSlots * sizeof(uint64_t));
+    require_gpu(gpuHostMalloc(&sig, sig_bytes, gpuHostMallocMapped),
+                "allocate signal table");
+    std::memset(sig, 0, sig_bytes);
     g_sig_host = static_cast<uint64_t*>(sig);
     require_gpu(gpuHostGetDevicePointer((void**)&g_sig_dev, sig, 0),
                 "map signal table");
-    g_sig = g_runtime->register_buffer(sig, 2 * kSigSlots * sizeof(uint64_t),
-                                       /*is_device=*/false);
+    g_sig = g_runtime->register_buffer(sig, sig_bytes, /*is_device=*/false);
 
     g_runtime->exchange();
     g_runtime->set_symmetric_heap(ptr, g_heap.index);
+    g_runtime->set_signal_table(g_sig_dev, g_sig.index);
+}
+
+void check_slot(int sig, const char* what) {
+    if (sig >= 0 && sig < kSigSlots) return;
+    std::fprintf(stderr, "[giomp] %s: signal slot %d is outside [0, %d)\n",
+                 what, sig, kSigSlots);
+    std::abort();
+}
+
+// Stage one put_signal on slot `sig` under DWQ: the payload, then the signal,
+// both released by the slot's next doorbell increment.
+void stage_signal_dwq(int peer, size_t dst_off, size_t src_off, size_t bytes,
+                      int sig, unsigned long long value) {
+    if (g_sig_next_cell == kSigCells) {
+        std::fprintf(stderr, "[giomp] more than %d put_signals staged without an "
+                             "ompx_quiet in between\n", kSigCells);
+        std::abort();
+    }
+    const int cell = kSigSlots + g_sig_next_cell++;
+    g_sig_host[cell] = value;
+    const uint64_t threshold = g_runtime->signal_slot_next(sig);
+    g_runtime->signal_slot_write(sig, threshold, g_heap, peer, g_heap.index,
+                                 bytes, src_off, dst_off);
+    g_runtime->signal_slot_write(sig, threshold, g_sig, peer, g_sig.index,
+                                 sizeof(uint64_t), (size_t)cell * sizeof(uint64_t),
+                                 (size_t)sig * sizeof(uint64_t));
 }
 
 // Heap offset of `addr`, which may be a heap device address or a host address
@@ -418,41 +451,57 @@ void ompx_get_host(int peer, void* dst, const void* src, size_t bytes) {
 
 // ---- signals ----------------------------------------------------------------
 
-unsigned long long* ompx_signal_ptr(void) { return (unsigned long long*)g_sig_dev; }
-
-unsigned long long ompx_signal_read(int sig) {
+unsigned long long ompx_signal_read_host(int sig) {
+    check_slot(sig, "ompx_signal_read");
     return __atomic_load_n(&g_sig_host[sig], __ATOMIC_ACQUIRE);
 }
 
 void ompx_signal_reset(int sig) {
+    check_slot(sig, "ompx_signal_reset");
     __atomic_store_n(&g_sig_host[sig], 0, __ATOMIC_RELEASE);
 }
 
-void ompx_signal_wait(int sig, unsigned long long ge) {
+// Spins without waiting for this rank's own transfers: some of them may be
+// staged for a kernel that has not run yet, and drain() would wait on those
+// forever.
+void ompx_signal_wait_host(int sig, unsigned long long ge) {
+    check_slot(sig, "ompx_signal_wait");
     while (__atomic_load_n(&g_sig_host[sig], __ATOMIC_ACQUIRE) < ge) {
-        ompx_trigger_host();          // release anything still staged
-        g_runtime->drain(false);      // and keep the fabric progressing
+        ompx_trigger_host();          // release plain puts still staged
+        g_runtime->progress();
     }
 }
 
-// Data, then the flag that announces it. The endpoint asks for FI_ORDER_WAW,
-// so the peer cannot see the flag before the payload; no fence, no atomic and
-// no completion wait in between.
-void ompx_put_signal(int peer, void* dst, const void* src, size_t bytes,
-                     int sig, unsigned long long value) {
-    ompx_put_host(peer, dst, src, bytes);
-    g_sig_host[kSigSlots + sig] = value;
-    const size_t src_off = (size_t)(kSigSlots + sig) * sizeof(uint64_t);
-    const size_t dst_off = (size_t)sig * sizeof(uint64_t);
+// Sent now. Under DWQ it is staged on the slot and the host rings the slot's
+// doorbell at once, so the pair still rides one endpoint in order.
+void ompx_put_signal_host(int peer, void* dst, const void* src, size_t bytes,
+                          int sig, unsigned long long value) {
+    if (g_runtime == nullptr) die("ompx_put_signal before ompx_init");
+    check_slot(sig, "ompx_put_signal");
+    const size_t src_off = offset_of(src, "ompx_put_signal src");
+    const size_t dst_off = offset_of(dst, "ompx_put_signal dst");
     if (g_dwq_enabled) {
-        (void)g_runtime->put(g_sig, peer, g_sig.index, sizeof(uint64_t),
-                             src_off, dst_off);
-        ++g_dwq_pending;
+        stage_signal_dwq(peer, dst_off, src_off, bytes, sig, value);
+        g_runtime->signal_slot_fire(sig);
     } else {
         g_runtime->proxy_push(gicc::proxy::CmdType::WRITE, peer,
-                              g_sig.index, dst_off, g_sig.index, src_off,
-                              sizeof(uint64_t));
+                              g_heap.index, dst_off, g_heap.index, src_off, bytes);
+        g_runtime->proxy_push(gicc::proxy::CmdType::SIGNAL, peer,
+                              g_sig.index, (size_t)sig * sizeof(uint64_t),
+                              0, (size_t)value, sizeof(uint64_t));
     }
+}
+
+// Staged for a kernel to release: the device-side ompx_put_signal with the
+// same slot rings the doorbell. The proxy needs no staging -- its device
+// put_signal carries the whole transfer -- so this is a no-op there.
+void ompx_stage_put_signal(int peer, void* dst, const void* src, size_t bytes,
+                           int sig, unsigned long long value) {
+    if (g_runtime == nullptr) die("ompx_stage_put_signal before ompx_init");
+    check_slot(sig, "ompx_stage_put_signal");
+    if (!g_dwq_enabled) return;
+    stage_signal_dwq(peer, offset_of(dst, "ompx_stage_put_signal dst"),
+                     offset_of(src, "ompx_stage_put_signal src"), bytes, sig, value);
 }
 
 // ---- completion -------------------------------------------------------------
@@ -472,6 +521,7 @@ void ompx_quiet_host() {
                     "drain the IPC stream");
     }
     g_runtime->drain(/*sync_ipc=*/false);
+    g_sig_next_cell = 0;          // every staged signal has completed
 }
 
 void ompx_barrier() {

@@ -13,9 +13,11 @@
 //   Control:    ompx_init/finalize, ompx_get_rank_num/num_ranks
 //   Memory:     ompx_alloc, ompx_bind, ompx_free
 //   Movement:   ompx_peer_ptr (same-node direct access), ompx_put, ompx_get
+//   Signals:    ompx_put_signal, ompx_stage_put_signal, ompx_signal_wait,
+//               ompx_signal_read, ompx_signal_reset
 //   Completion: ompx_quiet, ompx_fence, ompx_barrier
-//   Device-side (call INSIDE your own #pragma omp target):
-//               ompx_prepare, ompx_put_dev, ompx_quiet_dev
+//   Device:     ompx_prepare once, then put/get/quiet/trigger and the signal
+//               calls work inside #pragma omp target as well as outside
 //
 // The GPU-compiled runtime lives in libgicc_omp; this header is safe to include
 // in a -fopenmp TU AND in a -x hip/-x cuda TU (the device-side inline functions
@@ -67,21 +69,33 @@ void  ompx_get_host(int peer, void* dst, const void* src, size_t bytes);
 
 // ---- signals ----------------------------------------------------------------
 // A put whose arrival the receiver can observe without a barrier: the payload
-// lands, then a flag lands in the peer's slot `sig`. The endpoint asks the
-// provider for write-after-write ordering, so the flag never overtakes the
-// data it announces.
+// lands, then `value` lands in the peer's slot `sig`. Both writes ride one
+// endpoint, which asks the provider for write-after-write ordering, so the
+// flag never overtakes the data it announces. Slots are symmetric (slot i
+// means the same object on every rank) and there are 64 of them. A slot holds
+// the last value written, so give each slot one sender and make its values
+// increase -- a sequence number, waited for with `>=`.
 //
-// Slots are symmetric (slot i means the same object on every rank) and there
-// are 64 of them. `value` is whatever the sender wants the receiver to see --
-// a sequence number if the receiver waits for `>=`, a count if senders keep
-// bumping it. ompx_signal_ptr hands back the device-visible address of the
-// slots so a target region can poll them instead of the host.
-void ompx_put_signal(int peer, void* dst, const void* src, size_t bytes,
-                     int sig, unsigned long long value);
-unsigned long long ompx_signal_read(int sig);
-void ompx_signal_wait(int sig, unsigned long long ge);
+// ompx_put_signal, ompx_signal_wait and ompx_signal_read work on the host and
+// inside a target region alike (see below). On the device, put_signal is how
+// a kernel sends data it has just produced:
+//   - CPU proxy: it pushes the payload and the signal onto the ring.
+//   - DWQ: the NIC can only run descriptors the host queued beforehand, so
+//     the host stages the transfer with ompx_stage_put_signal and the device
+//     call rings that slot's doorbell. Every slot has its own doorbell, so
+//     each team releases only its own chunk, in whatever order teams finish.
+//     The n-th device put_signal on a slot releases the n-th one staged there.
+//     ompx_stage_put_signal is a no-op under the proxy, so one source serves
+//     both transports.
+// A device put_signal is issued by one thread; synchronize the threads that
+// wrote `src` first (e.g. #pragma omp barrier), as for any put.
+void ompx_put_signal_host(int peer, void* dst, const void* src, size_t bytes,
+                          int sig, unsigned long long value);
+void ompx_stage_put_signal(int peer, void* dst, const void* src, size_t bytes,
+                           int sig, unsigned long long value);
+unsigned long long ompx_signal_read_host(int sig);
+void ompx_signal_wait_host(int sig, unsigned long long ge);
 void ompx_signal_reset(int sig);
-unsigned long long* ompx_signal_ptr(void);
 
 // ---- completion -------------------------------------------------------------
 void ompx_quiet_host(void);
@@ -185,10 +199,66 @@ inline void ompx_quiet(int lane = 0) {
     (void)lane; ompx_quiet_host();
 #endif
 }
+
+// `lane` picks the proxy ring, as for ompx_put; the signal always rides the
+// same ring as its payload. DWQ ignores it.
+inline void ompx_put_signal(int peer, void* dst, const void* src, size_t bytes,
+                            int sig, unsigned long long value, int lane = 0) {
+#if defined(__AMDGCN__) || defined(__NVPTX__)
+    ompx_ctx* c = ompx__ctx;
+    if (c->sig_trigger) {
+        // DWQ. The NIC reads `src` once the doorbell rings, so the payload
+        // must be out of this device's caches first.
+        volatile uint64_t* bell = c->sig_trigger[sig];
+        if (!bell) __builtin_trap();      // nothing was ever staged on `sig`
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        *bell = 1;
+    } else {
+        gicc::omp::put_signal(c, peer, c->heap_buf, ompx__off(c, dst),
+                              c->heap_buf, ompx__off(c, src), bytes,
+                              (size_t)sig * sizeof(uint64_t), value, lane);
+    }
+#else
+    (void)lane; ompx_put_signal_host(peer, dst, src, bytes, sig, value);
+#endif
+}
+
+inline unsigned long long ompx_signal_read(int sig) {
+#if defined(__AMDGCN__) || defined(__NVPTX__)
+    return __atomic_load_n(&ompx__ctx->sig_base[sig], __ATOMIC_ACQUIRE);
+#else
+    return ompx_signal_read_host(sig);
+#endif
+}
+
+// Returns once slot `sig` holds a value >= `ge`; the payload that value
+// announces is then visible to the caller.
+inline void ompx_signal_wait(int sig, unsigned long long ge) {
+#if defined(__AMDGCN__) || defined(__NVPTX__)
+    const uint64_t* slot = &ompx__ctx->sig_base[sig];
+    while (__atomic_load_n(slot, __ATOMIC_ACQUIRE) < ge) {
+#ifdef __AMDGCN__
+        __builtin_amdgcn_s_sleep(1);
+#endif
+    }
+#else
+    ompx_signal_wait_host(sig, ge);
+#endif
+}
 #pragma omp end declare target
 #else
 static inline void ompx_put(int peer, void* dst, const void* src, size_t n) {
     ompx_put_host(peer, dst, src, n);
+}
+static inline void ompx_put_signal(int peer, void* dst, const void* src,
+                                   size_t n, int sig, unsigned long long value) {
+    ompx_put_signal_host(peer, dst, src, n, sig, value);
+}
+static inline unsigned long long ompx_signal_read(int sig) {
+    return ompx_signal_read_host(sig);
+}
+static inline void ompx_signal_wait(int sig, unsigned long long ge) {
+    ompx_signal_wait_host(sig, ge);
 }
 static inline void ompx_get(int peer, void* dst, const void* src, size_t n) {
     ompx_get_host(peer, dst, src, n);
