@@ -66,6 +66,7 @@ void gicc_runtime_arm_dwq_trigger(gicc::Runtime *rt);
 
 // Device-side helpers (called from device IR emitted by GICCDeviceLowering).
 volatile std::uint64_t *gicc_runtime_trigger_addr(gicc::Runtime *rt);
+volatile std::uint64_t *gicc_runtime_trigger_addr_host(gicc::Runtime *rt);
 std::uint64_t           gicc_runtime_trigger_val (gicc::Runtime *rt);
 
 // Host-mirror lookup (used by the pass-synthesized DWQ trace function when

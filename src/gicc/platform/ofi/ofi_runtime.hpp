@@ -88,6 +88,7 @@ class Runtime {
                                         const std::size_t *, const int *,
                                         const std::size_t *, const std::size_t *);
     friend volatile std::uint64_t *(::gicc_runtime_trigger_addr)(Runtime *);
+    friend volatile std::uint64_t *(::gicc_runtime_trigger_addr_host)(Runtime *);
     friend std::uint64_t           (::gicc_runtime_trigger_val) (Runtime *);
 
 public:

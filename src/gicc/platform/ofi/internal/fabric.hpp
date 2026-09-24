@@ -542,6 +542,13 @@ public:
         return fabric->dev_trigger_cntr;
     }
 
+    // Same counter, host mapping. The BAR is host memory registered with
+    // gpuHostRegisterMmio; dev_trigger_cntr is only its device alias, so a
+    // host thread can pull the trigger with a plain store.
+    volatile uint64_t* get_trigger_addr_host() const {
+        return static_cast<volatile uint64_t*>(fabric->trigger_mmio_addr);
+    }
+
     /**
      * Global barrier across all ranks
      */

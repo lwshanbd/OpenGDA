@@ -149,6 +149,10 @@ volatile std::uint64_t *gicc_runtime_trigger_addr(gicc::Runtime *rt) {
     return rt ? rt->comm_->get_trigger_addr() : nullptr;
 }
 
+volatile std::uint64_t *gicc_runtime_trigger_addr_host(gicc::Runtime *rt) {
+    return rt ? rt->comm_->get_trigger_addr_host() : nullptr;
+}
+
 std::uint64_t gicc_runtime_trigger_val(gicc::Runtime *rt) {
     return rt ? rt->mono_total_ops_ : 0;
 }
