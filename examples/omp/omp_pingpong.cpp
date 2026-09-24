@@ -85,7 +85,8 @@ int main(int argc, char** argv) {
             g_xport = (a.substr(8) == "dwq") ? Xport::Dwq : Xport::Proxy;
     }
     const bool per_msg = (mode == "per-msg");
-    const bool bulk    = (mode == "bulk");   // N puts in ONE region, ONE quiet_host at end
+    const bool bulk    = (mode == "bulk");
+    const bool pingpong = (mode == "pingpong");   // N puts in ONE region, ONE quiet_host at end
 
     ompx_init();
     void* buf = ompx_alloc(kBufBytes);
@@ -141,6 +142,38 @@ int main(int argc, char** argv) {
                 char sb[32];
                 printf("%-10s %14.3f %14s\n", fmt_size(bytes, sb),
                        (t1 - t0) * 1e6 / N, "(bulk N=2000)");
+            }
+            ompx_barrier();
+            continue;
+        }
+
+        // ---- pingpong: a real round trip ----
+        // Both ranks are active. The sender puts the payload and a flag in one
+        // call; the receiver polls the flag, so neither side needs a barrier
+        // and the measured time is the actual round trip.
+        if (pingpong) {
+            const int N = 200;
+            const int sig = 0;
+            ompx_signal_reset(sig);
+            ompx_barrier();
+            double t0 = omp_get_wtime();
+            for (int i = 1; i <= N; ++i) {
+                if (rank == 0) {
+                    ompx_put_signal(peer, buf, buf, bytes, sig, (unsigned long long)i);
+                    ompx_quiet();
+                    ompx_signal_wait(sig, (unsigned long long)i);
+                } else {
+                    ompx_signal_wait(sig, (unsigned long long)i);
+                    ompx_put_signal(peer, buf, buf, bytes, sig, (unsigned long long)i);
+                    ompx_quiet();
+                }
+            }
+            double t1 = omp_get_wtime();
+            ompx_barrier();
+            if (rank == 0) {
+                char sb[32];
+                printf("%-10s %14.3f %14s\n", fmt_size(bytes, sb),
+                       (t1 - t0) * 1e6 / N / 2.0, "(half RTT)");
             }
             ompx_barrier();
             continue;

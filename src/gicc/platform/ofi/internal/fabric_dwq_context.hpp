@@ -273,6 +273,10 @@ private:
             hints->domain_attr->threading = want;
             hints->domain_attr->control_progress = FI_PROGRESS_MANUAL;
             hints->domain_attr->data_progress = FI_PROGRESS_MANUAL;
+            // Write-after-write ordering to the same target, which CXI grants.
+            // It is what lets a signal be an ordinary second write: the peer
+            // cannot observe the flag before the payload it announces.
+            hints->tx_attr->msg_order = FI_ORDER_WAW;
 
             ret = fi_getinfo(FI_VERSION(FI_MAJOR_VERSION, FI_MINOR_VERSION),
                              NULL, NULL, 0, hints, &info);
