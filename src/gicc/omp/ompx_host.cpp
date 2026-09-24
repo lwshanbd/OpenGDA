@@ -10,6 +10,7 @@
 #include <mpi.h>
 #include <omp.h>
 
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -31,6 +32,11 @@ __global__ void gicc_omp_fire_trigger(volatile uint64_t* addr, uint64_t value) {
 }
 
 namespace {
+
+// gicc/omp.h mirrors these two leading fields for C target regions.
+static_assert(offsetof(gicc::DeviceCtx, trigger_addr_) == 0, "DeviceCtx layout");
+static_assert(offsetof(gicc::DeviceCtx, trigger_val_) == sizeof(void*),
+              "DeviceCtx layout");
 
 gicc::Runtime* g_runtime = nullptr;
 bool g_initialized_mpi = false;
@@ -285,6 +291,16 @@ void* ompx_bind(void* host_ptr, size_t bytes) {
 void ompx_free(void* ptr) {
     if (ptr == nullptr || g_heap_base == nullptr) return;
     const size_t off = offset_of(ptr, "ompx_free");
+    // Drop any ompx_bind record first: a stale one keeps resolving a host
+    // pointer whose heap block is about to be handed to the next allocation.
+    for (size_t i = 0; i < g_binds.size(); ++i) {
+        const char* p = static_cast<const char*>(ptr);
+        if ((p >= g_binds[i].host && p < g_binds[i].host + g_binds[i].bytes) ||
+            (p >= g_binds[i].dev  && p < g_binds[i].dev  + g_binds[i].bytes)) {
+            g_binds.erase(g_binds.begin() + (long)i);
+            break;
+        }
+    }
     for (size_t i = 0; i < g_blocks.size(); ++i) {
         if (g_blocks[i].offset != off) continue;
         g_blocks[i].used = false;
