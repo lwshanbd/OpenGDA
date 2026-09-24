@@ -44,11 +44,6 @@ typedef struct ompx_ctx {
 } ompx_ctx;
 #endif
 
-// ---- cross-node transport ---------------------------------------------------
-// IPC is always preferred for a same-node peer; this selects what a cross-node
-// put uses. OMPX_AUTO honours the GICC_HALO_DWQ environment variable.
-typedef enum { OMPX_AUTO = 0, OMPX_PROXY = 1, OMPX_DWQ = 2 } ompx_xport;
-
 // ---- control ----------------------------------------------------------------
 void ompx_init(void);       // MPI + runtime + device select + heap + exchange
 void ompx_finalize(void);
@@ -61,121 +56,125 @@ int  ompx_get_num_ranks(void);
 void* ompx_alloc(size_t bytes);                    // zeroed heap allocation
 void* ompx_bind(void* host_ptr, size_t bytes);     // alloc + associate + copy in
 void  ompx_free(void* ptr);
-size_t ompx_heap_size(void);                       // configured heap bytes
 
-// Escape hatch for the compiler path: the DWQ markers below take the buffer
-// index and heap offset the LTO pass analyses, so an application using them
-// needs to name an allocation that way. Ordinary code never calls these.
-int    ompx_heap_index(void);                      // address-book index of the heap
-size_t ompx_heap_offset_of(const void* addr);      // heap offset of an address
 
 // ---- data movement ----------------------------------------------------------
 // Addresses are local addresses of symmetric objects. `dst` names the object on
 // `peer`; `src` names our own copy.
 void* ompx_peer_ptr(int peer, const void* addr);   // NULL unless same-node
-void  ompx_put(int peer, void* dst, const void* src, size_t bytes);
-void  ompx_get(int peer, void* dst, const void* src, size_t bytes);
-void  ompx_set_transport(ompx_xport xport);
+void  ompx_put_host(int peer, void* dst, const void* src, size_t bytes);
+void  ompx_get_host(int peer, void* dst, const void* src, size_t bytes);
 
 // ---- completion -------------------------------------------------------------
-void ompx_quiet(void);      // drain the transfers this rank issued
+void ompx_quiet_host(void);
 void ompx_barrier(void);
 void ompx_fence(void);      // quiet + barrier: call before reading peer writes
 
 // ---- explicit batched DWQ ---------------------------------------------------
-// ompx_put already picks the DWQ when that transport is selected. These calls
-// expose the two halves separately: stage any number of operations, then fire
-// them all with one GPU MMIO write. Requires GICC_HALO_DWQ=1 before ompx_init.
-int  ompx_dwq_enabled(void);
-void ompx_dwq_stage_put(int peer, void* dst, const void* src, size_t bytes);
-void ompx_dwq_stage_get(int peer, void* dst, const void* src, size_t bytes);
-void ompx_dwq_trigger(void);    // arm + fire the staged batch
-// Arm without firing, for a kernel that fires the trigger itself as part of the
-// work it is already doing: stage, arm, then write *(ctx->trigger_addr_) =
-// ctx->trigger_val_ from one lead thread inside your own target region.
-void ompx_dwq_arm(void);
+// ompx_put stages; nothing moves until a trigger is pulled. ompx_quiet pulls it
+// for you, so an application only calls ompx_trigger when it wants the transfer
+// to start earlier than that -- typically before a kernel it wants to overlap.
+// No-op under the CPU proxy, which is already in flight on issue.
+void ompx_trigger_host(void);
 
 // ---- device-side ------------------------------------------------------------
-ompx_ctx* ompx_prepare(void);   // per-step device context (host call)
+ompx_ctx* ompx_prepare_ctx(void);
 
 #ifdef __cplusplus
 }  // extern "C"
 #endif
 
-#if !defined(__cplusplus)
-// Fire the armed DWQ batch from inside the application's own target region.
-// Pair with ompx_dwq_arm() on the host; one thread should call it.
+#if !defined(__HIPCC__) && !defined(__CUDACC__)
+// ---- one name, host or device ----------------------------------------------
+// These are `declare target`, so the same call works in ordinary code and
+// inside `#pragma omp target`. On the device they use the context published by
+// ompx_prepare; on the host they call the runtime. ompx_trigger works from C
+// and C++ alike; ompx_put/get/quiet have no C device body, so a C application
+// issues those from the host and only pulls the trigger on the device.
 #pragma omp declare target
-static inline void ompx_dwq_fire_dev(ompx_ctx* ctx) {
-    *(ctx->trigger_addr_) = ctx->trigger_val_;
+static ompx_ctx* ompx__ctx = 0;
+#pragma omp end declare target
+
+// The runtime's DeviceCtx is host-pinned and mapped and prepare() returns the
+// same device pointer for the life of the runtime, so this publishes it once;
+// later calls only update contents the device already sees.
+static inline ompx_ctx* ompx_prepare(void) {
+    ompx_ctx* c = ompx_prepare_ctx();
+    if (ompx__ctx != c) {
+        ompx__ctx = c;
+        #pragma omp target is_device_ptr(c)
+        { ompx__ctx = c; }
+    }
+    return c;
+}
+
+#pragma omp declare target
+static inline void ompx_trigger(void) {
+#if defined(__AMDGCN__) || defined(__NVPTX__)
+    // No trigger mapped means the CPU proxy, which is already in flight.
+    if (ompx__ctx && ompx__ctx->trigger_addr_)
+        *(ompx__ctx->trigger_addr_) = ompx__ctx->trigger_val_;
+#else
+    ompx_trigger_host();
+#endif
 }
 #pragma omp end declare target
-#endif
 
 #if defined(__cplusplus) && !defined(__HIPCC__) && !defined(__CUDACC__)
-// Device-side RMA: call inside your own `#pragma omp target is_device_ptr(ctx)`.
-// Addresses are translated to heap offsets in-kernel, so no handle is needed.
 #pragma omp declare target
-inline size_t ompx_heap_offset(ompx_ctx* ctx, const void* addr) {
-    return (size_t)((const char*)addr - (const char*)ctx->heap_base);
+static inline size_t ompx__off(ompx_ctx* c, const void* a) {
+    return (size_t)((const char*)a - (const char*)c->heap_base);
 }
 
 // `lane` picks one of the proxy rings, each drained by its own worker, so two
-// transfers issued on different lanes progress independently.
-inline void ompx_put_dev(ompx_ctx* ctx, int peer,
-                         void* dst, const void* src, size_t bytes,
-                         int lane = 0) {
-    gicc::omp::put(ctx, peer,
-                   ctx->heap_buf, ompx_heap_offset(ctx, dst),
-                   ctx->heap_buf, ompx_heap_offset(ctx, src), bytes, lane);
+// transfers issued on different lanes progress independently. It is ignored on
+// the host, which dispatches per call.
+inline void ompx_put(int peer, void* dst, const void* src, size_t bytes,
+                     int lane = 0) {
+#if defined(__AMDGCN__) || defined(__NVPTX__)
+    ompx_ctx* c = ompx__ctx;
+    gicc::omp::put(c, peer, c->heap_buf, ompx__off(c, dst),
+                   c->heap_buf, ompx__off(c, src), bytes, lane);
+#else
+    (void)lane; ompx_put_host(peer, dst, src, bytes);
+#endif
 }
 
-inline void ompx_get_dev(ompx_ctx* ctx, int peer,
-                         void* dst, const void* src, size_t bytes,
-                         int lane = 0) {
-    gicc::omp::get(ctx, peer,
-                   ctx->heap_buf, ompx_heap_offset(ctx, src),
-                   ctx->heap_buf, ompx_heap_offset(ctx, dst), bytes, lane);
+inline void ompx_get(int peer, void* dst, const void* src, size_t bytes,
+                     int lane = 0) {
+#if defined(__AMDGCN__) || defined(__NVPTX__)
+    ompx_ctx* c = ompx__ctx;
+    gicc::omp::get(c, peer, c->heap_buf, ompx__off(c, src),
+                   c->heap_buf, ompx__off(c, dst), bytes, lane);
+#else
+    (void)lane; ompx_get_host(peer, dst, src, bytes);
+#endif
 }
 
-// Lead-thread form: the caller guarantees a single work-item enqueues on this
-// lane until the matching quiet, which skips the contended ring CAS.
-inline void ompx_get_dev_single(ompx_ctx* ctx, int peer,
-                                void* dst, const void* src, size_t bytes,
-                                int lane = 0) {
-    gicc::omp::get_single(ctx, peer,
-                          ctx->heap_buf, ompx_heap_offset(ctx, src),
-                          ctx->heap_buf, ompx_heap_offset(ctx, dst), bytes, lane);
+// Single-issuer form: the caller guarantees one work-item enqueues on this lane
+// until the matching quiet, which skips the contended ring CAS. Device only.
+inline void ompx_get_single(int peer, void* dst, const void* src, size_t bytes,
+                            int lane = 0) {
+    ompx_ctx* c = ompx__ctx;
+    gicc::omp::get_single(c, peer, c->heap_buf, ompx__off(c, src),
+                          c->heap_buf, ompx__off(c, dst), bytes, lane);
 }
 
-inline void ompx_quiet_dev(ompx_ctx* ctx, int lane = 0) {
-    gicc::omp::quiet(ctx, lane);
-}
-
-// Fire the armed DWQ batch from inside a region the application is launching
-// anyway: one lead thread writes the NIC's trigger counter. Pair it with
-// ompx_dwq_arm() on the host. ompx_dwq_trigger() is the convenience form that
-// launches its own kernel; this one costs no extra launch, which matters when
-// the trigger sits inside a measured phase.
-inline void ompx_dwq_fire_dev(ompx_ctx* ctx) {
-    *(ctx->trigger_addr_) = ctx->trigger_val_;
+inline void ompx_quiet(int lane = 0) {
+#if defined(__AMDGCN__) || defined(__NVPTX__)
+    gicc::omp::quiet(ompx__ctx, lane);
+#else
+    (void)lane; ompx_quiet_host();
+#endif
 }
 #pragma omp end declare target
-
-// ---- DWQ marker path (opt-in) -----------------------------------------------
-// Alternative to the runtime DWQ above: the LTO pass recognizes these markers
-// and synthesizes the host trace, so the app TU must be compiled with
-// -fpass-plugin and -foffload-lto. The markers keep the buffer-index form the
-// pass analyses; they are a compiler interface, not the user-facing API.
-#ifdef GIOMP_ENABLE_DWQ
-#include "examples/omp/gicc_omp_dwq.hpp"
-#pragma omp declare target
-inline void ompx_dwq_put_dev(ompx_ctx* ctx, int node,
-                             int dst_buf, size_t dst_off,
-                             int src_buf, size_t src_off, size_t bytes) {
-    gicc::omp_dwq::put(ctx, node, dst_buf, dst_off, src_buf, src_off, bytes);
+#else
+static inline void ompx_put(int peer, void* dst, const void* src, size_t n) {
+    ompx_put_host(peer, dst, src, n);
 }
-inline void ompx_dwq_flush_dev(ompx_ctx* ctx) { gicc::omp_dwq::flush(ctx); }
-#pragma omp end declare target
+static inline void ompx_get(int peer, void* dst, const void* src, size_t n) {
+    ompx_get_host(peer, dst, src, n);
+}
+static inline void ompx_quiet(void) { ompx_quiet_host(); }
 #endif
-#endif
+#endif  // !__HIPCC__ && !__CUDACC__

@@ -21,16 +21,6 @@
 #include "gicc/platform/ofi/ofi_runtime.hpp"
 #include "gicc/platform/ofi/runtime_helpers.h"
 
-// One MMIO store to the NIC trigger counter, which fires every descriptor the
-// host staged. A kernel is the only way to reach that mapping from the device.
-// The address and value are passed in rather than read from the DeviceCtx:
-// Runtime::prepare() and the arm helper BOTH consume the pending-op delta, so
-// re-preparing here just to obtain a ctx pointer would zero the value we are
-// about to write and nothing would fire.
-__global__ void gicc_omp_fire_trigger(volatile uint64_t* addr, uint64_t value) {
-    *addr = value;
-}
-
 namespace {
 
 // gicc/omp.h mirrors these two leading fields for C target regions.
@@ -207,8 +197,19 @@ void ompx_init() {
     select_local_device();
     g_runtime = new gicc::Runtime();
 
+    // DWQ by default: the GPU triggers its own transfers, which is the point
+    // of this library. GICC_HALO_DWQ=0 selects the CPU proxy instead, and
+    // GICC_SKIP_DWQ_INIT forces it -- that switch leaves the CXI trigger BAR
+    // unmapped, so the DWQ physically cannot fire.
     const char* dwq_env = std::getenv("GICC_HALO_DWQ");
-    g_dwq_enabled = dwq_env != nullptr && std::atoi(dwq_env) != 0;
+    g_dwq_enabled = (dwq_env == nullptr) || (std::atoi(dwq_env) != 0);
+    if (g_dwq_enabled && std::getenv("GICC_SKIP_DWQ_INIT") != nullptr) {
+        if (dwq_env != nullptr && g_runtime->rank() == 0) {
+            std::fprintf(stderr, "[giomp] GICC_HALO_DWQ ignored: "
+                                 "GICC_SKIP_DWQ_INIT leaves the trigger unmapped\n");
+        }
+        g_dwq_enabled = false;
+    }
     if (g_dwq_enabled) g_runtime->enable_host_wait_mode();
 
     // Keep libomptarget and the GPU runtime on the same rank-local device.
@@ -317,8 +318,6 @@ void ompx_free(void* ptr) {
     }
 }
 
-size_t ompx_heap_size() { return g_heap_bytes; }
-
 int ompx_heap_index() { return g_heap.index; }
 
 size_t ompx_heap_offset_of(const void* addr) {
@@ -334,7 +333,7 @@ void* ompx_peer_ptr(int peer, const void* addr) {
     return static_cast<char*>(base) + offset_of(addr, "ompx_peer_ptr");
 }
 
-void ompx_put(int peer, void* dst, const void* src, size_t bytes) {
+void ompx_put_host(int peer, void* dst, const void* src, size_t bytes) {
     if (g_runtime == nullptr) die("ompx_put before ompx_init");
     const size_t src_off = offset_of(src, "ompx_put src");
     const size_t dst_off = offset_of(dst, "ompx_put dst");
@@ -364,7 +363,7 @@ void ompx_put(int peer, void* dst, const void* src, size_t bytes) {
     }
 }
 
-void ompx_get(int peer, void* dst, const void* src, size_t bytes) {
+void ompx_get_host(int peer, void* dst, const void* src, size_t bytes) {
     if (g_runtime == nullptr) die("ompx_get before ompx_init");
     const size_t dst_off = offset_of(dst, "ompx_get dst");
     const size_t src_off = offset_of(src, "ompx_get src");
@@ -391,25 +390,15 @@ void ompx_get(int peer, void* dst, const void* src, size_t bytes) {
     }
 }
 
-void ompx_set_transport(ompx_xport xport) {
-    if (xport == OMPX_DWQ && !g_dwq_enabled) {
-        if (g_runtime != nullptr) g_runtime->enable_host_wait_mode();
-        g_dwq_enabled = true;
-    }
-}
-
 // ---- completion -------------------------------------------------------------
 
-void ompx_dwq_trigger(void);   // defined below, with the rest of the DWQ calls
+void ompx_trigger_host(void);   // defined below, with the rest of the DWQ calls
 
-void ompx_quiet() {
+void ompx_quiet_host() {
     if (g_runtime == nullptr) return;
     // Descriptors staged by ompx_put sit in the queue until the NIC is told to
     // go; without this the completion counter below never reaches its threshold.
-    if (g_dwq_pending > 0) {
-        g_dwq_pending = 0;
-        ompx_dwq_trigger();
-    }
+    ompx_trigger_host();
     // Per-step completion only. The batch teardown in Runtime::reset() -- freeing
     // descriptors, zeroing the NIC counters -- runs once at ompx_finalize.
     if (g_ipc_pending) {
@@ -425,45 +414,25 @@ void ompx_barrier() {
 }
 
 void ompx_fence() {
-    ompx_quiet();
+    ompx_quiet_host();
     ompx_barrier();
 }
 
 // ---- device-side ------------------------------------------------------------
 
-ompx_ctx* ompx_prepare() {
+ompx_ctx* ompx_prepare_ctx() {
     return g_runtime->prepare();
 }
 
 // ---- explicit batched DWQ ---------------------------------------------------
 // Defined below, next to the other compiler-facing helpers.
-void ompx_dwq_arm(void);
-
-int ompx_dwq_enabled() { return g_dwq_enabled ? 1 : 0; }
-
-void ompx_dwq_stage_put(int peer, void* dst, const void* src, size_t bytes) {
-    gicc_runtime_dwq_enqueue(g_runtime, peer,
-                             g_heap.index, offset_of(dst, "ompx_dwq_stage_put dst"),
-                             g_heap.index, offset_of(src, "ompx_dwq_stage_put src"),
-                             bytes);
-}
-
-void ompx_dwq_stage_get(int peer, void* dst, const void* src, size_t bytes) {
-    // In host-wait mode Runtime::get queues a triggered descriptor rather than
-    // issuing it, which is exactly the staging this call promises.
-    (void)g_runtime->get(g_heap, peer, g_heap.index, bytes,
-                         offset_of(dst, "ompx_dwq_stage_get dst"),
-                         offset_of(src, "ompx_dwq_stage_get src"));
-}
-
-void ompx_dwq_trigger() {
+void ompx_trigger_host() {
+    if (g_runtime == nullptr || g_dwq_pending == 0) return;   // no-op for proxy
     g_dwq_pending = 0;
-    ompx_dwq_arm();
-    volatile uint64_t* addr = gicc_runtime_trigger_addr(g_runtime);
+    gicc_runtime_arm_dwq_trigger(g_runtime);
+    volatile uint64_t* addr = gicc_runtime_trigger_addr_host(g_runtime);
     const uint64_t value = gicc_runtime_trigger_val(g_runtime);
-    if (addr == nullptr || value == 0) return;
-    gicc_omp_fire_trigger<<<1, 1>>>(addr, value);
-    require_gpu(gpuDeviceSynchronize(), "fire DWQ trigger");
+    if (addr != nullptr && value != 0) *addr = value;
 }
 
 // ---- compiler-facing helpers ------------------------------------------------
@@ -473,10 +442,6 @@ void ompx_dwq_stage(int peer, int dst_buffer, size_t dst_offset,
                     int src_buffer, size_t src_offset, size_t bytes) {
     gicc_runtime_dwq_enqueue(g_runtime, peer, dst_buffer, dst_offset,
                              src_buffer, src_offset, bytes);
-}
-
-void ompx_dwq_arm() {
-    gicc_runtime_arm_dwq_trigger(g_runtime);
 }
 
 void* gicc_runtime_current() {
