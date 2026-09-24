@@ -140,6 +140,35 @@ inline void put(gicc::DeviceCtx* ctx, int target_rank,
     detail::atomic_push(ring, c);
 }
 
+// Payload, then an 8-byte signal carrying `value`, on the same ring. One ring
+// is drained by one worker on one endpoint, and that endpoint asks for
+// write-after-write ordering, so the signal cannot land before the payload.
+inline void put_signal(gicc::DeviceCtx* ctx, int target_rank,
+                       int dst_buf, size_t dst_offset,
+                       int src_buf, size_t src_offset, size_t size,
+                       size_t sig_offset, uint64_t value, int lane = 0) {
+    if (!ctx) return;
+    auto* ring = detail::lane_to_ring(ctx, lane);
+    if (!ring) return;
+    gicc::proxy::TransferCmd c;
+    c.cmd_type   = gicc::proxy::CmdType::WRITE;
+    c.dst_rank   = static_cast<uint8_t>(target_rank);
+    c.src_buf    = static_cast<uint8_t>(src_buf);
+    c.dst_buf    = static_cast<uint8_t>(dst_buf);
+    c.bytes      = static_cast<uint32_t>(size);
+    c.src_offset = src_offset;
+    c.dst_offset = dst_offset;
+    detail::atomic_push(ring, c);
+
+    c.cmd_type   = gicc::proxy::CmdType::SIGNAL;
+    c.src_buf    = 0;
+    c.dst_buf    = static_cast<uint8_t>(ctx->sig_buf);
+    c.bytes      = sizeof(uint64_t);
+    c.src_offset = value;
+    c.dst_offset = sig_offset;
+    detail::atomic_push(ring, c);
+}
+
 inline void get(gicc::DeviceCtx* ctx, int source_rank,
                 int src_buf, size_t src_offset,
                 int dst_buf, size_t dst_offset,
