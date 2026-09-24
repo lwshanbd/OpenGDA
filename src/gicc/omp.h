@@ -35,7 +35,13 @@
 typedef gicc::DeviceCtx ompx_ctx;
 extern "C" {
 #else
-typedef struct ompx_ctx ompx_ctx;                  // opaque handle in C
+// Layout-compatible prefix of gicc::DeviceCtx, so a C target region can fire
+// the trigger itself. Checked against the real struct on the C++ side.
+#include <stdint.h>
+typedef struct ompx_ctx {
+    volatile uint64_t* trigger_addr_;
+    uint64_t           trigger_val_;
+} ompx_ctx;
 #endif
 
 // ---- cross-node transport ---------------------------------------------------
@@ -94,6 +100,16 @@ ompx_ctx* ompx_prepare(void);   // per-step device context (host call)
 
 #ifdef __cplusplus
 }  // extern "C"
+#endif
+
+#if !defined(__cplusplus)
+// Fire the armed DWQ batch from inside the application's own target region.
+// Pair with ompx_dwq_arm() on the host; one thread should call it.
+#pragma omp declare target
+static inline void ompx_dwq_fire_dev(ompx_ctx* ctx) {
+    *(ctx->trigger_addr_) = ctx->trigger_val_;
+}
+#pragma omp end declare target
 #endif
 
 #if defined(__cplusplus) && !defined(__HIPCC__) && !defined(__CUDACC__)
