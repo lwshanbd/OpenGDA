@@ -233,24 +233,77 @@ private:
 
     void init_fabric() {
         // Setup hints
-        struct fi_info* hints = fi_allocinfo();
-        hints->caps = FI_RMA | FI_MSG | FI_HMEM | FI_ATOMIC;
-        hints->mode = FI_CONTEXT2;  // DWQ requires FI_CONTEXT2
-        hints->ep_attr->type = FI_EP_RDM;
-        hints->domain_attr->mr_mode = FI_MR_VIRT_ADDR | FI_MR_ALLOCATED |
-                                      FI_MR_PROV_KEY | FI_MR_LOCAL | FI_MR_ENDPOINT;
-        hints->domain_attr->threading = FI_THREAD_SAFE;
-        hints->domain_attr->control_progress = FI_PROGRESS_MANUAL;
-        hints->domain_attr->data_progress = FI_PROGRESS_MANUAL;
+        // Threading model. FI_THREAD_SAFE has the provider lock internally on
+        // every fi_* call, which we would like to avoid -- but the weaker
+        // models do not fit this design, so SAFE stays the default:
+        //
+        //   FI_THREAD_COMPLETION is granted by CXI and our objects look like
+        //   they satisfy it (one MR per EP, each proxy worker owning its own
+        //   proxy_eps_[i]/proxy_cqs_[i], the DWQ path alone on the main EP and
+        //   shared_completion_cntr_) -- yet 4/4 runs of the 2-rank DWQ halo
+        //   HANG under it, with or without the background CQ poller. The spec
+        //   pairs that model with SCALABLE endpoints; we open N standard
+        //   FI_EP_RDM endpoints instead, which only resembles the shape it
+        //   describes.
+        //
+        //   FI_THREAD_DOMAIN is the lockless model for standard endpoints, but
+        //   it requires serializing every object under a domain -- endpoints,
+        //   CQs, counters, AVs, MRs -- and the proxy workers genuinely run
+        //   concurrently with the main thread on one domain. Going lockless
+        //   would mean giving each thread its OWN domain (per-domain AV and
+        //   address exchange), which is an architecture change, not a flag.
+        //
+        // GICC_FI_THREADING=safe|completion|domain is kept as a research hook;
+        // anything but `safe` is unvalidated and known to hang.
+        enum fi_threading want = FI_THREAD_SAFE;
+        if (const char* e = std::getenv("GICC_FI_THREADING")) {
+            if (!std::strcmp(e, "safe"))            want = FI_THREAD_SAFE;
+            else if (!std::strcmp(e, "domain"))     want = FI_THREAD_DOMAIN;
+            else if (!std::strcmp(e, "completion")) want = FI_THREAD_COMPLETION;
+        }
 
-        int ret = fi_getinfo(FI_VERSION(FI_MAJOR_VERSION, FI_MINOR_VERSION),
+        int ret = -FI_ENODATA;
+        for (int attempt = 0; attempt < 2 && ret; ++attempt) {
+            struct fi_info* hints = fi_allocinfo();
+            hints->caps = FI_RMA | FI_MSG | FI_HMEM | FI_ATOMIC;
+            hints->mode = FI_CONTEXT2;  // DWQ requires FI_CONTEXT2
+            hints->ep_attr->type = FI_EP_RDM;
+            hints->domain_attr->mr_mode = FI_MR_VIRT_ADDR | FI_MR_ALLOCATED |
+                                          FI_MR_PROV_KEY | FI_MR_LOCAL | FI_MR_ENDPOINT;
+            hints->domain_attr->threading = want;
+            hints->domain_attr->control_progress = FI_PROGRESS_MANUAL;
+            hints->domain_attr->data_progress = FI_PROGRESS_MANUAL;
+
+            ret = fi_getinfo(FI_VERSION(FI_MAJOR_VERSION, FI_MINOR_VERSION),
                              NULL, NULL, 0, hints, &info);
-        fi_freeinfo(hints);
+            fi_freeinfo(hints);
+
+            // A provider that will not grant the requested level must not be
+            // silently run with a promise we cannot keep -- fall back to the
+            // always-supported FI_THREAD_SAFE instead.
+            if (ret && want != FI_THREAD_SAFE) {
+                if (rank == 0) {
+                    fprintf(stderr,
+                            "[gicc] fi_getinfo(threading=%d) failed: %s; "
+                            "falling back to FI_THREAD_SAFE\n",
+                            (int)want, fi_strerror(-ret));
+                }
+                want = FI_THREAD_SAFE;
+                continue;
+            }
+            break;
+        }
 
         if (ret) {
             fprintf(stderr, "Rank %d: fi_getinfo failed: %s (%d)\n",
                     rank, fi_strerror(-ret), ret);
             exit(1);
+        }
+        if (rank == 0) {
+            fprintf(stderr, "[gicc] libfabric threading = %s\n",
+                    want == FI_THREAD_SAFE       ? "FI_THREAD_SAFE"
+                  : want == FI_THREAD_COMPLETION ? "FI_THREAD_COMPLETION"
+                                                 : "FI_THREAD_DOMAIN");
         }
 
         // Find CXI provider - use affinity detector if available
