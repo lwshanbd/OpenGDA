@@ -241,6 +241,9 @@ public:
 
         for (auto* op : my_pending_) delete op;
         my_pending_.clear();
+        for (auto& slot : signal_slots_) comm_->fabric->close_trigger_counter(slot.trigger);
+        signal_slots_.clear();
+        if (signal_doorbells_host_) (void)gpuHostFree((void*)signal_doorbells_host_);
         for (int i = 0; i < POOL_SIZE; i++) {
             if (slots_[i].completion_cntr)
                 fi_close(&slots_[i].completion_cntr->fid);
@@ -541,6 +544,20 @@ public:
         // unified source kernel correctly serve both proxy and DWQ
         // paths (the mode is selected here, not inside the kernel).
         proxy_dispatch_disabled_ = true;
+
+        // One doorbell per signal slot, filled in as slots are opened. The
+        // table exists from here on so a context published before the first
+        // put_signal is staged already points the device at it.
+        if (gpuHostMalloc((void**)&signal_doorbells_host_,
+                          sizeof(void*) * kSignalSlots,
+                          gpuHostMallocMapped) != GPU_SUCCESS ||
+            gpuHostGetDevicePointer((void**)&signal_doorbells_dev_,
+                                    signal_doorbells_host_, 0) != GPU_SUCCESS) {
+            fprintf(stderr, "GICC: allocating the signal doorbell table failed\n");
+            std::abort();
+        }
+        std::memset((void*)signal_doorbells_host_, 0, sizeof(void*) * kSignalSlots);
+        signal_slots_.resize(kSignalSlots);
     }
 
 
@@ -949,6 +966,58 @@ public:
         heap_buf_  = buf_index;
     }
 
+    //--------------------------------------------------------------------------
+    // Signal slots -- the DWQ half of put-with-signal.
+    //
+    // Each slot owns a trigger counter, opened the first time something is
+    // staged on it. Writes staged on a slot are released by that slot's
+    // doorbell alone, so one team of a kernel can release its chunk's payload
+    // and flag while the others are still computing theirs. The global
+    // trigger cannot do that: any store to it releases everything queued
+    // below the new count. The n-th group staged on a slot carries threshold
+    // n and fires on the n-th increment, from the GPU or from the host.
+    //--------------------------------------------------------------------------
+    static constexpr int kSignalSlots = 64;
+
+    // The inbox a device-side signal_wait polls, published by prepare().
+    void set_signal_table(void* dev_base, int buf_index) {
+        sig_base_ = dev_base;
+        sig_buf_  = buf_index;
+    }
+
+    // Threshold for the next group staged on `slot`.
+    uint64_t signal_slot_next(int slot) {
+        return ++signal_slot_(slot).staged;
+    }
+
+    // Stage one write released by `slot` at `threshold`. Always the NIC,
+    // never the IPC fast path: a payload and the signal behind it must share
+    // one endpoint for write-after-write ordering to hold between them.
+    void signal_slot_write(int slot, uint64_t threshold, const Buffer& src,
+                           int dest_rank, int dest_buf_index, size_t size,
+                           size_t src_offset, size_t dst_offset) {
+        SignalSlot& s = signal_slot_(slot);
+        const OfiBuffer& ob = local_bufs_.at(src.index);
+        const RemoteInfo& ri = remote_info_cache_[
+            (size_t)dest_rank * (size_t)n_bufs_ + (size_t)dest_buf_index];
+        const uint64_t remote_addr = comm_->is_virt_addr_mode()
+            ? (ri.rma_addr + dst_offset)
+            : (ri.rma_addr - ri.base_addr) + dst_offset;
+        DwqWorkBuilder* dwq = dwq_get_();
+        dwq->queue_rma_write(
+            comm_->fabric->domain, comm_->fabric->ep,
+            (char*)ob.ptr + src_offset, ob.desc_, size,
+            comm_->av_addrs[dest_rank], remote_addr, ri.rma_key,
+            s.trigger.cntr, shared_completion_cntr_, threshold);
+        ++mono_total_ops_;          // so drain() waits for it
+        my_pending_.push_back(dwq);
+    }
+
+    // Release the oldest group still staged on `slot`, from the host.
+    void signal_slot_fire(int slot) {
+        *static_cast<volatile uint64_t*>(signal_slot_(slot).trigger.mmio) = 1;
+    }
+
     DeviceCtx* prepare(int peer_rank = -1, int remote_buf_index = -1) {
         (void)peer_rank;
         (void)remote_buf_index;
@@ -978,6 +1047,9 @@ public:
         h_dev_ctx_->ipc_n_bufs    = n_bufs_;
         h_dev_ctx_->heap_base     = heap_base_;
         h_dev_ctx_->heap_buf      = heap_buf_;
+        h_dev_ctx_->sig_base      = static_cast<uint64_t*>(sig_base_);
+        h_dev_ctx_->sig_buf       = sig_buf_;
+        h_dev_ctx_->sig_trigger   = host_wait_mode_ ? signal_doorbells_dev_ : nullptr;
 #ifdef GICC_CPU_PROXY
         // Lazy-start the CPU proxy fleet on first prepare(). Stash both
         // the single ring 0 (DeviceCtx::proxy_ring, for back-compat with
@@ -1436,6 +1508,30 @@ private:
     // per element without depending on a kernel-formal-only HK arg path.
     // See [[asf-rtm-pass-driven-dwq]] for the design rationale.
     std::unordered_map<const void*, const void*> host_mirrors_;
+    struct SignalSlot {
+        FabricDwqContext::TriggerCounter trigger;
+        uint64_t                         staged = 0;   // groups staged so far
+    };
+    std::vector<SignalSlot>            signal_slots_;            // kSignalSlots once DWQ is on
+    volatile uint64_t**                signal_doorbells_host_ = nullptr;
+    volatile uint64_t**                signal_doorbells_dev_  = nullptr;
+    void*                              sig_base_ = nullptr;
+    int                                sig_buf_  = -1;
+
+    SignalSlot& signal_slot_(int slot) {
+        if (!host_wait_mode_ || slot < 0 || slot >= kSignalSlots) {
+            fprintf(stderr, "GICC: signal slot %d needs DWQ mode and 0 <= slot < %d\n",
+                    slot, kSignalSlots);
+            std::abort();
+        }
+        SignalSlot& s = signal_slots_[slot];
+        if (s.trigger.cntr == nullptr) {
+            s.trigger = comm_->fabric->open_trigger_counter();
+            signal_doorbells_host_[slot] = s.trigger.dev;
+        }
+        return s;
+    }
+
     struct fid_cntr*                   shared_completion_cntr_;
     uint64_t                           mono_total_ops_;          // monotonic across batches
     uint64_t                           mono_last_triggered_;     // last value the kernel's MMIO write added (for delta calc)

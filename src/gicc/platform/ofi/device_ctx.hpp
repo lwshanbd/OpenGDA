@@ -46,6 +46,15 @@ struct DeviceCtx {
     // application does not use the ompx_* allocator.
     void*              heap_base     = nullptr;
     int                heap_buf      = -1;
+
+    // Signal slots (ompx_put_signal / ompx_signal_wait): the device alias of
+    // this rank's inbox, its address-book index, and -- under DWQ only -- one
+    // trigger doorbell per slot. A doorbell is null until the host first
+    // stages a put_signal on that slot; sig_trigger itself is null under the
+    // CPU proxy, which is how a device put_signal picks its transport.
+    uint64_t*           sig_base     = nullptr;
+    int                 sig_buf      = -1;
+    volatile uint64_t** sig_trigger  = nullptr;
 };
 
 } // namespace gicc

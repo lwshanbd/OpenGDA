@@ -481,6 +481,39 @@ public:
         return cp;
     }
 
+    // A bare trigger counter: something to hang deferred work off and a
+    // doorbell to release it, mapped for both the host and the GPU. A store
+    // of n to either mapping adds n to the counter.
+    struct TriggerCounter {
+        struct fid_cntr*   cntr = nullptr;
+        void*              mmio = nullptr;
+        size_t             mmio_len = 0;
+        volatile uint64_t* dev = nullptr;
+    };
+
+    TriggerCounter open_trigger_counter() {
+        TriggerCounter t;
+        struct fi_cntr_attr attr = {};
+        attr.events = FI_CNTR_EVENTS_COMP;
+        check(fi_cntr_open(domain, &attr, &t.cntr, NULL), "fi_cntr_open(slot trigger)");
+        struct fi_cxi_cntr_ops* ops = nullptr;
+        check(fi_open_ops(&t.cntr->fid, FI_CXI_COUNTER_OPS, 0, (void**)&ops, NULL),
+              "fi_open_ops(slot trigger)");
+        check(ops->get_mmio_addr(&t.cntr->fid, &t.mmio, &t.mmio_len),
+              "get_mmio_addr(slot trigger)");
+        check_gpu(gpuHostRegister(t.mmio, t.mmio_len, gpuHostRegisterMmio),
+                  "gpuHostRegister(slot trigger)");
+        check_gpu(gpuHostGetDevicePointer((void**)&t.dev, t.mmio, 0),
+                  "gpuHostGetDevicePointer(slot trigger)");
+        return t;
+    }
+
+    void close_trigger_counter(TriggerCounter& t) {
+        if (t.mmio) (void)gpuHostUnregister(t.mmio);
+        if (t.cntr) fi_close(&t.cntr->fid);
+        t = TriggerCounter{};
+    }
+
     // Cleanup counter pair (ignore errors in cleanup)
     void destroy_counter_pair(CounterPair& cp) {
         if (cp.trigger_mmio_addr) (void)gpuHostUnregister(cp.trigger_mmio_addr);
