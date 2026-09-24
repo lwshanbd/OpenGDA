@@ -65,6 +65,24 @@ void* ompx_peer_ptr(int peer, const void* addr);   // NULL unless same-node
 void  ompx_put_host(int peer, void* dst, const void* src, size_t bytes);
 void  ompx_get_host(int peer, void* dst, const void* src, size_t bytes);
 
+// ---- signals ----------------------------------------------------------------
+// A put whose arrival the receiver can observe without a barrier: the payload
+// lands, then a flag lands in the peer's slot `sig`. The endpoint asks the
+// provider for write-after-write ordering, so the flag never overtakes the
+// data it announces.
+//
+// Slots are symmetric (slot i means the same object on every rank) and there
+// are 64 of them. `value` is whatever the sender wants the receiver to see --
+// a sequence number if the receiver waits for `>=`, a count if senders keep
+// bumping it. ompx_signal_ptr hands back the device-visible address of the
+// slots so a target region can poll them instead of the host.
+void ompx_put_signal(int peer, void* dst, const void* src, size_t bytes,
+                     int sig, unsigned long long value);
+unsigned long long ompx_signal_read(int sig);
+void ompx_signal_wait(int sig, unsigned long long ge);
+void ompx_signal_reset(int sig);
+unsigned long long* ompx_signal_ptr(void);
+
 // ---- completion -------------------------------------------------------------
 void ompx_quiet_host(void);
 void ompx_barrier(void);

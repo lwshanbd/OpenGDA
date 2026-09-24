@@ -41,6 +41,17 @@ bool g_ipc_pending = false;
 bool g_ipc_enabled = false;
 int g_local_device = 0;
 
+// ---- signal table -----------------------------------------------------------
+// Host-pinned, mapped and registered, so the NIC writes it, a host thread
+// polls it with an ordinary load, and a target region polls the device alias.
+// Symmetric like the heap: slot i means the same thing on every rank.
+//   [0, kSigSlots)          this rank's inbox -- peers write here
+//   [kSigSlots, 2*kSigSlots) this rank's outbox -- the value a signal carries
+constexpr int kSigSlots = 64;
+gicc::Buffer g_sig{};
+uint64_t*    g_sig_host = nullptr;
+uint64_t*    g_sig_dev  = nullptr;
+
 // ---- symmetric heap ---------------------------------------------------------
 gicc::Buffer g_heap{};              // the heap as an address-book entry
 char*  g_heap_base  = nullptr;
@@ -162,6 +173,16 @@ void create_heap() {
     g_blocks.clear();
     g_blocks.push_back(HeapBlock{0, g_heap_bytes, false});
 
+    void* sig = nullptr;
+    require_gpu(gpuHostMalloc(&sig, 2 * kSigSlots * sizeof(uint64_t),
+                              gpuHostMallocMapped), "allocate signal table");
+    std::memset(sig, 0, 2 * kSigSlots * sizeof(uint64_t));
+    g_sig_host = static_cast<uint64_t*>(sig);
+    require_gpu(gpuHostGetDevicePointer((void**)&g_sig_dev, sig, 0),
+                "map signal table");
+    g_sig = g_runtime->register_buffer(sig, 2 * kSigSlots * sizeof(uint64_t),
+                                       /*is_device=*/false);
+
     g_runtime->exchange();
     g_runtime->set_symmetric_heap(ptr, g_heap.index);
 }
@@ -227,6 +248,11 @@ void ompx_finalize() {
         g_blocks.clear();
         g_binds.clear();
         g_ipc_pending = false;
+    }
+    if (g_sig_host != nullptr) {
+        (void)gpuHostFree(g_sig_host);
+        g_sig_host = nullptr;
+        g_sig_dev  = nullptr;
     }
     delete g_runtime;
     g_runtime = nullptr;
@@ -387,6 +413,45 @@ void ompx_get_host(int peer, void* dst, const void* src, size_t bytes) {
         // src_* names the local slice and dst_* the remote one for every cmd type.
         g_runtime->proxy_push(gicc::proxy::CmdType::READ, peer,
                               g_heap.index, src_off, g_heap.index, dst_off, bytes);
+    }
+}
+
+// ---- signals ----------------------------------------------------------------
+
+unsigned long long* ompx_signal_ptr(void) { return (unsigned long long*)g_sig_dev; }
+
+unsigned long long ompx_signal_read(int sig) {
+    return __atomic_load_n(&g_sig_host[sig], __ATOMIC_ACQUIRE);
+}
+
+void ompx_signal_reset(int sig) {
+    __atomic_store_n(&g_sig_host[sig], 0, __ATOMIC_RELEASE);
+}
+
+void ompx_signal_wait(int sig, unsigned long long ge) {
+    while (__atomic_load_n(&g_sig_host[sig], __ATOMIC_ACQUIRE) < ge) {
+        ompx_trigger_host();          // release anything still staged
+        g_runtime->drain(false);      // and keep the fabric progressing
+    }
+}
+
+// Data, then the flag that announces it. The endpoint asks for FI_ORDER_WAW,
+// so the peer cannot see the flag before the payload; no fence, no atomic and
+// no completion wait in between.
+void ompx_put_signal(int peer, void* dst, const void* src, size_t bytes,
+                     int sig, unsigned long long value) {
+    ompx_put_host(peer, dst, src, bytes);
+    g_sig_host[kSigSlots + sig] = value;
+    const size_t src_off = (size_t)(kSigSlots + sig) * sizeof(uint64_t);
+    const size_t dst_off = (size_t)sig * sizeof(uint64_t);
+    if (g_dwq_enabled) {
+        (void)g_runtime->put(g_sig, peer, g_sig.index, sizeof(uint64_t),
+                             src_off, dst_off);
+        ++g_dwq_pending;
+    } else {
+        g_runtime->proxy_push(gicc::proxy::CmdType::WRITE, peer,
+                              g_sig.index, dst_off, g_sig.index, src_off,
+                              sizeof(uint64_t));
     }
 }
 
