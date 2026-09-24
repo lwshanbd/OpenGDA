@@ -1,7 +1,7 @@
 /*
  * transfer_cmd.hpp - 24-byte command from GPU kernel to CPU proxy.
  *
- * Supports WRITE, READ, QUIET, and ATOMIC (FI_SUM, FI_UINT32 only).
+ * Supports WRITE, READ, QUIET, ATOMIC (FI_SUM, FI_UINT32 only) and SIGNAL.
  * ATOMIC fields reuse the WRITE layout: src points at the value to add
  * (one 4-byte uint32), dst points at the remote counter slot. `bytes` is
  * implicitly 4 for ATOMIC and the proxy ignores any other value.
@@ -35,7 +35,10 @@ enum class CmdType : uint8_t {
                   // __threadfence_system, then subsequent loads see the data).
     ATOMIC = 4,   // FI_SUM, FI_UINT32; non-fetching remote add. See
                   // ProxyLibfabric::submit_atomic_add for semantics.
-    // Reserved: BARRIER = 5
+    SIGNAL = 5,   // 8-byte write of the value carried in src_offset to
+                  // (dst_rank, dst_buf, dst_offset). The value travels in the
+                  // command itself, so two signals queued back to back cannot
+                  // alias one source cell. src_buf and bytes are ignored.
 };
 
 #pragma pack(push, 1)

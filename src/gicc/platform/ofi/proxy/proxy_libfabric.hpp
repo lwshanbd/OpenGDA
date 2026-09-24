@@ -90,6 +90,12 @@ public:
     // is true, on a fallback provider lacking atomics this aborts.
     int submit_atomic_add(const TransferCmd& c, uint64_t slot);
 
+    // Writes the 8-byte value carried in c.src_offset to the peer's
+    // (c.dst_buf, c.dst_offset). Issued on the same endpoint as the WRITE
+    // queued before it, so the endpoint's write-after-write ordering keeps
+    // the value from landing ahead of that payload.
+    int submit_signal(const TransferCmd& c, uint64_t slot);
+
     // Drains up to `max` completions into `out`; returns how many were read
     // (0..max). Treats -FI_EAGAIN as "no completions yet" (returns 0).
     int poll(Completion* out, int max);

@@ -235,6 +235,40 @@ int ProxyLibfabric::submit_atomic_add(const TransferCmd& c, uint64_t slot)
 }
 
 
+int ProxyLibfabric::submit_signal(const TransferCmd& c, uint64_t slot)
+{
+    const auto& ri   = rt_.remote_info(c.dst_rank, c.dst_buf);
+    fi_addr_t   peer = rt_.av_addr(c.dst_rank);
+    uint64_t    raddr = rt_.is_virt_addr_mode()
+                          ? (ri.rma_addr + c.dst_offset)
+                          : (ri.rma_addr - ri.base_addr) + c.dst_offset;
+
+    // FI_INJECT copies the value before returning, so it can live on the
+    // stack; FI_COMPLETION still reports the slot, which QUIET waits on.
+    uint64_t value = c.src_offset;
+    struct iovec     iov{&value, sizeof(value)};
+    struct fi_rma_iov rma{raddr, sizeof(value), ri.rma_key};
+    struct fi_msg_rma msg{};
+    msg.msg_iov       = &iov;
+    msg.iov_count     = 1;
+    msg.addr          = peer;
+    msg.rma_iov       = &rma;
+    msg.rma_iov_count = 1;
+    msg.context       = reinterpret_cast<void*>(slot);
+
+    int ret = fi_writemsg(ep_, &msg, FI_INJECT | FI_COMPLETION);
+    if (ret == -FI_EAGAIN) {
+        return -FI_EAGAIN;
+    }
+    if (ret != 0) {
+        fprintf(stderr,
+            "ProxyLibfabric[%d]::submit_signal: fi_writemsg failed: %s\n",
+            ep_idx_, fi_strerror(-ret));
+        std::abort();
+    }
+    return 0;
+}
+
 int ProxyLibfabric::poll(Completion* out, int max)
 {
     // 256 fi_cq_entry slots = 4 KiB on stack. 256 is the minimum bump that

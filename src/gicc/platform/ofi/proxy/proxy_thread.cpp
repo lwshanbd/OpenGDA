@@ -201,6 +201,10 @@ void ProxyThread::main_loop() {
                     ret = lf_.submit_atomic_add(pending_retry_->cmd,
                                                 pending_retry_->slot);
                     break;
+                case CmdType::SIGNAL:
+                    ret = lf_.submit_signal(pending_retry_->cmd,
+                                            pending_retry_->slot);
+                    break;
                 default:
                     fprintf(stderr,
                         "ProxyThread: pending retry has unexpected cmd_type %u\n",
@@ -287,6 +291,23 @@ void ProxyThread::main_loop() {
                 }
                 case CmdType::ATOMIC: {
                     int ret = lf_.submit_atomic_add(c, slot);
+                    if (ret == -FI_EAGAIN) {
+                        pending_retry_ = PendingRetry{c, slot};
+                        stop_submitting = true;
+                        break;
+                    }
+                    in_flight_.set(bit);
+                    ++in_flight_count_;
+                    if (prof_enabled_) {
+                        prof_submit_ns_[bit] = now_ns();
+                        ++prof_submit_calls_;
+                        if (in_flight_count_ > prof_max_inflight_)
+                            prof_max_inflight_ = in_flight_count_;
+                    }
+                    break;
+                }
+                case CmdType::SIGNAL: {
+                    int ret = lf_.submit_signal(c, slot);
                     if (ret == -FI_EAGAIN) {
                         pending_retry_ = PendingRetry{c, slot};
                         stop_submitting = true;
