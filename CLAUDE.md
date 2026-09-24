@@ -294,9 +294,11 @@ over all 64 cores. Two separate failures follow:
   us/iter. `-c 8` holds it at 45.5 us within 1%.
 * Pinning. Unpinned, minimod at 16 GPU / grid 1200 varies 22% run to run with a
   different straggler rank every iteration, and comm alone swings 2.2-5.3 s.
-  Adding `-o cpu-affinity=per-task` collapses that to 1.4%, drops comm to
-  ~1.0 s and the total by 17%. Compute is unaffected either way (0.2% spread),
-  so the cost lands entirely on the communication threads.
+  Adding `-o cpu-affinity=per-task` collapses that to 3.0% over six
+  iterations, drops comm to 0.85-1.22 s and the total by 17%, and leaves the
+  straggler on one of two fixed ranks instead of a new one each time. Compute
+  is unaffected either way (0.2% spread), so the cost lands entirely on the
+  communication threads.
 
 `-o cpu-affinity=per-task` is independent of mpibind: it binds CPUs without
 touching GPU visibility, so it composes with the IPC recipe.
