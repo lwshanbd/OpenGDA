@@ -223,14 +223,14 @@ void execute_proxy_fused(unsigned char* data, ompx_ctx* ctx,
             }
             #pragma omp barrier
             if (tid == 0) {
-                ompx_put_dev(ctx, peer, data + kRecvOffset,
+                ompx_put(peer, data + kRecvOffset,
                              data + kSendOffset, bytes);
             }
             #pragma omp barrier
             state = scratch[tid];
             scratch[tid] = run_work(state, work_b);
             #pragma omp barrier
-            if (tid == 0) ompx_quiet_dev(ctx);
+            if (tid == 0) ompx_quiet();
         }
     }
 }
@@ -256,7 +256,7 @@ void execute_dwq_fused(unsigned char* data, ompx_ctx* ctx,
             #pragma omp barrier
             if (tid == 0) {
                 __atomic_thread_fence(__ATOMIC_SEQ_CST);
-                ompx_dwq_fire_dev(ctx);
+                ompx_trigger();
                 __atomic_thread_fence(__ATOMIC_SEQ_CST);
             }
             #pragma omp barrier
@@ -273,9 +273,8 @@ void execute_giomp_full(const Options& options, bool use_dwq,
     if (use_dwq) {
         // Arm without firing: the fused kernel's lead thread fires the trigger
         // itself, so the MMIO store stays GPU-issued.
-        ompx_dwq_stage_put(peer, data + kRecvOffset, data + kSendOffset,
+        ompx_put(peer, data + kRecvOffset, data + kSendOffset,
                            options.bytes);
-        ompx_dwq_arm();
         execute_dwq_fused(data, ctx, options.bytes,
                           options.work_a, options.work_b, options.threads,
                           epoch, value);
@@ -378,12 +377,6 @@ int main(int argc, char** argv) {
         ompx_init();
         rank = ompx_get_rank_num();
         nranks = ompx_get_num_ranks();
-        if (use_dwq != ompx_dwq_enabled()) {
-            if (rank == 0)
-                std::fprintf(stderr, "%s requires GICC_HALO_DWQ=%d\n",
-                             options.transport.c_str(), use_dwq ? 1 : 0);
-            MPI_Abort(MPI_COMM_WORLD, 7);
-        }
         data = static_cast<unsigned char*>(ompx_alloc(buffer_bytes));
     }
 

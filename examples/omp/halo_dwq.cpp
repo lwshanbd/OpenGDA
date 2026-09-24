@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include "gicc/omp.h"
+#include "gicc/omp_compiler.h"
 #include "examples/omp/giomp_example_utils.hpp"
 
 static int env_int(const char* k, int d) {

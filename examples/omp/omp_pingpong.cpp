@@ -1,7 +1,7 @@
 // omp_pingpong.cpp - p2p microbench for the GICC-from-OpenMP path.
 //
 // Mirrors examples/proxy/bench_pingpong.cpp, but instead of the HIP device API
-// (gicc::put inside a __global__ kernel), it issues ompx_put_dev from inside a
+// (gicc::put inside a __global__ kernel), it issues ompx_put from inside a
 // `#pragma omp target` region -- exactly how the OpenMP minimod halo
 // (gicc_halo_issue) drives the proxy. This isolates the cost the omp-target
 // kernel-launch layer adds on top of the raw proxy transport.
@@ -63,15 +63,14 @@ static void issue_puts(ompx_ctx* d_ctx, int peer, void* buf,
                        size_t bytes, int n) {
     if (g_xport == Xport::Dwq) {
         for (int i = 0; i < n; ++i)
-            ompx_dwq_stage_put(peer, buf, buf, bytes);
-        ompx_dwq_arm();
+            ompx_put(peer, buf, buf, bytes);
         #pragma omp target is_device_ptr(d_ctx)
-        { ompx_dwq_fire_dev(d_ctx); }     // one MMIO store fires all n
+        { ompx_trigger(); }     // one MMIO store fires all n
     } else {
         #pragma omp target is_device_ptr(d_ctx, buf) firstprivate(peer, bytes, n)
         {
             for (int i = 0; i < n; ++i)
-                ompx_put_dev(d_ctx, peer, buf, buf, bytes);
+                ompx_put(peer, buf, buf, bytes);
         }
     }
 }

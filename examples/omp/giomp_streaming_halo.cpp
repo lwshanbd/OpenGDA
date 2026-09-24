@@ -169,12 +169,11 @@ void execute_giomp_iteration(Path path, unsigned char* data,
                                  static_cast<size_t>(tiles);
             const size_t end = bytes * static_cast<size_t>(tile + 1) /
                                static_cast<size_t>(tiles);
-            ompx_dwq_stage_put(peer, data + kRecvOffset + begin,
+            ompx_put(peer, data + kRecvOffset + begin,
                                data + kSendOffset + begin, end - begin);
         }
         // Arm on the host, but fire the doorbell only after the GPU produces
-        // the halo. This avoids the extra kernel launch in ompx_dwq_trigger().
-        ompx_dwq_arm();
+        // the halo. This avoids the extra kernel launch in ompx_trigger().
     }
 
     const int path_value = static_cast<int>(path);
@@ -211,7 +210,7 @@ void execute_giomp_iteration(Path path, unsigned char* data,
                 #pragma omp barrier
                 if (tid == 0) {
                     if (path_value == static_cast<int>(Path::Proxy)) {
-                        ompx_put_dev(ctx, peer, data + kRecvOffset + begin,
+                        ompx_put(peer, data + kRecvOffset + begin,
                                      data + kSendOffset + begin, end - begin);
                     }
                     __atomic_store_n(&ready[team], epoch, __ATOMIC_RELEASE);
@@ -228,7 +227,7 @@ void execute_giomp_iteration(Path path, unsigned char* data,
 
             if (path_value == static_cast<int>(Path::Dwq) && team == 0 && tid == 0) {
                 __atomic_thread_fence(__ATOMIC_SEQ_CST);
-                ompx_dwq_fire_dev(ctx);
+                ompx_trigger();
                 __atomic_thread_fence(__ATOMIC_SEQ_CST);
             }
 
@@ -239,7 +238,7 @@ void execute_giomp_iteration(Path path, unsigned char* data,
 
             #pragma omp barrier
             if (path_value == static_cast<int>(Path::Proxy) && team == 0 && tid == 0)
-                ompx_quiet_dev(ctx);
+                ompx_quiet();
         }
     }
     ompx_quiet();
@@ -493,12 +492,6 @@ int main(int argc, char** argv) {
         ompx_init();
         rank = ompx_get_rank_num();
         nranks = ompx_get_num_ranks();
-        if ((path == Path::Dwq) != ompx_dwq_enabled()) {
-            if (rank == 0)
-                std::fprintf(stderr, "%s requires GICC_HALO_DWQ=%d\n",
-                             options.transport.c_str(), path == Path::Dwq ? 1 : 0);
-            MPI_Abort(MPI_COMM_WORLD, 7);
-        }
         data = static_cast<unsigned char*>(ompx_alloc(buffer_bytes));
     }
 

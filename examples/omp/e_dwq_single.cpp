@@ -8,7 +8,8 @@
 // The DWQ markers need GIOMP_ENABLE_DWQ + the LTO pass (a different build from
 // the proxy path): use examples/omp/build_omp_dwq.sh (2-pass, ROCm 6.4.0 clang).
 // Run: HSA_XNACK=1 GICC_HALO_DWQ=1 flux run -N2 -n2 -g1 -o mpibind=off ./omp_dwq
-#include "gicc/omp.h"          // ompx_dwq_put_dev / ompx_dwq_flush_dev (GIOMP_ENABLE_DWQ)
+#include "gicc/omp.h"
+#include "gicc/omp_compiler.h"          // ompx_dwq_put_dev / ompx_dwq_flush_dev (GIOMP_ENABLE_DWQ)
 #include <omp.h>
 #include <cstdio>
 #include <cstddef>

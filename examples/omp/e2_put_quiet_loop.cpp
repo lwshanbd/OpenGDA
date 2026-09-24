@@ -1,6 +1,6 @@
 // e2_put_quiet_loop.cpp - OpenMP-target backpressure + quiet() liveness test.
 // rank 0 issues NITER puts (NITER >> ring capacity 4096, forcing ring-full
-// backoff) then a device-side ompx_quiet_dev() — all from inside one omp
+// backoff) then a device-side ompx_quiet() — all from inside one omp
 // target region. The proxy thread drains concurrently. The test asserts
 // LIVENESS (completes well under the time limit, no deadlock) and that the
 // final payload still lands correctly on the peer.
@@ -36,8 +36,8 @@ int main() {
         #pragma omp target is_device_ptr(d_ctx, buffer)
         {
             for (int i = 0; i < NITER; ++i)
-                ompx_put_dev(d_ctx, peer, /*dst=*/buffer, /*src=*/buffer, bytes);
-            ompx_quiet_dev(d_ctx);   // device-side fence: must drain before returning
+                ompx_put(peer, /*dst=*/buffer, /*src=*/buffer, bytes);
+            ompx_quiet();   // device-side fence: must drain before returning
         }
     }
     ompx_fence();

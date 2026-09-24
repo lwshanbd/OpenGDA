@@ -226,10 +226,10 @@ void issue_giomp_get(gicc::DeviceCtx* ctx, int right,
         // the target launch and the NIC produces the local destination.  No
         // GPU data needs publishing before the MMIO store, so wrapping this
         // fire in a pair of seq_cst system fences would be unnecessary and
-        // stronger than the bare store ompx_dwq_fire_dev performs.
-        ompx_dwq_fire_dev(ctx);
+        // stronger than the bare store ompx_trigger performs.
+        ompx_trigger();
     } else {
-        ompx_get_dev_single(ctx, right, next_b, current_b, stripe_bytes);
+        ompx_get_single(right, next_b, current_b, stripe_bytes);
     }
 }
 
@@ -271,11 +271,11 @@ void issue_giomp_get_unified(gicc::DeviceCtx* ctx, int use_dwq,
     if (use_dwq) {
         if (trigger_fences)
             __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        ompx_dwq_fire_dev(ctx);
+        ompx_trigger();
         if (trigger_fences)
             __atomic_thread_fence(__ATOMIC_SEQ_CST);
     } else {
-        ompx_get_dev_single(ctx, right, next_b, current_b, stripe_bytes);
+        ompx_get_single(right, next_b, current_b, stripe_bytes);
     }
 }
 
@@ -409,12 +409,6 @@ int main(int argc, char** argv) {
 
 #if defined(MM_BACKEND_GIOMP)
     const bool use_dwq = options.transport == "dwq";
-    if (use_dwq != ompx_dwq_enabled()) {
-        if (rank == 0)
-            std::fprintf(stderr, "%s requires GICC_HALO_DWQ=%d\n",
-                         backend_name(options), use_dwq ? 1 : 0);
-        MPI_Abort(MPI_COMM_WORLD, 5);
-    }
 #endif
 
     const int n = options.n;
@@ -498,9 +492,8 @@ int main(int argc, char** argv) {
                     if (has_next) {
                         gicc::DeviceCtx* ctx = ompx_prepare();
                         if (use_dwq) {
-                            ompx_dwq_stage_get(right, next_b, current_b,
+                            ompx_get(right, next_b, current_b,
                                                stripe_bytes);
-                            ompx_dwq_arm();
                         }
                         if (options.kernel_style == "loop") {
                             if (use_dwq)

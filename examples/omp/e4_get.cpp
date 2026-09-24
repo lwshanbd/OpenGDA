@@ -1,4 +1,4 @@
-// e4_get.cpp - OpenMP-target ompx_get_dev() correctness test (RMA read).
+// e4_get.cpp - OpenMP-target ompx_get() correctness test (RMA read).
 // rank 1 (source) holds a known pattern; rank 0 (puller) issues get() to pull
 // that data into its own buffer from inside an omp target region, quiets, and
 // then verifies the landed bytes ON-DEVICE (after quiet) — exercising the
@@ -36,8 +36,8 @@ int main() {
         int dev_bad = 0;
         #pragma omp target is_device_ptr(d_ctx, buffer) map(tofrom: dev_bad)
         {
-            ompx_get_dev(d_ctx, peer, /*dst=*/buffer, /*src=*/buffer, bytes);
-            ompx_quiet_dev(d_ctx);
+            ompx_get(peer, /*dst=*/buffer, /*src=*/buffer, bytes);
+            ompx_quiet();
             // Read landed data ON-DEVICE, after quiet(). This is the path under test.
             int b = 0;
             for (size_t i = 0; i < bytes; ++i)

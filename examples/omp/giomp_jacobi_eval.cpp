@@ -235,18 +235,17 @@ void giomp_fused_step(float* current, float* next,
     // DWQ transport: the descriptors are staged HERE, on the host, before the
     // kernel runs. The only device-side work left is a single MMIO store, so
     // team 0 never spins waiting on a host proxy round trip the way
-    // ompx_quiet_dev(ctx, lane) does -- it fires the NIC and returns.
+    // ompx_quiet(lane) does -- it fires the NIC and returns.
     const bool dwq_top    = use_dwq && communicate && !top_ipc;
     const bool dwq_bottom = use_dwq && communicate && !bottom_ipc;
     if (dwq_top)
-        ompx_dwq_stage_put(top, next + static_cast<size_t>(rows + 1) * nx,
+        ompx_put(top, next + static_cast<size_t>(rows + 1) * nx,
                            next + nx, row_bytes);
     if (dwq_bottom)
-        ompx_dwq_stage_put(bottom, next,
+        ompx_put(bottom, next,
                            next + static_cast<size_t>(rows) * nx, row_bytes);
     const bool dwq_fire = dwq_top || dwq_bottom;
-    if (dwq_fire) ompx_dwq_arm();
-
+    if (dwq_fire)
     #pragma omp target teams num_teams(teams) thread_limit(threads) \
         is_device_ptr(current, next, top_peer, bottom_peer, ctx) \
         firstprivate(nx, rows, top, bottom, row_bytes, communicate, top_ipc, bottom_ipc, use_dwq, dwq_fire)
@@ -275,7 +274,7 @@ void giomp_fused_step(float* current, float* next,
                         top_peer[static_cast<size_t>(rows + 1) * nx + x] =
                             next[static_cast<size_t>(nx) + x];
                 } else if (communicate && !use_dwq && tid == 0) {
-                    ompx_put_dev(ctx, top,
+                    ompx_put(top,
                         next + static_cast<size_t>(rows + 1) * nx,
                         next + nx, row_bytes, 0);
                 }
@@ -284,7 +283,7 @@ void giomp_fused_step(float* current, float* next,
                     for (int x = tid; x < nx; x += nth)
                         bottom_peer[x] = next[static_cast<size_t>(rows) * nx + x];
                 } else if (communicate && !use_dwq && tid == 0) {
-                    ompx_put_dev(ctx, bottom, next,
+                    ompx_put(bottom, next,
                         next + static_cast<size_t>(rows) * nx, row_bytes, 1);
                 }
 
@@ -293,13 +292,13 @@ void giomp_fused_step(float* current, float* next,
                 // publishes them before the NIC reads them.
                 if (dwq_fire && tid == 0) {
                     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-                    ompx_dwq_fire_dev(ctx);
+                    ompx_trigger();
                 }
 
                 #pragma omp barrier
                 if (communicate && !use_dwq && tid == 0) {
-                    if (!top_ipc) ompx_quiet_dev(ctx, 0);
-                    if (!bottom_ipc) ompx_quiet_dev(ctx, 1);
+                    if (!top_ipc) ompx_quiet(0);
+                    if (!bottom_ipc) ompx_quiet(1);
                 }
             } else {
                 const size_t points = static_cast<size_t>(rows - 2) * (nx - 2);

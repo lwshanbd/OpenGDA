@@ -1,7 +1,7 @@
 // e_omp_mapped_put.cpp - make-or-break for the minimod port.
 //
 // Binds an application field to the symmetric heap with ompx_bind and delivers
-// one face through ompx_put_dev from inside an omp target region. This mirrors
+// one face through ompx_put from inside an omp target region. This mirrors
 // exactly how a real OpenMP-offload stencil (minimod) hands its omp-mapped
 // field to GICC for halo exchange: the field keeps its host pointer and its
 // `map` clauses, and GICC can RMA into it. Cross-node (proxy/NIC) per srun
@@ -40,7 +40,7 @@ int main() {
     if (my == 0) {
         #pragma omp target is_device_ptr(d_ctx, dv)
         {
-            ompx_put_dev(d_ctx, peer, dv, dv, n);
+            ompx_put(peer, dv, dv, n);
         }
         ompx_quiet();
     } else {

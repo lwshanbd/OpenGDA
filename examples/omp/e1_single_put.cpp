@@ -32,7 +32,7 @@ int main() {
     if (my == 0) {
         #pragma omp target is_device_ptr(d_ctx, buffer)
         {
-            ompx_put_dev(d_ctx, peer, /*dst=*/buffer, /*src=*/buffer, bytes);
+            ompx_put(peer, /*dst=*/buffer, /*src=*/buffer, bytes);
         }
     }
     ompx_fence();   // drain proxy + completion, then rendezvous

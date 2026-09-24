@@ -1,5 +1,5 @@
 // e3_halo.cpp - OpenMP-target 1-D ring halo exchange correctness test.
-// Each rank sends its edge faces to left/right neighbors via ompx_put_dev
+// Each rank sends its edge faces to left/right neighbors via ompx_put
 // from inside an omp target region, then verifies the received faces.
 #include <omp.h>
 #include <cstdio>
@@ -39,11 +39,11 @@ int main() {
     #pragma omp target is_device_ptr(d_ctx, buffer)
     {
         // my right_send -> right neighbor's left_recv  (lane 0)
-        ompx_put_dev(d_ctx, right, buffer + off_lrecv, buffer + off_rsend, face, /*lane=*/0);
+        ompx_put(right, buffer + off_lrecv, buffer + off_rsend, face, /*lane=*/0);
         // my left_send  -> left neighbor's right_recv  (lane 1)
-        ompx_put_dev(d_ctx, left,  buffer + off_rrecv, buffer + off_lsend, face, /*lane=*/1);
-        ompx_quiet_dev(d_ctx, 0);
-        ompx_quiet_dev(d_ctx, 1);
+        ompx_put(left,  buffer + off_rrecv, buffer + off_lsend, face, /*lane=*/1);
+        ompx_quiet(0);
+        ompx_quiet(1);
     }
     ompx_fence();
 

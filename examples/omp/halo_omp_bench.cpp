@@ -1,6 +1,6 @@
 // halo_omp_bench.cpp - GICC-from-OpenMP halo exchange bandwidth/latency sweep.
 // Each rank exchanges `size`-byte faces with its left/right ring neighbors via
-// ompx_put_dev issued from an omp target region. Times the full halo round
+// ompx_put issued from an omp target region. Times the full halo round
 // (region + host drain + barrier), sweeping message size. Run cross-node
 // (-N2 -n2 1/node) for the NIC path or intra-node (-N1 -n2) for IPC.
 #include <omp.h>
@@ -51,10 +51,10 @@ int main() {
         for (int it = 0; it < kWarm; ++it) {
             #pragma omp target is_device_ptr(d_ctx, lsend, rsend, lrecv, rrecv)
             {
-                ompx_put_dev(d_ctx, right, lrecv, rsend, sz, 0);
-                ompx_put_dev(d_ctx, left,  rrecv, lsend, sz, 1);
-                ompx_quiet_dev(d_ctx, 0);
-                ompx_quiet_dev(d_ctx, 1);
+                ompx_put(right, lrecv, rsend, sz, 0);
+                ompx_put(left,  rrecv, lsend, sz, 1);
+                ompx_quiet(0);
+                ompx_quiet(1);
             }
             ompx_fence();
         }
@@ -64,10 +64,10 @@ int main() {
         for (int it = 0; it < kIters; ++it) {
             #pragma omp target is_device_ptr(d_ctx, lsend, rsend, lrecv, rrecv)
             {
-                ompx_put_dev(d_ctx, right, lrecv, rsend, sz, 0);
-                ompx_put_dev(d_ctx, left,  rrecv, lsend, sz, 1);
-                ompx_quiet_dev(d_ctx, 0);
-                ompx_quiet_dev(d_ctx, 1);
+                ompx_put(right, lrecv, rsend, sz, 0);
+                ompx_put(left,  rrecv, lsend, sz, 1);
+                ompx_quiet(0);
+                ompx_quiet(1);
             }
             ompx_fence();
         }

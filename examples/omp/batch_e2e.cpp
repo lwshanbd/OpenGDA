@@ -23,6 +23,7 @@
 #include <cstddef>
 #define GIOMP_ENABLE_DWQ 1          // expose the compiler-facing DWQ markers
 #include "gicc/omp.h"
+#include "gicc/omp_compiler.h"
 
 static int env_int(const char* k, int d) {
     if (const char* v = std::getenv(k)) { int x = atoi(v); if (x > 0) return x; }
