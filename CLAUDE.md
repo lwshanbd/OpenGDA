@@ -282,6 +282,14 @@ needs the pass (2-pass compile, `GICC_MODE=omp-dwq` + `GICC_META_DIR` env,
 `-mllvm -openmp-opt-disable=true`), then it links the prebuilt `libgicc_omp`. Run
 with `GICC_HALO_DWQ=1` and WITHOUT `GICC_SKIP_DWQ_INIT` (so the trigger BAR maps).
 
+**Give DWQ runs cores.** `flux run` defaults to one core per task, and the DWQ
+path runs a background CQ progress thread (`while (!stop) fi_cq_read(cq,NULL,0);`)
+alongside the thread spinning in `Runtime::drain`. On one core those two spinners
+alternate by scheduler luck and the 2-rank jacobi_e2e halo swings between 49 and
+1100 us/iter run to run. With `-c 8` the same binary holds 45.5 us within 1%, and
+`GICC_DWQ_CQ_THREAD=0` makes no further difference. Pass `-c` on every DWQ run
+before reading anything into a timing.
+
 ## GICC API
 
 ### Host
