@@ -35,6 +35,10 @@ int main() {
     // resolve to the heap allocation instead of a fresh device buffer.
     #pragma omp target enter data map(to: v[0:n])
 
+    // The receiver's ompx_bind copies its initial field into the heap; a put
+    // that arrives before that copy is overwritten by it. Wait for every rank.
+    ompx_barrier();
+
     ompx_ctx* d_ctx = ompx_prepare();
 
     if (my == 0) {
