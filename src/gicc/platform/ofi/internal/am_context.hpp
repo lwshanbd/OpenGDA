@@ -1,5 +1,5 @@
 /**
- * gda_am_context.hpp - Simplified Active Message context
+ * am_context.hpp - Simplified Active Message context
  *
  * This file provides host-side AM context management:
  *   - Allocation of per-peer inbox rings in GPU device memory

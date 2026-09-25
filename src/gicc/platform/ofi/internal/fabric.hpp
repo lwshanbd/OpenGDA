@@ -37,7 +37,7 @@
 // `static` (= internal linkage) so multiple TUs that include this header —
 // notably the gicc-clang-plugin's generated sidecars and the user's own
 // HIP TU — don't fight over the kernel symbol at link time.
-static __global__ void gda_trigger_kernel(volatile uint64_t* trigger_addr,
+static __global__ void fabric_trigger_kernel(volatile uint64_t* trigger_addr,
                                           uint64_t threshold) {
     *trigger_addr = threshold;
 }
@@ -502,7 +502,7 @@ public:
      * @param threshold The threshold value returned by put()
      */
     void trigger(uint64_t threshold) {
-        gpuLaunchKernel(gda_trigger_kernel, dim3(1), dim3(1), 0, 0,
+        gpuLaunchKernel(fabric_trigger_kernel, dim3(1), dim3(1), 0, 0,
                         fabric->dev_trigger_cntr, threshold);
     }
 

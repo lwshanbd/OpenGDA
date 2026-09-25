@@ -253,7 +253,7 @@ int main(int argc, char** argv) {
     // gicc::Runtime initializes Bootstrap (MPI) internally; we just use
     // its rank/size and MPI_COMM_WORLD afterwards.
     gicc::Runtime rt;
-    // DWQ mode uses the GDA-style host-wait fast path (shared completion
+    // DWQ mode uses the host-wait fast path (shared completion
     // counter, mono_total_ops_ accounting). Proxy mode doesn't care.
     if (mode == "dwq" || mode == "dwq-tonly") rt.enable_host_wait_mode();
     int rank = rt.rank();

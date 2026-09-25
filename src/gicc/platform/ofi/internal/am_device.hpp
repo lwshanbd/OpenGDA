@@ -1,5 +1,5 @@
 /**
- * gda_am_device.hpp - Simplified GPU device-side Active Message APIs
+ * am_device.hpp - Simplified GPU device-side Active Message APIs
  *
  * Provides device functions for:
  *   - Polling for incoming AMs

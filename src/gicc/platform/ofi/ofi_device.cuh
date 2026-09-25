@@ -1,9 +1,8 @@
 /**
  * ofi_device.cuh - libfabric/CXI device-side API
  *
- * Mirrors src/gicc/platform/mlx5/proxy/proxy_device.cuh as closely as the
- * hardware model permits. Both backends expose the same kernel-visible
- * primitives:
+ * Both backends expose the same kernel-visible primitives (the InfiniBand
+ * ones live in src/gicc/platform/mlx5/mlx5_device.hpp):
  *
  *   gicc::put(ctx, target_rank,
  *             dst_buf, dst_offset,

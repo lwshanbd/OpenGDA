@@ -311,7 +311,7 @@ touching GPU visibility, so it composes with the IPC recipe.
 #include "gicc/gicc.hpp"
 
 gicc::Runtime rt;
-rt.enable_host_wait_mode();                            // GDA-style fast path
+rt.enable_host_wait_mode();                            // host-wait fast path (libfabric)
 auto buf = rt.register_buffer(d_ptr, size, /*device=*/true);
 rt.exchange();                                          // collective IPC + RMA address book
 

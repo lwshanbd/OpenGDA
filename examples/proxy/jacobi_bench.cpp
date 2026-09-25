@@ -70,8 +70,7 @@ __global__ void jacobi_kernel(const float* __restrict__ u,
 // is needed, unlike the MPI path.
 //
 // The trigger still must not fire until every halo row is written. Electing
-// a last block with a grid-wide atomic counter (as examples/gicc/jacobi.cu
-// does) costs one atomic per block on a single address; at 8192^2 that is
+// a last block with a grid-wide atomic counter costs one atomic per block on a single address; at 8192^2 that is
 // 131072 blocks contending on one cache line and it dominates the iteration.
 // Issuing the trigger as its own one-thread kernel on the same stream gets
 // the same ordering from stream semantics for the price of one launch, and

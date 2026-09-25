@@ -5,8 +5,6 @@
  * address exchange) and implements a per-stream completion+atomic pool that
  * mirrors the proven-correct benchmark_runner.hpp design.
  *
- * No gda:: namespace types are used — this is a self-contained gicc:: backend.
- *
  *   - put_no_db queues the RDMA write. Each op consumes one slot from a
  *     pre-allocated pool of N libfabric completion counters. The op's
  *     trigger threshold is its 1-based index within the current batch.
@@ -467,7 +465,7 @@ public:
     }
 
     //--------------------------------------------------------------------------
-    // enable_host_wait_mode — switch put_no_db / get_no_db to the GDA-style
+    // enable_host_wait_mode — switch put_no_db / get_no_db to the host-wait
     // fast path. After enabling:
     //   - Each put queues ONLY the RMA write (no chained atomic_signal),
     //     halving the NIC ops per put.
@@ -767,7 +765,7 @@ public:
             ? (ri.rma_addr + dst_offset)
             : (ri.rma_addr - ri.base_addr) + dst_offset;
 
-        // ---------- Host-wait fast path (GDA-compatible) ----------
+        // ---------- Host-wait fast path ----------
         if (host_wait_mode_) {
             ++mono_total_ops_;
             ++my_n_remote_ops_;
@@ -1420,7 +1418,7 @@ public:
 #endif
 
 private:
-    // Internal buffer metadata (replaces gda::Buffer).
+    // Internal buffer metadata.
     struct OfiBuffer {
         void*             ptr;
         void*             desc_;
@@ -1476,7 +1474,7 @@ private:
     // [peer * n_bufs_ + buf_idx]. Each entry's mapped_ptr is non-null
     // exactly when peer is on the same node and exposed an IPC handle
     // for that buffer. nullptr until exchange() runs.
-    // Host-wait mode (GDA-compatible fast path):
+    // Host-wait mode (fast path):
     //   - Skip per-slot atomic_signal queueing (saves 1 NIC op per put)
     //   - One shared completion counter, monotonic threshold, no per-batch reset
     //   - DwqWorkBuilder objects pooled instead of new/delete per iter
@@ -1544,7 +1542,7 @@ private:
 
     // Pool of streams for host-driven IPC dispatches. The LTO host
     // trace queues hipMemcpyAsync's on these streams BEFORE the kernel
-    // launch (Y' / GDA-style); rt.reset() drains all of them.
+    // launch (Y'); rt.reset() drains all of them.
     // Pool size is controlled by GICC_STREAMS_MAX (default 8, range [1,32]).
     std::vector<GpuStream_t>           ipc_streams_;
     int                                n_streams_max_  = 8;

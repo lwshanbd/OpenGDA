@@ -131,7 +131,7 @@ if(GICC_GPU_API STREQUAL "hip")
         pthread)
 elseif(GICC_GPU_API STREQUAL "cuda")
     # Delta path: ofi_runtime.hpp transitively pulls device-side bits
-    # (e.g. fabric.hpp's gpuLaunchKernel(gda_trigger_kernel,...) and
+    # (e.g. fabric.hpp's gpuLaunchKernel(fabric_trigger_kernel,...) and
     # ofi_device.cuh's threadIdx/blockIdx in flush()). Those require nvcc
     # parsing, so compile the test sources as CUDA.
     set_source_files_properties(test_proxy_libfabric_loopback.cpp
