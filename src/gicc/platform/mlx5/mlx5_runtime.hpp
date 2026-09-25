@@ -8,6 +8,8 @@
  *   - the transport (transport.hpp): GPU-owned QPs that kernels and target
  *     regions post to directly, plus verbs QPs for host-issued transfers
  *   - memory registration and the buffer address book
+ *   - CUDA IPC mappings of same-node peers' device buffers (peer_mapped),
+ *     which need neither verbs nor the NIC
  *
  * Construction is collective: every rank builds its Runtime at the same point.
  * GICC_IB_LANES (default 1) sets the QPs per peer and GICC_IB_QP_DEPTH
@@ -70,6 +72,7 @@ public:
 
     ~Runtime() {
         reset();
+        close_ipc();
         transport_.reset();
         for (auto* mr : local_bufs_) delete mr;
         local_bufs_.clear();
@@ -80,10 +83,18 @@ public:
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
 
+    // A device buffer is also exported for CUDA IPC, so same-node peers can
+    // map it (peer_mapped). As on libfabric, the mapping is of the whole
+    // allocation `buf` belongs to, so register allocation starts -- as the
+    // GiOMP heap and signal inbox are -- when peers are to map them.
     Buffer register_buffer(void* buf, size_t size, bool is_device) {
         auto* mr = new gicc::MemoryRegion(pd_, buf, size, is_device, boot_.rank());
         int idx = (int)local_bufs_.size();
         local_bufs_.push_back(mr);
+        IpcExport e{};
+        if (is_device && cudaIpcGetMemHandle(&e.handle, buf) == cudaSuccess) e.valid = 1;
+        else (void)cudaGetLastError();
+        ipc_exports_.push_back(e);
         return { buf, size, (uint64_t)buf, mr->lkey, mr->rkey, idx };
     }
 
@@ -99,6 +110,7 @@ public:
         }
 
         auto raw = boot_.allgather(my_entries.data(), n * (int)sizeof(BufEntry));
+        open_ipc();
 
         remote_bufs_.resize(boot_.size());
         for (int r = 0; r < boot_.size(); r++) {
@@ -178,6 +190,20 @@ public:
 
     void barrier() { boot_.barrier(); }
 
+    // Same-node peers and their device buffers mapped through CUDA IPC.
+    // peer_mapped(rank, buf) is the local address of `rank`'s buffer `buf`,
+    // or nullptr when `rank` is this rank, on another node, or the buffer is
+    // not device memory. Valid after exchange().
+    bool is_local_peer(int rank) const {
+        return rank >= 0 && (size_t)rank < local_peer_.size() && local_peer_[rank];
+    }
+    void* peer_mapped(int rank, int buf_idx) const {
+        if (rank < 0 || (size_t)rank >= peer_mapped_.size()) return nullptr;
+        const auto& pm = peer_mapped_[rank];
+        if (buf_idx < 0 || (size_t)buf_idx >= pm.size()) return nullptr;
+        return pm[buf_idx];
+    }
+
     int rank() const { return boot_.rank(); }
     int size() const { return boot_.size(); }
     int gpu_id() const { return gpu_id_; }
@@ -187,11 +213,9 @@ public:
     Bootstrap& boot() noexcept { return boot_; }
     const Bootstrap& boot() const noexcept { return boot_; }
 
-    // Parity with the libfabric runtime for portable host code: every peer
-    // is reached through the NIC and memory is addressed by virtual address.
+    // Parity with the libfabric runtime for portable host code: there is no
+    // host-wait mode to enable, and memory is addressed by virtual address.
     void  enable_host_wait_mode() noexcept {}
-    bool  is_local_peer(int /*rank*/) const noexcept { return false; }
-    void* peer_mapped (int /*rank*/, int /*buf_idx*/) const noexcept { return nullptr; }
     bool  is_virt_addr_mode() const noexcept { return true; }
 
 private:
@@ -206,6 +230,45 @@ private:
     int gpu_id_ = 0;
     double clock_rate_khz_ = 0;
     cudaDeviceProp gpu_props_;
+
+    struct IpcExport {
+        cudaIpcMemHandle_t handle;
+        uint8_t            valid;
+    };
+    std::vector<IpcExport>          ipc_exports_;   // [buf], ours
+    std::vector<bool>               local_peer_;    // [rank]
+    std::vector<std::vector<void*>> peer_mapped_;   // [rank][buf]
+
+    // Collective: exchange the IPC handles and map every same-node peer's
+    // device buffers. Called by exchange(); earlier mappings are replaced.
+    void open_ipc() {
+        close_ipc();
+        const int n = (int)ipc_exports_.size();
+        auto all = boot_.allgather(ipc_exports_.data(), n * (int)sizeof(IpcExport));
+        local_peer_ = boot_.locality_map();
+        peer_mapped_.assign(boot_.size(), std::vector<void*>(n, nullptr));
+        for (int r = 0; r < boot_.size(); ++r) {
+            if (r == boot_.rank() || !local_peer_[r]) continue;
+            const auto* peer = reinterpret_cast<const IpcExport*>(all[r].data());
+            for (int b = 0; b < n; ++b) {
+                if (!peer[b].valid) continue;
+                void* mapped = nullptr;
+                if (cudaIpcOpenMemHandle(&mapped, peer[b].handle,
+                                         cudaIpcMemLazyEnablePeerAccess) == cudaSuccess) {
+                    peer_mapped_[r][b] = mapped;
+                } else {
+                    (void)cudaGetLastError();   // stays unmapped: use the NIC
+                }
+            }
+        }
+    }
+
+    void close_ipc() {
+        for (auto& per_rank : peer_mapped_)
+            for (void* p : per_rank)
+                if (p) (void)cudaIpcCloseMemHandle(p);
+        peer_mapped_.clear();
+    }
 
     // Hand the transport the address book in the flat form the GPU indexes.
     void publish_tables() {
