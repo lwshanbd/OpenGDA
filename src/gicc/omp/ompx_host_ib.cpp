@@ -14,6 +14,12 @@
 // registered once, carved by ompx_alloc, the same offset on every rank. The
 // signal inbox is device memory too, so a signal and the payload it announces
 // travel the same path into the GPU.
+//
+// Same-node peers: with GICC_HALO_IPC=1, as on libfabric, every same-node
+// peer's heap is mapped through CUDA IPC. ompx_peer_ptr then hands out the
+// peer's address of an object, and host-issued ompx_put / ompx_get to such a
+// peer copy over NVLink / PCIe instead of the NIC. Device-side puts and every
+// put_signal keep using the NIC, whose QP orders a signal behind its payload.
 #include <mpi.h>
 #include <omp.h>
 #include <cuda_runtime.h>
@@ -37,6 +43,12 @@ static_assert(offsetof(gicc::DeviceCtx, trigger_val_) == sizeof(void*),
 gicc::Runtime* g_runtime = nullptr;
 bool g_initialized_mpi = false;
 cudaStream_t g_stream = nullptr;   // small copies of the signal inbox
+
+// Same-node copies through CUDA IPC (GICC_HALO_IPC=1). They ride their own
+// stream, which ompx_quiet synchronizes when a copy is outstanding.
+bool         g_ipc_enabled = false;
+bool         g_ipc_pending = false;
+cudaStream_t g_ipc_stream  = nullptr;
 
 // ---- signal inbox -----------------------------------------------------------
 // kSigSlots 8-byte slots in device memory, registered, symmetric: slot i means
@@ -143,6 +155,12 @@ void check_slot(int sig, const char* what) {
     std::abort();
 }
 
+// The local address of `peer`'s heap, or nullptr when it is not mapped.
+char* peer_heap(int peer) {
+    if (!g_ipc_enabled) return nullptr;
+    return static_cast<char*>(g_runtime->peer_mapped(peer, g_heap.index));
+}
+
 // Heap offset of `addr`, which may be a heap device address or a host address
 // bound to the heap by ompx_bind.
 size_t offset_of(const void* addr, const char* what) {
@@ -181,16 +199,28 @@ void ompx_init() {
     g_runtime = new gicc::Runtime();
     require_cuda(cudaStreamCreateWithFlags(&g_stream, cudaStreamNonBlocking),
                  "create signal stream");
+    const char* ipc_env = std::getenv("GICC_HALO_IPC");
+    g_ipc_enabled = ipc_env != nullptr && std::atoi(ipc_env) != 0;
+    if (g_ipc_enabled) {
+        require_cuda(cudaStreamCreateWithFlags(&g_ipc_stream, cudaStreamNonBlocking),
+                     "create IPC stream");
+    }
     // Keep libomptarget on the device the runtime selected.
     omp_set_default_device(g_runtime->gpu_id());
     create_heap();
 }
 
 void ompx_finalize() {
-    // The runtime drains and deregisters the heap and the inbox, so it goes
-    // before the memory it registered.
+    if (g_ipc_pending) {
+        (void)cudaStreamSynchronize(g_ipc_stream);
+        g_ipc_pending = false;
+    }
+    // The runtime drains, unmaps the peers' heaps and deregisters the heap
+    // and the inbox, so it goes before the memory it registered -- and every
+    // rank must have unmapped this rank's heap before it is freed.
     delete g_runtime;
     g_runtime = nullptr;
+    MPI_Barrier(MPI_COMM_WORLD);
     if (g_heap_base != nullptr) {
         (void)cudaFree(g_heap_base);
         g_heap_base = nullptr;
@@ -208,6 +238,11 @@ void ompx_finalize() {
         (void)cudaStreamDestroy(g_stream);
         g_stream = nullptr;
     }
+    if (g_ipc_stream != nullptr) {
+        (void)cudaStreamDestroy(g_ipc_stream);
+        g_ipc_stream = nullptr;
+    }
+    g_ipc_enabled = false;
 
     int finalized = 0;
     MPI_Finalized(&finalized);
@@ -301,24 +336,42 @@ size_t ompx_heap_offset_of(const void* addr) {
 
 // ---- data movement ----------------------------------------------------------
 
-// No load/store path to a peer's heap: every transfer, same node or not,
-// goes through the NIC.
+// A same-node peer's address for the object at `addr`: its heap is mapped
+// through CUDA IPC, and the object sits at the same heap offset there. NULL
+// for this rank, for a peer on another node, and without GICC_HALO_IPC.
 void* ompx_peer_ptr(int peer, const void* addr) {
-    (void)peer;
-    (void)addr;
-    return nullptr;
+    if (g_runtime == nullptr) return nullptr;
+    char* base = peer_heap(peer);
+    if (base == nullptr) return nullptr;
+    return base + offset_of(addr, "ompx_peer_ptr");
 }
 
 void ompx_put_host(int peer, void* dst, const void* src, size_t bytes) {
     if (g_runtime == nullptr) die("ompx_put before ompx_init");
-    g_runtime->put(g_heap, peer, g_heap.index, bytes,
-                   offset_of(src, "ompx_put src"), offset_of(dst, "ompx_put dst"));
+    const size_t src_off = offset_of(src, "ompx_put src");
+    const size_t dst_off = offset_of(dst, "ompx_put dst");
+    if (char* base = peer_heap(peer)) {
+        require_cuda(cudaMemcpyAsync(base + dst_off, g_heap_base + src_off, bytes,
+                                     cudaMemcpyDeviceToDevice, g_ipc_stream),
+                     "same-node put");
+        g_ipc_pending = true;
+        return;
+    }
+    g_runtime->put(g_heap, peer, g_heap.index, bytes, src_off, dst_off);
 }
 
 void ompx_get_host(int peer, void* dst, const void* src, size_t bytes) {
     if (g_runtime == nullptr) die("ompx_get before ompx_init");
-    g_runtime->get(g_heap, peer, g_heap.index, bytes,
-                   offset_of(dst, "ompx_get dst"), offset_of(src, "ompx_get src"));
+    const size_t dst_off = offset_of(dst, "ompx_get dst");
+    const size_t src_off = offset_of(src, "ompx_get src");
+    if (char* base = peer_heap(peer)) {
+        require_cuda(cudaMemcpyAsync(g_heap_base + dst_off, base + src_off, bytes,
+                                     cudaMemcpyDeviceToDevice, g_ipc_stream),
+                     "same-node get");
+        g_ipc_pending = true;
+        return;
+    }
+    g_runtime->get(g_heap, peer, g_heap.index, bytes, dst_off, src_off);
 }
 
 // ---- signals ----------------------------------------------------------------
@@ -369,6 +422,10 @@ void ompx_stage_put_signal(int peer, void* dst, const void* src, size_t bytes,
 // is every device-side put of a target region that has returned.
 void ompx_quiet_host() {
     if (g_runtime == nullptr) return;
+    if (g_ipc_pending) {
+        g_ipc_pending = false;
+        require_cuda(cudaStreamSynchronize(g_ipc_stream), "drain the IPC stream");
+    }
     g_runtime->drain();
 }
 
