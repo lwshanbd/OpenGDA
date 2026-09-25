@@ -1,15 +1,15 @@
 /*
- * gda_types.hpp - POD layout of the GPU-driven InfiniBand context.
+ * device_ctx.hpp - POD layout of the GPU-driven InfiniBand context.
  *
  * On InfiniBand the GPU does not need a trigger or a proxy: a GPU thread
  * writes the work-queue entry (WQE) into the send queue and rings the NIC
  * doorbell itself, so the transfer starts the moment the thread issues it.
- * This header describes what that thread needs -- one GdaQp per
+ * This header describes what that thread needs -- one QpView per
  * (peer, lane) and the address book of registered buffers -- and nothing
  * else, so it can be included from host C++, CUDA and OpenMP TUs alike.
  *
  * The device-side functions that operate on these types live in
- * gda_device.hpp; the host-side setup lives in gda_qp.hpp / gda_engine.hpp.
+ * mlx5_device.hpp; the host-side setup lives in gpu_qp.hpp / transport.hpp.
  */
 #pragma once
 
@@ -39,7 +39,7 @@ namespace gicc::mlx5 {
 // completed" is a pure function of *ready and that one CQE. The counter is
 // read as a signed 16-bit distance from *ready, which also covers a WQE that
 // completes before its poster has published *ready, so nwqes stays <= 16384.
-struct GdaQp {
+struct QpView {
     uint8_t*           wq;        // send queue ring (host memory, mapped)
     volatile uint32_t* dbrec;     // send doorbell record (host memory, mapped)
     uint64_t*          uar;       // NIC doorbell register (MMIO, mapped)
@@ -50,11 +50,22 @@ struct GdaQp {
     uint32_t           nwqes;     // power of two
 };
 
-// What a kernel or a target region needs to communicate. The first two
-// fields mirror gicc::DeviceCtx on the libfabric backend so the C view of
-// ompx_ctx in gicc/omp.h stays one struct; on InfiniBand there is no trigger
-// and both stay zero.
-struct GdaCtx {
+// Largest single RDMA message; bigger transfers are split. The QPs are
+// created with log_msg_max = 30.
+constexpr uint64_t kMaxMsg = 1ull << 30;
+
+// Send queue depth ceiling; see the completion arithmetic above.
+constexpr uint32_t kMaxWqes = 16384;
+
+} // namespace gicc::mlx5
+
+namespace gicc {
+
+// What a kernel or a target region needs to communicate: gicc::DeviceCtx on
+// InfiniBand, the counterpart of the libfabric one in ofi/device_ctx.hpp. The
+// first two fields match it, so the C view of ompx_ctx in gicc/omp.h stays
+// one struct; on InfiniBand there is no trigger and both stay zero.
+struct DeviceCtx {
     volatile uint64_t*  trigger_addr_ = nullptr;
     uint64_t            trigger_val_  = 0;
 
@@ -74,21 +85,14 @@ struct GdaCtx {
     int                 nlanes  = 0;
     int                 nbufs   = 0;
 
-    GdaQp*              qps       = nullptr;  // [peer * nlanes + lane]
+    mlx5::QpView*       qps       = nullptr;  // [peer * nlanes + lane]
     const uint64_t*     lbuf_addr = nullptr;  // [buf]
     const uint32_t*     lbuf_lkey = nullptr;  // [buf]
     const uint64_t*     rbuf_addr = nullptr;  // [peer * nbufs + buf]
     const uint32_t*     rbuf_rkey = nullptr;  // [peer * nbufs + buf]
 };
 
-// Largest single RDMA message; bigger transfers are split. The QPs are
-// created with log_msg_max = 30.
-constexpr uint64_t kGdaMaxMsg = 1ull << 30;
-
-// Send queue depth ceiling; see the completion arithmetic above.
-constexpr uint32_t kGdaMaxWqes = 16384;
-
-} // namespace gicc::mlx5
+} // namespace gicc
 
 #if !defined(__CUDACC__) && defined(_OPENMP)
 #pragma omp end declare target

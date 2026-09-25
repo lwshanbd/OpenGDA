@@ -6,7 +6,7 @@
 // The difference is who moves the data. Over libfabric a target region hands
 // its transfers to a CPU proxy or fires descriptors the host pre-staged. Here
 // the GPU thread in the target region writes the work request and rings the
-// NIC doorbell itself (gicc/platform/mlx5/gda_device.hpp), so there is nothing
+// NIC doorbell itself (gicc/platform/mlx5/mlx5_device.hpp), so there is nothing
 // to stage and nothing to trigger: ompx_stage_put_signal and ompx_trigger are
 // no-ops. Transfers issued from host code go through ordinary verbs QPs.
 //
@@ -30,9 +30,9 @@
 namespace {
 
 // gicc/omp.h mirrors these two leading fields for C target regions.
-static_assert(offsetof(gicc::mlx5::GdaCtx, trigger_addr_) == 0, "GdaCtx layout");
-static_assert(offsetof(gicc::mlx5::GdaCtx, trigger_val_) == sizeof(void*),
-              "GdaCtx layout");
+static_assert(offsetof(gicc::DeviceCtx, trigger_addr_) == 0, "DeviceCtx layout");
+static_assert(offsetof(gicc::DeviceCtx, trigger_val_) == sizeof(void*),
+              "DeviceCtx layout");
 
 gicc::Runtime* g_runtime = nullptr;
 bool g_initialized_mpi = false;

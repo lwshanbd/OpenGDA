@@ -1,4 +1,4 @@
-// gda_test.cu - GPU-driven InfiniBand transfers from CUDA kernels, checked
+// ib_test.cu - GPU-initiated InfiniBand transfers from CUDA kernels, checked
 // word for word.
 //
 // Every rank sends to its right neighbour and receives from its left one.
@@ -11,7 +11,7 @@
 //   host        the same put / put_u64 / get issued from the host.
 //   pingpong    device put_signal round trip between ranks 0 and 1.
 //
-// Run: srun -p maple -N2 -n2 --gres=gpu:1 --mpi=pmix ./gicc_gda_test
+// Run: srun -p maple -N2 -n2 --gres=gpu:1 --mpi=pmix ./gicc_ib_test
 //      (GICC_IB_LANES=N gives each chunk's block its own QP when N >= chunks)
 
 #include "gicc/gicc.hpp"
@@ -28,7 +28,7 @@
     std::fprintf(stderr, "%s:%d %s\n", __FILE__, __LINE__, cudaGetErrorString(e_)); \
     gicc::abort(1, #x); } } while (0)
 
-using gicc::mlx5::GdaCtx;
+using gicc::DeviceCtx;
 
 __device__ __host__ inline uint32_t pattern(int it, int rank, int chunk, size_t i) {
     return (uint32_t)it * 0x9E3779B1u ^ (uint32_t)rank * 0x85EBCA77u ^
@@ -52,7 +52,7 @@ __global__ void check(const uint32_t* buf, size_t words, int it, int rank,
     if (n) atomicAdd(bad, n);
 }
 
-__global__ void put_kernel(GdaCtx* ctx, int peer, int dbuf, int sbuf,
+__global__ void put_kernel(DeviceCtx* ctx, int peer, int dbuf, int sbuf,
                            uint32_t* src, size_t words, int it, int rank) {
     const int k = blockIdx.x;
     for (size_t i = threadIdx.x; i < words; i += blockDim.x)
@@ -66,7 +66,7 @@ __global__ void put_kernel(GdaCtx* ctx, int peer, int dbuf, int sbuf,
     }
 }
 
-__global__ void signal_kernel(GdaCtx* ctx, int right, int left, int dbuf, int sbuf,
+__global__ void signal_kernel(DeviceCtx* ctx, int right, int left, int dbuf, int sbuf,
                               uint32_t* src, const uint32_t* dst, size_t words,
                               int K, int it, int rank, unsigned long long* bad) {
     const uint64_t v = (uint64_t)it + 1;
@@ -98,7 +98,7 @@ __global__ void signal_kernel(GdaCtx* ctx, int right, int left, int dbuf, int sb
     if ((int)blockIdx.x < K && threadIdx.x == 0) gicc::quiet(ctx, blockIdx.x);
 }
 
-__global__ void get_kernel(GdaCtx* ctx, int left, int dbuf, int sbuf,
+__global__ void get_kernel(DeviceCtx* ctx, int left, int dbuf, int sbuf,
                            const uint32_t* dst, size_t words, int it,
                            unsigned long long* bad) {
     const int k = blockIdx.x;
@@ -114,7 +114,7 @@ __global__ void get_kernel(GdaCtx* ctx, int left, int dbuf, int sbuf,
     if (n) atomicAdd(bad, n);
 }
 
-__global__ void pingpong_kernel(GdaCtx* ctx, int me, int peer, int dbuf, int sbuf,
+__global__ void pingpong_kernel(DeviceCtx* ctx, int me, int peer, int dbuf, int sbuf,
                                 size_t bytes, int iters, unsigned long long* ns) {
     const unsigned long long t0 = clock64();
     uint64_t t_start;
@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
     auto bsig = rt.register_buffer(sig, 64 * sizeof(uint64_t), true);
     rt.exchange();
     rt.set_signal_table(sig, bsig.index);
-    GdaCtx* ctx = rt.prepare();
+    DeviceCtx* ctx = rt.prepare();
 
     if (rank == 0)
         std::printf("%d ranks, %d chunks, %d iters, lanes %s\n", n, K, iters,

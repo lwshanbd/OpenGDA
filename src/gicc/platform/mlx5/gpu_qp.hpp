@@ -1,5 +1,5 @@
 /*
- * gda_qp.hpp - host-side construction of one GPU-driven RC queue pair.
+ * gpu_qp.hpp - host-side construction of one GPU-driven RC queue pair.
  *
  * The QP is created through DevX so that every resource the posting thread
  * touches can be placed where the GPU reaches it:
@@ -32,7 +32,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "gicc/platform/mlx5/gda_types.hpp"
+#include "gicc/platform/mlx5/device_ctx.hpp"
 #include "gicc/platform/mlx5/mlx5_ifc.h"
 #include "gicc/platform/mlx5/mlx5_prm.h"
 
@@ -46,12 +46,12 @@ struct IbPortAddr {
     uint8_t  gid[16];
 };
 
-[[noreturn]] inline void gda_die(const char* what, int err = errno) {
+[[noreturn]] inline void die(const char* what, int err = errno) {
     std::fprintf(stderr, "[gicc] %s failed: %s\n", what, std::strerror(err));
     std::abort();
 }
 
-inline void gda_cuda(cudaError_t err, const char* what) {
+inline void cuda_check(cudaError_t err, const char* what) {
     if (err != cudaSuccess) {
         std::fprintf(stderr, "[gicc] %s failed: %s\n", what, cudaGetErrorString(err));
         std::abort();
@@ -59,7 +59,7 @@ inline void gda_cuda(cudaError_t err, const char* what) {
 }
 
 // Port MTU, capped by GICC_MTU (bytes) when set.
-inline int gda_port_mtu(const ibv_port_attr& port) {
+inline int port_mtu(const ibv_port_attr& port) {
     int mtu = port.active_mtu;
     if (const char* e = std::getenv("GICC_MTU")) {
         const int bytes = std::atoi(e);
@@ -72,7 +72,7 @@ inline int gda_port_mtu(const ibv_port_attr& port) {
 
 // Fill a QP context's primary address path towards `remote`. RoCE needs the
 // peer MAC, which only an address handle resolves.
-inline void gda_set_path(void* qpc, ibv_pd* pd, uint8_t port_num,
+inline void set_address_path(void* qpc, ibv_pd* pd, uint8_t port_num,
                          const IbPortAddr& remote) {
     if (remote.link_layer == IBV_LINK_LAYER_INFINIBAND) {
         DEVX_SET(qpc, qpc, primary_address_path.rlid, remote.lid);
@@ -87,12 +87,12 @@ inline void gda_set_path(void* qpc, ibv_pd* pd, uint8_t port_num,
     ah.grh.sgid_index = remote.gid_index;
     ah.dlid = 0xC000;                                  // RoCE v2 UDP sport base
     ibv_ah* handle = ibv_create_ah(pd, &ah);
-    if (!handle) gda_die("ibv_create_ah");
+    if (!handle) die("ibv_create_ah");
     mlx5dv_obj dv = {};
     mlx5dv_ah dah = {};
     dv.ah.in = handle;
     dv.ah.out = &dah;
-    if (mlx5dv_init_obj(&dv, MLX5DV_OBJ_AH)) gda_die("mlx5dv_init_obj(AH)");
+    if (mlx5dv_init_obj(&dv, MLX5DV_OBJ_AH)) die("mlx5dv_init_obj(AH)");
     std::memcpy(DEVX_ADDR_OF(qpc, qpc, primary_address_path.rmac_47_32),
                 &dah.av->rmac, 6);
     std::memcpy(DEVX_ADDR_OF(qpc, qpc, primary_address_path.rgid_rip),
@@ -106,7 +106,7 @@ inline void gda_set_path(void* qpc, ibv_pd* pd, uint8_t port_num,
 // Map an MMIO address (a UAR doorbell) into the GPU. Several UARs can share
 // one system page (64 KB kernels hold sixteen 4 KB UAR pages), and CUDA
 // refuses to register a page twice, so registrations are shared per page.
-class GdaMmioMap {
+class MmioMap {
 public:
     static void* map(void* addr) {
         auto& self = instance();
@@ -115,11 +115,11 @@ public:
         auto it = self.pages_.find(page);
         if (it == self.pages_.end()) {
             void* dev = nullptr;
-            gda_cuda(cudaHostRegister((void*)page, self.page_,
+            cuda_check(cudaHostRegister((void*)page, self.page_,
                                       cudaHostRegisterPortable | cudaHostRegisterMapped |
                                       cudaHostRegisterIoMemory),
                      "cudaHostRegister(UAR)");
-            gda_cuda(cudaHostGetDevicePointer(&dev, (void*)page, 0),
+            cuda_check(cudaHostGetDevicePointer(&dev, (void*)page, 0),
                      "cudaHostGetDevicePointer(UAR)");
             it = self.pages_.emplace(page, Entry{(char*)dev, 0}).first;
         }
@@ -145,19 +145,19 @@ private:
     std::map<uintptr_t, Entry> pages_;
     uintptr_t page_ = (uintptr_t)sysconf(_SC_PAGESIZE);
 
-    static GdaMmioMap& instance() {
-        static GdaMmioMap m;
+    static MmioMap& instance() {
+        static MmioMap m;
         return m;
     }
 };
 
-class GdaQpHost {
+class GpuQp {
 public:
     // `cqe_slot` is the CQ's single 64-byte entry, in GPU memory, at the
     // 4 KB-aligned byte offset `cq_umem_off` of the registered umem
     // `cq_umem`. The engine packs every QP's CQ into one allocation so the
     // GPU memory costs one registration.
-    GdaQpHost(ibv_context* ctx, ibv_pd* pd, uint8_t port, uint32_t nwqes,
+    GpuQp(ibv_context* ctx, ibv_pd* pd, uint8_t port, uint32_t nwqes,
               uint32_t srqn, uint32_t recv_cqn, uint32_t eqn,
               mlx5dv_devx_umem* cq_umem, uint64_t cq_umem_off, void* cqe_slot)
         : ctx_(ctx), pd_(pd), port_(port), nwqes_(nwqes), cqe_slot_(cqe_slot) {
@@ -165,7 +165,7 @@ public:
         mlx5dv_pd dvpd = {};
         obj.pd.in = pd;
         obj.pd.out = &dvpd;
-        if (mlx5dv_init_obj(&obj, MLX5DV_OBJ_PD)) gda_die("mlx5dv_init_obj(PD)");
+        if (mlx5dv_init_obj(&obj, MLX5DV_OBJ_PD)) die("mlx5dv_init_obj(PD)");
 
         alloc_uar();
         alloc_host(&wq_, (size_t)nwqes * 64, &wq_umem_, &d_wq_);
@@ -178,27 +178,27 @@ public:
         create_qp(dvpd.pdn, srqn, recv_cqn);
     }
 
-    ~GdaQpHost() {
+    ~GpuQp() {
         if (qp_) mlx5dv_devx_obj_destroy(qp_);
         if (cq_) mlx5dv_devx_obj_destroy(cq_);
         free_host(wq_, wq_umem_);
         free_host(dbr_, dbr_umem_);
         free_host(cq_dbr_, cq_dbr_umem_);
         if (uar_) {
-            GdaMmioMap::unmap(uar_->reg_addr);
+            MmioMap::unmap(uar_->reg_addr);
             mlx5dv_devx_free_uar(uar_);
         }
     }
 
-    GdaQpHost(const GdaQpHost&) = delete;
-    GdaQpHost& operator=(const GdaQpHost&) = delete;
+    GpuQp(const GpuQp&) = delete;
+    GpuQp& operator=(const GpuQp&) = delete;
 
     uint32_t qpn() const { return qpn_; }
 
     // RST -> INIT -> RTR -> RTS against the remote QP `remote_qpn`.
     void connect(uint32_t remote_qpn, const IbPortAddr& remote) {
         ibv_port_attr port = {};
-        if (ibv_query_port(ctx_, port_, &port)) gda_die("ibv_query_port");
+        if (ibv_query_port(ctx_, port_, &port)) die("ibv_query_port");
         {
             uint8_t in[DEVX_ST_SZ_BYTES(rst2init_qp_in)] = {};
             uint8_t out[DEVX_ST_SZ_BYTES(rst2init_qp_out)] = {};
@@ -219,14 +219,14 @@ public:
             DEVX_SET(init2rtr_qp_in, in, opcode, MLX5_CMD_OP_INIT2RTR_QP);
             DEVX_SET(init2rtr_qp_in, in, qpn, qpn_);
             void* qpc = DEVX_ADDR_OF(init2rtr_qp_in, in, qpc);
-            DEVX_SET(qpc, qpc, mtu, gda_port_mtu(port));
+            DEVX_SET(qpc, qpc, mtu, port_mtu(port));
             DEVX_SET(qpc, qpc, log_msg_max, 30);
             DEVX_SET(qpc, qpc, remote_qpn, remote_qpn);
             DEVX_SET(qpc, qpc, min_rnr_nak, 12);
             DEVX_SET(qpc, qpc, log_rra_max, 4);
             DEVX_SET(qpc, qpc, next_rcv_psn, 0);
             DEVX_SET(qpc, qpc, primary_address_path.vhca_port_num, port_);
-            gda_set_path(qpc, pd_, port_, remote);
+            set_address_path(qpc, pd_, port_, remote);
             modify(in, sizeof(in), out, sizeof(out), "INIT2RTR");
         }
         {
@@ -247,8 +247,8 @@ public:
 
     // The device view; `counters` points at this QP's {resv, ready} pair in
     // GPU memory.
-    GdaQp device_view(uint64_t* counters) const {
-        GdaQp q = {};
+    QpView device_view(uint64_t* counters) const {
+        QpView q = {};
         q.wq       = static_cast<uint8_t*>(d_wq_);
         q.dbrec    = reinterpret_cast<volatile uint32_t*>(
                          static_cast<char*>(d_dbr_) + 4);   // SQ half of the record
@@ -290,23 +290,23 @@ private:
         // Non-cached UAR: an 8-byte doorbell store, no BlueFlame buffer.
         uar_ = mlx5dv_devx_alloc_uar(ctx_, MLX5DV_UAR_ALLOC_TYPE_NC);
         if (!uar_) uar_ = mlx5dv_devx_alloc_uar(ctx_, MLX5DV_UAR_ALLOC_TYPE_BF);
-        if (!uar_) gda_die("mlx5dv_devx_alloc_uar");
-        d_uar_ = GdaMmioMap::map(uar_->reg_addr);
+        if (!uar_) die("mlx5dv_devx_alloc_uar");
+        d_uar_ = MmioMap::map(uar_->reg_addr);
     }
 
     // Page-aligned host memory, registered with the NIC and (when d_ptr is
     // given) mapped into the GPU.
     void alloc_host(void** ptr, size_t bytes, mlx5dv_devx_umem** umem, void** d_ptr) {
         const size_t size = (bytes + kPage - 1) / kPage * kPage;
-        if (posix_memalign(ptr, kPage, size)) gda_die("posix_memalign", ENOMEM);
+        if (posix_memalign(ptr, kPage, size)) die("posix_memalign", ENOMEM);
         std::memset(*ptr, 0, size);
         *umem = mlx5dv_devx_umem_reg(ctx_, *ptr, size, IBV_ACCESS_LOCAL_WRITE);
-        if (!*umem) gda_die("mlx5dv_devx_umem_reg(host)");
+        if (!*umem) die("mlx5dv_devx_umem_reg(host)");
         if (d_ptr) {
-            gda_cuda(cudaHostRegister(*ptr, size, cudaHostRegisterPortable |
+            cuda_check(cudaHostRegister(*ptr, size, cudaHostRegisterPortable |
                                                   cudaHostRegisterMapped),
                      "cudaHostRegister(queue)");
-            gda_cuda(cudaHostGetDevicePointer(d_ptr, *ptr, 0),
+            cuda_check(cudaHostGetDevicePointer(d_ptr, *ptr, 0),
                      "cudaHostGetDevicePointer(queue)");
         }
     }

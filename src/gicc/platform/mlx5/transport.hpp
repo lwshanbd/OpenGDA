@@ -1,9 +1,9 @@
 /*
- * gda_engine.hpp - the InfiniBand transport behind the GPU-driven API.
+ * transport.hpp - the InfiniBand transport behind the GPU-driven API.
  *
  * Two kinds of RC queue pairs, both on the Runtime's PD:
  *
- *   GPU QPs   one per (peer, lane), created through DevX (gda_qp.hpp). GPU
+ *   GPU QPs   one per (peer, lane), created through DevX (gpu_qp.hpp). GPU
  *             threads post to them directly: a put inside a kernel or an
  *             OpenMP target region is a WQE write plus a doorbell, with no
  *             trigger and no proxy.
@@ -32,11 +32,11 @@
 #include <vector>
 
 #include "gicc/bootstrap/bootstrap.hpp"
-#include "gicc/platform/mlx5/gda_qp.hpp"
-#include "gicc/platform/mlx5/gda_types.hpp"
+#include "gicc/platform/mlx5/gpu_qp.hpp"
+#include "gicc/platform/mlx5/device_ctx.hpp"
 
 #if defined(__CUDACC__)
-#include "gicc/platform/mlx5/gda_device.hpp"
+#include "gicc/platform/mlx5/mlx5_device.hpp"
 #endif
 
 namespace gicc::mlx5 {
@@ -46,15 +46,15 @@ namespace gicc::mlx5 {
 // memory, so the cheapest reader is one GPU thread running the same code
 // the kernels use. A template keeps one definition across TUs.
 template <int = 0>
-__global__ void gda_quiet_kernel(const GdaCtx* ctx) {
-    gda::quiet_all(ctx);
+__global__ void quiet_kernel(const DeviceCtx* ctx) {
+    dev::quiet_all(ctx);
 }
 #endif
 
 // Open the HCA with DevX enabled. GICC_IB_DEV names the device; otherwise
 // the first one whose port 1 is an active InfiniBand port wins, then the
 // first active port of any kind (RoCE).
-inline ibv_context* gda_open_device(int rank) {
+inline ibv_context* open_device(int rank) {
     int n = 0;
     ibv_device** list = ibv_get_device_list(&n);
     if (!list || n == 0) {
@@ -98,9 +98,9 @@ inline ibv_context* gda_open_device(int rank) {
 }
 
 // Our address on `port`. RoCE addresses by GID, so pick a RoCE v2 entry.
-inline IbPortAddr gda_port_addr(ibv_context* ctx, uint8_t port_num) {
+inline IbPortAddr port_addr(ibv_context* ctx, uint8_t port_num) {
     ibv_port_attr port = {};
-    if (ibv_query_port(ctx, port_num, &port)) gda_die("ibv_query_port");
+    if (ibv_query_port(ctx, port_num, &port)) die("ibv_query_port");
     IbPortAddr a = {};
     a.lid = port.lid;
     a.link_layer = port.link_layer;
@@ -123,34 +123,34 @@ inline IbPortAddr gda_port_addr(ibv_context* ctx, uint8_t port_num) {
         a.gid_index = (uint8_t)(index < 0 ? 0 : index);
     }
     ibv_gid gid;
-    if (ibv_query_gid(ctx, port_num, a.gid_index, &gid)) gda_die("ibv_query_gid");
+    if (ibv_query_gid(ctx, port_num, a.gid_index, &gid)) die("ibv_query_gid");
     std::memcpy(a.gid, gid.raw, 16);
     return a;
 }
 
-class GdaEngine {
+class Transport {
 public:
     static constexpr uint8_t kPort = 1;
     static constexpr size_t  kCqStride = 4096;
 
     // Collective: every rank constructs its engine at the same point.
-    GdaEngine(Bootstrap& boot, ibv_context* ctx, ibv_pd* pd, int lanes, uint32_t depth)
+    Transport(Bootstrap& boot, ibv_context* ctx, ibv_pd* pd, int lanes, uint32_t depth)
         : boot_(boot), ctx_(ctx), pd_(pd),
           rank_(boot.rank()), nranks_(boot.size()),
           lanes_(lanes < 1 ? 1 : lanes) {
         uint32_t d = 1;
         while (d < depth) d <<= 1;
-        depth_ = d > kGdaMaxWqes ? kGdaMaxWqes : d;
+        depth_ = d > kMaxWqes ? kMaxWqes : d;
         nqp_ = nranks_ * lanes_;
 
         // Shared receive side: nothing is ever received into it.
         recv_cq_ = ibv_create_cq(ctx_, 16, nullptr, nullptr, 0);
-        if (!recv_cq_) gda_die("ibv_create_cq(recv)");
+        if (!recv_cq_) die("ibv_create_cq(recv)");
         ibv_srq_init_attr sattr = {};
         sattr.attr.max_wr = 16;
         sattr.attr.max_sge = 1;
         srq_ = ibv_create_srq(pd_, &sattr);
-        if (!srq_) gda_die("ibv_create_srq");
+        if (!srq_) die("ibv_create_srq");
         uint32_t srqn = 0, recv_cqn = 0;
         {
             mlx5dv_obj obj = {};
@@ -162,43 +162,43 @@ public:
             obj.cq.in = recv_cq_;
             obj.cq.out = &dcq;
             if (mlx5dv_init_obj(&obj, MLX5DV_OBJ_SRQ | MLX5DV_OBJ_CQ))
-                gda_die("mlx5dv_init_obj(SRQ, CQ)");
+                die("mlx5dv_init_obj(SRQ, CQ)");
             srqn = dsrq.srqn;
             recv_cqn = dcq.cqn;
         }
         uint32_t eqn = 0;
-        if (mlx5dv_devx_query_eqn(ctx_, 0, &eqn)) gda_die("mlx5dv_devx_query_eqn");
+        if (mlx5dv_devx_query_eqn(ctx_, 0, &eqn)) die("mlx5dv_devx_query_eqn");
 
         // Every GPU QP's CQ in one GPU allocation, one registration.
         const size_t cq_bytes = (size_t)nqp_ * kCqStride;
-        gda_cuda(cudaMalloc(&cq_raw_, cq_bytes + 65536), "cudaMalloc(CQ)");
+        cuda_check(cudaMalloc(&cq_raw_, cq_bytes + 65536), "cudaMalloc(CQ)");
         cq_base_ = reinterpret_cast<char*>(
             ((uintptr_t)cq_raw_ + 65535) & ~(uintptr_t)65535);
-        gda_cuda(cudaMemset(cq_base_, 0xFF, cq_bytes), "cudaMemset(CQ)");
+        cuda_check(cudaMemset(cq_base_, 0xFF, cq_bytes), "cudaMemset(CQ)");
         cq_umem_ = mlx5dv_devx_umem_reg(ctx_, cq_base_, cq_bytes, IBV_ACCESS_LOCAL_WRITE);
-        if (!cq_umem_) gda_die("mlx5dv_devx_umem_reg(GPU CQ)");
+        if (!cq_umem_) die("mlx5dv_devx_umem_reg(GPU CQ)");
 
-        gda_cuda(cudaMalloc(&d_counters_, (size_t)nqp_ * 2 * sizeof(uint64_t)),
+        cuda_check(cudaMalloc(&d_counters_, (size_t)nqp_ * 2 * sizeof(uint64_t)),
                  "cudaMalloc(counters)");
-        gda_cuda(cudaMemset(d_counters_, 0, (size_t)nqp_ * 2 * sizeof(uint64_t)),
+        cuda_check(cudaMemset(d_counters_, 0, (size_t)nqp_ * 2 * sizeof(uint64_t)),
                  "cudaMemset(counters)");
 
         for (int q = 0; q < nqp_; ++q) {
-            gpu_qps_.push_back(std::make_unique<GdaQpHost>(
+            gpu_qps_.push_back(std::make_unique<GpuQp>(
                 ctx_, pd_, kPort, depth_, srqn, recv_cqn, eqn,
                 cq_umem_, (uint64_t)q * kCqStride, cq_base_ + (size_t)q * kCqStride));
         }
         create_host_qps();
         connect_all();
 
-        std::vector<GdaQp> views(nqp_);
+        std::vector<QpView> views(nqp_);
         for (int q = 0; q < nqp_; ++q)
             views[q] = gpu_qps_[q]->device_view(d_counters_ + 2 * q);
-        gda_cuda(cudaMalloc(&d_qps_, sizeof(GdaQp) * nqp_), "cudaMalloc(QP views)");
-        gda_cuda(cudaMemcpy(d_qps_, views.data(), sizeof(GdaQp) * nqp_,
+        cuda_check(cudaMalloc(&d_qps_, sizeof(QpView) * nqp_), "cudaMalloc(QP views)");
+        cuda_check(cudaMemcpy(d_qps_, views.data(), sizeof(QpView) * nqp_,
                             cudaMemcpyHostToDevice), "upload QP views");
-        gda_cuda(cudaMalloc(&d_ctx_, sizeof(GdaCtx)), "cudaMalloc(GdaCtx)");
-        gda_cuda(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking),
+        cuda_check(cudaMalloc(&d_ctx_, sizeof(DeviceCtx)), "cudaMalloc(DeviceCtx)");
+        cuda_check(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking),
                  "cudaStreamCreate");
         h_ctx_.my_rank = rank_;
         h_ctx_.nranks  = nranks_;
@@ -208,7 +208,7 @@ public:
         boot_.barrier();
     }
 
-    ~GdaEngine() {
+    ~Transport() {
         for (auto& h : host_qps_) if (h.qp) ibv_destroy_qp(h.qp);
         if (host_cq_) ibv_destroy_cq(host_cq_);
         gpu_qps_.clear();
@@ -223,15 +223,15 @@ public:
         if (stream_) cudaStreamDestroy(stream_);
     }
 
-    GdaEngine(const GdaEngine&) = delete;
-    GdaEngine& operator=(const GdaEngine&) = delete;
+    Transport(const Transport&) = delete;
+    Transport& operator=(const Transport&) = delete;
 
     int lanes() const { return lanes_; }
     uint32_t depth() const { return depth_; }
 
     // The device context. Its address never changes; set_* and set_tables
     // update the contents in place.
-    GdaCtx* device_ctx() const { return d_ctx_; }
+    DeviceCtx* device_ctx() const { return d_ctx_; }
 
     // Address book: `laddr/lkey` per local buffer, `raddr/rkey` indexed
     // [peer * nbufs + buf].
@@ -293,7 +293,7 @@ public:
         wr.num_sge = 1;
         wr.wr.rdma.remote_addr = raddr;
         wr.wr.rdma.rkey = rkey;
-        if (int err = ibv_post_send(h.qp, &wr, &bad)) gda_die("ibv_post_send(inline)", err);
+        if (int err = ibv_post_send(h.qp, &wr, &bad)) die("ibv_post_send(inline)", err);
         ++h.outstanding;
         ++host_outstanding_;
     }
@@ -314,7 +314,7 @@ public:
                 --host_outstanding_;
             }
         }
-        if (n < 0) gda_die("ibv_poll_cq");
+        if (n < 0) die("ibv_poll_cq");
     }
 
     void host_quiet() {
@@ -324,9 +324,9 @@ public:
 #if defined(__CUDACC__)
     // Wait for every GPU-posted transfer that has been rung so far.
     void device_quiet() {
-        gda_quiet_kernel<<<1, 1, 0, stream_>>>(d_ctx_);
-        gda_cuda(cudaGetLastError(), "launch gda_quiet_kernel");
-        gda_cuda(cudaStreamSynchronize(stream_), "gda_quiet_kernel");
+        quiet_kernel<<<1, 1, 0, stream_>>>(d_ctx_);
+        cuda_check(cudaGetLastError(), "launch quiet_kernel");
+        cuda_check(cudaStreamSynchronize(stream_), "quiet_kernel");
     }
 #endif
 
@@ -355,16 +355,16 @@ private:
     char*    cq_base_ = nullptr;
     mlx5dv_devx_umem* cq_umem_ = nullptr;
     uint64_t* d_counters_ = nullptr;
-    std::vector<std::unique_ptr<GdaQpHost>> gpu_qps_;
+    std::vector<std::unique_ptr<GpuQp>> gpu_qps_;
 
     ibv_cq*  host_cq_ = nullptr;
     std::vector<HostQp> host_qps_;
     long     host_outstanding_ = 0;
     uint32_t host_depth_ = 256;
 
-    GdaCtx   h_ctx_{};
-    GdaCtx*  d_ctx_ = nullptr;
-    GdaQp*   d_qps_ = nullptr;
+    DeviceCtx   h_ctx_{};
+    DeviceCtx*  d_ctx_ = nullptr;
+    QpView*   d_qps_ = nullptr;
     uint64_t* d_laddr_ = nullptr;
     uint32_t* d_lkey_ = nullptr;
     uint64_t* d_raddr_ = nullptr;
@@ -374,8 +374,8 @@ private:
     template <class T>
     static void upload(T** dst, const std::vector<T>& v) {
         if (v.empty()) { *dst = nullptr; return; }
-        gda_cuda(cudaMalloc(dst, sizeof(T) * v.size()), "cudaMalloc(table)");
-        gda_cuda(cudaMemcpy(*dst, v.data(), sizeof(T) * v.size(),
+        cuda_check(cudaMalloc(dst, sizeof(T) * v.size()), "cudaMalloc(table)");
+        cuda_check(cudaMemcpy(*dst, v.data(), sizeof(T) * v.size(),
                             cudaMemcpyHostToDevice), "upload table");
     }
 
@@ -385,13 +385,13 @@ private:
     }
 
     void upload_ctx() {
-        gda_cuda(cudaMemcpy(d_ctx_, &h_ctx_, sizeof(GdaCtx), cudaMemcpyHostToDevice),
-                 "upload GdaCtx");
+        cuda_check(cudaMemcpy(d_ctx_, &h_ctx_, sizeof(DeviceCtx), cudaMemcpyHostToDevice),
+                 "upload DeviceCtx");
     }
 
     void create_host_qps() {
         host_cq_ = ibv_create_cq(ctx_, (int)(host_depth_ * nranks_), nullptr, nullptr, 0);
-        if (!host_cq_) gda_die("ibv_create_cq(host)");
+        if (!host_cq_) die("ibv_create_cq(host)");
         host_qps_.resize(nranks_);
         for (int p = 0; p < nranks_; ++p) {
             ibv_qp_init_attr attr = {};
@@ -404,13 +404,13 @@ private:
             attr.cap.max_send_sge = 1;
             attr.cap.max_inline_data = 16;
             host_qps_[p].qp = ibv_create_qp(pd_, &attr);
-            if (!host_qps_[p].qp) gda_die("ibv_create_qp(host)");
+            if (!host_qps_[p].qp) die("ibv_create_qp(host)");
         }
     }
 
     void connect_host_qp(ibv_qp* qp, uint32_t remote_qpn, const IbPortAddr& remote) {
         ibv_port_attr port = {};
-        if (ibv_query_port(ctx_, kPort, &port)) gda_die("ibv_query_port");
+        if (ibv_query_port(ctx_, kPort, &port)) die("ibv_query_port");
         ibv_qp_attr a = {};
         a.qp_state = IBV_QPS_INIT;
         a.pkey_index = 0;
@@ -419,11 +419,11 @@ private:
                             IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_ATOMIC;
         if (int e = ibv_modify_qp(qp, &a, IBV_QP_STATE | IBV_QP_PKEY_INDEX |
                                           IBV_QP_PORT | IBV_QP_ACCESS_FLAGS))
-            gda_die("ibv_modify_qp(INIT)", e);
+            die("ibv_modify_qp(INIT)", e);
 
         a = {};
         a.qp_state = IBV_QPS_RTR;
-        a.path_mtu = (ibv_mtu)gda_port_mtu(port);
+        a.path_mtu = (ibv_mtu)port_mtu(port);
         a.dest_qp_num = remote_qpn;
         a.rq_psn = 0;
         a.max_dest_rd_atomic = 16;
@@ -441,7 +441,7 @@ private:
                                           IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
                                           IBV_QP_MAX_DEST_RD_ATOMIC |
                                           IBV_QP_MIN_RNR_TIMER))
-            gda_die("ibv_modify_qp(RTR)", e);
+            die("ibv_modify_qp(RTR)", e);
 
         a = {};
         a.qp_state = IBV_QPS_RTS;
@@ -453,7 +453,7 @@ private:
         if (int e = ibv_modify_qp(qp, &a, IBV_QP_STATE | IBV_QP_TIMEOUT |
                                           IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
                                           IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC))
-            gda_die("ibv_modify_qp(RTS)", e);
+            die("ibv_modify_qp(RTS)", e);
     }
 
     // One allgather, then every QP connects to the mirror QP the peer
@@ -463,7 +463,7 @@ private:
         const size_t nq = (size_t)nranks_ + (size_t)nqp_;
         std::vector<uint8_t> mine(sizeof(ConnHeader) + nq * sizeof(uint32_t));
         ConnHeader hdr = {};
-        hdr.addr = gda_port_addr(ctx_, kPort);
+        hdr.addr = port_addr(ctx_, kPort);
         hdr.lanes = lanes_;
         std::memcpy(mine.data(), &hdr, sizeof(hdr));
         uint32_t* qpns = reinterpret_cast<uint32_t*>(mine.data() + sizeof(hdr));
@@ -496,8 +496,8 @@ private:
     void host_post(int peer, ibv_wr_opcode op, uint64_t laddr, uint32_t lkey,
                    uint64_t raddr, uint32_t rkey, size_t bytes) {
         HostQp& h = host_qps_[peer];
-        for (size_t done = 0; done < bytes; done += kGdaMaxMsg) {
-            const size_t len = bytes - done < kGdaMaxMsg ? bytes - done : kGdaMaxMsg;
+        for (size_t done = 0; done < bytes; done += kMaxMsg) {
+            const size_t len = bytes - done < kMaxMsg ? bytes - done : kMaxMsg;
             make_room(h);
             ibv_sge sge = {};
             sge.addr = laddr + done;
@@ -511,7 +511,7 @@ private:
             wr.num_sge = 1;
             wr.wr.rdma.remote_addr = raddr + done;
             wr.wr.rdma.rkey = rkey;
-            if (int err = ibv_post_send(h.qp, &wr, &bad)) gda_die("ibv_post_send", err);
+            if (int err = ibv_post_send(h.qp, &wr, &bad)) die("ibv_post_send", err);
             ++h.outstanding;
             ++host_outstanding_;
         }

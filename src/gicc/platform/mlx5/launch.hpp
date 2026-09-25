@@ -4,7 +4,7 @@
  *   gicc::launch<kernel>(rt, grid, block, args...)
  *
  * launches kernel<<<grid, block>>>(rt.prepare(), args...). The kernel takes
- * the context (gicc::mlx5::GdaCtx*) first and communicates with the device API of
+ * the gicc::DeviceCtx* first and communicates with the device API of
  * gicc/gicc_device.cuh (gicc::put / get / put_signal / quiet), whose calls
  * post work requests directly from GPU threads.
  *

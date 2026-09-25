@@ -5,7 +5,7 @@
  *   - Bootstrap (MPI or PMI2, selected at build time)
  *   - GPU selection
  *   - IB device open (DevX), PD allocation
- *   - the transport (gda_engine.hpp): GPU-owned QPs that kernels and target
+ *   - the transport (transport.hpp): GPU-owned QPs that kernels and target
  *     regions post to directly, plus verbs QPs for host-issued transfers
  *   - memory registration and the buffer address book
  *
@@ -25,8 +25,8 @@
 
 #include "gicc/bootstrap/bootstrap.hpp"
 #include "gicc/gicc_types.hpp"
-#include "gicc/platform/mlx5/gda_types.hpp"
-#include "gicc/platform/mlx5/gda_engine.hpp"
+#include "gicc/platform/mlx5/device_ctx.hpp"
+#include "gicc/platform/mlx5/transport.hpp"
 #include "gicc/util/memory_region.hpp"
 
 namespace gicc {
@@ -53,7 +53,7 @@ public:
                         "cudaGetDeviceProperties");
         clock_rate_khz_ = gpu_props_.clockRate;
 
-        ib_ctx_ = gicc::mlx5::gda_open_device(boot_.rank());
+        ib_ctx_ = gicc::mlx5::open_device(boot_.rank());
         pd_ = ibv_alloc_pd(ib_ctx_);
         if (!pd_) {
             fprintf(stderr, "GICC Rank %d: ibv_alloc_pd failed\n", boot_.rank());
@@ -64,7 +64,7 @@ public:
         uint32_t depth = 1024;
         if (const char* e = std::getenv("GICC_IB_LANES")) lanes = std::atoi(e);
         if (const char* e = std::getenv("GICC_IB_QP_DEPTH")) depth = (uint32_t)std::atoi(e);
-        transport_ = std::make_unique<gicc::mlx5::GdaEngine>(boot_, ib_ctx_, pd_,
+        transport_ = std::make_unique<gicc::mlx5::Transport>(boot_, ib_ctx_, pd_,
                                                              lanes, depth);
     }
 
@@ -125,7 +125,7 @@ public:
     // The context kernels and target regions communicate through. Same
     // pointer for the life of the runtime; exchange() and set_* refresh the
     // contents.
-    gicc::mlx5::GdaCtx* prepare() { return transport_->device_ctx(); }
+    DeviceCtx* prepare() { return transport_->device_ctx(); }
 
     void set_symmetric_heap(void* dev_base, int buf_index) {
         transport_->set_heap(dev_base, buf_index);
@@ -198,7 +198,7 @@ private:
     gicc::Bootstrap boot_;
     ibv_context* ib_ctx_ = nullptr;
     ibv_pd* pd_ = nullptr;
-    std::unique_ptr<gicc::mlx5::GdaEngine> transport_;
+    std::unique_ptr<gicc::mlx5::Transport> transport_;
 
     std::vector<gicc::MemoryRegion*> local_bufs_;
     std::vector<std::vector<RemoteBufferInfo>> remote_bufs_;

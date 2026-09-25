@@ -1,10 +1,10 @@
 /*
- * gda_device.hpp - GPU threads post InfiniBand work requests themselves.
+ * mlx5_device.hpp - GPU threads post InfiniBand work requests themselves.
  *
  * A put is: reserve send-queue slots, write the WQEs, ring the doorbell. No
  * host thread and no trigger is involved, so the NIC starts the transfer
  * as soon as the issuing thread rings. Completion is read back from a
- * collapsed CQE (see gda_types.hpp).
+ * collapsed CQE (see device_ctx.hpp).
  *
  * One source serves two compilers:
  *   - CUDA (nvcc, clang -x cuda): the functions are __device__, usable from
@@ -17,26 +17,26 @@
  */
 #pragma once
 
-#include "gicc/platform/mlx5/gda_types.hpp"
+#include "gicc/platform/mlx5/device_ctx.hpp"
 
 #include <cstdint>
 #include <cstdio>
 
 #if defined(__CUDACC__)
-  #define GICC_GDA_FN __device__ __forceinline__
+  #define GICC_MLX5_FN __device__ __forceinline__
 #else
-  #define GICC_GDA_FN inline
+  #define GICC_MLX5_FN inline
 #endif
 
 #if defined(__CUDA_ARCH__) || defined(__NVPTX__)
-  #define GICC_GDA_PTX 1
+  #define GICC_MLX5_PTX 1
 #endif
 
 #if !defined(__CUDACC__) && defined(_OPENMP)
 #pragma omp declare target
 #endif
 
-namespace gicc::mlx5::gda {
+namespace gicc::mlx5::dev {
 
 // mlx5 PRM encodings used below.
 constexpr uint32_t kOpRdmaWrite = 0x08;
@@ -55,8 +55,8 @@ constexpr uint64_t kStallNs = 20ull * 1000 * 1000 * 1000;
 // PTX primitives
 //==============================================================================
 
-GICC_GDA_FN uint32_t be32(uint32_t x) {
-#ifdef GICC_GDA_PTX
+GICC_MLX5_FN uint32_t be32(uint32_t x) {
+#ifdef GICC_MLX5_PTX
     uint32_t r;
     asm("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r) : "r"(x));
     return r;
@@ -65,16 +65,16 @@ GICC_GDA_FN uint32_t be32(uint32_t x) {
 #endif
 }
 
-GICC_GDA_FN void trap() {
-#ifdef GICC_GDA_PTX
+GICC_MLX5_FN void trap() {
+#ifdef GICC_MLX5_PTX
     asm volatile("trap;");
 #elif !defined(__CUDACC__)
     __builtin_trap();
 #endif
 }
 
-GICC_GDA_FN void st_v4(uint32_t* p, uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
-#ifdef GICC_GDA_PTX
+GICC_MLX5_FN void st_v4(uint32_t* p, uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+#ifdef GICC_MLX5_PTX
     asm volatile("st.global.v4.b32 [%0], {%1, %2, %3, %4};"
                  :: "l"(p), "r"(a), "r"(b), "r"(c), "r"(d) : "memory");
 #else
@@ -82,14 +82,14 @@ GICC_GDA_FN void st_v4(uint32_t* p, uint32_t a, uint32_t b, uint32_t c, uint32_t
 #endif
 }
 
-GICC_GDA_FN void fence_sys() {
-#ifdef GICC_GDA_PTX
+GICC_MLX5_FN void fence_sys() {
+#ifdef GICC_MLX5_PTX
     asm volatile("fence.sc.sys;" ::: "memory");
 #endif
 }
 
-GICC_GDA_FN void st_sys_u32(volatile uint32_t* p, uint32_t v) {
-#ifdef GICC_GDA_PTX
+GICC_MLX5_FN void st_sys_u32(volatile uint32_t* p, uint32_t v) {
+#ifdef GICC_MLX5_PTX
     asm volatile("st.relaxed.sys.global.b32 [%0], %1;" :: "l"(p), "r"(v) : "memory");
 #else
     (void)p; (void)v; trap();
@@ -97,8 +97,8 @@ GICC_GDA_FN void st_sys_u32(volatile uint32_t* p, uint32_t v) {
 }
 
 // Doorbell register: an MMIO store, never merged or cached.
-GICC_GDA_FN void st_mmio_u64(uint64_t* p, uint64_t v) {
-#ifdef GICC_GDA_PTX
+GICC_MLX5_FN void st_mmio_u64(uint64_t* p, uint64_t v) {
+#ifdef GICC_MLX5_PTX
     asm volatile("st.relaxed.sys.global.b64 [%0], %1;" :: "l"(p), "l"(v) : "memory");
 #else
     (void)p; (void)v; trap();
@@ -106,8 +106,8 @@ GICC_GDA_FN void st_mmio_u64(uint64_t* p, uint64_t v) {
 }
 
 // Written by the NIC, so read at system scope (never from a stale L1 line).
-GICC_GDA_FN uint32_t ld_sys_u32(const uint32_t* p) {
-#ifdef GICC_GDA_PTX
+GICC_MLX5_FN uint32_t ld_sys_u32(const uint32_t* p) {
+#ifdef GICC_MLX5_PTX
     uint32_t r;
     asm volatile("ld.relaxed.sys.global.b32 %0, [%1];" : "=r"(r) : "l"(p) : "memory");
     return r;
@@ -116,8 +116,8 @@ GICC_GDA_FN uint32_t ld_sys_u32(const uint32_t* p) {
 #endif
 }
 
-GICC_GDA_FN uint64_t ld_acquire_u64(const uint64_t* p) {
-#ifdef GICC_GDA_PTX
+GICC_MLX5_FN uint64_t ld_acquire_u64(const uint64_t* p) {
+#ifdef GICC_MLX5_PTX
     uint64_t r;
     asm volatile("ld.acquire.gpu.global.b64 %0, [%1];" : "=l"(r) : "l"(p) : "memory");
     return r;
@@ -126,16 +126,16 @@ GICC_GDA_FN uint64_t ld_acquire_u64(const uint64_t* p) {
 #endif
 }
 
-GICC_GDA_FN void st_release_u64(uint64_t* p, uint64_t v) {
-#ifdef GICC_GDA_PTX
+GICC_MLX5_FN void st_release_u64(uint64_t* p, uint64_t v) {
+#ifdef GICC_MLX5_PTX
     asm volatile("st.release.gpu.global.b64 [%0], %1;" :: "l"(p), "l"(v) : "memory");
 #else
     (void)p; (void)v; trap();
 #endif
 }
 
-GICC_GDA_FN uint64_t atomic_add_u64(uint64_t* p, uint64_t v) {
-#ifdef GICC_GDA_PTX
+GICC_MLX5_FN uint64_t atomic_add_u64(uint64_t* p, uint64_t v) {
+#ifdef GICC_MLX5_PTX
     uint64_t r;
     asm volatile("atom.relaxed.gpu.global.add.u64 %0, [%1], %2;"
                  : "=l"(r) : "l"(p), "l"(v) : "memory");
@@ -145,14 +145,14 @@ GICC_GDA_FN uint64_t atomic_add_u64(uint64_t* p, uint64_t v) {
 #endif
 }
 
-GICC_GDA_FN void backoff() {
-#ifdef GICC_GDA_PTX
+GICC_MLX5_FN void backoff() {
+#ifdef GICC_MLX5_PTX
     asm volatile("nanosleep.u32 32;");
 #endif
 }
 
-GICC_GDA_FN uint64_t now_ns() {
-#ifdef GICC_GDA_PTX
+GICC_MLX5_FN uint64_t now_ns() {
+#ifdef GICC_MLX5_PTX
     uint64_t t;
     asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
     return t;
@@ -165,15 +165,15 @@ GICC_GDA_FN uint64_t now_ns() {
 // Send queue
 //==============================================================================
 
-GICC_GDA_FN uint32_t* wqe_at(const GdaQp* qp, uint64_t slot) {
+GICC_MLX5_FN uint32_t* wqe_at(const QpView* qp, uint64_t slot) {
     return reinterpret_cast<uint32_t*>(
         qp->wq + ((slot & (uint64_t)(qp->nwqes - 1)) << 6));
 }
 
 // WQEs completed so far, from the collapsed CQE and the rung count `ready`.
 // The CQE's wqe_counter is the 16-bit index of the newest completed WQE; its
-// signed distance from ready-1 recovers the full index (gda_types.hpp).
-GICC_GDA_FN uint64_t completed(const GdaQp* qp, uint64_t ready, uint32_t tail) {
+// signed distance from ready-1 recovers the full index (device_ctx.hpp).
+GICC_MLX5_FN uint64_t completed(const QpView* qp, uint64_t ready, uint32_t tail) {
     const uint32_t opcode = tail >> 28;
     if (opcode == kCqeInvalid) return 0;                 // nothing completed yet
     if (opcode == kCqeReqErr || opcode == kCqeRespErr) {
@@ -190,7 +190,7 @@ GICC_GDA_FN uint64_t completed(const GdaQp* qp, uint64_t ready, uint32_t tail) {
 }
 
 // Spin until at least `target` WQEs on this QP have completed.
-GICC_GDA_FN void wait_completed(const GdaQp* qp, uint64_t target) {
+GICC_MLX5_FN void wait_completed(const QpView* qp, uint64_t target) {
     uint64_t start = 0;
     for (;;) {
         // CQE first, then ready: a CQE never names a WQE the poster has not
@@ -211,7 +211,7 @@ GICC_GDA_FN void wait_completed(const GdaQp* qp, uint64_t target) {
 }
 
 // Reserve `n` consecutive slots and wait until the ring has room for them.
-GICC_GDA_FN uint64_t reserve(GdaQp* qp, uint32_t n) {
+GICC_MLX5_FN uint64_t reserve(QpView* qp, uint32_t n) {
     const uint64_t first = atomic_add_u64(qp->resv, n);
     const uint64_t end   = first + n;
     if (end > qp->nwqes) wait_completed(qp, end - qp->nwqes);
@@ -221,7 +221,7 @@ GICC_GDA_FN uint64_t reserve(GdaQp* qp, uint32_t n) {
 // Ring the doorbell for slots [first, first+n). Posters ring in slot order:
 // each waits for the previous one to publish `ready`, so the doorbell record
 // only ever moves forward.
-GICC_GDA_FN void ring(GdaQp* qp, uint64_t first, uint32_t n) {
+GICC_MLX5_FN void ring(QpView* qp, uint64_t first, uint32_t n) {
     while (ld_acquire_u64(qp->ready) != first) backoff();
     const uint32_t end = (uint32_t)(first + n) & 0xffff;
     fence_sys();                               // WQEs before the doorbell record
@@ -233,7 +233,7 @@ GICC_GDA_FN void ring(GdaQp* qp, uint64_t first, uint32_t n) {
 }
 
 // ctrl | raddr | data, 48 bytes = 3 data segments, completion requested.
-GICC_GDA_FN void write_rdma(const GdaQp* qp, uint64_t slot, uint32_t opcode,
+GICC_MLX5_FN void write_rdma(const QpView* qp, uint64_t slot, uint32_t opcode,
                             uint64_t laddr, uint32_t lkey,
                             uint64_t raddr, uint32_t rkey, uint32_t bytes) {
     uint32_t* w = wqe_at(qp, slot);
@@ -247,7 +247,7 @@ GICC_GDA_FN void write_rdma(const GdaQp* qp, uint64_t slot, uint32_t opcode,
 // RDMA WRITE of one 8-byte value carried inside the WQE: ctrl | raddr |
 // inline header + value = 44 bytes, 3 data segments. Used for signals, so a
 // signal needs no source buffer.
-GICC_GDA_FN void write_inline_u64(const GdaQp* qp, uint64_t slot,
+GICC_MLX5_FN void write_inline_u64(const QpView* qp, uint64_t slot,
                                   uint64_t raddr, uint32_t rkey, uint64_t value) {
     uint32_t* w = wqe_at(qp, slot);
     st_v4(w + 0, be32(((uint32_t)(slot & 0xffff) << 8) | kOpRdmaWrite),
@@ -258,16 +258,16 @@ GICC_GDA_FN void write_inline_u64(const GdaQp* qp, uint64_t slot,
     st_v4(w + 8, be32(kInlineSeg | 8), (uint32_t)value, (uint32_t)(value >> 32), 0);
 }
 
-GICC_GDA_FN uint32_t chunks(size_t bytes) {
-    return (uint32_t)((bytes + kGdaMaxMsg - 1) / kGdaMaxMsg);
+GICC_MLX5_FN uint32_t chunks(size_t bytes) {
+    return (uint32_t)((bytes + kMaxMsg - 1) / kMaxMsg);
 }
 
-// Write the WQEs of one transfer, split at kGdaMaxMsg, starting at `slot`.
-GICC_GDA_FN void write_transfer(const GdaQp* qp, uint64_t slot, uint32_t opcode,
+// Write the WQEs of one transfer, split at kMaxMsg, starting at `slot`.
+GICC_MLX5_FN void write_transfer(const QpView* qp, uint64_t slot, uint32_t opcode,
                                 uint64_t laddr, uint32_t lkey,
                                 uint64_t raddr, uint32_t rkey, size_t bytes) {
-    for (size_t done = 0; done < bytes; done += kGdaMaxMsg, ++slot) {
-        const size_t len = bytes - done < kGdaMaxMsg ? bytes - done : kGdaMaxMsg;
+    for (size_t done = 0; done < bytes; done += kMaxMsg, ++slot) {
+        const size_t len = bytes - done < kMaxMsg ? bytes - done : kMaxMsg;
         write_rdma(qp, slot, opcode, laddr + done, lkey, raddr + done, rkey,
                    (uint32_t)len);
     }
@@ -277,16 +277,16 @@ GICC_GDA_FN void write_transfer(const GdaQp* qp, uint64_t slot, uint32_t opcode,
 // Context-level operations
 //==============================================================================
 
-GICC_GDA_FN GdaQp* qp_of(const GdaCtx* c, int peer, int lane) {
+GICC_MLX5_FN QpView* qp_of(const DeviceCtx* c, int peer, int lane) {
     const int l = lane <= 0 ? 0 : lane % c->nlanes;
     return &c->qps[peer * c->nlanes + l];
 }
 
 // Local (src_buf, src_off) -> peer's (dst_buf, dst_off).
-GICC_GDA_FN void put(const GdaCtx* c, int peer, int dst_buf, size_t dst_off,
+GICC_MLX5_FN void put(const DeviceCtx* c, int peer, int dst_buf, size_t dst_off,
                      int src_buf, size_t src_off, size_t bytes, int lane = 0) {
     if (bytes == 0) return;
-    GdaQp* qp = qp_of(c, peer, lane);
+    QpView* qp = qp_of(c, peer, lane);
     const int r = peer * c->nbufs + dst_buf;
     const uint32_t n = chunks(bytes);
     const uint64_t first = reserve(qp, n);
@@ -297,10 +297,10 @@ GICC_GDA_FN void put(const GdaCtx* c, int peer, int dst_buf, size_t dst_off,
 }
 
 // Peer's (src_buf, src_off) -> local (dst_buf, dst_off).
-GICC_GDA_FN void get(const GdaCtx* c, int peer, int src_buf, size_t src_off,
+GICC_MLX5_FN void get(const DeviceCtx* c, int peer, int src_buf, size_t src_off,
                      int dst_buf, size_t dst_off, size_t bytes, int lane = 0) {
     if (bytes == 0) return;
-    GdaQp* qp = qp_of(c, peer, lane);
+    QpView* qp = qp_of(c, peer, lane);
     const int r = peer * c->nbufs + src_buf;
     const uint32_t n = chunks(bytes);
     const uint64_t first = reserve(qp, n);
@@ -313,10 +313,10 @@ GICC_GDA_FN void get(const GdaCtx* c, int peer, int src_buf, size_t src_off,
 // Payload, then `value` into the peer's signal slot at byte offset sig_off,
 // posted together on one QP behind one doorbell. An RC QP executes RDMA
 // writes in order, so the signal cannot land before the payload.
-GICC_GDA_FN void put_signal(const GdaCtx* c, int peer, int dst_buf, size_t dst_off,
+GICC_MLX5_FN void put_signal(const DeviceCtx* c, int peer, int dst_buf, size_t dst_off,
                             int src_buf, size_t src_off, size_t bytes,
                             size_t sig_off, uint64_t value, int lane = 0) {
-    GdaQp* qp = qp_of(c, peer, lane);
+    QpView* qp = qp_of(c, peer, lane);
     const int r = peer * c->nbufs + dst_buf;
     const int s = peer * c->nbufs + c->sig_buf;
     const uint32_t n = chunks(bytes) + 1;
@@ -331,21 +331,21 @@ GICC_GDA_FN void put_signal(const GdaCtx* c, int peer, int dst_buf, size_t dst_o
 
 // Wait for everything rung on `lane` (to every peer) to complete. Local
 // buffers are then reusable and data fetched by get() is visible.
-GICC_GDA_FN void quiet(const GdaCtx* c, int lane = 0) {
+GICC_MLX5_FN void quiet(const DeviceCtx* c, int lane = 0) {
     for (int peer = 0; peer < c->nranks; ++peer) {
-        const GdaQp* qp = qp_of(c, peer, lane);
+        const QpView* qp = qp_of(c, peer, lane);
         const uint64_t target = ld_acquire_u64(qp->ready);
         if (target) wait_completed(qp, target);
     }
     fence_sys();
 }
 
-GICC_GDA_FN void quiet_all(const GdaCtx* c) {
+GICC_MLX5_FN void quiet_all(const DeviceCtx* c) {
     for (int lane = 0; lane < c->nlanes; ++lane) quiet(c, lane);
 }
 
-GICC_GDA_FN uint64_t signal_read(const GdaCtx* c, int sig) {
-#ifdef GICC_GDA_PTX
+GICC_MLX5_FN uint64_t signal_read(const DeviceCtx* c, int sig) {
+#ifdef GICC_MLX5_PTX
     uint64_t v;
     asm volatile("ld.acquire.sys.global.b64 %0, [%1];"
                  : "=l"(v) : "l"(c->sig_base + sig) : "memory");
@@ -357,11 +357,11 @@ GICC_GDA_FN uint64_t signal_read(const GdaCtx* c, int sig) {
 
 // Returns once slot `sig` holds a value >= ge; the payload that value
 // announces is then visible to the caller.
-GICC_GDA_FN void signal_wait(const GdaCtx* c, int sig, uint64_t ge) {
+GICC_MLX5_FN void signal_wait(const DeviceCtx* c, int sig, uint64_t ge) {
     while (signal_read(c, sig) < ge) backoff();
 }
 
-} // namespace gicc::mlx5::gda
+} // namespace gicc::mlx5::dev
 
 #if !defined(__CUDACC__) && defined(_OPENMP)
 #pragma omp end declare target
@@ -376,42 +376,42 @@ GICC_GDA_FN void signal_wait(const GdaCtx* c, int sig, uint64_t ge) {
 namespace gicc {
 
 __device__ __forceinline__
-void put(mlx5::GdaCtx* ctx, int target_rank, int dst_buf, size_t dst_offset,
+void put(DeviceCtx* ctx, int target_rank, int dst_buf, size_t dst_offset,
          int src_buf, size_t src_offset, size_t size, int lane = 0) {
-    mlx5::gda::put(ctx, target_rank, dst_buf, dst_offset, src_buf, src_offset,
+    mlx5::dev::put(ctx, target_rank, dst_buf, dst_offset, src_buf, src_offset,
                    size, lane);
 }
 
 __device__ __forceinline__
-void get(mlx5::GdaCtx* ctx, int source_rank, int src_buf, size_t src_offset,
+void get(DeviceCtx* ctx, int source_rank, int src_buf, size_t src_offset,
          int dst_buf, size_t dst_offset, size_t size, int lane = 0) {
-    mlx5::gda::get(ctx, source_rank, src_buf, src_offset, dst_buf, dst_offset,
+    mlx5::dev::get(ctx, source_rank, src_buf, src_offset, dst_buf, dst_offset,
                    size, lane);
 }
 
 // Payload, then `value` into the peer's signal slot `sig`.
 __device__ __forceinline__
-void put_signal(mlx5::GdaCtx* ctx, int target_rank, int dst_buf, size_t dst_offset,
+void put_signal(DeviceCtx* ctx, int target_rank, int dst_buf, size_t dst_offset,
                 int src_buf, size_t src_offset, size_t size,
                 int sig, uint64_t value, int lane = 0) {
-    mlx5::gda::put_signal(ctx, target_rank, dst_buf, dst_offset, src_buf, src_offset,
+    mlx5::dev::put_signal(ctx, target_rank, dst_buf, dst_offset, src_buf, src_offset,
                           size, (size_t)sig * sizeof(uint64_t), value, lane);
 }
 
 __device__ __forceinline__
-void quiet(mlx5::GdaCtx* ctx, int lane = 0) { mlx5::gda::quiet(ctx, lane); }
+void quiet(DeviceCtx* ctx, int lane = 0) { mlx5::dev::quiet(ctx, lane); }
 
 __device__ __forceinline__
-void flush(mlx5::GdaCtx*) {}
+void flush(DeviceCtx*) {}
 
 __device__ __forceinline__
-uint64_t signal_read(mlx5::GdaCtx* ctx, int sig) {
-    return mlx5::gda::signal_read(ctx, sig);
+uint64_t signal_read(DeviceCtx* ctx, int sig) {
+    return mlx5::dev::signal_read(ctx, sig);
 }
 
 __device__ __forceinline__
-void signal_wait(mlx5::GdaCtx* ctx, int sig, uint64_t ge) {
-    mlx5::gda::signal_wait(ctx, sig, ge);
+void signal_wait(DeviceCtx* ctx, int sig, uint64_t ge) {
+    mlx5::dev::signal_wait(ctx, sig, ge);
 }
 
 } // namespace gicc

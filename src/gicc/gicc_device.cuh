@@ -9,12 +9,12 @@
  *   gicc::quiet(ctx, lane = 0);
  *   gicc::flush(ctx);
  *
- * InfiniBand adds put_signal and signal_wait (gda_device.hpp).
+ * InfiniBand adds put_signal and signal_wait (mlx5_device.hpp).
  */
 #pragma once
 
 #if defined(GICC_PLATFORM_MLX5)
-#include "platform/mlx5/gda_device.hpp"
+#include "platform/mlx5/mlx5_device.hpp"
 #elif defined(GICC_PLATFORM_OFI)
 #include "platform/ofi/ofi_device.cuh"
 #else

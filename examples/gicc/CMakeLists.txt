@@ -22,14 +22,14 @@ find_package(CUDAToolkit REQUIRED)
 # Examples
 # ===========================================================================
 
-# gda_test: GPU-initiated put / put_nbi / put_signal / get from CUDA kernels
+# ib_test: GPU-initiated put / put_nbi / put_signal / get from CUDA kernels
 # and host put / get, checked word for word, plus a device ping-pong.
-add_executable(gicc_gda_test gda_test.cu)
-target_link_libraries(gicc_gda_test PRIVATE gicc MPI::MPI_CXX)
-target_compile_options(gicc_gda_test PRIVATE
+add_executable(gicc_ib_test ib_test.cu)
+target_link_libraries(gicc_ib_test PRIVATE gicc MPI::MPI_CXX)
+target_compile_options(gicc_ib_test PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo --expt-relaxed-constexpr>)
 
 message(STATUS "")
 message(STATUS "=== GICC Examples ===")
-message(STATUS "  gicc_gda_test - GPU-initiated InfiniBand transfers, checked word for word")
+message(STATUS "  gicc_ib_test - GPU-initiated InfiniBand transfers, checked word for word")
 message(STATUS "")
