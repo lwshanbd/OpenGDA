@@ -213,6 +213,7 @@ int main(int argc, char** argv) {
         // --- device put_nbi ---------------------------------------------------
         *bad = 0;
         CK(cudaMemset(dst, 0, bytes * K));
+        CK(cudaDeviceSynchronize());
         rt.barrier();
         t0 = MPI_Wtime();
         for (int r = 0; r < iters; ++r, ++it) {
@@ -230,6 +231,7 @@ int main(int argc, char** argv) {
         // --- device put_signal ----------------------------------------------
         *bad = 0;
         CK(cudaMemset(sig, 0, 64 * sizeof(uint64_t)));
+        CK(cudaDeviceSynchronize());
         rt.barrier();
         t0 = MPI_Wtime();
         for (int r = 0; r < iters; ++r, ++it) {
@@ -257,7 +259,8 @@ int main(int argc, char** argv) {
                     (MPI_Wtime() - t0) * 1e6 / iters);
         total += *bad;
 
-        // --- host put + put_u64 + get ----------------------------------------
+        // --- host put + put_u64, then host get ----------------------------------
+        unsigned long long bad_get = 0;
         *bad = 0;
         t0 = MPI_Wtime();
         for (int r = 0; r < iters; ++r, ++it) {
@@ -273,17 +276,23 @@ int main(int argc, char** argv) {
             uint64_t s = 0;
             CK(cudaMemcpy(&s, sig + 63, sizeof(s), cudaMemcpyDeviceToHost));
             if (s != (uint64_t)it + 1) ++*bad;
+            // cudaMemset on device memory can still be running when it
+            // returns; finish it before the NIC writes into dst.
             CK(cudaMemset(dst, 0, bytes * K));
+            CK(cudaDeviceSynchronize());
             rt.barrier();
+            const unsigned long long before = *bad;
             for (int k = 0; k < K; ++k)
                 rt.get(bdst, left, bsrc.index, bytes, k * bytes, k * bytes);
             rt.drain();
             check<<<dim3(4, K), 256>>>(dst, words, it, left, bad);
             CK(cudaDeviceSynchronize());
+            bad_get += *bad - before;
             rt.barrier();
         }
-        std::printf("%-6d %-10s %10zu %12llu %10.1f\n", rank, "host", bytes, *bad,
-                    (MPI_Wtime() - t0) * 1e6 / iters);
+        std::printf("%-6d %-10s %10zu %12llu %10.1f\n", rank, "host_put", bytes,
+                    *bad - bad_get, (MPI_Wtime() - t0) * 1e6 / iters);
+        std::printf("%-6d %-10s %10zu %12llu\n", rank, "host_get", bytes, bad_get);
         total += *bad;
     }
 
@@ -291,6 +300,7 @@ int main(int argc, char** argv) {
     if (n >= 2) {
         for (size_t bytes : {(size_t)8, (size_t)4096, (size_t)65536}) {
             CK(cudaMemset(sig, 0, 64 * sizeof(uint64_t)));
+            CK(cudaDeviceSynchronize());
             rt.barrier();
             unsigned long long* ns;
             CK(cudaMallocManaged(&ns, sizeof(*ns)));
