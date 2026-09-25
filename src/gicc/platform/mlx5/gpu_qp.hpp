@@ -259,8 +259,8 @@ public:
         }
     }
 
-    // The device view; `counters` points at this QP's {resv, ready} pair in
-    // GPU memory.
+    // The device view; `counters` points at this QP's four counters in GPU
+    // memory: resv, then (16-byte aligned) ready and rung, read as one pair.
     QpView device_view(uint64_t* counters) const {
         QpView q = {};
         q.wq       = static_cast<uint8_t*>(d_wq_);
@@ -270,7 +270,8 @@ public:
         q.cqe_tail = reinterpret_cast<const uint32_t*>(
                          static_cast<char*>(cqe_slot_) + 60);
         q.resv     = counters;
-        q.ready    = counters + 1;
+        q.ready    = counters + 2;
+        q.rung     = counters + 3;
         q.qpn      = qpn_;
         q.nwqes    = nwqes_;
         return q;

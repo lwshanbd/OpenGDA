@@ -132,6 +132,7 @@ class Transport {
 public:
     static constexpr uint8_t kPort = 1;
     static constexpr size_t  kCqStride = 4096;
+    static constexpr size_t  kCounters = 4;   // resv, padding, ready, rung
 
     // Collective: every rank constructs its engine at the same point.
     Transport(Bootstrap& boot, ibv_context* ctx, ibv_pd* pd, int lanes, uint32_t depth)
@@ -178,9 +179,9 @@ public:
         cq_umem_ = umem_reg(ctx_, cq_base_, cq_bytes);
         if (!cq_umem_) die("mlx5dv_devx_umem_reg(GPU CQ)");
 
-        cuda_check(cudaMalloc(&d_counters_, (size_t)nqp_ * 2 * sizeof(uint64_t)),
+        cuda_check(cudaMalloc(&d_counters_, (size_t)nqp_ * kCounters * sizeof(uint64_t)),
                  "cudaMalloc(counters)");
-        cuda_check(cudaMemset(d_counters_, 0, (size_t)nqp_ * 2 * sizeof(uint64_t)),
+        cuda_check(cudaMemset(d_counters_, 0, (size_t)nqp_ * kCounters * sizeof(uint64_t)),
                  "cudaMemset(counters)");
 
         for (int q = 0; q < nqp_; ++q) {
@@ -193,7 +194,7 @@ public:
 
         std::vector<QpView> views(nqp_);
         for (int q = 0; q < nqp_; ++q)
-            views[q] = gpu_qps_[q]->device_view(d_counters_ + 2 * q);
+            views[q] = gpu_qps_[q]->device_view(d_counters_ + kCounters * q);
         cuda_check(cudaMalloc(&d_qps_, sizeof(QpView) * nqp_), "cudaMalloc(QP views)");
         cuda_check(cudaMemcpy(d_qps_, views.data(), sizeof(QpView) * nqp_,
                             cudaMemcpyHostToDevice), "upload QP views");

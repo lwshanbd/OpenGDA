@@ -24,6 +24,7 @@
 namespace gicc {
 namespace omp {
 
+
 inline void put(gicc::DeviceCtx* ctx, int target_rank,
                 int dst_buf, size_t dst_offset,
                 int src_buf, size_t src_offset,
@@ -31,6 +32,23 @@ inline void put(gicc::DeviceCtx* ctx, int target_rank,
     if (!ctx) return;
     gicc::mlx5::dev::put(ctx, target_rank, dst_buf, dst_offset,
                          src_buf, src_offset, size, lane);
+}
+
+// Burst form of put: started by the next put, flush() or quiet() on `lane`,
+// so a run of small puts shares one doorbell and one completion.
+inline void put_nbi(gicc::DeviceCtx* ctx, int target_rank,
+                    int dst_buf, size_t dst_offset,
+                    int src_buf, size_t src_offset,
+                    size_t size, int lane = 0) {
+    if (!ctx) return;
+    gicc::mlx5::dev::put_nbi(ctx, target_rank, dst_buf, dst_offset,
+                             src_buf, src_offset, size, lane);
+}
+
+// Start what put_nbi left waiting on `lane`.
+inline void flush(gicc::DeviceCtx* ctx, int lane = 0) {
+    if (!ctx) return;
+    gicc::mlx5::dev::flush(ctx, lane);
 }
 
 // Payload, then an 8-byte signal carrying `value` at byte `sig_offset` of the

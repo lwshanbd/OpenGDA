@@ -28,24 +28,30 @@ namespace gicc::mlx5 {
 //
 // The send queue is a ring of `nwqes` 64-byte basic blocks. A thread
 // reserves slots with an atomic add on *resv, fills them, then waits until
-// *ready reaches its first slot, rings the doorbell and publishes
-// *ready = its last slot + 1. Doorbells are therefore rung in slot order,
-// which is what keeps the 16-bit doorbell record monotonic.
+// *ready reaches its first slot and publishes *ready = its last slot + 1.
+// Posters publish in slot order, and only a poster inside that ordered step
+// rings the doorbell (and advances *rung), which is what keeps the 16-bit
+// doorbell record monotonic. A poster may publish without ringing
+// (put_nbi); the next doorbell -- any later put, a flush, or the automatic
+// one once half the ring is waiting -- carries its WQEs too.
 //
-// Every WQE asks for a completion, and the completion queue is collapsed:
-// the NIC overwrites a single CQE whose wqe_counter is the index of the
-// newest completed WQE. With at most nwqes (<= 32768) WQEs in flight that
-// 16-bit counter identifies a unique 64-bit slot, so "how many WQEs have
-// completed" is a pure function of *ready and that one CQE. The counter is
-// read as a signed 16-bit distance from *ready, which also covers a WQE that
-// completes before its poster has published *ready, so nwqes stays <= 16384.
+// Only the last WQE behind each doorbell asks for a completion, and the
+// completion queue is collapsed: the NIC overwrites a single CQE whose
+// wqe_counter is the index of the newest completed signaled WQE, and an RC
+// queue completes in order, so everything before it has completed too. With
+// at most nwqes WQEs in flight that 16-bit counter identifies a unique 64-bit
+// slot, so "how many WQEs have completed" is a pure function of *ready and
+// that one CQE. The counter is read as a signed 16-bit distance from *ready,
+// which also covers a WQE that completes before its poster has published
+// *ready, so nwqes stays <= 16384.
 struct QpView {
     uint8_t*           wq;        // send queue ring (host memory, mapped)
     volatile uint32_t* dbrec;     // send doorbell record (host memory, mapped)
     uint64_t*          uar;       // NIC doorbell register (MMIO, mapped)
     const uint32_t*    cqe_tail;  // bytes 60..63 of the collapsed CQE (GPU mem)
     uint64_t*          resv;      // next WQE slot to hand out   (GPU memory)
-    uint64_t*          ready;     // WQE slots rung so far       (GPU memory)
+    uint64_t*          ready;     // WQE slots published so far  (GPU memory)
+    uint64_t*          rung;      // WQE slots behind a doorbell (GPU memory)
     uint32_t           qpn;
     uint32_t           nwqes;     // power of two
 };

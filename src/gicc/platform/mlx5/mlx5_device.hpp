@@ -96,6 +96,14 @@ GICC_MLX5_FN void st_sys_u32(volatile uint32_t* p, uint32_t v) {
 #endif
 }
 
+GICC_MLX5_FN void st_u32(uint32_t* p, uint32_t v) {
+#ifdef GICC_MLX5_PTX
+    asm volatile("st.global.b32 [%0], %1;" :: "l"(p), "r"(v) : "memory");
+#else
+    (void)p; (void)v; trap();
+#endif
+}
+
 // Doorbell register: an MMIO store, never merged or cached.
 GICC_MLX5_FN void st_mmio_u64(uint64_t* p, uint64_t v) {
 #ifdef GICC_MLX5_PTX
@@ -133,6 +141,16 @@ GICC_MLX5_FN uint64_t ld_relaxed_u64(const uint64_t* p) {
     return r;
 #else
     (void)p; trap(); return 0;
+#endif
+}
+
+// Two adjacent counters in one 16-byte load (p 16-byte aligned).
+GICC_MLX5_FN void ld_relaxed_u64x2(const uint64_t* p, uint64_t* a, uint64_t* b) {
+#ifdef GICC_MLX5_PTX
+    asm volatile("ld.relaxed.gpu.global.v2.b64 {%0, %1}, [%2];"
+                 : "=l"(*a), "=l"(*b) : "l"(p) : "memory");
+#else
+    (void)p; *a = *b = 0; trap();
 #endif
 }
 
@@ -221,36 +239,75 @@ GICC_MLX5_FN void wait_completed(const QpView* qp, uint64_t target) {
 }
 
 // Reserve `n` consecutive slots and wait until the ring has room for them.
+// n <= nwqes / 2 is what makes the wait finite with WQEs published but not
+// yet rung: publish() rings once half the ring is waiting (see there).
 GICC_MLX5_FN uint64_t reserve(QpView* qp, uint32_t n) {
+    if (n > qp->nwqes / 2) {
+        printf("[gicc] %u WQEs in one transfer exceed half of the %u-slot send "
+               "queue\n", n, qp->nwqes);
+        trap();
+    }
     const uint64_t first = atomic_add_u64(qp->resv, n);
     const uint64_t end   = first + n;
     if (end > qp->nwqes) wait_completed(qp, end - qp->nwqes);
     return first;
 }
 
-// Ring the doorbell for slots [first, first+n). Posters ring in slot order:
-// each waits for the previous one to publish `ready`, so the doorbell record
-// only ever moves forward.
-GICC_MLX5_FN void ring(QpView* qp, uint64_t first, uint32_t n) {
+// Publish slots [first, first+n) once every earlier slot is published, and
+// ring the doorbell if asked to -- or if half the ring would otherwise be
+// waiting for one. A doorbell covers every slot published before it, and the
+// last of them is the one that asks for a completion. Only a poster inside
+// this ordered step touches *rung or the doorbell record, so both only ever
+// move forward.
+//
+// Why the half-ring rule: a poster that reserved past the end of the ring
+// waits for completions, and unrung WQEs never complete. With at most
+// nwqes/2 slots waiting and n <= nwqes/2, the slots it waits for are always
+// rung by the time every poster before it has published.
+//
+// A poster that does not ring still has its WQEs seen by the NIC before the
+// doorbell that carries them: they precede its release of *ready, which the
+// ringing poster observes before its system fence.
+GICC_MLX5_FN void publish(QpView* qp, uint64_t first, uint32_t n, bool doorbell) {
     // A relaxed spin is enough: the system fence below orders everything
     // after it behind the previous poster's doorbell, as an acquire would.
-    while (ld_relaxed_u64(qp->ready) != first) backoff();
-    const uint32_t end = (uint32_t)(first + n) & 0xffff;
-    fence_sys();                               // WQEs before the doorbell record
-    st_sys_u32(qp->dbrec, be32(end));
-    fence_sys();                               // record before the doorbell
-    const uint64_t db = ((uint64_t)be32(qp->qpn << 8) << 32) | be32(end << 8);
-    st_mmio_u64(qp->uar, db);
-    st_release_u64(qp->ready, first + n);
+    // ready and rung sit side by side, so one load returns both.
+    uint64_t ready, rung;
+    for (;;) {
+        ld_relaxed_u64x2(qp->ready, &ready, &rung);
+        if (ready == first) break;
+        backoff();
+    }
+    const uint64_t end = first + n;
+    if (doorbell || end - rung >= qp->nwqes / 2) {
+        st_u32(wqe_at(qp, end - 1) + 2, kCtrlCqUpdate << 24);
+        const uint32_t idx = (uint32_t)end & 0xffff;
+        fence_sys();                           // WQEs before the doorbell record
+        st_sys_u32(qp->dbrec, be32(idx));
+        fence_sys();                           // record before the doorbell
+        const uint64_t db = ((uint64_t)be32(qp->qpn << 8) << 32) | be32(idx << 8);
+        st_mmio_u64(qp->uar, db);
+        *qp->rung = end;
+    }
+    st_release_u64(qp->ready, end);
 }
 
-// ctrl | raddr | data, 48 bytes = 3 data segments, completion requested.
+// A NOP: rings a doorbell for whatever is waiting, carrying no data.
+GICC_MLX5_FN void write_nop(const QpView* qp, uint64_t slot) {
+    uint32_t* w = wqe_at(qp, slot);
+    st_v4(w + 0, be32((uint32_t)(slot & 0xffff) << 8), be32((qp->qpn << 8) | 1), 0, 0);
+}
+
+// WQE writers leave the completion flag clear; publish() sets it on the last
+// WQE behind a doorbell.
+
+// ctrl | raddr | data, 48 bytes = 3 data segments.
 GICC_MLX5_FN void write_rdma(const QpView* qp, uint64_t slot, uint32_t opcode,
                             uint64_t laddr, uint32_t lkey,
                             uint64_t raddr, uint32_t rkey, uint32_t bytes) {
     uint32_t* w = wqe_at(qp, slot);
     st_v4(w + 0, be32(((uint32_t)(slot & 0xffff) << 8) | opcode),
-                 be32((qp->qpn << 8) | 3), kCtrlCqUpdate << 24, 0);
+                 be32((qp->qpn << 8) | 3), 0, 0);
     st_v4(w + 4, be32((uint32_t)(raddr >> 32)), be32((uint32_t)raddr), be32(rkey), 0);
     st_v4(w + 8, be32(bytes), be32(lkey),
                  be32((uint32_t)(laddr >> 32)), be32((uint32_t)laddr));
@@ -263,7 +320,7 @@ GICC_MLX5_FN void write_inline_u64(const QpView* qp, uint64_t slot,
                                   uint64_t raddr, uint32_t rkey, uint64_t value) {
     uint32_t* w = wqe_at(qp, slot);
     st_v4(w + 0, be32(((uint32_t)(slot & 0xffff) << 8) | kOpRdmaWrite),
-                 be32((qp->qpn << 8) | 3), kCtrlCqUpdate << 24, 0);
+                 be32((qp->qpn << 8) | 3), 0, 0);
     st_v4(w + 4, be32((uint32_t)(raddr >> 32)), be32((uint32_t)raddr), be32(rkey), 0);
     // The value goes out in memory order, so the peer reads it as the same
     // little-endian integer.
@@ -294,11 +351,11 @@ GICC_MLX5_FN void load_inline(const void* src, uint32_t len, uint32_t d[8]) {
 // then never reads the source, which on a GH200 saves it a trip into GPU
 // memory: ~1.2 us of a small put's latency.
 GICC_MLX5_FN void write_inline(const QpView* qp, uint64_t slot, uint64_t raddr,
-                               uint32_t rkey, const uint32_t d[8], uint32_t len) {
+                              uint32_t rkey, const uint32_t d[8], uint32_t len) {
     const uint32_t ds = (32 + 4 + len + 15) / 16;      // 3 or 4
     uint32_t* w = wqe_at(qp, slot);
     st_v4(w + 0, be32(((uint32_t)(slot & 0xffff) << 8) | kOpRdmaWrite),
-                 be32((qp->qpn << 8) | ds), kCtrlCqUpdate << 24, 0);
+                 be32((qp->qpn << 8) | ds), 0, 0);
     st_v4(w + 4, be32((uint32_t)(raddr >> 32)), be32((uint32_t)raddr), be32(rkey), 0);
     st_v4(w + 8, d[0], d[1], d[2], d[3]);
     if (ds == 4) st_v4(w + 12, d[4], d[5], d[6], d[7]);
@@ -328,9 +385,11 @@ GICC_MLX5_FN QpView* qp_of(const DeviceCtx* c, int peer, int lane) {
     return &c->qps[peer * c->nlanes + l];
 }
 
-// Local (src_buf, src_off) -> peer's (dst_buf, dst_off).
-GICC_MLX5_FN void put(const DeviceCtx* c, int peer, int dst_buf, size_t dst_off,
-                     int src_buf, size_t src_off, size_t bytes, int lane = 0) {
+// Post an RDMA WRITE local (src_buf, src_off) -> peer's (dst_buf, dst_off);
+// ring now, or leave it for the next doorbell.
+GICC_MLX5_FN void post_put(const DeviceCtx* c, int peer, int dst_buf, size_t dst_off,
+                          int src_buf, size_t src_off, size_t bytes, int lane,
+                          bool doorbell) {
     if (bytes == 0) return;
     QpView* qp = qp_of(c, peer, lane);
     const int r = peer * c->nbufs + dst_buf;
@@ -340,7 +399,7 @@ GICC_MLX5_FN void put(const DeviceCtx* c, int peer, int dst_buf, size_t dst_off,
         const uint64_t first = reserve(qp, 1);
         write_inline(qp, first, c->rbuf_addr[r] + dst_off, c->rbuf_rkey[r], d,
                      (uint32_t)bytes);
-        ring(qp, first, 1);
+        publish(qp, first, 1, doorbell);
         return;
     }
     const uint32_t n = chunks(bytes);
@@ -348,7 +407,21 @@ GICC_MLX5_FN void put(const DeviceCtx* c, int peer, int dst_buf, size_t dst_off,
     write_transfer(qp, first, kOpRdmaWrite,
                    c->lbuf_addr[src_buf] + src_off, c->lbuf_lkey[src_buf],
                    c->rbuf_addr[r] + dst_off, c->rbuf_rkey[r], bytes);
-    ring(qp, first, n);
+    publish(qp, first, n, doorbell);
+}
+
+// Local (src_buf, src_off) -> peer's (dst_buf, dst_off), started now.
+GICC_MLX5_FN void put(const DeviceCtx* c, int peer, int dst_buf, size_t dst_off,
+                     int src_buf, size_t src_off, size_t bytes, int lane = 0) {
+    post_put(c, peer, dst_buf, dst_off, src_buf, src_off, bytes, lane, true);
+}
+
+// The same transfer, started by the next doorbell on its lane: a later put,
+// flush() or quiet(). Consecutive put_nbi calls share one doorbell and one
+// completion, which is what a burst of small puts needs.
+GICC_MLX5_FN void put_nbi(const DeviceCtx* c, int peer, int dst_buf, size_t dst_off,
+                         int src_buf, size_t src_off, size_t bytes, int lane = 0) {
+    post_put(c, peer, dst_buf, dst_off, src_buf, src_off, bytes, lane, false);
 }
 
 // Peer's (src_buf, src_off) -> local (dst_buf, dst_off).
@@ -362,7 +435,7 @@ GICC_MLX5_FN void get(const DeviceCtx* c, int peer, int src_buf, size_t src_off,
     write_transfer(qp, first, kOpRdmaRead,
                    c->lbuf_addr[dst_buf] + dst_off, c->lbuf_lkey[dst_buf],
                    c->rbuf_addr[r] + src_off, c->rbuf_rkey[r], bytes);
-    ring(qp, first, n);
+    publish(qp, first, n, true);
 }
 
 // Payload, then `value` into the peer's signal slot at byte offset sig_off,
@@ -389,15 +462,32 @@ GICC_MLX5_FN void put_signal(const DeviceCtx* c, int peer, int dst_buf, size_t d
     }
     write_inline_u64(qp, first + n - 1, c->rbuf_addr[s] + sig_off,
                      c->rbuf_rkey[s], value);
-    ring(qp, first, n);
+    publish(qp, first, n, true);
 }
 
-// Wait for everything rung on `lane` (to every peer) to complete. Local
-// buffers are then reusable and data fetched by get() is visible.
+// Ring the doorbell for anything published but not yet rung on this QP, and
+// return the slot count to wait for.
+GICC_MLX5_FN uint64_t flush_qp(QpView* qp) {
+    const uint64_t ready = ld_acquire_u64(qp->ready);
+    if (ld_relaxed_u64(qp->rung) >= ready) return ready;
+    const uint64_t first = reserve(qp, 1);
+    write_nop(qp, first);
+    publish(qp, first, 1, true);
+    return first + 1;
+}
+
+// Start everything posted with put_nbi on `lane`, to every peer.
+GICC_MLX5_FN void flush(const DeviceCtx* c, int lane = 0) {
+    for (int peer = 0; peer < c->nranks; ++peer) flush_qp(qp_of(c, peer, lane));
+}
+
+// Wait for everything posted on `lane` (to every peer) to complete, starting
+// what put_nbi left waiting. Local buffers are then reusable and data
+// fetched by get() is visible.
 GICC_MLX5_FN void quiet(const DeviceCtx* c, int lane = 0) {
     for (int peer = 0; peer < c->nranks; ++peer) {
-        const QpView* qp = qp_of(c, peer, lane);
-        const uint64_t target = ld_acquire_u64(qp->ready);
+        QpView* qp = qp_of(c, peer, lane);
+        const uint64_t target = flush_qp(qp);
         if (target) wait_completed(qp, target);
     }
     fence_sys();
@@ -434,7 +524,8 @@ GICC_MLX5_FN void signal_wait(const DeviceCtx* c, int sig, uint64_t ge) {
 //==============================================================================
 // Kernel-facing API: the same buffer-index form as the libfabric backend's
 // gicc::put / get / quiet (ofi_device.cuh), taking the context returned by
-// Runtime::prepare(). There is nothing to trigger, so flush() is empty.
+// Runtime::prepare(). There is nothing to trigger; flush() starts puts posted
+// with put_nbi.
 //==============================================================================
 namespace gicc {
 
@@ -464,8 +555,17 @@ void put_signal(DeviceCtx* ctx, int target_rank, int dst_buf, size_t dst_offset,
 __device__ __forceinline__
 void quiet(DeviceCtx* ctx, int lane = 0) { mlx5::dev::quiet(ctx, lane); }
 
+// Burst form of put: started by the next put, flush() or quiet() on `lane`.
 __device__ __forceinline__
-void flush(DeviceCtx*) {}
+void put_nbi(DeviceCtx* ctx, int target_rank, int dst_buf, size_t dst_offset,
+             int src_buf, size_t src_offset, size_t size, int lane = 0) {
+    mlx5::dev::put_nbi(ctx, target_rank, dst_buf, dst_offset, src_buf, src_offset,
+                       size, lane);
+}
+
+// Start what put_nbi left waiting on `lane`.
+__device__ __forceinline__
+void flush(DeviceCtx* ctx, int lane = 0) { mlx5::dev::flush(ctx, lane); }
 
 __device__ __forceinline__
 uint64_t signal_read(DeviceCtx* ctx, int sig) {
