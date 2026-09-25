@@ -18,14 +18,22 @@
  * operands and ignores it.
  */
 #pragma once
-#include "gicc/platform/ofi/gicc_omp_device.hpp"   // gicc::omp::put + DeviceCtx
 #include <cstddef>
+#if defined(GICC_PLATFORM_MLX5)
+// InfiniBand: the GPU posts the put itself, so `put` is the transfer and
+// `flush` has nothing to release. No pass is involved.
+#include "gicc/platform/mlx5/gicc_omp_device.hpp"  // gicc::omp::put + GdaCtx
+namespace gicc { namespace omp_dwq { using Ctx = gicc::mlx5::GdaCtx; } }
+#else
+#include "gicc/platform/ofi/gicc_omp_device.hpp"   // gicc::omp::put + DeviceCtx
+namespace gicc { namespace omp_dwq { using Ctx = gicc::DeviceCtx; } }
+#endif
 
 #pragma omp declare target
 namespace gicc { namespace omp_dwq {
 
 __attribute__((noinline, used))
-inline void put(gicc::DeviceCtx* ctx, int target_rank,
+inline void put(Ctx* ctx, int target_rank,
                 int dst_buf, size_t dst_offset,
                 int src_buf, size_t src_offset, size_t size,
                 int lane = 0) {
@@ -34,7 +42,7 @@ inline void put(gicc::DeviceCtx* ctx, int target_rank,
 }
 
 __attribute__((noinline, used))
-inline void flush(gicc::DeviceCtx* ctx) {
+inline void flush(Ctx* ctx) {
     // Proxy path: each put publishes its descriptor individually, so the
     // release point has nothing to do. The asm keeps the marker call alive
     // for the pass build, where it is replaced by the trigger sequence.
