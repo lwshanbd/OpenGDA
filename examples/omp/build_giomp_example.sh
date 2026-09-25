@@ -5,6 +5,8 @@
 # GIOMP_BACKEND selects the GPU stack, matching omp/build_libgicc_omp.sh:
 #   hip  (default) - ROCm 6.4.0 clang, gfx90a (Tioga)
 #   cuda           - clang with NVPTX offload, sm_90 (GH200 + Slingshot)
+#   ib             - clang with NVPTX offload, sm_90, InfiniBand verbs (MAPLE);
+#                    GIOMP_MPI_ROOT names an MPI with include/ and lib/libmpi.so
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
@@ -58,15 +60,41 @@ cuda)
     GPU_LIBS=( "-L${CUDA}/lib64" -lcudart )
     RPATH_EXTRA="${CUDA}/lib64"
     ;;
+ib)
+    CUDA="${GIOMP_CUDA_ROOT:-${CUDA_HOME:-/usr/local/cuda}}"
+    CLANG="${GIOMP_CXX:?set GIOMP_CXX to a clang++ with NVPTX offload}"
+    ARCH="${GIOMP_OFFLOAD_ARCH:-sm_90}"
+    OMPLIB="${GIOMP_OMP_LIBDIR:?set GIOMP_OMP_LIBDIR to the clang lib dir}"
+    OFFLOAD=( --offload-arch="${ARCH}" --cuda-path="${CUDA}"
+              -Wno-unknown-cuda-version -include string )
+    GPU_DEFS=( -DGICC_GPU_CUDA=1 )
+    GPU_INCS=( -I"${CUDA}/include" )
+    GPU_LIBS=( "-L${CUDA}/lib64" -lcudart -libverbs -lmlx5 )
+    RPATH_EXTRA="${CUDA}/lib64"
+    ;;
 *)
-    echo "error: GIOMP_BACKEND must be 'hip' or 'cuda' (got '${BACKEND}')" >&2
+    echo "error: GIOMP_BACKEND must be 'hip', 'cuda' or 'ib' (got '${BACKEND}')" >&2
     exit 2
     ;;
 esac
 
+# Network: libfabric (Cray MPICH, CPU proxy) or InfiniBand verbs.
+if [[ "${BACKEND}" == "ib" ]]; then
+    PLATFORM_DEFS=( -DGICC_BOOTSTRAP_MPI=1 -DGICC_PLATFORM_MLX5 )
+    NET_LIBS=()
+    MPI_LIB="${GIOMP_MPI_LIB:-${MPI}/lib/libmpi.so}"
+    MPI_GTL_LIB=()
+    MPI_GTL_DIR=""
+else
+    PLATFORM_DEFS=( -DGICC_BOOTSTRAP_MPI=1 -DGICC_PLATFORM_OFI -DGICC_CPU_PROXY=1 )
+    NET_LIBS=( "${LIBFAB}/lib64/libfabric.so" /usr/lib64/libhwloc.so )
+    MPI_GTL_LIB=( "${MPI_GTL}" )
+    MPI_GTL_DIR="$(dirname "${MPI_GTL}"):"
+fi
+
 # Cray MPICH names its library after the compiler that built it
 # (libmpi_cray.so, libmpi_gnu_123.so, ...), so probe rather than hard-code.
-MPI_LIB="${GIOMP_MPI_LIB:-}"
+MPI_LIB="${MPI_LIB:-${GIOMP_MPI_LIB:-}}"
 if [[ -z "${MPI_LIB}" ]]; then
     for cand in "${MPI}/lib/libmpi_cray.so" "${MPI}"/lib/libmpi_gnu_*.so \
                 "${MPI}/lib/libmpich.so"; do
@@ -86,15 +114,15 @@ mkdir -p "$(dirname "${OUTPUT}")"
 set -x
 "${CLANG}" -fopenmp "${OFFLOAD[@]}" \
     -O3 -std=gnu++17 \
-    -DGICC_BOOTSTRAP_MPI=1 -DGICC_PLATFORM_OFI -DGICC_CPU_PROXY=1 \
+    "${PLATFORM_DEFS[@]}" \
     "${GPU_DEFS[@]}" "${EXTRA_FLAGS[@]}" \
     -I"${GICC_ROOT}" -I"${GICC_ROOT}/src" "${GPU_INCS[@]}" \
     -isystem "${MPI}/include" \
     "${SOURCE}" -L"${LIBDIR}" -lgicc_omp \
-    "${LIBFAB}/lib64/libfabric.so" /usr/lib64/libhwloc.so -lpthread \
-    "${GPU_LIBS[@]}" "${MPI_LIB}" "${MPI_GTL}" \
+    "${NET_LIBS[@]}" -lpthread \
+    "${GPU_LIBS[@]}" "${MPI_LIB}" "${MPI_GTL_LIB[@]}" \
     "${OMPLIB}/libomptarget.so" -Wl,--allow-shlib-undefined \
-    -Wl,-rpath,"${LIBDIR}:${LIBFAB}/lib64:${MPI}/lib:$(dirname "${MPI_GTL}"):${OMPLIB}:${RPATH_EXTRA}:${CRAYPE}" \
+    -Wl,-rpath,"${LIBDIR}:${LIBFAB}/lib64:${MPI}/lib:${MPI_GTL_DIR}${OMPLIB}:${RPATH_EXTRA}:${CRAYPE}" \
     -o "${OUTPUT}"
 set +x
 echo "BUILT (${BACKEND}): ${OUTPUT}"
