@@ -19,6 +19,7 @@
 
 #if defined(GICC_PLATFORM_MLX5)
 #include "platform/mlx5/mlx5_device.cuh"
+#include "platform/mlx5/gda_device.hpp"      // GPU-driven API on GdaCtx
 #elif defined(GICC_PLATFORM_OFI)
 #include "platform/ofi/ofi_device.cuh"
 #else
