@@ -4,6 +4,8 @@
 // Every rank sends to its right neighbour and receives from its left one.
 //   put         K blocks each fill a chunk and put it; quiet; the receiver
 //               checks after a barrier.
+//   put_nbi     the same, each chunk sent as 64 put_nbi pieces that share
+//               doorbells; quiet starts and completes them.
 //   put_signal  K sender blocks put a chunk with signal slot k; K receiver
 //               blocks wait for their slot and check their chunk on the
 //               spot, so a signal that overtook its payload shows up.
@@ -62,6 +64,24 @@ __global__ void put_kernel(DeviceCtx* ctx, int peer, int dbuf, int sbuf,
         __threadfence_system();
         const size_t off = (size_t)k * words * 4;
         gicc::put(ctx, peer, dbuf, off, sbuf, off, words * 4, k);
+        gicc::quiet(ctx, k);
+    }
+}
+
+__global__ void put_nbi_kernel(DeviceCtx* ctx, int peer, int dbuf, int sbuf,
+                               uint32_t* src, size_t words, int it, int rank) {
+    const int k = blockIdx.x;
+    for (size_t i = threadIdx.x; i < words; i += blockDim.x)
+        src[k * words + i] = pattern(it, rank, k, i);
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        __threadfence_system();
+        const size_t bytes = words * 4, base = (size_t)k * bytes;
+        const size_t piece = (bytes + 63) / 64;
+        for (size_t off = 0; off < bytes; off += piece) {
+            const size_t len = bytes - off < piece ? bytes - off : piece;
+            gicc::put_nbi(ctx, peer, dbuf, base + off, sbuf, base + off, len, k);
+        }
         gicc::quiet(ctx, k);
     }
 }
@@ -187,6 +207,23 @@ int main(int argc, char** argv) {
             rt.barrier();
         }
         std::printf("%-6d %-10s %10zu %12llu %10.1f\n", rank, "put", bytes, *bad,
+                    (MPI_Wtime() - t0) * 1e6 / iters);
+        total += *bad;
+
+        // --- device put_nbi ---------------------------------------------------
+        *bad = 0;
+        CK(cudaMemset(dst, 0, bytes * K));
+        rt.barrier();
+        t0 = MPI_Wtime();
+        for (int r = 0; r < iters; ++r, ++it) {
+            put_nbi_kernel<<<K, 256>>>(ctx, right, bdst.index, bsrc.index, src, words, it, rank);
+            CK(cudaDeviceSynchronize());
+            rt.barrier();
+            check<<<dim3(4, K), 256>>>(dst, words, it, left, bad);
+            CK(cudaDeviceSynchronize());
+            rt.barrier();
+        }
+        std::printf("%-6d %-10s %10zu %12llu %10.1f\n", rank, "put_nbi", bytes, *bad,
                     (MPI_Wtime() - t0) * 1e6 / iters);
         total += *bad;
 
