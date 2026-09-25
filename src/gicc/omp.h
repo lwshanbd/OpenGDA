@@ -27,14 +27,28 @@
 
 #include <stddef.h>
 
+// Backend: GICC_PLATFORM_MLX5 selects InfiniBand, where a GPU thread posts
+// its own work requests; anything else is libfabric (CPU proxy / DWQ).
 #if defined(__cplusplus) && !defined(__HIPCC__) && !defined(__CUDACC__)
+#if defined(GICC_PLATFORM_MLX5)
+#include "gicc/platform/mlx5/gicc_omp_device.hpp"  // gicc::omp::put/get/quiet
+#else
 #include "gicc/platform/ofi/gicc_omp_device.hpp"   // gicc::omp::put/get/quiet
+#endif
 #elif defined(__cplusplus)
+#if defined(GICC_PLATFORM_MLX5)
+#include "gicc/platform/mlx5/gda_types.hpp"        // gicc::mlx5::GdaCtx only
+#else
 #include "gicc/platform/ofi/device_ctx.hpp"        // gicc::DeviceCtx only
+#endif
 #endif
 
 #ifdef __cplusplus
+#if defined(GICC_PLATFORM_MLX5)
+typedef gicc::mlx5::GdaCtx ompx_ctx;
+#else
 typedef gicc::DeviceCtx ompx_ctx;
+#endif
 extern "C" {
 #else
 // Layout-compatible prefix of gicc::DeviceCtx, so a C target region can fire
