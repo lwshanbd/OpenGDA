@@ -12,6 +12,11 @@
 #   cuda           - upstream clang with NVPTX offload, for GH200 + Slingshot.
 #                    The pass plugin is NOT available there, so this covers the
 #                    IPC / CPU-proxy transports only.
+#   ib             - upstream clang with NVPTX offload, for NVIDIA + InfiniBand
+#                    (verbs, no libfabric). GPU threads post their own work
+#                    requests, so neither the proxy nor the pass is involved.
+#                    Needs GIOMP_CXX; GIOMP_MPI_ROOT names an MPI with
+#                    include/mpi.h and lib/libmpi.so.
 #
 # The TUs are compiled as GPU source (-x hip / -x cuda) rather than plain C++
 # because ofi_runtime.hpp transitively pulls fabric.hpp, which defines a
@@ -50,18 +55,35 @@ cuda)
     GPU_INCS=( -I"${CUDA}/include" )
     LINK_EXTRA=( --cuda-path="${CUDA}" )
     ;;
+ib)
+    CUDA="${GIOMP_CUDA_ROOT:-${CUDA_HOME:-/usr/local/cuda}}"
+    CXX="${GIOMP_CXX:?set GIOMP_CXX to a clang++ with NVPTX offload}"
+    ARCH="${GIOMP_OFFLOAD_ARCH:-sm_90}"
+    GPU_LANG=( -x cuda --offload-arch="${ARCH}" --cuda-path="${CUDA}"
+               -Wno-unknown-cuda-version )
+    GPU_DEFS=( -DGICC_GPU_CUDA=1 )
+    GPU_INCS=( -I"${CUDA}/include" )
+    LINK_EXTRA=( --cuda-path="${CUDA}" -L"${CUDA}/lib64" -lcudart
+                 -libverbs -lmlx5 )
+    COMMON_DEFS=( -DGICC_BOOTSTRAP_MPI=1 -DGICC_PLATFORM_MLX5 )
+    COMMON_INCS=( -I"${GICC_ROOT}" -I"${GICC_ROOT}/src" -isystem "${MPI}/include" )
+    ;;
 *)
-    echo "error: GIOMP_BACKEND must be 'hip' or 'cuda' (got '${BACKEND}')" >&2
+    echo "error: GIOMP_BACKEND must be 'hip', 'cuda' or 'ib' (got '${BACKEND}')" >&2
     exit 2
     ;;
 esac
 
-SRCS=(
-  "${GICC_ROOT}/src/gicc/omp/ompx_host.cpp"
-  "${GICC_ROOT}/src/gicc/platform/ofi/runtime_helpers.cpp"
-  "${GICC_ROOT}/src/gicc/platform/ofi/proxy/proxy_thread.cpp"
-  "${GICC_ROOT}/src/gicc/platform/ofi/proxy/proxy_libfabric.cpp"
-)
+if [[ "${BACKEND}" == "ib" ]]; then
+  SRCS=( "${GICC_ROOT}/src/gicc/omp/ompx_host_ib.cpp" )
+else
+  SRCS=(
+    "${GICC_ROOT}/src/gicc/omp/ompx_host.cpp"
+    "${GICC_ROOT}/src/gicc/platform/ofi/runtime_helpers.cpp"
+    "${GICC_ROOT}/src/gicc/platform/ofi/proxy/proxy_thread.cpp"
+    "${GICC_ROOT}/src/gicc/platform/ofi/proxy/proxy_libfabric.cpp"
+  )
+fi
 OBJS=()
 for s in "${SRCS[@]}"; do
   o="${OBJ}/$(basename "${s%.cpp}").o"
