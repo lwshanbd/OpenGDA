@@ -19,10 +19,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <memory>
 #include <unordered_map>
 
 #include "gicc/gicc_types.hpp"
 #include "gicc/platform/mlx5/devx_qp.hpp"
+#include "gicc/platform/mlx5/gda_engine.hpp"
 #include "gicc/util/memory_region.hpp"
 #include "gicc/bootstrap/bootstrap.hpp"
 
@@ -61,7 +63,10 @@ inline void gicc_cuda_check(cudaError_t err, const char* what) {
 
 class Runtime {
 public:
-    Runtime() {
+    // `legacy_qps` builds the per-peer DevxQp set behind prepare(peer, buf)
+    // and build_context(). The GPU-driven API (enable_gda / prepare()) does
+    // not use it, so GiOMP turns it off.
+    explicit Runtime(bool legacy_qps = true) {
         // GPU setup
         int num_gpus = 0;
         gicc_cuda_check(cudaGetDeviceCount(&num_gpus), "cudaGetDeviceCount");
@@ -85,14 +90,16 @@ public:
             exit(1);
         }
 
-        // Create one DevX QP per peer
-        for (int i = 0; i < boot_.size(); i++) {
-            if (i == boot_.rank()) continue;
-            peer_qps_[i] = new gicc::mlx5::DevxQp(
-                ib_ctx_, pd_, boot_.rank(), 1, 256, 512);
-        }
+        if (legacy_qps) {
+            // Create one DevX QP per peer
+            for (int i = 0; i < boot_.size(); i++) {
+                if (i == boot_.rank()) continue;
+                peer_qps_[i] = new gicc::mlx5::DevxQp(
+                    ib_ctx_, pd_, boot_.rank(), 1, 256, 512);
+            }
 
-        connect_peers();
+            connect_peers();
+        }
 
 #ifdef GICC_CPU_PROXY
         // Decide proxy fleet width up front (workers are started lazily
@@ -130,6 +137,8 @@ public:
             proxy_rings_arr_dev_  = nullptr;
         }
 #endif
+
+        gda_.reset();
 
         for (auto* mr : local_bufs_) delete mr;
         local_bufs_.clear();
@@ -179,6 +188,7 @@ public:
                 remote_bufs_[r][b] = { entries[b].addr, entries[b].rkey };
             }
         }
+        if (gda_) publish_tables();
     }
 
     RemoteBufferInfo remote_buffer(int rank, int buf_index) const {
@@ -272,8 +282,90 @@ public:
     }
 
     void reset() {
+        if (gda_) drain();
         for (auto* d : device_ctxs_) cudaFree(d);
         device_ctxs_.clear();
+    }
+
+    //--------------------------------------------------------------------------
+    // GPU-driven transport (see gda_engine.hpp).
+    //
+    // Collective. Builds one GPU-owned QP per (peer, lane) and one host QP
+    // per peer. GICC_IB_LANES (default 1) and GICC_IB_QP_DEPTH (default
+    // 1024 WQEs, at most 16384) override the arguments when set.
+    //--------------------------------------------------------------------------
+    void enable_gda(int lanes = 1, uint32_t depth = 1024) {
+        if (gda_) return;
+        if (const char* e = std::getenv("GICC_IB_LANES")) lanes = std::atoi(e);
+        if (const char* e = std::getenv("GICC_IB_QP_DEPTH")) depth = (uint32_t)std::atoi(e);
+        gda_ = std::make_unique<gicc::mlx5::GdaEngine>(boot_, ib_ctx_, pd_, lanes, depth);
+        if (!remote_bufs_.empty()) publish_tables();
+    }
+
+    bool gda_enabled() const noexcept { return gda_ != nullptr; }
+
+    // The GPU context kernels and target regions communicate through. Same
+    // pointer for the life of the runtime; exchange() and set_* refresh the
+    // contents.
+    gicc::mlx5::GdaCtx* prepare() {
+        require_gda("prepare()");
+        return gda_->device_ctx();
+    }
+
+    void set_symmetric_heap(void* dev_base, int buf_index) {
+        require_gda("set_symmetric_heap");
+        gda_->set_heap(dev_base, buf_index);
+    }
+
+    void set_signal_table(void* dev_base, int buf_index) {
+        require_gda("set_signal_table");
+        gda_->set_signals(static_cast<uint64_t*>(dev_base), buf_index);
+    }
+
+    // Host-issued RDMA WRITE: local (src, src_offset) -> peer's
+    // (dest_buf_index, dst_offset). Non-blocking; drain() completes it.
+    void put(const Buffer& src, int dest_rank, int dest_buf_index,
+             size_t size, size_t src_offset = 0, size_t dst_offset = 0) {
+        require_gda("put");
+        const auto& mr = *local_bufs_.at(src.index);
+        const auto& rb = remote_bufs_.at(dest_rank).at(dest_buf_index);
+        gda_->host_write(dest_rank, (uint64_t)mr.buf + src_offset, mr.lkey,
+                         rb.addr + dst_offset, rb.rkey, size);
+    }
+
+    // Host-issued RDMA READ: peer's (src_buf_index, remote_offset) -> local
+    // (local_dst, local_offset).
+    void get(const Buffer& local_dst, int src_rank, int src_buf_index,
+             size_t size, size_t local_offset = 0, size_t remote_offset = 0) {
+        require_gda("get");
+        const auto& mr = *local_bufs_.at(local_dst.index);
+        const auto& rb = remote_bufs_.at(src_rank).at(src_buf_index);
+        gda_->host_read(src_rank, (uint64_t)mr.buf + local_offset, mr.lkey,
+                        rb.addr + remote_offset, rb.rkey, size);
+    }
+
+    // Write `value` into the 8 bytes at peer's (dest_buf_index, dst_offset),
+    // ordered after every host put already issued to that peer.
+    void put_u64(int dest_rank, int dest_buf_index, size_t dst_offset, uint64_t value) {
+        require_gda("put_u64");
+        const auto& rb = remote_bufs_.at(dest_rank).at(dest_buf_index);
+        gda_->host_write_u64(dest_rank, rb.addr + dst_offset, rb.rkey, value);
+    }
+
+    // Complete every transfer this rank has issued, host- or GPU-posted.
+    // GPU-posted work is only seen once the posting kernel has rung it;
+    // call after the kernel (or target region) returns.
+    void drain() {
+        require_gda("drain");
+        gda_->host_quiet();
+#if defined(__CUDACC__)
+        gda_->device_quiet();
+#endif
+    }
+
+    // Reap host completions without blocking.
+    void progress() {
+        if (gda_) gda_->host_progress();
     }
 
     void barrier() { boot_.barrier(); }
@@ -403,6 +495,8 @@ private:
     std::vector<std::vector<RemoteBufferInfo>> remote_bufs_;
     std::vector<DeviceCtx*> device_ctxs_;
 
+    std::unique_ptr<gicc::mlx5::GdaEngine> gda_;
+
     int gpu_id_ = 0;
     double clock_rate_khz_ = 0;
     cudaDeviceProp gpu_props_;
@@ -420,31 +514,33 @@ private:
 #endif
 
     void open_ib_device() {
-        int num_devices = 0;
-        struct ibv_device** dev_list = ibv_get_device_list(&num_devices);
-        if (!dev_list || num_devices == 0) {
-            fprintf(stderr, "GICC Rank %d: No IB devices found\n", boot_.rank());
-            exit(1);
-        }
+        ib_ctx_ = gicc::mlx5::gda_open_device(boot_.rank());
+    }
 
-        // Prefer mlx5_1 (IB port), fallback to first device
-        struct ibv_device* target = nullptr;
-        for (int i = 0; i < num_devices; i++) {
-            const char* name = ibv_get_device_name(dev_list[i]);
-            if (name && strcmp(name, "mlx5_1") == 0) {
-                target = dev_list[i];
-                break;
+    void require_gda(const char* what) const {
+        if (!gda_) {
+            fprintf(stderr, "GICC: %s needs Runtime::enable_gda() first\n", what);
+            gicc::abort(1, what);
+        }
+    }
+
+    // Hand the engine the address book in the flat form the GPU indexes.
+    void publish_tables() {
+        const int n = (int)local_bufs_.size();
+        const int ranks = boot_.size();
+        std::vector<uint64_t> laddr(n), raddr((size_t)ranks * n);
+        std::vector<uint32_t> lkey(n), rkey((size_t)ranks * n);
+        for (int b = 0; b < n; ++b) {
+            laddr[b] = (uint64_t)local_bufs_[b]->buf;
+            lkey[b]  = local_bufs_[b]->lkey;
+        }
+        for (int r = 0; r < ranks; ++r) {
+            for (int b = 0; b < n; ++b) {
+                raddr[(size_t)r * n + b] = remote_bufs_[r][b].addr;
+                rkey[(size_t)r * n + b]  = remote_bufs_[r][b].rkey;
             }
         }
-        if (!target) target = dev_list[0];
-
-        ib_ctx_ = ibv_open_device(target);
-        ibv_free_device_list(dev_list);
-
-        if (!ib_ctx_) {
-            fprintf(stderr, "GICC Rank %d: ibv_open_device failed\n", boot_.rank());
-            exit(1);
-        }
+        gda_->set_tables(laddr, lkey, raddr, rkey);
     }
 
     void connect_peers() {
