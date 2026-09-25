@@ -1,32 +1,22 @@
 /**
  * gicc_device.cuh - GICC Device-Side API
  *
- * Simplified API (use with GiccContext from gicc::context()):
- *   gicc::put(ctx, dst, src, size, peer);     // one-line RDMA
- *   gicc::put_no_db(ctx, dst, src, size, peer);
- *   gicc::flush(ctx, peer);
- *   gicc::quiet(ctx, peer);
+ * The kernel receives the context from gicc::launch (or Runtime::prepare())
+ * and names data by (rank, buffer index, offset):
  *
- * Legacy API (use with DeviceCtx from rt.prepare()):
- *   gicc::put(ctx, local_addr, local_lkey, remote_addr, remote_rkey, size);
- *   gicc::quiet(ctx);
+ *   gicc::put(ctx, rank, dst_buf, dst_off, src_buf, src_off, bytes, lane = 0);
+ *   gicc::get(ctx, rank, src_buf, src_off, dst_buf, dst_off, bytes, lane = 0);
+ *   gicc::quiet(ctx, lane = 0);
+ *   gicc::flush(ctx);
+ *
+ * InfiniBand adds put_signal and signal_wait (gda_device.hpp).
  */
 #pragma once
 
-//==============================================================================
-// Include platform-specific DeviceCtx and device functions
-//==============================================================================
-
 #if defined(GICC_PLATFORM_MLX5)
-#include "platform/mlx5/mlx5_device.cuh"
-#include "platform/mlx5/gda_device.hpp"      // GPU-driven API on GdaCtx
+#include "platform/mlx5/gda_device.hpp"
 #elif defined(GICC_PLATFORM_OFI)
 #include "platform/ofi/ofi_device.cuh"
 #else
 #error "No GICC platform defined. Define GICC_PLATFORM_MLX5 or GICC_PLATFORM_OFI."
-#endif
-
-// Simplified GiccContext-based API — mlx5-only (depends on CUDA)
-#if defined(GICC_PLATFORM_MLX5)
-#include "platform/mlx5/gicc_context.cuh"
 #endif

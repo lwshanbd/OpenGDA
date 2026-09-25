@@ -1,22 +1,12 @@
 /**
  * gicc.hpp - GICC (GPU-Initiated Communication and Coordination) Host API
  *
- * Simplified NVSHMEM-style API:
+ *   gicc::Runtime rt;
+ *   auto buf = rt.register_buffer(d_ptr, size, true);   // device memory
+ *   rt.exchange();                                   // collective
+ *   gicc::launch<kernel>(rt, grid, block, args...);  // kernel(ctx, args...)
  *
- *   gicc::init();
- *   void* send = gicc::malloc(size);              // collective
- *   void* recv = gicc::malloc(size);              // collective
- *   auto* ctx  = gicc::context();                 // GPU-accessible context
- *   void* peer_recv = gicc::remote_ptr(recv, 1);  // remote address on PE 1
- *   my_kernel<<<...>>>(ctx, peer_recv, send, size, 1);
- *   gicc::finalize();
- *
- * Device-side (in kernel):
- *   gicc::put(ctx, dst, src, size, peer);         // one-line RDMA
- *   gicc::flush(ctx, peer);
- *   gicc::quiet(ctx, peer);
- *
- * Legacy Runtime API is still available for advanced use.
+ * Device side: gicc/gicc_device.cuh.
  */
 #pragma once
 
@@ -35,8 +25,8 @@ namespace gicc {
 //   Buffer register_buffer(ptr, size, is_device)
 //   void exchange()                    - Collective buffer info exchange
 //   RemoteBufferInfo remote_buffer(rank, buf_index)
-//   DeviceCtx* prepare(peer_rank, remote_buf_index)
-//   void reset()                       - Free GPU DeviceCtxs
+//   DeviceCtx* prepare()               - Context for kernels / target regions
+//   void reset()                       - Complete outstanding transfers
 //   void barrier()                     - Global barrier (via Bootstrap)
 //   int rank(), size(), gpu_id()
 //   Bootstrap& boot()                  - Access the Bootstrap for collectives
@@ -56,14 +46,6 @@ namespace gicc {
 #include "platform/ofi/ofi_runtime.hpp"
 #else
 #error "No GICC platform defined. Define GICC_PLATFORM_MLX5 or GICC_PLATFORM_OFI."
-#endif
-
-//==============================================================================
-// Simplified NVSHMEM-style API — currently mlx5-only (depends on CUDA)
-//==============================================================================
-
-#if defined(GICC_PLATFORM_MLX5)
-#include "platform/mlx5/gicc_api.hpp"
 #endif
 
 //==============================================================================

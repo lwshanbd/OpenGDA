@@ -18,42 +18,18 @@ endif()
 find_package(MPI REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 
-# Common CUDA flags for examples
-set(EXAMPLE_CUDA_FLAGS
-    -lineinfo
-    -Xcompiler -Wall
-    --expt-relaxed-constexpr
-)
-
-# ===========================================================================
-# Helper function for adding examples
-# ===========================================================================
-
-function(add_gicc_example target_name source_file)
-    add_executable(${target_name} ${source_file})
-    target_link_libraries(${target_name} PRIVATE gicc)
-    target_compile_options(${target_name} PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:${EXAMPLE_CUDA_FLAGS}>)
-    set_target_properties(${target_name} PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        CUDA_RESOLVE_DEVICE_SYMBOLS ON)
-endfunction()
-
 # ===========================================================================
 # Examples
 # ===========================================================================
 
-add_gicc_example(gicc_pingpong_bench pingpong_bench.cu)
-add_gicc_example(gicc_mm             mm.cu)
-add_gicc_example(gicc_jacobi         jacobi.cu)
-
-# ===========================================================================
-# Summary
-# ===========================================================================
+# gda_test: GPU-initiated put / put_nbi / put_signal / get from CUDA kernels
+# and host put / get, checked word for word, plus a device ping-pong.
+add_executable(gicc_gda_test gda_test.cu)
+target_link_libraries(gicc_gda_test PRIVATE gicc MPI::MPI_CXX)
+target_compile_options(gicc_gda_test PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo --expt-relaxed-constexpr>)
 
 message(STATUS "")
 message(STATUS "=== GICC Examples ===")
-message(STATUS "  gicc_pingpong_bench - Ping-pong latency/bandwidth")
-message(STATUS "  gicc_mm             - Distributed matrix multiplication")
-message(STATUS "  gicc_jacobi         - Jacobi solver with fused RDMA")
+message(STATUS "  gicc_gda_test - GPU-initiated InfiniBand transfers, checked word for word")
 message(STATUS "")

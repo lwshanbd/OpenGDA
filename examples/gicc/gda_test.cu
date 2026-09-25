@@ -12,6 +12,7 @@
 //   pingpong    device put_signal round trip between ranks 0 and 1.
 //
 // Run: srun -p maple -N2 -n2 --gres=gpu:1 --mpi=pmix ./gicc_gda_test
+//      (GICC_IB_LANES=N gives each chunk's block its own QP when N >= chunks)
 
 #include "gicc/gicc.hpp"
 #include "gicc/gicc_device.cuh"
@@ -141,8 +142,7 @@ int main(int argc, char** argv) {
         if (!std::strncmp(argv[i], "--chunks=", 9)) K = std::atoi(argv[i] + 9);
     }
 
-    gicc::Runtime rt(/*legacy_qps=*/false);
-    rt.enable_gda(/*lanes=*/4);
+    gicc::Runtime rt;
     const int rank = rt.rank(), n = rt.size();
     const int right = (rank + 1) % n, left = (rank + n - 1) % n;
 
@@ -163,7 +163,8 @@ int main(int argc, char** argv) {
     GdaCtx* ctx = rt.prepare();
 
     if (rank == 0)
-        std::printf("%d ranks, %d chunks, %d iters, lanes %d\n", n, K, iters, 4);
+        std::printf("%d ranks, %d chunks, %d iters, lanes %s\n", n, K, iters,
+                    std::getenv("GICC_IB_LANES") ? std::getenv("GICC_IB_LANES") : "1");
     std::printf("%-6s %-10s %10s %12s %10s\n", "rank", "test", "chunk", "bad", "us/iter");
 
     unsigned long long total = 0;

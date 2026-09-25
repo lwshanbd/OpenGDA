@@ -178,8 +178,7 @@ extern "C" {
 void ompx_init() {
     if (g_runtime != nullptr) return;
     initialize_mpi_if_needed();
-    g_runtime = new gicc::Runtime(/*legacy_qps=*/false);
-    g_runtime->enable_gda();
+    g_runtime = new gicc::Runtime();
     require_cuda(cudaStreamCreateWithFlags(&g_stream, cudaStreamNonBlocking),
                  "create signal stream");
     // Keep libomptarget on the device the runtime selected.

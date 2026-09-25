@@ -52,6 +52,5 @@ make -j$(nproc)
 echo ""
 echo "=== Build Complete ==="
 echo ""
-echo "Library: $BUILD_DIR/src/libgicc.so"
-echo "Examples:"
-echo "  srun -p maple --account=app -N 2 --ntasks-per-node=1 --gres=gpu:1 --mpi=pmix $BUILD_DIR/examples/gicc/gicc_pingpong_bench"
+echo "Test:"
+echo "  srun -p maple --account=app -N 2 --ntasks-per-node=1 --gres=gpu:1 --mpi=pmix $BUILD_DIR/examples/gicc/gicc_gda_test"

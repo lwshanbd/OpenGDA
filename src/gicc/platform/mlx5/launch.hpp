@@ -1,25 +1,16 @@
 /**
- * launch.hpp - gicc::launch wrapper for MLX5 backend.
+ * launch.hpp - gicc::launch wrapper for the InfiniBand backend.
  *
- * Owns the build_context() + kernel-launch sequence. The user calls
  *   gicc::launch<kernel>(rt, grid, block, args...)
- * instead of writing rt.build_context() + kernel<<<>>>(gctx, args...) by
- * hand. The kernel receives a GiccContext* and uses the common-form
- * device API (gicc::put_no_db(ctx, rank, dst_buf, dst_off, ...)),
- * matching the cross-backend semantics documented in
- * src/gicc/platform/ofi/ofi_device.cuh.
  *
- * The kernel is passed as a NON-TYPE TEMPLATE PARAMETER (constant
- * expression) so the OFI backend can key its kernel_trace<>
- * specialization on it. We mirror that signature for source-level
- * portability across both backends.
+ * launches kernel<<<grid, block>>>(rt.prepare(), args...). The kernel takes
+ * the context (gicc::mlx5::GdaCtx*) first and communicates with the device API of
+ * gicc/gicc_device.cuh (gicc::put / get / put_signal / quiet), whose calls
+ * post work requests directly from GPU threads.
  *
- * NOTE: the underlying GiccContext is heap-allocated by build_context()
- * and held by the launch site. Repeatedly calling launch() will leak
- * GiccContexts; the production refresh of this wrapper should cache
- * the per-Runtime GiccContext (one allocation per Runtime, reused on
- * every launch). That refactor is intentionally not part of this
- * cross-backend parity patch.
+ * The kernel is a NON-TYPE TEMPLATE PARAMETER, as on the libfabric backend,
+ * where the LTO pass keys its kernel trace on it; the signature is shared so
+ * the same source builds on both.
  */
 #pragma once
 
@@ -32,23 +23,17 @@ namespace gicc {
 
 template <auto Kernel, typename... Args>
 GICC_LAUNCH_SITE
-inline void launch(Runtime& rt,
-                   dim3 grid, dim3 block,
-                   Args... args)
+inline void launch(Runtime& rt, dim3 grid, dim3 block, Args... args)
 {
-    GiccContext* gctx = rt.build_context();
-    Kernel<<<grid, block>>>(gctx, args...);
+    Kernel<<<grid, block>>>(rt.prepare(), args...);
 }
 
 template <auto Kernel, typename... Args>
 GICC_LAUNCH_SITE
-inline void launch(Runtime& rt,
-                   dim3 grid, dim3 block,
-                   size_t shmem_bytes, cudaStream_t stream,
-                   Args... args)
+inline void launch(Runtime& rt, dim3 grid, dim3 block,
+                   size_t shmem_bytes, cudaStream_t stream, Args... args)
 {
-    GiccContext* gctx = rt.build_context();
-    Kernel<<<grid, block, shmem_bytes, stream>>>(gctx, args...);
+    Kernel<<<grid, block, shmem_bytes, stream>>>(rt.prepare(), args...);
 }
 
 } // namespace gicc

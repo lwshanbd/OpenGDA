@@ -31,38 +31,24 @@ if(NOT MLX5_LIBRARY)
 endif()
 
 # ===========================================================================
-# GICC Shared Library
+# GICC (InfiniBand backend): header-only. Kernels and OpenMP target regions
+# post their own work requests, so there is no library code to build; the
+# target carries the include path, the platform definition and the verbs /
+# CUDA runtime dependencies.
 # ===========================================================================
 
-add_library(gicc SHARED
-    gicc_lib.cu
-)
+add_library(gicc INTERFACE)
 
-# CPU proxy worker (MLX5/verbs flavour). Pure host C++ — added to the same
-# libgicc.so so kernels that pull in proxy_device.cuh link cleanly. Mirrors
-# the OFI proxy/ source set; activated by the top-level GICC_ENABLE_CPU_PROXY
-# option (which also defines GICC_CPU_PROXY=1 globally).
-if(GICC_ENABLE_CPU_PROXY)
-    target_sources(gicc PRIVATE
-        gicc/platform/mlx5/proxy/proxy_qp_fleet.cpp
-        gicc/platform/mlx5/proxy/proxy_verbs.cpp
-        gicc/platform/mlx5/proxy/proxy_thread.cpp
-    )
-endif()
-
-# Include directories: src/ is the root so includes work as <gicc/...>
 target_include_directories(gicc
-    PUBLIC
+    INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<INSTALL_INTERFACE:include>
-    PRIVATE
-        ${CUDAToolkit_INCLUDE_DIRS}
 )
 
-target_compile_definitions(gicc PUBLIC GICC_PLATFORM_MLX5)
+target_compile_definitions(gicc INTERFACE GICC_PLATFORM_MLX5)
 
 target_link_libraries(gicc
-    PUBLIC
+    INTERFACE
         ${IBVERBS_LIBRARY}
         ${MLX5_LIBRARY}
         CUDA::cudart
@@ -74,8 +60,8 @@ target_link_libraries(gicc
 
 if(GICC_BOOTSTRAP STREQUAL "mpi")
     find_package(MPI REQUIRED)
-    target_compile_definitions(gicc PUBLIC GICC_BOOTSTRAP_MPI=1)
-    target_link_libraries     (gicc PUBLIC MPI::MPI_CXX)
+    target_compile_definitions(gicc INTERFACE GICC_BOOTSTRAP_MPI=1)
+    target_link_libraries     (gicc INTERFACE MPI::MPI_CXX)
 elseif(GICC_BOOTSTRAP STREQUAL "pmi2")
     find_path   (PMI2_INCLUDE_DIR pmi2.h
                  PATHS ${PMI_ROOT} /opt/cray/pe/pmi/6.1.15
@@ -86,47 +72,19 @@ elseif(GICC_BOOTSTRAP STREQUAL "pmi2")
     if(NOT PMI2_INCLUDE_DIR OR NOT PMI2_LIBRARY)
         message(FATAL_ERROR "PMI2 not found (set PMI_ROOT=/path/to/pmi)")
     endif()
-    target_compile_definitions(gicc PUBLIC GICC_BOOTSTRAP_PMI2=1)
-    target_include_directories(gicc PUBLIC ${PMI2_INCLUDE_DIR})
-    target_link_libraries     (gicc PUBLIC ${PMI2_LIBRARY})
+    target_compile_definitions(gicc INTERFACE GICC_BOOTSTRAP_PMI2=1)
+    target_include_directories(gicc INTERFACE ${PMI2_INCLUDE_DIR})
+    target_link_libraries     (gicc INTERFACE ${PMI2_LIBRARY})
 else()
     message(FATAL_ERROR
         "GICC_BOOTSTRAP must be 'mpi' or 'pmi2' (got '${GICC_BOOTSTRAP}').")
 endif()
 
-target_compile_options(gicc PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:
-        -lineinfo
-        -Xcompiler -Wall
-        --expt-relaxed-constexpr
-    >
-)
-
-set_target_properties(gicc PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    POSITION_INDEPENDENT_CODE ON
-    VERSION 1.0.0
-    SOVERSION 1
-)
-
-# ===========================================================================
-# Header-only interface target (for users who only need headers)
-# ===========================================================================
-
-add_library(gicc_headers INTERFACE)
-target_include_directories(gicc_headers
-    INTERFACE
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
-        $<INSTALL_INTERFACE:include>
-)
-target_compile_definitions(gicc_headers INTERFACE GICC_PLATFORM_MLX5)
-
 # ===========================================================================
 # Install
 # ===========================================================================
 
-install(TARGETS gicc gicc_headers
+install(TARGETS gicc
     EXPORT gicc-targets
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
@@ -161,6 +119,5 @@ message(STATUS "ibverbs:    ${IBVERBS_LIBRARY}")
 message(STATUS "mlx5:       ${MLX5_LIBRARY}")
 message(STATUS "")
 message(STATUS "Targets:")
-message(STATUS "  gicc          - Shared library (libgicc.so)")
-message(STATUS "  gicc_headers  - Header-only interface")
+message(STATUS "  gicc          - Header-only interface (InfiniBand backend)")
 message(STATUS "")
