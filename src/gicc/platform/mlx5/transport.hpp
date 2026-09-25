@@ -175,7 +175,7 @@ public:
         cq_base_ = reinterpret_cast<char*>(
             ((uintptr_t)cq_raw_ + 65535) & ~(uintptr_t)65535);
         cuda_check(cudaMemset(cq_base_, 0xFF, cq_bytes), "cudaMemset(CQ)");
-        cq_umem_ = mlx5dv_devx_umem_reg(ctx_, cq_base_, cq_bytes, IBV_ACCESS_LOCAL_WRITE);
+        cq_umem_ = umem_reg(ctx_, cq_base_, cq_bytes);
         if (!cq_umem_) die("mlx5dv_devx_umem_reg(GPU CQ)");
 
         cuda_check(cudaMalloc(&d_counters_, (size_t)nqp_ * 2 * sizeof(uint64_t)),

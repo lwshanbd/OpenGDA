@@ -58,6 +58,20 @@ inline void cuda_check(cudaError_t err, const char* what) {
     }
 }
 
+// Register memory with the NIC in 4 KB pages. The QP and CQ contexts are
+// created with log_page_size = 0, so their umem must use 4 KB pages too; left
+// to itself mlx5dv_devx_umem_reg picks the largest page the region allows,
+// and a CQ that sits at a 4 KB offset of, say, a 512 KB region is then
+// rejected (CREATE_CQ fails with syndrome 0x357275 at 128 and 256 QPs).
+inline mlx5dv_devx_umem* umem_reg(ibv_context* ctx, void* addr, size_t size) {
+    mlx5dv_devx_umem_in in = {};
+    in.addr = addr;
+    in.size = size;
+    in.access = IBV_ACCESS_LOCAL_WRITE;
+    in.pgsz_bitmap = 1ull << 12;
+    return mlx5dv_devx_umem_reg_ex(ctx, &in);
+}
+
 // Port MTU, capped by GICC_MTU (bytes) when set.
 inline int port_mtu(const ibv_port_attr& port) {
     int mtu = port.active_mtu;
@@ -300,7 +314,7 @@ private:
         const size_t size = (bytes + kPage - 1) / kPage * kPage;
         if (posix_memalign(ptr, kPage, size)) die("posix_memalign", ENOMEM);
         std::memset(*ptr, 0, size);
-        *umem = mlx5dv_devx_umem_reg(ctx_, *ptr, size, IBV_ACCESS_LOCAL_WRITE);
+        *umem = umem_reg(ctx_, *ptr, size);
         if (!*umem) die("mlx5dv_devx_umem_reg(host)");
         if (d_ptr) {
             cuda_check(cudaHostRegister(*ptr, size, cudaHostRegisterPortable |
