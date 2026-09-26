@@ -15,6 +15,8 @@ Mode parseMode(const char *e) {
     if (s == "feature-extract") return Mode::FeatureExtract;
     if (s == "lower")           return Mode::Lower;
     if (s == "omp-dwq")         return Mode::OmpDwq;
+    if (s == "chunk-analyze")   return Mode::ChunkAnalyze;
+    if (s == "chunk-lower")     return Mode::ChunkLower;
     return Mode::Passthrough;
 }
 
@@ -54,6 +56,8 @@ const char *modeName(Mode m) {
         case Mode::FeatureExtract:  return "feature-extract";
         case Mode::Lower:           return "lower";
         case Mode::OmpDwq:          return "omp-dwq";
+        case Mode::ChunkAnalyze:    return "chunk-analyze";
+        case Mode::ChunkLower:      return "chunk-lower";
         case Mode::Passthrough:     return "passthrough";
     }
     return "?";

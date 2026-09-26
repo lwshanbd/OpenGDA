@@ -1,3 +1,4 @@
+#include "GICCChunkAnalysis.h"
 #include "GICCDeviceDiscovery.h"
 #include "GICCFeatureExtraction.h"
 #include "GICCHKAnalysis.h"
@@ -117,6 +118,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
             // in every other mode (Discover / Lower / Passthrough).
             PB.registerOptimizerLastEPCallback(
                 GICC_EP_LAMBDA_HEAD(MPM) {
+                    MPM.addPass(GICCChunkAnalysisPass());
                     MPM.addPass(GICCOmpDeviceDiscoveryPass());
                     MPM.addPass(GICCOmpHostDiscoveryPass());
                     MPM.addPass(GICCTraceSynthesisPass());
@@ -156,6 +158,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-omp-device-discovery") {
                         MPM.addPass(GICCOmpDeviceDiscoveryPass());
+                        return true;
+                    }
+                    if (Name == "gicc-chunk-analysis") {
+                        MPM.addPass(GICCChunkAnalysisPass());
                         return true;
                     }
                     if (Name == "gicc-omp-host-discovery") {
