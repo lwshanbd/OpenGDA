@@ -48,6 +48,14 @@
 // kernel starts, and sent by no mirrored store -- are copied once at its
 // start (ompx__box_residual). The peer must be same-node.
 //
+// The put may also be stated inside the worksharing loop's body, so that
+// the kernel can be a combined `target teams distribute parallel for`,
+// which clang emits in SPMD mode; a marker after the loop keeps the teams
+// region generic, and the kernel is then slower even with nothing else in
+// it. Such a put runs on every iteration with the same arguments, and means
+// the same as one after the loop in a loop that runs at least once: it
+// takes the box form whatever the dimension of the write.
+//
 // GICC_MODE=chunk-analyze reports the verdict; chunk-lower also rewrites
 // each proven put at the grain GICC_CHUNK_GRAIN selects (see lowerPut) and
 // makes an unprovable one a compile error. GICCChunkPrepPass keeps the
@@ -261,6 +269,9 @@ std::string writesOutsideLoop(const OmpKernel &KI, Value *obj) {
 // function? If the body was inlined into it, rewriting the outlined
 // function alone would miss the code that runs.
 bool wrapperCallsOutlined(const OmpKernel &KI) {
+    // No wrapper (an SPMD kernel): the runtime calls the region directly.
+    if (isa<ConstantPointerNull>(KI.parallel->getArgOperand(kmpc::ParallelWrapper)))
+        return true;
     auto *W = dyn_cast<Function>(
         KI.parallel->getArgOperand(kmpc::ParallelWrapper)->stripPointerCasts());
     if (!W) return false;
@@ -343,11 +354,17 @@ private:
             else if (auto *CB = dyn_cast<CallBase>(&I); CB && calleeName(*CB) == kPlainPut)
                 plain.push_back(cast<CallInst>(&I));
         }
-        if (puts.empty() && plain.empty()) return;
-
-        out() << "[gicc-chunk] kernel " << F.getName() << "\n";
+        // Markers in the worksharing loop's body, found through the kernel's
+        // parallel region.
         std::string why;
         auto KI = OmpKernel::locate(F, why);
+        SmallVector<CallInst *, 4> loopPuts;
+        if (KI)
+            for (Instruction &I : instructions(*KI->outlined))
+                if (isCallTo(I, kPipelinedPut)) loopPuts.push_back(cast<CallInst>(&I));
+        if (puts.empty() && plain.empty() && loopPuts.empty()) return;
+
+        out() << "[gicc-chunk] kernel " << F.getName() << "\n";
         if (!KI) {
             for (CallInst *CI : puts) report(CI, Verdict::Illegal, why);
             return;
@@ -369,11 +386,21 @@ private:
                 unsynced.push_back(CI);
         }
         puts = std::move(unsynced);
-        if (puts.empty() && plain.empty()) return;
+        // A put in the loop's body stands for one when the loop ends.
+        if (!loopPuts.empty())
+            if (std::string sync = syncBeforePut(*KI, KI->distFini, DT, LI); !sync.empty()) {
+                for (CallInst *CI : loopPuts)
+                    report(CI, Verdict::Illegal,
+                           "synchronization (" + sync + ") in the loop: early words would "
+                           "reach the peer before it");
+                loopPuts.clear();
+            }
+        if (puts.empty() && plain.empty() && loopPuts.empty()) return;
 
         auto W = collectWrites(*KI, FAM, UnknownStore::Fail, why);
         if (!W) {
             for (CallInst *CI : puts) report(CI, Verdict::Illegal, why);
+            for (CallInst *CI : loopPuts) report(CI, Verdict::Illegal, why);
             return;
         }
 
@@ -388,7 +415,8 @@ private:
                           bounds->second->getValueOperand(), seen1)) {
             for (CallInst *CI : puts)
                 report(CI, Verdict::Illegal, "cannot identify the distribute block bounds");
-            return;
+            if (loopPuts.empty()) return;
+            puts.clear();   // a put in the loop needs no block bounds
         }
 
         for (CallInst *CI : plain) {
@@ -401,10 +429,17 @@ private:
         }
 
         auto &PDT = FAM.getResult<PostDominatorTreeAnalysis>(F);
-        KernelFacts KF{*KI, *W, SE, DT, PDT, LI, bounds->first, bounds->second};
+        KernelFacts KF{*KI, *W, SE, DT, PDT, LI,
+                       bounds ? bounds->first : nullptr, bounds ? bounds->second : nullptr};
         SmallVector<Plan, 2> plans;
         for (CallInst *CI : puts)
             if (auto P = checkPut(KF, CI)) {
+                report(CI, Verdict::Legal, "");
+                printPlan(KF, *P);
+                plans.push_back(*P);
+            }
+        for (CallInst *CI : loopPuts)
+            if (auto P = checkLoopPut(KF, CI)) {
                 report(CI, Verdict::Legal, "");
                 printPlan(KF, *P);
                 plans.push_back(*P);
@@ -565,7 +600,8 @@ private:
     // B1, B2 and P4 for a put of an object the loop writes as a box (P3 and
     // P5 as in checkPut).
     std::optional<Plan> checkBoxPut(const KernelFacts &KF, CallInst *CI, Value *obj,
-                                    const SCEV *off) {
+                                    const SCEV *off, const SCEV *bytes = nullptr,
+                                    const SCEV *peer = nullptr, const SCEV *dst = nullptr) {
         const OmpKernel &KI = KF.KI;
         ScalarEvolution &SE = KF.SE;
         auto illegal = [&](const std::string &why) {
@@ -597,7 +633,7 @@ private:
         // That the range and the box are aligned to the stores (so none
         // straddles the range's edge) is checked at run time, by
         // ompx__box_residual: a length is often a formal SCEV knows nothing of.
-        const SCEV *bytes = KI.normalize(SE, SE.getSCEV(CI->getArgOperand(3)));
+        if (!bytes) bytes = KI.normalize(SE, SE.getSCEV(CI->getArgOperand(3)));
         // Everything the kernel evaluates before the loop must be the same in
         // every team and on every path: formals and constants only.
         if (!onlyFormals(off, KI.K) || !onlyFormals(bytes, KI.K))
@@ -613,8 +649,8 @@ private:
             if (!onlyFormals(f.x, KI.K))
                 return illegal("the condition " + scevStr(f.x) + " under which the loop runs "
                                "is not made of kernel formals");
-        const SCEV *peer = KI.normalize(SE, SE.getSCEV(CI->getArgOperand(0)));
-        const SCEV *dst  = KI.normalize(SE, SE.getSCEV(CI->getArgOperand(1)));
+        if (!peer) peer = KI.normalize(SE, SE.getSCEV(CI->getArgOperand(0)));
+        if (!dst) dst = KI.normalize(SE, SE.getSCEV(CI->getArgOperand(1)));
         if (!onlyFormals(peer, KI.K) || !onlyFormals(dst, KI.K))
             return illegal("peer or dst differs between teams");
         Plan P{CI, obj, nullptr, nullptr, nullptr, peer, dst, covered};
@@ -627,6 +663,47 @@ private:
         P.runs.assign(KF.W.preconditions.begin(), KF.W.preconditions.end());
         P.elem = elem;
         return P;
+    }
+
+    // A put in the worksharing loop's body: it must run on every iteration
+    // with arguments that are kernel values, the same in every team; it then
+    // takes the box form.
+    std::optional<Plan> checkLoopPut(const KernelFacts &KF, CallInst *CI) {
+        const OmpKernel &KI = KF.KI;
+        ScalarEvolution &SE = KF.SE;
+        auto illegal = [&](const std::string &why) {
+            report(CI, Verdict::Illegal, why);
+            return std::nullopt;
+        };
+        Function &O = *KI.outlined;
+        auto &SO = FAM.getResult<ScalarEvolutionAnalysis>(O);
+        auto &LO = FAM.getResult<LoopAnalysis>(O);
+        auto &DO = FAM.getResult<DominatorTreeAnalysis>(O);
+        Loop *L = LO.getLoopFor(CI->getParent());
+        if (!L) return illegal("the put is in the parallel region but not in its loop");
+        if (L->getParentLoop())
+            return illegal("the put is in a loop nested in the worksharing loop");
+        BasicBlock *latch = L->getLoopLatch();
+        if (!latch || !DO.dominates(CI->getParent(), latch))
+            return illegal("the put does not run on every iteration (it is conditional)");
+        const SCEV *v[4];
+        for (unsigned i = 0; i < 4; ++i) {
+            v[i] = KI.toKernel(SO.getSCEV(CI->getArgOperand(i)), SE);
+            if (!v[i]) return illegal("argument " + std::to_string(i) + " of the put is not a "
+                                      "value of the kernel");
+            v[i] = KI.normalize(SE, v[i]);
+        }
+        auto *base = dyn_cast<SCEVUnknown>(SE.getPointerBase(v[2]));
+        Value *obj = base ? KI.resolve(base->getValue()) : nullptr;
+        if (!obj || !isa<Argument>(obj))
+            return illegal("put source is not a kernel argument plus an offset");
+        const SCEV *off = SE.removePointerBase(v[2]);
+        if (isa<SCEVCouldNotCompute>(off))
+            return illegal("put source is not a kernel argument plus an offset");
+        if (llvm::none_of(KF.W.boxes, [&](const BoxWrite &b) { return b.obj == obj; }))
+            return illegal("put source '" + objName(obj) +
+                           "' is not written by the worksharing loop");
+        return checkBoxPut(KF, CI, obj, off, v[3], v[0], v[1]);
     }
 
     void printPlan(const KernelFacts &KF, const Plan &P) {
@@ -897,19 +974,39 @@ private:
 }  // namespace
 
 PreservedAnalyses GICCChunkPrepPass::run(Module &M, ModuleAnalysisManager &) {
-    if (getConfig().mode != Mode::ChunkLower) return PreservedAnalyses::all();
+    // Also when only analysing: a put in a loop's body is read in the shape
+    // this prepares.
+    if (getConfig().mode != Mode::ChunkLower && getConfig().mode != Mode::ChunkAnalyze)
+        return PreservedAnalyses::all();
     Triple T(M.getTargetTriple());
     if (!T.isNVPTX() && !T.isAMDGPU()) return PreservedAnalyses::all();
     bool changed = false;
+    // The marker is only read by this pass, which replaces it. Said to touch
+    // no memory the program can see, it stays in the loop but no longer
+    // keeps the optimizer from hoisting the loop's own loads past it (the
+    // thread stride, above all), so a marker in the loop's body leaves the
+    // loop in the shape the write analysis reads.
+    if (Function *Marker = M.getFunction(kPipelinedPut);
+        Marker && !Marker->onlyAccessesInaccessibleMemory()) {
+        Marker->setMemoryEffects(MemoryEffects::inaccessibleMemOnly());
+        Marker->addFnAttr(Attribute::NoUnwind);
+        changed = true;
+    }
+    auto hasPut = [](Function &F) {
+        for (Instruction &I : instructions(F))
+            if (isCallTo(I, kPipelinedPut)) return true;
+        return false;
+    };
     for (Function &F : M) {
-        bool hasPut = false;
-        for (Instruction &I : instructions(F)) hasPut |= isCallTo(I, kPipelinedPut);
-        if (!hasPut) continue;
+        if (F.isDeclaration()) continue;
+        const bool kernelHasPut = hasPut(F);
         for (Instruction &I : instructions(F)) {
             auto *CB = dyn_cast<CallBase>(&I);
             if (!CB || calleeName(*CB) != "__kmpc_parallel_51") continue;
             auto *O = dyn_cast<Function>(CB->getArgOperand(kmpc::ParallelFn)->stripPointerCasts());
             if (!O || O->isDeclaration() || O->hasFnAttribute(kPrepAttr)) continue;
+            // The marker after the loop, or in the region's loop itself.
+            if (!kernelHasPut && !hasPut(*O)) continue;
             // Clang marks outlined regions alwaysinline; remember that so the
             // lowering can put it back.
             const bool always = O->hasFnAttribute(Attribute::AlwaysInline);
