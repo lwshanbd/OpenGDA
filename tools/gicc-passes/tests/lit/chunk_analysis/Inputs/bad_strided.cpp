@@ -17,4 +17,4 @@ void step(float* src, float* dst, int n, int peer, float a) {
 }
 
 // CHECK: [gicc-chunk] kernel __omp_offloading_{{.*}}_Z4stepPfS_iif_l{{[0-9]+}}
-// CHECK-NEXT: ompx_pipelined_put: ILLEGAL: store address is not affine in the loop IV
+// CHECK-NEXT: ompx_pipelined_put: ILLEGAL: writes to 'arg#2' are strided (8 bytes per iteration, 4-byte stores): a block does not own a contiguous range

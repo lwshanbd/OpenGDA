@@ -22,7 +22,7 @@
 ; }
 ;
 ; // CHECK: [gicc-chunk] kernel __omp_offloading_{{.*}}_Z4stepPfS_iif_l{{[0-9]+}}
-; // CHECK-NEXT: ompx_pipelined_put: ILLEGAL: store address is not affine in the loop IV
+; // CHECK-NEXT: ompx_pipelined_put: ILLEGAL: writes to 'arg#2' are strided (8 bytes per iteration, 4-byte stores): a block does not own a contiguous range
 
 source_filename = "Inputs/bad_strided.cpp"
 target datalayout = "e-p6:32:32-i64:64-i128:128-v16:16-v32:32-n16:32:64"
@@ -40,8 +40,8 @@ target triple = "nvptx64-nvidia-cuda"
 @__omp_rtl_assume_no_nested_parallelism = weak_odr hidden local_unnamed_addr constant i32 0
 @0 = private unnamed_addr constant [23 x i8] c";unknown;unknown;0;0;;\00", align 1
 @1 = private unnamed_addr constant %struct.ident_t { i32 0, i32 2, i32 0, i32 22, ptr @0 }, align 8
-@__omp_offloading_6bc59cba_a5003ce1__Z4stepPfS_iif_l10_dynamic_environment = weak_odr protected global %struct.DynamicEnvironmentTy zeroinitializer
-@__omp_offloading_6bc59cba_a5003ce1__Z4stepPfS_iif_l10_kernel_environment = weak_odr protected constant %struct.KernelEnvironmentTy { %struct.ConfigurationEnvironmentTy { i8 1, i8 0, i8 1, i32 1, i32 128, i32 0, i32 0, i32 0, i32 0 }, ptr @1, ptr @__omp_offloading_6bc59cba_a5003ce1__Z4stepPfS_iif_l10_dynamic_environment }
+@__omp_offloading_6bc59cba_a5004435__Z4stepPfS_iif_l10_dynamic_environment = weak_odr protected global %struct.DynamicEnvironmentTy zeroinitializer
+@__omp_offloading_6bc59cba_a5004435__Z4stepPfS_iif_l10_kernel_environment = weak_odr protected constant %struct.KernelEnvironmentTy { %struct.ConfigurationEnvironmentTy { i8 1, i8 0, i8 1, i32 1, i32 128, i32 0, i32 0, i32 0, i32 0 }, ptr @1, ptr @__omp_offloading_6bc59cba_a5004435__Z4stepPfS_iif_l10_dynamic_environment }
 @2 = private unnamed_addr constant %struct.ident_t { i32 0, i32 2050, i32 0, i32 22, ptr @0 }, align 8
 @3 = private unnamed_addr constant %struct.ident_t { i32 0, i32 514, i32 0, i32 22, ptr @0 }, align 8
 @_shared = internal addrspace(3) global [4 x i8] poison, align 16
@@ -49,13 +49,13 @@ target triple = "nvptx64-nvidia-cuda"
 @_shared2 = internal addrspace(3) global [4 x i8] poison, align 16
 
 ; Function Attrs: alwaysinline convergent norecurse nounwind
-define weak_odr protected ptx_kernel void @__omp_offloading_6bc59cba_a5003ce1__Z4stepPfS_iif_l10(ptr noalias noundef %0, i64 noundef %1, ptr noundef %2, i64 noundef %3, i64 noundef %4, ptr noundef %5) local_unnamed_addr #0 {
+define weak_odr protected ptx_kernel void @__omp_offloading_6bc59cba_a5004435__Z4stepPfS_iif_l10(ptr noalias noundef %0, i64 noundef %1, ptr noundef %2, i64 noundef %3, i64 noundef %4, ptr noundef %5) local_unnamed_addr #0 {
   %7 = alloca i32, align 4
   %8 = alloca i32, align 4
   %9 = alloca i32, align 4
   %10 = alloca i32, align 4
   %11 = alloca [5 x ptr], align 8
-  %12 = tail call i32 @__kmpc_target_init(ptr nonnull @__omp_offloading_6bc59cba_a5003ce1__Z4stepPfS_iif_l10_kernel_environment, ptr %0) #2
+  %12 = tail call i32 @__kmpc_target_init(ptr nonnull @__omp_offloading_6bc59cba_a5004435__Z4stepPfS_iif_l10_kernel_environment, ptr %0) #2
   %13 = icmp eq i32 %12, -1
   br i1 %13, label %15, label %14
 
@@ -120,7 +120,7 @@ define weak_odr protected ptx_kernel void @__omp_offloading_6bc59cba_a5003ce1__Z
   store ptr addrspacecast (ptr addrspace(3) @_shared2 to ptr), ptr addrspace(5) %35, align 8, !tbaa !20, !noalias !12
   store ptr addrspacecast (ptr addrspace(3) @_shared1 to ptr), ptr addrspace(5) %37, align 8, !tbaa !20, !noalias !12
   store ptr addrspacecast (ptr addrspace(3) @_shared to ptr), ptr addrspace(5) %39, align 8, !tbaa !20, !noalias !12
-  call void @__kmpc_parallel_51(ptr nonnull @1, i32 %16, i32 1, i32 -1, i32 -1, ptr nonnull @__omp_offloading_6bc59cba_a5003ce1__Z4stepPfS_iif_l10_omp_outlined_omp_outlined, ptr nonnull @__omp_offloading_6bc59cba_a5003ce1__Z4stepPfS_iif_l10_omp_outlined_omp_outlined_wrapper, ptr nonnull %11, i64 5) #2, !noalias !12
+  call void @__kmpc_parallel_51(ptr nonnull @1, i32 %16, i32 1, i32 -1, i32 -1, ptr nonnull @__omp_offloading_6bc59cba_a5004435__Z4stepPfS_iif_l10_omp_outlined_omp_outlined, ptr nonnull @__omp_offloading_6bc59cba_a5004435__Z4stepPfS_iif_l10_omp_outlined_omp_outlined_wrapper, ptr nonnull %11, i64 5) #2, !noalias !12
   %48 = load i32, ptr addrspace(5) %24, align 4, !tbaa !8, !noalias !12
   %49 = add nsw i32 %48, %42
   %50 = load i32, ptr addrspace(5) %23, align 4, !tbaa !8, !noalias !12
@@ -162,7 +162,7 @@ declare void @llvm.lifetime.end.p0(i64 immarg, ptr captures(none)) #1
 declare void @__kmpc_distribute_static_init_4(ptr, i32, i32, ptr, ptr, ptr, ptr, i32, i32) local_unnamed_addr #2
 
 ; Function Attrs: alwaysinline norecurse nounwind
-define internal void @__omp_offloading_6bc59cba_a5003ce1__Z4stepPfS_iif_l10_omp_outlined_omp_outlined(ptr noalias noundef readonly captures(none) %0, ptr noalias readnone captures(none) %1, i64 noundef %2, i64 noundef %3, ptr noundef nonnull readonly align 4 captures(none) dereferenceable(4) %4, ptr noundef nonnull readonly align 8 captures(none) dereferenceable(8) %5, ptr noundef nonnull readonly align 4 captures(none) dereferenceable(4) %6) #3 {
+define internal void @__omp_offloading_6bc59cba_a5004435__Z4stepPfS_iif_l10_omp_outlined_omp_outlined(ptr noalias noundef readonly captures(none) %0, ptr noalias readnone captures(none) %1, i64 noundef %2, i64 noundef %3, ptr noundef nonnull readonly align 4 captures(none) dereferenceable(4) %4, ptr noundef nonnull readonly align 8 captures(none) dereferenceable(8) %5, ptr noundef nonnull readonly align 4 captures(none) dereferenceable(4) %6) #3 {
   %8 = alloca i32, align 4
   %9 = alloca i32, align 4
   %10 = alloca i32, align 4
@@ -231,7 +231,7 @@ declare void @__kmpc_for_static_init_4(ptr, i32, i32, ptr, ptr, ptr, ptr, i32, i
 declare void @__kmpc_for_static_fini(ptr, i32) local_unnamed_addr #2
 
 ; Function Attrs: norecurse nounwind
-define internal void @__omp_offloading_6bc59cba_a5003ce1__Z4stepPfS_iif_l10_omp_outlined_omp_outlined_wrapper(i16 zeroext %0, i32 noundef %1) #4 {
+define internal void @__omp_offloading_6bc59cba_a5004435__Z4stepPfS_iif_l10_omp_outlined_omp_outlined_wrapper(i16 zeroext %0, i32 noundef %1) #4 {
   %3 = alloca i32, align 4
   %4 = alloca i32, align 4
   %5 = alloca i32, align 4
@@ -339,7 +339,7 @@ attributes #9 = { nounwind memory(readwrite) }
 !llvm.module.flags = !{!1, !2, !3, !4, !5, !6}
 !llvm.ident = !{!7}
 
-!0 = !{i32 0, i32 1808112826, i32 -1526711071, !"_Z4stepPfS_iif", i32 10, i32 0, i32 0}
+!0 = !{i32 0, i32 1808112826, i32 -1526709195, !"_Z4stepPfS_iif", i32 10, i32 0, i32 0}
 !1 = !{i32 1, !"wchar_size", i32 4}
 !2 = !{i32 4, !"nvvm-reflect-ftz", i32 0}
 !3 = !{i32 7, !"openmp", i32 51}
@@ -352,8 +352,8 @@ attributes #9 = { nounwind memory(readwrite) }
 !10 = !{!"omnipotent char", !11, i64 0}
 !11 = !{!"Simple C++ TBAA"}
 !12 = !{!13}
-!13 = distinct !{!13, !14, !"__omp_offloading_6bc59cba_a5003ce1__Z4stepPfS_iif_l10_omp_outlined: argument 0"}
-!14 = distinct !{!14, !"__omp_offloading_6bc59cba_a5003ce1__Z4stepPfS_iif_l10_omp_outlined"}
+!13 = distinct !{!13, !14, !"__omp_offloading_6bc59cba_a5004435__Z4stepPfS_iif_l10_omp_outlined: argument 0"}
+!14 = distinct !{!14, !"__omp_offloading_6bc59cba_a5004435__Z4stepPfS_iif_l10_omp_outlined"}
 !15 = !{!16, !16, i64 0}
 !16 = !{!"p1 float", !17, i64 0}
 !17 = !{!"any pointer", !10, i64 0}
@@ -365,5 +365,5 @@ attributes #9 = { nounwind memory(readwrite) }
 !23 = !{!"p1 long", !17, i64 0}
 !24 = !{!17, !17, i64 0}
 !25 = !{!26}
-!26 = distinct !{!26, !27, !"__omp_offloading_6bc59cba_a5003ce1__Z4stepPfS_iif_l10_omp_outlined_omp_outlined: argument 0"}
-!27 = distinct !{!27, !"__omp_offloading_6bc59cba_a5003ce1__Z4stepPfS_iif_l10_omp_outlined_omp_outlined"}
+!26 = distinct !{!26, !27, !"__omp_offloading_6bc59cba_a5004435__Z4stepPfS_iif_l10_omp_outlined_omp_outlined: argument 0"}
+!27 = distinct !{!27, !"__omp_offloading_6bc59cba_a5004435__Z4stepPfS_iif_l10_omp_outlined_omp_outlined"}
