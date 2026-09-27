@@ -97,10 +97,14 @@ const SCEV *exactDivide(ScalarEvolution &SE, const SCEV *a, const SCEV *b) {
 std::optional<AccessDecomposer::Lin>
 AccessDecomposer::digit(Instruction *I, bool remainder, std::string &why) {
     auto a = build(I->getOperand(0), why);
-    auto b = build(I->getOperand(1), why);
-    if (!a || !b) return std::nullopt;
-    if (!b->t.empty()) { why = "division by a loop-variant value"; return std::nullopt; }
-    const SCEV *R = b->c0;
+    if (!a) return std::nullopt;
+    // The divisor read the way the instruction reads it: sign-extended for
+    // sdiv / srem, zero-extended for udiv / urem.
+    const SCEV *RS = SE.getSCEV(I->getOperand(1));
+    if (!SE.isLoopInvariant(RS, L)) { why = "division by a loop-variant value"; return std::nullopt; }
+    const bool isSigned =
+        I->getOpcode() == Instruction::SDiv || I->getOpcode() == Instruction::SRem;
+    const SCEV *R = isSigned ? SE.getNoopOrSignExtend(RS, I64) : SE.getNoopOrZeroExtend(RS, I64);
 
     // The dividend must be X minus a prefix of the digits, each times its
     // own radix, and nothing else.
@@ -253,9 +257,31 @@ std::optional<AccessDecomposer::Lin> AccessDecomposer::build(Value *v, std::stri
 
     switch (I->getOpcode()) {
     case Instruction::PHI: {
+        auto *PN = cast<PHINode>(I);
+        // A second IV stepping in lockstep with the IV: on every incoming
+        // edge an extension of (or equal to) the IV's value there -- the
+        // wide copy indvars keeps of a narrow IV. Its value is X.
+        if (PN->getParent() == L->getHeader()) {
+            bool lockstep = PN->getNumIncomingValues() == iv->getNumIncomingValues();
+            for (unsigned k = 0; lockstep && k < PN->getNumIncomingValues(); ++k) {
+                Value *a = PN->getIncomingValue(k);
+                Value *b = iv->getIncomingValueForBlock(PN->getIncomingBlock(k));
+                if (a == b) continue;
+                auto *E = dyn_cast<CastInst>(a);
+                lockstep = E && (isa<SExtInst>(E) || isa<ZExtInst>(E)) && E->getOperand(0) == b;
+            }
+            if (!lockstep) {
+                why = "loop-carried recurrence in the index";
+                return std::nullopt;
+            }
+            Lin r;
+            r.c0 = SE.getZero(I64);
+            r.t.push_back({-1, SE.getOne(I64)});
+            r.sx = r.ux = true;   // X in [0, N), sext and zext agree
+            return done(r);
+        }
         // Merge of the same index computed on several paths (e.g. once per
         // branch and not CSE'd): all incoming values must agree.
-        auto *PN = cast<PHINode>(I);
         std::optional<Lin> r;
         for (Value *in : PN->incoming_values()) {
             auto x = build(in, why);

@@ -11,6 +11,69 @@ using namespace llvm;
 
 namespace gicc::pass {
 
+SmallVector<EntryFact, 4> factsOnEntry(BasicBlock *target, DominatorTree &DT,
+                                      ScalarEvolution &SE) {
+    SmallVector<EntryFact, 4> facts;
+    auto add = [&](const SCEV *x, bool nonzeroOnly = false) {
+        if (llvm::none_of(facts, [&](const EntryFact &f) { return f.x == x; }))
+            facts.push_back({x, nonzeroOnly});
+    };
+    std::function<void(Value *, bool)> collect = [&](Value *c, bool holds) {
+        // a & b true, or a | b false: both halves hold (the latter negated).
+        // Also in the select form instcombine uses for logical and / or.
+        Value *a = nullptr, *b = nullptr;
+        bool isAnd = false, isOr = false;
+        if (auto *BO = dyn_cast<BinaryOperator>(c)) {
+            a = BO->getOperand(0);
+            b = BO->getOperand(1);
+            isAnd = BO->getOpcode() == Instruction::And;
+            isOr = BO->getOpcode() == Instruction::Or;
+        } else if (auto *Sel = dyn_cast<SelectInst>(c)) {
+            a = Sel->getCondition();
+            if (auto *K = dyn_cast<ConstantInt>(Sel->getFalseValue()); K && K->isZero()) {
+                b = Sel->getTrueValue();
+                isAnd = true;
+            } else if (auto *K = dyn_cast<ConstantInt>(Sel->getTrueValue()); K && K->isOne()) {
+                b = Sel->getFalseValue();
+                isOr = true;
+            }
+        }
+        if (a && b) {
+            if ((isAnd && holds) || (isOr && !holds)) {
+                collect(a, holds);
+                collect(b, holds);
+            }
+            return;
+        }
+        auto *Cmp = dyn_cast<ICmpInst>(c);
+        if (!Cmp || !SE.isSCEVable(Cmp->getOperand(0)->getType())) return;
+        ICmpInst::Predicate P = holds ? Cmp->getPredicate() : Cmp->getInversePredicate();
+        const SCEV *x = SE.getSCEV(Cmp->getOperand(0)), *y = SE.getSCEV(Cmp->getOperand(1));
+        const SCEV *one = SE.getOne(x->getType());
+        switch (P) {
+        case ICmpInst::ICMP_SGT: add(SE.getMinusSCEV(x, y)); break;
+        case ICmpInst::ICMP_SGE: add(SE.getAddExpr(SE.getMinusSCEV(x, y), one)); break;
+        case ICmpInst::ICMP_SLT: add(SE.getMinusSCEV(y, x)); break;
+        case ICmpInst::ICMP_SLE: add(SE.getAddExpr(SE.getMinusSCEV(y, x), one)); break;
+        case ICmpInst::ICMP_NE:
+            if (y->isZero()) add(x, true);
+            else if (x->isZero()) add(y, true);
+            break;
+        case ICmpInst::ICMP_UGT: if (y->isZero()) add(x, true); break;
+        case ICmpInst::ICMP_ULT: if (x->isZero()) add(y, true); break;
+        default: break;
+        }
+    };
+    for (BasicBlock &BB : *target->getParent()) {
+        auto *BI = dyn_cast<BranchInst>(BB.getTerminator());
+        if (!BI || !BI->isConditional()) continue;
+        for (unsigned s = 0; s < 2; ++s)
+            if (DT.dominates(BasicBlockEdge(&BB, BI->getSuccessor(s)), target))
+                collect(BI->getCondition(), s == 0);
+    }
+    return facts;
+}
+
 namespace {
 
 // The slot a (possibly cast) SCEVUnknown load reads, or null.
@@ -22,36 +85,21 @@ const Value *loadedSlot(const SCEV *S) {
     return LI ? LI->getPointerOperand()->stripPointerCasts() : nullptr;
 }
 
-// Split S = c * ext(load slot) into (c, ext(load slot)); c = 1 when no mul.
-bool splitScaledLoad(const SCEV *S, const Value *slot, const SCEV *&c,
-                     const SCEV *&term, ScalarEvolution &SE) {
-    if (auto *M = dyn_cast<SCEVMulExpr>(S)) {
-        if (M->getNumOperands() == 2 && isa<SCEVConstant>(M->getOperand(0)) &&
-            loadedSlot(M->getOperand(1)) == slot) {
-            c = M->getOperand(0);
-            term = M->getOperand(1);
-            return true;
-        }
-        return false;
-    }
-    if (loadedSlot(S) == slot) {
-        c = SE.getOne(S->getType());
-        term = S;
-        return true;
-    }
-    return false;
-}
-
 class Collector {
     const OmpKernel &KI;
     FunctionAnalysisManager &FAM;
     UnknownStore policy;
     std::string &why;
     Function &O;
-    ScalarEvolution &SE;
+    ScalarEvolution &SE, &SK;
     LoopInfo &LI;
+    DominatorTree &DT;
+    Type *I64;
     const Value *lbSlot = nullptr, *ubSlot = nullptr, *strideSlot = nullptr;
-    std::optional<AccessDecomposer> decomposer;
+    // The distribute loop's iteration count, when it starts at 0.
+    const SCEV *N = nullptr;
+    SmallVector<EntryFact, 4> kernelFacts;
+    DenseMap<Loop *, SmallVector<EntryFact, 4>> loopFacts;
     WriteSet W;
 
 public:
@@ -59,10 +107,20 @@ public:
               std::string &why)
         : KI(KI), FAM(FAM), policy(policy), why(why), O(*KI.outlined),
           SE(FAM.getResult<ScalarEvolutionAnalysis>(O)),
-          LI(FAM.getResult<LoopAnalysis>(O)) {}
+          SK(FAM.getResult<ScalarEvolutionAnalysis>(KI.K)),
+          LI(FAM.getResult<LoopAnalysis>(O)), DT(FAM.getResult<DominatorTreeAnalysis>(O)),
+          I64(Type::getInt64Ty(O.getContext())) {}
 
     std::optional<WriteSet> run() {
         if (!findThreadLoop()) return std::nullopt;
+        auto &DTK = FAM.getResult<DominatorTreeAnalysis>(KI.K);
+        kernelFacts = factsOnEntry(KI.distInit->getParent(), DTK, SK);
+        W.preconditions = kernelFacts;
+        if (auto bounds = KI.distBounds(DTK)) {
+            const SCEV *lb0 = KI.normalize(SK, SK.getSCEV(bounds->first->getValueOperand()));
+            const SCEV *ub0 = KI.normalize(SK, SK.getSCEV(bounds->second->getValueOperand()));
+            if (lb0->isZero()) N = SK.getAddExpr(KI.extDist(SK, ub0, I64), SK.getOne(I64));
+        }
         for (Instruction &I : instructions(O)) {
             if (auto *CB = dyn_cast<CallBase>(&I)) {
                 if (!isBenignCall(*CB)) {
@@ -128,7 +186,6 @@ private:
     }
 
     bool store(StoreInst *St) {
-        Value *ptr = St->getPointerOperand();
         Loop *inner = LI.getLoopFor(St->getParent());
         if (!inner) return unknown(St, "store outside the worksharing loop body");
         // The worksharing loop is the outermost one.
@@ -142,39 +199,45 @@ private:
             // with it, as it then depends on the worksharing IV alone.
             // Conditional: the inner loop may not run.
             for (Loop *l = inner; l != L; l = l->getParentLoop())
-                if (!SE.isLoopInvariant(SE.getSCEV(ptr), l))
+                if (!SE.isLoopInvariant(SE.getSCEV(St->getPointerOperand()), l))
                     return unknown(St, "store address moves with a sequential loop "
                                        "nested in the worksharing loop");
-            return box(St, L, iv, /*inInnerLoop=*/true);
         }
-        auto *AR = dyn_cast<SCEVAddRecExpr>(SE.getSCEV(ptr));
-        if (!AR || AR->getLoop() != L || !AR->isAffine())
-            // Not base + c*i: try the multi-dimensional (collapse) form.
-            return box(St, L, iv, /*inInnerLoop=*/false);
-
-        // addr = base + c*iv + d, with the same IV the exit tests.
-        const SCEV *c = nullptr, *stepTerm = nullptr;
-        if (!splitScaledLoad(AR->getStepRecurrence(SE), strideSlot, c, stepTerm, SE) ||
-            stepTerm != iv->getStepRecurrence(SE))
-            return unknown(St, "store address does not advance with the loop IV");
-        auto *base = dyn_cast<SCEVUnknown>(SE.getPointerBase(AR->getStart()));
-        if (!base) return unknown(St, "store has no single base pointer");
-        const SCEV *d = SE.getMinusSCEV(SE.getMinusSCEV(AR, SE.getMulExpr(c, iv)), base);
-        if (!isa<SCEVConstant>(d))
-            return unknown(St, "store offset is not constant relative to base + c*i");
-        Value *obj = KI.resolveOutlined(base->getValue());
-        if (!obj || !isa<Argument>(obj)) return unknown(St, "store base is not a kernel argument");
-        DenseWrite dw{c, d, KI.DL.getTypeStoreSize(St->getValueOperand()->getType())};
-        auto [it, fresh] = W.dense.try_emplace(obj, dw);
-        if (!fresh && (it->second.c != c || it->second.d != d ||
-                       it->second.storeSize != dw.storeSize))
-            return unknown(St, "object '" + objName(obj) +
-                               "' is written with more than one access pattern");
-        W.storesTo[obj].push_back(St);
-        return true;
+        return box(St, L, iv, /*inInnerLoop=*/inner != L);
     }
 
-    // A store whose address is a box over the collapsed loop's digits.
+    // x > 0 for an outlined-function value, whenever the loop body runs:
+    // SCEV knows it, a guard of the loop or of the kernel's distribute
+    // loop says so (x != 0 suffices, radices being trip counts below 2^63),
+    // or it is a product / extension of such values.
+    bool isPositive(const SCEV *x, Loop *L) {
+        if (SE.isKnownPositive(x)) return true;
+        auto [it, fresh] = loopFacts.try_emplace(L);
+        if (fresh) it->second = factsOnEntry(L->getHeader(), DT, SE);
+        if (llvm::any_of(it->second, [&](const EntryFact &f) { return sameSCEV(SE, f.x, x); }))
+            return true;
+        if (const SCEV *k = KI.toKernel(x, SK); k && kernelPositive(k)) return true;
+        if (auto *M = dyn_cast<SCEVMulExpr>(x))
+            return llvm::all_of(M->operands(), [&](const SCEV *op) { return isPositive(op, L); });
+        // sext(t) > 0 iff t > 0; zext(t) > 0 if t > 0 read signed.
+        if (isa<SCEVSignExtendExpr>(x) || isa<SCEVZeroExtendExpr>(x))
+            return isPositive(cast<SCEVCastExpr>(x)->getOperand(), L);
+        return false;
+    }
+
+    // The same for a kernel value, against the distribute loop's guards.
+    bool kernelPositive(const SCEV *k) {
+        if (SK.isKnownPositive(k) ||
+            llvm::any_of(kernelFacts, [&](const EntryFact &f) { return sameSCEV(SK, f.x, k); }))
+            return true;
+        if (auto *M = dyn_cast<SCEVMulExpr>(k))
+            return llvm::all_of(M->operands(), [&](const SCEV *op) { return kernelPositive(op); });
+        if (isa<SCEVSignExtendExpr>(k) || isa<SCEVZeroExtendExpr>(k))
+            return kernelPositive(cast<SCEVCastExpr>(k)->getOperand());
+        return false;
+    }
+
+    // Each store as a box over the loop's digits, in kernel values.
     bool box(StoreInst *St, Loop *L, const SCEVAddRecExpr *iv, bool inInnerLoop) {
         auto fail = [&](const std::string &reason) {
             return unknown(St, "store address: " + reason);
@@ -188,9 +251,8 @@ private:
                 SE.getNoopOrSignExtend(SE.getSCEV(&PN), iv->getType()) == iv)
                 ivPhi = &PN;
         if (!ivPhi) return fail("the loop IV is not a header phi");
-        if (!decomposer) decomposer.emplace(SE, KI.DL, L, ivPhi);
         std::string reason;
-        auto b = decomposer->decompose(St->getPointerOperand(), reason);
+        auto b = AccessDecomposer(SE, KI.DL, L, ivPhi).decompose(St->getPointerOperand(), reason);
         if (!b) return fail(reason);
         for (auto &[R, R2] : b->assumedEqual)
             if (!provenEqual(L, R, R2))
@@ -198,10 +260,36 @@ private:
                             " differ only by a cast, but they cannot be proven equal");
         Value *obj = KI.resolveOutlined(b->base);
         if (!obj || !isa<Argument>(obj)) return fail("store base is not a kernel argument");
-        auto &DT = FAM.getResult<DominatorTreeAnalysis>(O);
+
+        // The digits are a box only for positive radices and an iteration
+        // count N = n_1 * R_1.
+        for (const SCEV *R : b->radix)
+            if (!isPositive(R, L))
+                return fail("collapse radix " + scevStr(R) +
+                            " cannot be proven positive (a division the source wrote?)");
+        if (!N) return fail("the distribute loop's iteration count is unknown");
+        BoxWrite bw{St, obj, {}, {}, nullptr,
+                    KI.DL.getTypeStoreSize(St->getValueOperand()->getType()), false,
+                    b->trustedTrunc};
+        const SCEV *R1 = b->radix.empty() ? nullptr : KI.toKernel(b->radix[0], SK);
+        const SCEV *n1 = b->radix.empty() ? N
+                         : R1 ? exactDivide(SK, N, SK.getNoopOrSignExtend(R1, I64)) : nullptr;
+        if (!n1)
+            return fail("the iteration count " + scevStr(N) +
+                        " is not a proven multiple of collapse radix " + scevStr(b->radix[0]));
+        bw.extent.push_back(n1);
+        for (size_t d = 0; d < b->stride.size(); ++d) {
+            const SCEV *s = KI.toKernel(b->stride[d], SK);
+            const SCEV *e = d ? KI.toKernel(b->extent[d], SK) : n1;
+            if (!s || !e) return fail("the box has no counterpart in kernel values");
+            bw.stride.push_back(SK.getNoopOrSignExtend(s, I64));
+            if (d) bw.extent.push_back(SK.getNoopOrSignExtend(e, I64));
+        }
+        bw.offset = KI.toKernel(b->offset, SK);
+        if (!bw.offset) return fail("the box has no counterpart in kernel values");
         BasicBlock *latch = L->getLoopLatch();
-        const bool always = !inInnerLoop && latch && DT.dominates(St->getParent(), latch);
-        W.boxes.push_back({St, obj, *b, always});
+        bw.unconditional = !inInnerLoop && latch && DT.dominates(St->getParent(), latch);
+        W.boxes.push_back(bw);
         W.storesTo[obj].push_back(St);
         return true;
     }
@@ -260,7 +348,11 @@ private:
             if (ar && ar->getLoop() == L && ar->isAffine()) cur = ar;
         }
         if (!cur) {
-            auto *next = dyn_cast<SCEVAddRecExpr>(SE.getSCEV(ivSide));
+            // Also an extension of it: a narrow IV compared through a sext.
+            const SCEV *n = SE.getSCEV(ivSide);
+            if (isa<SCEVSignExtendExpr>(n) || isa<SCEVZeroExtendExpr>(n))
+                n = cast<SCEVCastExpr>(n)->getOperand();
+            auto *next = dyn_cast<SCEVAddRecExpr>(n);
             if (next && next->getLoop() == L && next->isAffine()) {
                 const SCEV *s = next->getStepRecurrence(SE);
                 cur = dyn_cast<SCEVAddRecExpr>(SE.getAddRecExpr(
@@ -273,56 +365,21 @@ private:
             why = "loop IV is not the thread's lb stepped by its stride";
             return nullptr;
         }
-        const SCEV *ub = SE.getSCEV(bSide);
-        if (!SE.isLoopEntryGuardedByCond(L, P, cur->getStart(),
-                                         SE.getNoopOrSignExtend(ub, cur->getType()))) {
+        // Compare in the wider of the two types.
+        const SCEV *ub = SE.getSCEV(bSide), *lb = cur->getStart();
+        Type *T = SE.getWiderType(ub->getType(), lb->getType());
+        if (!SE.isLoopEntryGuardedByCond(L, P, SE.getNoopOrSignExtend(lb, T),
+                                         SE.getNoopOrSignExtend(ub, T))) {
             why = "first iteration is not guarded by lb <= UB";
             return nullptr;
         }
         return cur;
     }
 
-    // Values x with x > 0 on entry to L: the signed icmp x > 0 (or x >= 1)
-    // conditions of branches whose taken edge dominates the header.
-    SmallVector<const SCEV *, 4> positiveOnEntry(Loop *L) {
-        SmallVector<const SCEV *, 4> facts;
-        auto &DT = FAM.getResult<DominatorTreeAnalysis>(O);
-        std::function<void(Value *, bool)> collect = [&](Value *c, bool holds) {
-            if (auto *BO = dyn_cast<BinaryOperator>(c)) {
-                // a & b true, or a | b false: both halves hold (negated).
-                if ((BO->getOpcode() == Instruction::And && holds) ||
-                    (BO->getOpcode() == Instruction::Or && !holds)) {
-                    collect(BO->getOperand(0), holds);
-                    collect(BO->getOperand(1), holds);
-                }
-                return;
-            }
-            auto *Cmp = dyn_cast<ICmpInst>(c);
-            if (!Cmp) return;
-            ICmpInst::Predicate P = holds ? Cmp->getPredicate() : Cmp->getInversePredicate();
-            Value *x = Cmp->getOperand(0), *y = Cmp->getOperand(1);
-            if (isa<ConstantInt>(x)) { std::swap(x, y); P = ICmpInst::getSwappedPredicate(P); }
-            auto *K = dyn_cast<ConstantInt>(y);
-            if (!K) return;
-            if ((P == ICmpInst::ICMP_SGT && K->getSExtValue() >= 0) ||
-                (P == ICmpInst::ICMP_SGE && K->getSExtValue() >= 1))
-                facts.push_back(SE.getSCEV(x));
-        };
-        for (BasicBlock &BB : O) {
-            auto *BI = dyn_cast<BranchInst>(BB.getTerminator());
-            if (!BI || !BI->isConditional()) continue;
-            for (unsigned s = 0; s < 2; ++s)
-                if (DT.dominates(BasicBlockEdge(&BB, BI->getSuccessor(s)), L->getHeader()))
-                    collect(BI->getCondition(), s == 0);
-        }
-        return facts;
-    }
-
     // R == R2, two radices that differ only by casts. Mapped to kernel
     // values they must be equal, or be sext(t) and zext(t) of one narrow t
-    // that a guard of the loop shows positive.
+    // that a guard shows positive.
     bool provenEqual(Loop *L, const SCEV *R, const SCEV *R2) {
-        auto &SK = FAM.getResult<ScalarEvolutionAnalysis>(KI.K);
         const SCEV *a = KI.toKernel(R, SK), *b = KI.toKernel(R2, SK);
         if (!a || !b) return false;
         if (sameSCEV(SK, a, b)) return true;
@@ -334,9 +391,11 @@ private:
         bool sa = false, sb = false;
         const SCEV *ta = narrow(a, sa), *tb = narrow(b, sb);
         if (!ta || !tb || ta != tb || sa == sb) return false;
-        for (const SCEV *x : positiveOnEntry(L))
-            if (const SCEV *xk = KI.toKernel(x, SK); xk && xk == ta) return true;
-        return false;
+        // t > 0: the outlined side's narrow value, or the kernel's.
+        for (const SCEV *r : {R, R2})
+            if (auto *C = dyn_cast<SCEVCastExpr>(r); C && isPositive(C->getOperand(), L))
+                return true;
+        return llvm::any_of(kernelFacts, [&](const EntryFact &f) { return f.x == ta; });
     }
 };
 

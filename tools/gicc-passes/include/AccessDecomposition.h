@@ -28,8 +28,10 @@
 //   - i64 arithmetic without flags is taken modulo 2^64, which is exact
 //     for an address; a division's dividend must instead be recognised as
 //     X minus earlier digits, whose value is in range by construction.
-// Radices are trip-count products; they are taken to be positive and
-// below 2^63, as trip counts are.
+// The digits are a box only when every radix is positive: the caller must
+// prove each of AccessDecomp::radix > 0 (a user's own i / m looks the same
+// as a collapse digit), and that the IV's range N is n_1 * R_1. Radices
+// are taken to be below 2^63, as trip counts are.
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -67,7 +69,7 @@ bool sameSCEV(llvm::ScalarEvolution &SE, const llvm::SCEV *a, const llvm::SCEV *
 const llvm::SCEV *exactDivide(llvm::ScalarEvolution &SE, const llvm::SCEV *a,
                               const llvm::SCEV *b);
 
-// One per worksharing loop: every store in it must agree on the digits.
+// Decomposes one store address; use a fresh decomposer per store.
 class AccessDecomposer {
 public:
     AccessDecomposer(llvm::ScalarEvolution &SE, const llvm::DataLayout &DL,

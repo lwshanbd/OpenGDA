@@ -243,6 +243,10 @@ struct Plan {
     const SCEV *c, *d;    // block [LB,UB] owns srcObj + c*LB + d, c*(UB-LB+1) bytes
     const SCEV *lb0;      // first distribute iteration (i64)
     const SCEV *peer, *dst;
+    // Some write covers the range on every iteration. The element grain
+    // sends only what is stored, so it needs this; the block grain sends
+    // whole blocks and does not.
+    bool covered;
 };
 
 class ChunkAnalyzer {
@@ -337,7 +341,7 @@ private:
 
         for (CallInst *CI : plain) {
             Value *obj = stripToObject(*KI, CI->getArgOperand(2), nullptr);
-            if (obj && W->dense.count(obj) && CI->getFunction() != KI->outlined)
+            if (obj && W->storesTo.count(obj) && CI->getFunction() != KI->outlined)
                 report(CI, Verdict::Race,
                        "ompx_put in the teams region runs once per team, after "
                        "only that team's blocks of '" + objName(obj) +
@@ -395,26 +399,29 @@ private:
         Value *obj = stripToObject(KI, CI->getArgOperand(2), &off);
         if (!obj || !isa<Argument>(obj))
             return illegal("put source is not a kernel argument plus a constant");
-        if (auto b = llvm::find_if(KF.W.boxes, [&](auto &b) { return b.obj == obj; });
-            b != KF.W.boxes.end()) {
-            if (b->box.stride.size() == 1)
-                return illegal(stridedMessage(
-                    obj, scevStr(b->box.stride[0]),
-                    KI.DL.getTypeStoreSize(b->st->getValueOperand()->getType())));
-            return illegal("writes to '" + objName(obj) +
-                           "' are multi-dimensional (collapse); "
-                           "ompx_pipelined_put splits 1-D blocks only");
+        // Every write to the source is the same dense 1-D range.
+        const BoxWrite *first = nullptr;
+        bool covered = false;   // some write runs on every iteration
+        for (const BoxWrite &b : KF.W.boxes) {
+            if (b.obj != obj) continue;
+            if (b.stride.size() != 1)
+                return illegal("writes to '" + objName(obj) +
+                               "' are multi-dimensional (collapse); "
+                               "ompx_pipelined_put splits 1-D blocks only");
+            auto *cC = dyn_cast<SCEVConstant>(b.stride[0]);
+            if (!cC || cC->getAPInt().getZExtValue() != b.storeSize)
+                return illegal(stridedMessage(obj, scevStr(b.stride[0]), b.storeSize));
+            if (first && (!sameSCEV(SE, b.stride[0], first->stride[0]) ||
+                          !sameSCEV(SE, b.offset, first->offset)))
+                return illegal("object '" + objName(obj) +
+                               "' is written with more than one access pattern");
+            first = first ? first : &b;
+            covered |= b.unconditional;
         }
-        auto it = KF.W.dense.find(obj);
-        if (it == KF.W.dense.end())
+        if (!first)
             return illegal("put source '" + objName(obj) +
                            "' is not written by the worksharing loop");
         if (std::string why = writesOutsideLoop(KI, obj); !why.empty()) return illegal(why);
-        const DenseWrite &dw = it->second;
-        auto *cC = cast<SCEVConstant>(dw.c);
-        if (cC->getAPInt().getZExtValue() != dw.storeSize)
-            return illegal(stridedMessage(obj, std::to_string(cC->getAPInt().getSExtValue()),
-                                          dw.storeSize));
 
         // Trip count in the bounds' own width. It equals the true count only
         // if ub0 - lb0 + 1 does not wrap there; prove that where the loop
@@ -433,8 +440,8 @@ private:
             return illegal("cannot prove the distribute trip count " + scevStr(ub0n) +
                            " - " + scevStr(lb0n) + " + 1 does not wrap");
         const SCEV *lb0 = KI.extDist(SE, lb0n, I64);
-        const SCEV *c   = SE.getNoopOrSignExtend(dw.c, I64);
-        const SCEV *d   = SE.getNoopOrSignExtend(dw.d, I64);
+        const SCEV *c   = first->stride[0];
+        const SCEV *d   = first->offset;
         const SCEV *wantOff   = SE.getAddExpr(SE.getMulExpr(c, lb0), d);
         const SCEV *wantBytes = SE.getMulExpr(c, KI.extDist(SE, SE.getAddExpr(span, one), I64));
         const SCEV *bytes = KI.normalize(SE, SE.getSCEV(onLoopPath(KF, CI->getArgOperand(3))));
@@ -447,7 +454,7 @@ private:
         const SCEV *dst  = KI.normalize(SE, SE.getSCEV(CI->getArgOperand(1)));
         if (!onlyFormals(peer, KI.K) || !onlyFormals(dst, KI.K))
             return illegal("peer or dst differs between teams");
-        return Plan{CI, obj, c, d, lb0, peer, dst};
+        return Plan{CI, obj, c, d, lb0, peer, dst, covered};
     }
 
     void printPlan(const KernelFacts &KF, const Plan &P) {
