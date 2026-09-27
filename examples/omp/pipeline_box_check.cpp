@@ -11,6 +11,10 @@
 //   grid   collapse(2) over padded rows; the range starts and ends mid-row.
 //   trans  collapse(2) with the loop order transposed to the layout.
 //
+// slab states its puts after the loop in a teams region; grid and trans
+// state theirs in the body of a combined construct, the form that keeps
+// the kernel in SPMD mode. Both forms are checked.
+//
 // Values depend on the step, the sender and the index; ghost cells keep
 // the value they were given once at the start. After the fence each rank
 // checks its receive buffers word for word, including the words just
@@ -70,26 +74,24 @@ static void slab_kernel(uint32_t* a, int step, int rank, int left, uint32_t* to_
 
 static void grid_kernel(uint32_t* b, int step, int rank, int right, uint32_t* to) {
     const int64_t bytes = (GRID_HI - GRID_LO) * 4;
-    #pragma omp target teams is_device_ptr(b, to) firstprivate(step, rank, right, bytes)
-    {
-        #pragma omp distribute parallel for collapse(2)
-        for (int64_t i = 0; i < NR; ++i)
-            for (int64_t j = 0; j < NC; ++j)
-                b[i * LD + j] = val(step, rank, 1, i * LD + j);
-        ompx_pipelined_put(right, to, b + GRID_LO, bytes);
-    }
+    #pragma omp target teams distribute parallel for collapse(2) is_device_ptr(b, to) \
+            firstprivate(step, rank, right, bytes)
+    for (int64_t i = 0; i < NR; ++i)
+        for (int64_t j = 0; j < NC; ++j) {
+            b[i * LD + j] = val(step, rank, 1, i * LD + j);
+            ompx_pipelined_put(right, to, b + GRID_LO, bytes);
+        }
 }
 
 static void trans_kernel(uint32_t* c, int step, int rank, int right, uint32_t* to) {
     const int64_t bytes = TRANS_WORDS * 4;
-    #pragma omp target teams is_device_ptr(c, to) firstprivate(step, rank, right, bytes)
-    {
-        #pragma omp distribute parallel for collapse(2)
-        for (int64_t i = 0; i < NR; ++i)
-            for (int64_t j = 0; j < NC; ++j)
-                c[j * LD + i] = val(step, rank, 2, j * LD + i);
-        ompx_pipelined_put(right, to, c, bytes);
-    }
+    #pragma omp target teams distribute parallel for collapse(2) is_device_ptr(c, to) \
+            firstprivate(step, rank, right, bytes)
+    for (int64_t i = 0; i < NR; ++i)
+        for (int64_t j = 0; j < NC; ++j) {
+            c[j * LD + i] = val(step, rank, 2, j * LD + i);
+            ompx_pipelined_put(right, to, c, bytes);
+        }
 }
 
 // Words of `got` that differ from what `sender` produced in `step`. `box`
