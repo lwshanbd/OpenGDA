@@ -116,13 +116,16 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                 });
             // Phase 2 (omp-dwq): the OpenMP markers survive only AFTER the
             // inliner has run, so the omp passes attach at OptimizerLast.
-            // Each pass self-gates on Mode::OmpDwq, so this block is inert
-            // in every other mode (Discover / Lower / Passthrough).
+            // The trace and lowering passes are shared with the HIP path,
+            // which runs them at EarlySimplification in Lower mode; adding
+            // them here as well would put a second trace call at every
+            // launch site, so the tail of this block is omp-dwq only.
             PB.registerOptimizerLastEPCallback(
                 GICC_EP_LAMBDA_HEAD(MPM) {
                     MPM.addPass(GICCWriteSummaryPass());
                     MPM.addPass(GICCChunkAnalysisPass());
                     MPM.addPass(GICCNoDbMirrorPass());
+                    if (getConfig().mode != Mode::OmpDwq) return;
                     MPM.addPass(GICCOmpDeviceDiscoveryPass());
                     MPM.addPass(GICCOmpHostDiscoveryPass());
                     MPM.addPass(GICCTraceSynthesisPass());
