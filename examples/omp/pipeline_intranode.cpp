@@ -17,9 +17,12 @@
 //                pointer (what the library's put_auto does on the node).
 //   compiled     the serial-ce kernel with the send stated inside it as
 //                ompx_pipelined_put; the gicc-passes plugin (chunk-lower)
-//                proves it splittable and rewrites it into one send per
-//                dist_schedule block, issued as that block completes. Nothing
-//                about the pipelining is written by hand.
+//                proves it splittable and rewrites it: at element grain
+//                every word is stored to the peer as it is produced, at block
+//                grain each dist_schedule block is sent as it completes.
+//                Nothing about the pipelining is written by hand.
+//   compute-teams  the compiled kernel's shape without the send, to tell
+//                what the shape costs from what sending costs.
 //   nobarrier    pipelined without waiting for the block to be complete:
 //                threads send words other threads may not have written yet
 //                (the copy runs in reverse order so they are other threads'
@@ -33,9 +36,9 @@
 // stale or torn block is caught.
 //
 // Build (the pass must run on the device compile, or ompx_pipelined_put
-// does not link):
+// does not link; GICC_CHUNK_GRAIN=element|block picks the grain):
 //   GICC_MODE=chunk-lower GIOMP_BACKEND=cuda \
-//   GIOMP_EXTRA_FLAGS=-fpass-plugin=<build>/libgicc-passes.so \
+//   GIOMP_EXTRA_FLAGS="-foffload-lto -fpass-plugin=<build>/libgicc-passes.so" \
 //   bash examples/omp/build_giomp_example.sh examples/omp/pipeline_intranode.cpp OUT
 // Run  : GICC_HALO_IPC=1 GICC_PROXY_ENABLED=1 GICC_SKIP_DWQ_INIT=1 \
 //            srun -N1 -n4 --gpus-per-node=4 --gpu-bind=none ./OUT [options]
@@ -116,11 +119,12 @@ struct Ctx {
     int me, left, right, np;
 };
 
-enum class Variant { ComputeOnly, CopyOnly, SerialCE, SerialKC, Compiled, NoBarrier };
+enum class Variant { ComputeOnly, ComputeTeams, CopyOnly, SerialCE, SerialKC, Compiled, NoBarrier };
 
 static const char* name(Variant v) {
     switch (v) {
         case Variant::ComputeOnly: return "compute-only";
+        case Variant::ComputeTeams: return "compute-teams";
         case Variant::CopyOnly:    return "copy-only";
         case Variant::SerialCE:    return "serial-ce";
         case Variant::SerialKC:    return "serial-kc";
@@ -157,6 +161,17 @@ static void step(Variant v, const Ctx& c, const Opts& o, int it, size_t chunk) {
     switch (v) {
     case Variant::ComputeOnly:
         compute(c, o, it);
+        break;
+    case Variant::ComputeTeams:
+        // The compiled variant's kernel shape (teams region around a
+        // dist_schedule loop) without the send: separates what the shape
+        // costs from what sending costs.
+        #pragma omp target teams num_teams(o.teams) is_device_ptr(src) \
+                firstprivate(n, me, it, work, chunk)
+        {
+            #pragma omp distribute parallel for dist_schedule(static, chunk)
+            for (size_t i = 0; i < n; ++i) src[i] = produce(me, it, i, work);
+        }
         break;
     case Variant::CopyOnly:
         copy_kernel(c, o);
@@ -225,7 +240,7 @@ static void clear_dst(const Ctx& c, const Opts& o) {
     for (size_t i = 0; i < n; ++i) dst[i] = 0xDEADBEEFu;
 }
 
-static bool sends(Variant v) { return v != Variant::ComputeOnly; }
+static bool sends(Variant v) { return v != Variant::ComputeOnly && v != Variant::ComputeTeams; }
 static bool produces(Variant v) { return v != Variant::CopyOnly; }
 
 // Runs verify_iters checked iterations, then timed iterations. Returns the
@@ -284,7 +299,7 @@ int main(int argc, char** argv) {
         run(v, c, o, chunk, ms, bad);
         if (c.me != 0) return;
         char ch[32] = "-";
-        if (v == Variant::Compiled || v == Variant::NoBarrier) std::snprintf(ch, sizeof ch, "%zu", chunk);
+        if (v == Variant::Compiled || v == Variant::NoBarrier || v == Variant::ComputeTeams) std::snprintf(ch, sizeof ch, "%zu", chunk);
         const bool checked = sends(v) && produces(v);
         std::printf("%-13s chunk=%-8s %9.3f ms  %8.1f GB/s  %s\n", name(v), ch, ms,
                     bytes / (ms * 1e6),
@@ -302,6 +317,7 @@ int main(int argc, char** argv) {
                         "verify_iters=%d\n", c.np, o.n, bytes / 1e6, o.work, o.teams,
                         o.iters, o.verify_iters);
         line(Variant::ComputeOnly, 0);
+        for (size_t ch : o.chunks) line(Variant::ComputeTeams, ch);
         line(Variant::CopyOnly, 0);
         line(Variant::SerialCE, 0);
         line(Variant::SerialKC, 0);
