@@ -11,6 +11,9 @@
 // Same node, so "send" is a store through ompx_peer_ptr (NVLink / xGMI) or a
 // copy-engine copy. Variants:
 //
+//   compute-only / copy-only  compute alone, copy alone: the max(compute,
+//                copy) bound pipelining can at best reach
+//
 //   serial-ce    compute kernel, then host ompx_put (copy engine). The
 //                program as a user writes it.
 //   serial-kc    compute kernel, then a copy kernel storing through the peer
@@ -42,8 +45,11 @@
 //   bash examples/omp/build_giomp_example.sh examples/omp/pipeline_intranode.cpp OUT
 // Run  : GICC_HALO_IPC=1 GICC_PROXY_ENABLED=1 GICC_SKIP_DWQ_INIT=1 \
 //            srun -N1 -n4 --gpus-per-node=4 --gpu-bind=none ./OUT [options]
-// Options: --n WORDS --work ROUNDS | --works R1,R2,... --teams T --iters I --verify-iters V
-//          --chunks C1,C2,...
+//        With GICC_HALO_IPC=0 nothing is IPC-mapped: only serial-ce and
+//        compiled run, the latter through its proxy fallback.
+// Options: --n WORDS --work ROUNDS | --works R1,R2,... --teams T --iters I
+//          --warmup W --verify-iters V --chunks C1,C2,...
+// Exit code 1 when a checked variant loses a word or the control does not.
 
 #include "gicc/omp.h"
 #include "gicc/omp_pipeline.h"
@@ -85,8 +91,12 @@ struct Opts {
 
 static Opts parse(int argc, char** argv) {
     Opts o;
-    for (int a = 1; a + 1 < argc; a += 2) {
+    for (int a = 1; a < argc; a += 2) {
         std::string k = argv[a];
+        if (a + 1 == argc) {
+            std::fprintf(stderr, "option %s needs a value\n", k.c_str());
+            std::exit(2);
+        }
         const char* v = argv[a + 1];
         if (k == "--n") o.n = std::strtoull(v, nullptr, 0);
         else if (k == "--work") o.work = std::atoi(v);
@@ -283,30 +293,45 @@ int main(int argc, char** argv) {
     c.src = (uint32_t*)ompx_alloc(bytes);
     c.dst = (uint32_t*)ompx_alloc(bytes);
     c.peer_dst = (uint32_t*)ompx_peer_ptr(c.right, c.dst);
-    if (c.np < 2 || c.peer_dst == nullptr) {
-        std::fprintf(stderr, "rank %d: need >= 2 ranks on one node with "
-                             "GICC_HALO_IPC=1 (peer pointer is NULL)\n", c.me);
+    if (c.np < 2) {
+        std::fprintf(stderr, "need at least 2 ranks\n");
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
+    // Without an IPC mapping (GICC_HALO_IPC=0, or a peer on another node)
+    // only the variants that do not store through the peer pointer run, and
+    // the compiled one takes its non-IPC fallback: one proxy put per block.
+    int mapped = c.peer_dst != nullptr, all_mapped = 0;
+    MPI_Allreduce(&mapped, &all_mapped, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
     ompx_prepare();   // publishes the device context the block sends use
     ompx_barrier();
 
     if (o.works.empty()) o.works.push_back(o.work);
 
+    // A variant that must deliver every word FAILs on any bad word; the
+    // nobarrier control FAILs if it delivers them all, which would mean the
+    // check could not have seen a torn block. Either makes the exit code 1.
+    int failures = 0;
     auto line = [&](Variant v, size_t chunk) {
         double ms;
         unsigned long long bad;
         run(v, c, o, chunk, ms, bad);
+        const bool checked = sends(v) && produces(v);
+        const bool control = v == Variant::NoBarrier;
+        const bool ok = !checked || (control ? bad != 0 : bad == 0);
+        failures += !ok;
         if (c.me != 0) return;
         char ch[32] = "-";
-        if (v == Variant::Compiled || v == Variant::NoBarrier || v == Variant::ComputeTeams) std::snprintf(ch, sizeof ch, "%zu", chunk);
-        const bool checked = sends(v) && produces(v);
-        std::printf("%-13s chunk=%-8s %9.3f ms  %8.1f GB/s  %s\n", name(v), ch, ms,
-                    bytes / (ms * 1e6),
-                    !checked ? "(not checked)"
-                             : bad == 0 ? "bad=0 PASS"
-                                        : (std::string("bad=") + std::to_string(bad) +
-                                           " FAIL").c_str());
+        if (v == Variant::Compiled || v == Variant::NoBarrier || v == Variant::ComputeTeams)
+            std::snprintf(ch, sizeof ch, "%zu", chunk);
+        std::string verdict = !checked ? "(not checked)"
+                            : "bad=" + std::to_string(bad) + (ok ? " PASS" : " FAIL") +
+                                  (control ? " (control: must be > 0)" : "");
+        if (ms > 0)
+            std::printf("%-13s chunk=%-8s %9.3f ms  %8.1f GB/s  %s\n", name(v), ch, ms,
+                        bytes / (ms * 1e6), verdict.c_str());
+        else
+            std::printf("%-13s chunk=%-8s %9s     %8s       %s\n", name(v), ch, "-", "-",
+                        verdict.c_str());
         std::fflush(stdout);
     };
 
@@ -314,20 +339,22 @@ int main(int argc, char** argv) {
         o.work = w;
         if (c.me == 0)
             std::printf("\nranks=%d n=%zu words (%.1f MB) work=%d teams=%d iters=%d "
-                        "verify_iters=%d\n", c.np, o.n, bytes / 1e6, o.work, o.teams,
-                        o.iters, o.verify_iters);
+                        "verify_iters=%d%s\n", c.np, o.n, bytes / 1e6, o.work, o.teams,
+                        o.iters, o.verify_iters,
+                        all_mapped ? "" : " (peer not IPC-mapped: fallback path)");
         line(Variant::ComputeOnly, 0);
         for (size_t ch : o.chunks) line(Variant::ComputeTeams, ch);
-        line(Variant::CopyOnly, 0);
+        if (all_mapped) line(Variant::CopyOnly, 0);
         line(Variant::SerialCE, 0);
-        line(Variant::SerialKC, 0);
+        if (all_mapped) line(Variant::SerialKC, 0);
         for (size_t ch : o.chunks) line(Variant::Compiled, ch);
-        line(Variant::NoBarrier, o.chunks.front());
+        if (all_mapped) line(Variant::NoBarrier, o.chunks.front());
     }
 
+    MPI_Allreduce(MPI_IN_PLACE, &failures, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
     ompx_barrier();
     ompx_free(c.dst);
     ompx_free(c.src);
     ompx_finalize();
-    return 0;
+    return failures ? 1 : 0;
 }
