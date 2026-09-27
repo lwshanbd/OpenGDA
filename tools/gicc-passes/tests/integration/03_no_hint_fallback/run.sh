@@ -14,12 +14,12 @@ META_DIR="$(mktemp -d)"
 trap 'rm -rf "${META_DIR}"' EXIT
 
 cd "${GICC_ROOT}/benchmarks/Minimod_MPI"
-make TARGET=hip_gicc COMPILER=hipcc_gicc GICC_USE_LTO_PASS=1 clean >/dev/null
+make TARGET=hip_gicc COMPILER=hipcc_gicc GICC_USE_LTO_PASS=1 GICC_ROOT="${GICC_ROOT}" clean >/dev/null
 
 # NOTE: deliberately do NOT set GICC_HINT_IN — the pass must default
 # to IPC_OR_DWQ all on its own.
 GICC_MODE=lower GICC_META_DIR="${META_DIR}" \
-    make TARGET=hip_gicc COMPILER=hipcc_gicc GICC_USE_LTO_PASS=1 \
+    make TARGET=hip_gicc COMPILER=hipcc_gicc GICC_USE_LTO_PASS=1 GICC_ROOT="${GICC_ROOT}" all \
     > /tmp/03_build.log 2>&1 || { tail /tmp/03_build.log; exit 2; }
 
 OUT=$(PMI_MAX_KVS_ENTRIES=512 FI_MR_CACHE_MAX_COUNT=0 \

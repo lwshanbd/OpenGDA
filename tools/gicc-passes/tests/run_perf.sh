@@ -29,9 +29,9 @@ cd "${GICC_ROOT}/benchmarks/Minimod_MPI"
 META_DIR="${GICC_ROOT}/build_ofi/integration_scratch/perf_meta"
 rm -rf "${META_DIR}"; mkdir -p "${META_DIR}"
 
-make TARGET=hip_gicc COMPILER=hipcc_gicc GICC_USE_LTO_PASS=1 clean >/dev/null
+make TARGET=hip_gicc COMPILER=hipcc_gicc GICC_USE_LTO_PASS=1 GICC_ROOT="${GICC_ROOT}" clean >/dev/null
 GICC_MODE=lower GICC_META_DIR="${META_DIR}" \
-    make TARGET=hip_gicc COMPILER=hipcc_gicc GICC_USE_LTO_PASS=1 >/dev/null 2>&1
+    make TARGET=hip_gicc COMPILER=hipcc_gicc GICC_USE_LTO_PASS=1 GICC_ROOT="${GICC_ROOT}" all >/dev/null 2>&1
 
 declare -a RUNS=()
 for i in 1 2 3; do
