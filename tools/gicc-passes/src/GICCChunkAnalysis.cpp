@@ -41,6 +41,7 @@
 // team runs it once, after only its own blocks are written.
 
 #include "GICCChunkAnalysis.h"
+#include "AccessDecomposition.h"
 #include "GICCPassConfig.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -64,6 +65,7 @@
 #include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 
 #include <cstdlib>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -147,6 +149,17 @@ struct Kernel {
     std::string   error;
     // Stores in the outlined region, by the kernel object they write.
     DenseMap<Value *, SmallVector<StoreInst *, 2>> storesTo;
+    // Stores whose address is a multi-dimensional (collapsed) box.
+    struct BoxWrite {
+        StoreInst   *st;
+        Value       *obj;
+        AccessDecomp box;
+        bool         unconditional;   // runs on every iteration
+    };
+    SmallVector<BoxWrite, 4> boxes;
+    // write-summary mode: report a store it cannot describe and go on.
+    bool summary = false;
+    SmallVector<std::pair<StoreInst *, std::string>, 2> unknownStores;
 
     Kernel(Function &K) : K(K), DL(K.getParent()->getDataLayout()) {}
 
@@ -328,6 +341,14 @@ class Analyzer {
 public:
     Analyzer(Module &M, FunctionAnalysisManager &FAM, bool lower)
         : M(M), FAM(FAM), lower(lower) {}
+
+    // write-summary: what every kernel's worksharing loop writes.
+    void summarize() {
+        for (Function &F : M)
+            if (!F.isDeclaration() && F.getName().starts_with("__omp_offloading_") &&
+                !F.hasLocalLinkage())
+                summarizeKernel(F);
+    }
     bool modified() const { return changed; }
 
     void run() {
@@ -451,6 +472,7 @@ private:
             return false;
         }
 
+        std::optional<AccessDecomposer> decomposer;
         for (Instruction &I : instructions(O)) {
             if (auto *CB = dyn_cast<CallBase>(&I)) {
                 if (!isBenignCall(*CB)) {
@@ -470,23 +492,39 @@ private:
             Value *ptr = St->getPointerOperand();
             if (isa<AllocaInst>(getUnderlyingObject(ptr))) continue;   // thread-private
 
-            Loop *L = LI.getLoopFor(St->getParent());
-            if (!L) { KI.error = "store outside the worksharing loop body"; return false; }
-            // Inner loops (e.g. a per-element compute loop) are fine as long
-            // as the store itself sits in the worksharing loop: its address
-            // then depends on that loop's IV alone.
-            if (L->getParentLoop()) {
-                KI.error = "store inside a loop nested in the worksharing loop";
-                return false;
-            }
-            auto *AR = dyn_cast<SCEVAddRecExpr>(SE.getSCEV(ptr));
-            if (!AR || AR->getLoop() != L || !AR->isAffine()) {
-                KI.error = "store address is not affine in the loop IV";
-                return false;
-            }
+            Loop *inner = LI.getLoopFor(St->getParent());
+            if (!inner) { KI.error = "store outside the worksharing loop body"; return false; }
+            // The worksharing loop is the outermost one.
+            Loop *L = inner;
+            while (L->getParentLoop()) L = L->getParentLoop();
             const SCEVAddRecExpr *iv = checkLoopCoversBlock(
                 L, O, lbSlot, ubSlot, strideSlot, SE, KI);
             if (!iv) return false;
+            if (inner != L) {
+                // Inside a sequential loop nested in the worksharing loop (a
+                // per-element compute loop): fine if the address does not
+                // move with it, as it then depends on the worksharing IV
+                // alone. Conditional: the inner loop may not run.
+                bool moves = false;
+                for (Loop *l = inner; l != L; l = l->getParentLoop())
+                    moves |= !SE.isLoopInvariant(SE.getSCEV(ptr), l);
+                if (moves) {
+                    if (!storeFail(KI, St, "store address moves with a sequential "
+                                           "loop nested in the worksharing loop"))
+                        return false;
+                    continue;
+                }
+                if (!recordBox(KI, St, L, iv, SE, decomposer, /*inInnerLoop=*/true))
+                    return false;
+                continue;
+            }
+            auto *AR = dyn_cast<SCEVAddRecExpr>(SE.getSCEV(ptr));
+            if (!AR || AR->getLoop() != L || !AR->isAffine()) {
+                // Not base + c*i: try the multi-dimensional (collapse) form.
+                if (!recordBox(KI, St, L, iv, SE, decomposer, /*inInnerLoop=*/false))
+                    return false;
+                continue;
+            }
 
             // addr = base + c*iv + d, with the same IV the exit tests.
             const SCEV *c = nullptr, *stepTerm = nullptr;
@@ -519,6 +557,109 @@ private:
             }
             KI.storesTo[obj].push_back(St);
         }
+        return true;
+    }
+
+    // Values x with x > 0 on entry to L: the signed icmp x > 0 (or x >= 1)
+    // conditions of branches whose taken edge dominates the header.
+    SmallVector<const SCEV *, 4> positiveOnEntry(Loop *L, ScalarEvolution &SE) {
+        SmallVector<const SCEV *, 4> facts;
+        Function &O = *L->getHeader()->getParent();
+        auto &DT = FAM.getResult<DominatorTreeAnalysis>(O);
+        std::function<void(Value *, bool)> collect = [&](Value *c, bool holds) {
+            if (auto *BO = dyn_cast<BinaryOperator>(c)) {
+                // a & b true, or a | b false: both halves hold (negated).
+                if ((BO->getOpcode() == Instruction::And && holds) ||
+                    (BO->getOpcode() == Instruction::Or && !holds)) {
+                    collect(BO->getOperand(0), holds);
+                    collect(BO->getOperand(1), holds);
+                }
+                return;
+            }
+            auto *Cmp = dyn_cast<ICmpInst>(c);
+            if (!Cmp) return;
+            ICmpInst::Predicate P = holds ? Cmp->getPredicate() : Cmp->getInversePredicate();
+            Value *x = Cmp->getOperand(0), *y = Cmp->getOperand(1);
+            if (isa<ConstantInt>(x)) { std::swap(x, y); P = ICmpInst::getSwappedPredicate(P); }
+            auto *K = dyn_cast<ConstantInt>(y);
+            if (!K) return;
+            if ((P == ICmpInst::ICMP_SGT && K->getSExtValue() >= 0) ||
+                (P == ICmpInst::ICMP_SGE && K->getSExtValue() >= 1))
+                facts.push_back(SE.getSCEV(x));
+        };
+        for (BasicBlock &BB : O) {
+            auto *BI = dyn_cast<BranchInst>(BB.getTerminator());
+            if (!BI || !BI->isConditional()) continue;
+            for (unsigned s = 0; s < 2; ++s)
+                if (DT.dominates(BasicBlockEdge(&BB, BI->getSuccessor(s)), L->getHeader()))
+                    collect(BI->getCondition(), s == 0);
+        }
+        return facts;
+    }
+
+    // R == R2, two outlined-function radices that differ only by casts.
+    // Mapped to kernel values they must be equal, or be sext(t) and zext(t)
+    // of one narrow t that a guard of the loop shows positive.
+    bool provenEqual(Kernel &KI, Loop *L, const SCEV *R, const SCEV *R2,
+                     ScalarEvolution &SE) {
+        auto &SK = FAM.getResult<ScalarEvolutionAnalysis>(KI.K);
+        const SCEV *a = toKernel(R, KI, SK), *b = toKernel(R2, KI, SK);
+        if (!a || !b) return false;
+        if (isZero(SK, a, b)) return true;
+        auto narrow = [](const SCEV *s, bool &isSext) -> const SCEV * {
+            if (auto *X = dyn_cast<SCEVSignExtendExpr>(s)) { isSext = true; return X->getOperand(); }
+            if (auto *X = dyn_cast<SCEVZeroExtendExpr>(s)) { isSext = false; return X->getOperand(); }
+            return nullptr;
+        };
+        bool sa = false, sb = false;
+        const SCEV *ta = narrow(a, sa), *tb = narrow(b, sb);
+        if (!ta || !tb || ta != tb || sa == sb) return false;
+        for (const SCEV *x : positiveOnEntry(L, SE))
+            if (const SCEV *xk = toKernel(x, KI, SK); xk && xk == ta) return true;
+        return false;
+    }
+
+    // A store whose address is a box over the collapsed loop's digits.
+    // Returns false (with KI.error) only when the caller must give up; in
+    // write-summary mode an address it cannot describe is recorded instead.
+    // A store the analysis cannot describe: recorded in write-summary mode
+    // (returns true, go on), fatal otherwise (returns false, KI.error set).
+    static bool storeFail(Kernel &KI, StoreInst *St, const std::string &why) {
+        if (KI.summary) { KI.unknownStores.push_back({St, why}); return true; }
+        KI.error = why;
+        return false;
+    }
+
+    bool recordBox(Kernel &KI, StoreInst *St, Loop *L, const SCEVAddRecExpr *iv,
+                   ScalarEvolution &SE, std::optional<AccessDecomposer> &decomposer,
+                   bool inInnerLoop) {
+        auto fail = [&](const std::string &why) {
+            return storeFail(KI, St, "store address: " + why);
+        };
+        PHINode *ivPhi = nullptr;
+        // The phi may be narrower than the IV the exit test sees (an i32
+        // loop compared through a sext); match it widened.
+        for (PHINode &PN : L->getHeader()->phis())
+            if (SE.isSCEVable(PN.getType()) &&
+                PN.getType()->getScalarSizeInBits() <= iv->getType()->getScalarSizeInBits() &&
+                SE.getNoopOrSignExtend(SE.getSCEV(&PN), iv->getType()) == iv)
+                ivPhi = &PN;
+        if (!ivPhi) return fail("the loop IV is not a header phi");
+        if (!decomposer) decomposer.emplace(SE, KI.DL, L, ivPhi);
+        std::string why;
+        auto box = decomposer->decompose(St->getPointerOperand(), why);
+        if (!box) return fail(why);
+        for (auto &[R, R2] : box->assumedEqual)
+            if (!provenEqual(KI, L, R, R2, SE))
+                return fail("collapse radix " + str(R) + " and " + str(R2) +
+                            " differ only by a cast, but they cannot be proven equal");
+        Value *obj = KI.resolveOutlined(box->base);
+        if (!obj || !isa<Argument>(obj)) return fail("store base is not a kernel argument");
+        auto &DT = FAM.getResult<DominatorTreeAnalysis>(*St->getFunction());
+        BasicBlock *latch = L->getLoopLatch();
+        const bool always = !inInnerLoop && latch && DT.dominates(St->getParent(), latch);
+        KI.boxes.push_back({St, obj, *box, always});
+        KI.storesTo[obj].push_back(St);
         return true;
     }
 
@@ -712,6 +853,21 @@ private:
                 report(CI, "ILLEGAL", "put source is not a kernel argument plus a constant");
                 continue;
             }
+            if (auto b = llvm::find_if(KI.boxes, [&](auto &b) { return b.obj == obj; });
+                b != KI.boxes.end()) {
+                if (b->box.stride.size() == 1)
+                    report(CI, "ILLEGAL",
+                           "writes to '" + objName(obj) + "' are strided (" +
+                           str(b->box.stride[0]) + " bytes per iteration, " +
+                           std::to_string(KI.DL.getTypeStoreSize(
+                               b->st->getValueOperand()->getType())) +
+                           "-byte stores): a block does not own a contiguous range");
+                else
+                    report(CI, "ILLEGAL", "writes to '" + objName(obj) +
+                                          "' are multi-dimensional (collapse); "
+                                          "ompx_pipelined_put splits 1-D blocks only");
+                continue;
+            }
             auto it = writes.find(obj);
             if (it == writes.end()) {
                 report(CI, "ILLEGAL", "put source '" + objName(obj) +
@@ -791,6 +947,126 @@ private:
             if (verifyFunction(F, &errs()))
                 report_fatal_error("gicc-chunk: lowering produced invalid IR");
         }
+    }
+
+    // An outlined-function SCEV rewritten in terms of kernel values: its
+    // unknowns are captured values, mapped back through the parallel
+    // argument slots. Null when some part has no kernel counterpart.
+    const SCEV *toKernel(const SCEV *S, const Kernel &KI, ScalarEvolution &SK) {
+        if (auto *C = dyn_cast<SCEVConstant>(S)) return SK.getConstant(C->getAPInt());
+        if (auto *U = dyn_cast<SCEVUnknown>(S)) {
+            Value *v = U->getValue(), *kv = nullptr;
+            if (auto *A = dyn_cast<Argument>(v); A && A->getParent() == KI.outlined &&
+                                                 A->getArgNo() >= 2) {
+                kv = KI.slotValue(A->getArgNo() - 2);
+                if (kv) {
+                    kv = kv->stripPointerCasts();
+                    if (auto *I2P = dyn_cast<IntToPtrInst>(kv)) kv = I2P->getOperand(0);
+                    kv = KI.resolve(kv);
+                }
+            } else if (isa<LoadInst>(v)) {
+                kv = KI.resolveOutlined(v);
+            }
+            if (!kv || !SK.isSCEVable(kv->getType())) return nullptr;
+            return SK.getTruncateOrSignExtend(SK.getSCEV(kv), S->getType());
+        }
+        if (auto *C = dyn_cast<SCEVCastExpr>(S)) {
+            const SCEV *op = toKernel(C->getOperand(), KI, SK);
+            if (!op) return nullptr;
+            switch (S->getSCEVType()) {
+            case scTruncate:   return SK.getTruncateExpr(op, S->getType());
+            case scZeroExtend: return SK.getZeroExtendExpr(op, S->getType());
+            case scSignExtend: return SK.getSignExtendExpr(op, S->getType());
+            default:           return nullptr;
+            }
+        }
+        if (auto *N = dyn_cast<SCEVNAryExpr>(S)) {
+            SmallVector<const SCEV *, 4> ops;
+            for (const SCEV *op : N->operands()) {
+                const SCEV *k = toKernel(op, KI, SK);
+                if (!k) return nullptr;
+                ops.push_back(k);
+            }
+            if (isa<SCEVAddExpr>(S)) return SK.getAddExpr(ops);
+            if (isa<SCEVMulExpr>(S)) return SK.getMulExpr(ops);
+            if (isa<SCEVSMaxExpr>(S)) return SK.getSMaxExpr(ops);
+            if (isa<SCEVUMaxExpr>(S)) return SK.getUMaxExpr(ops);
+            if (isa<SCEVSMinExpr>(S)) return SK.getSMinExpr(ops);
+            if (isa<SCEVUMinExpr>(S)) return SK.getUMinExpr(ops);
+            return nullptr;
+        }
+        if (auto *D = dyn_cast<SCEVUDivExpr>(S)) {
+            const SCEV *a = toKernel(D->getLHS(), KI, SK), *b = toKernel(D->getRHS(), KI, SK);
+            return a && b ? SK.getUDivExpr(a, b) : nullptr;
+        }
+        return nullptr;
+    }
+
+    void summarizeKernel(Function &F) {
+        Kernel KI(F);
+        KI.summary = true;
+        const char *tag = "[gicc-write]   ";
+        out() << "[gicc-write] kernel " << F.getName() << "\n";
+        DenseMap<Value *, WritePattern> writes;
+        if (!locateStructure(KI) || !collectWrites(KI, writes)) {
+            out() << tag << "not analysable: " << KI.error << "\n";
+            return;
+        }
+        auto &SK = FAM.getResult<ScalarEvolutionAnalysis>(F);
+        auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);
+        Type *I64 = Type::getInt64Ty(F.getContext());
+
+        // Iteration count N = ub0 - lb0 + 1 of the distribute loop.
+        const Value *lbSlot = boundSlot(KI.distInit, 4), *ubSlot = boundSlot(KI.distInit, 5);
+        StoreInst *lbSt = nullptr, *ubSt = nullptr;
+        for (Instruction &I : instructions(F))
+            if (auto *SI = dyn_cast<StoreInst>(&I); SI && DT.dominates(SI, KI.distInit)) {
+                if (SI->getPointerOperand()->stripPointerCasts() == lbSlot) lbSt = SI;
+                if (SI->getPointerOperand()->stripPointerCasts() == ubSlot) ubSt = SI;
+            }
+        const SCEV *N = nullptr;
+        if (lbSt && ubSt) {
+            const SCEV *lb0 = normalize(SK, KI, SK.getSCEV(lbSt->getValueOperand()));
+            const SCEV *ub0 = normalize(SK, KI, SK.getSCEV(ubSt->getValueOperand()));
+            if (lb0->isZero())
+                N = SK.getAddExpr(KI.distSigned ? SK.getNoopOrSignExtend(ub0, I64)
+                                                : SK.getNoopOrZeroExtend(ub0, I64),
+                                  SK.getOne(I64));
+        }
+        auto list = [&](auto &v) {
+            std::string r = "[";
+            for (size_t i = 0; i < v.size(); ++i)
+                r += (i ? ", " : "") + (v[i] ? str(v[i]) : std::string("?"));
+            return r + "]";
+        };
+
+        for (auto &[obj, wp] : writes)
+            out() << tag << objName(obj) << ": 1-D stride=" << str(wp.c)
+                  << " offset=" << str(wp.d) << " extent=[" << (N ? str(N) : "?") << "]\n";
+        auto &SO = FAM.getResult<ScalarEvolutionAnalysis>(*KI.outlined);
+        for (auto &b : KI.boxes) {
+            SmallVector<const SCEV *, 4> ext, stride;
+            for (size_t d = 0; d < b.box.stride.size(); ++d) {
+                stride.push_back(toKernel(b.box.stride[d], KI, SK));
+                ext.push_back(d ? toKernel(b.box.extent[d], KI, SK) : nullptr);
+            }
+            // n_1 = N / R_1 (a 1-D box has n_1 = N).
+            if (N) {
+                if (b.box.radix.empty()) ext[0] = N;
+                else if (const SCEV *R1 = toKernel(b.box.radix[0], KI, SK))
+                    ext[0] = exactDivide(SK, N, SK.getNoopOrSignExtend(R1, I64));
+            }
+            const SCEV *off = toKernel(b.box.offset, KI, SK);
+            out() << tag << objName(b.obj) << ": " << b.box.stride.size() << "-D box"
+                  << " extent=" << list(ext) << " stride=" << list(stride)
+                  << " offset=" << (off ? str(off) : std::string("?"))
+                  << (b.unconditional ? "" : " (conditional)")
+                  << (b.box.trustedTrunc ? " (trusts loop-variable trunc)" : "") << "\n";
+            (void)SO;
+        }
+        for (auto &[St, why] : KI.unknownStores)
+            out() << tag << "store to " << *St->getPointerOperand()->getType()
+                  << " not analysable: " << why << "\n";
     }
 
     // The integer block bound behind parallel slot 0 or 1:
@@ -1042,6 +1318,14 @@ private:
 };
 
 }  // namespace
+
+PreservedAnalyses GICCWriteSummaryPass::run(Module &M, ModuleAnalysisManager &MAM) {
+    if (getConfig().mode != Mode::WriteSummary) return PreservedAnalyses::all();
+    if (!Triple(M.getTargetTriple()).isGPU()) return PreservedAnalyses::all();
+    auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
+    Analyzer(M, FAM, false).summarize();
+    return PreservedAnalyses::all();
+}
 
 PreservedAnalyses GICCChunkPrepPass::run(Module &M, ModuleAnalysisManager &) {
     if (getConfig().mode != Mode::ChunkLower) return PreservedAnalyses::all();

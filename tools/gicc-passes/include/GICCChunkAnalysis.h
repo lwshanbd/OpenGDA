@@ -15,6 +15,15 @@ public:
     static llvm::StringRef name() { return "GICCChunkAnalysisPass"; }
 };
 
+// GICC_MODE=write-summary: for every offload kernel, what its worksharing
+// loop writes -- 1-D ranges or collapsed boxes (extents and byte strides in
+// terms of kernel values) -- and why a store could not be described.
+class GICCWriteSummaryPass : public llvm::PassInfoMixin<GICCWriteSummaryPass> {
+public:
+    llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &);
+    static llvm::StringRef name() { return "GICCWriteSummaryPass"; }
+};
+
 // Runs before any inlining in chunk-lower mode: keeps the outlined parallel
 // regions of kernels with an ompx_pipelined_put out of their wrappers, so
 // the element-grain lowering rewrites the code the workers run. The

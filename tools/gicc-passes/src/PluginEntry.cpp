@@ -118,6 +118,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
             // in every other mode (Discover / Lower / Passthrough).
             PB.registerOptimizerLastEPCallback(
                 GICC_EP_LAMBDA_HEAD(MPM) {
+                    MPM.addPass(GICCWriteSummaryPass());
                     MPM.addPass(GICCChunkAnalysisPass());
                     MPM.addPass(GICCOmpDeviceDiscoveryPass());
                     MPM.addPass(GICCOmpHostDiscoveryPass());
@@ -164,6 +165,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-omp-device-discovery") {
                         MPM.addPass(GICCOmpDeviceDiscoveryPass());
+                        return true;
+                    }
+                    if (Name == "gicc-write-summary") {
+                        MPM.addPass(GICCWriteSummaryPass());
                         return true;
                     }
                     if (Name == "gicc-chunk-prep") {

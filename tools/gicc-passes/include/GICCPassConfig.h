@@ -11,6 +11,7 @@ enum class Mode {
     OmpDwq,        // Phase 2: DWQ-from-OpenMP (post-inline, gated)
     ChunkAnalyze,  // report whether pipelined puts can be split per block
     ChunkLower,    // ... and split the ones that can
+    WriteSummary,  // report every kernel's write sets
     Passthrough,
 };
 
