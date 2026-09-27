@@ -13,4 +13,5 @@ void step(float* c, const float* a, const float* b, int ns, int n) {
 }
 
 // CHECK: [gicc-write] kernel {{.*}}
+// CHECK-NEXT: when ((trunc i64 %1 to i32) > 0)
 // CHECK-NEXT: arg#5: 2-D box extent=[(sext i32 (trunc i64 %1 to i32) to i64), (sext i32 (trunc i64 %1 to i32) to i64)] stride=[(4 * (sext i32 (trunc i64 %1 to i32) to i64))<nsw>, 4] offset=0 (trusts loop-variable trunc)

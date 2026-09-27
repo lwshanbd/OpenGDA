@@ -1,6 +1,8 @@
 // OpenMP 5 non-rectangular collapse (inner bound depends on i): clang walks
-// the bounding rectangle and skips the points outside the triangle, so the
-// store is a conditional (may-write) box over the rectangle.
+// the bounding rectangle, with inner extent max(n, 1) - 1, and skips the
+// points outside the triangle. That radix is 0 for n = 1, so it cannot be
+// proven positive and the store is not described -- conservative: at best it
+// would be a conditional box.
 typedef long long llint;
 void step(float* a, llint n) {
     #pragma omp target teams distribute parallel for collapse(2) is_device_ptr(a)
@@ -10,4 +12,5 @@ void step(float* a, llint n) {
 }
 
 // CHECK: [gicc-write] kernel {{.*}}
-// CHECK-NEXT: arg#2: 2-D box extent=[%1, (-1 + (1 smax %1))<nsw>] stride=[(4 * %1), 4] offset=0 (conditional)
+// CHECK-NEXT: when (%1 > 0)
+// CHECK-NEXT: store to ptr not analysable: store address: collapse radix (-1 + (1 smax %4))<nsw> cannot be proven positive (a division the source wrote?)

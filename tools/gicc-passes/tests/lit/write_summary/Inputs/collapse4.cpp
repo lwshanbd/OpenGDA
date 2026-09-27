@@ -10,4 +10,5 @@ void step(float* a, llint n0, llint n1, llint n2, llint n3) {
 }
 
 // CHECK: [gicc-write] kernel {{.*}}
-// CHECK-NEXT: arg#5: 1-D stride=4 offset=0 extent=[(%1 * %2 * %3 * %4)]
+// CHECK-NEXT: when (%1 > 0) (%2 > 0) (%3 > 0) (%4 > 0)
+// CHECK-NEXT: arg#5: 4-D box extent=[%1, %2, %3, %4] stride=[(4 * %2 * %3 * %4), (4 * %3 * %4), (4 * %4), 4] offset=0

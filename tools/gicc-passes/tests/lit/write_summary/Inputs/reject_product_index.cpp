@@ -8,4 +8,5 @@ void step(float* a, llint n) {
 }
 
 // CHECK: [gicc-write] kernel {{.*}}
+// CHECK-NEXT: when (%1 > 0)
 // CHECK-NEXT: store to ptr not analysable: store address: product of two loop-variant values

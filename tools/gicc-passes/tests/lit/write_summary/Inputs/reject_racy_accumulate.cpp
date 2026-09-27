@@ -10,6 +10,7 @@ void step(float* C, const float* A, const float* B, int N, int Ns) {
 }
 
 // CHECK: [gicc-write] kernel {{.*}}
+// CHECK-NEXT: when ((trunc i64 %1 to i32) > 0) ((trunc i64 %2 to i32) > 0)
 // CHECK-NEXT: store to ptr not analysable: store address moves with a sequential loop nested in the worksharing loop
 // CHECK-NEXT: store to ptr not analysable: store address moves with a sequential loop nested in the worksharing loop
 // CHECK-NEXT: store to ptr not analysable: store address moves with a sequential loop nested in the worksharing loop

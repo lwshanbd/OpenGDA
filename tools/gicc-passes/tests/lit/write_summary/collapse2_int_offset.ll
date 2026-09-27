@@ -14,6 +14,7 @@
 ; }
 ;
 ; // CHECK: [gicc-write] kernel {{.*}}
+; // CHECK-NEXT: when ((trunc i64 %1 to i32) > 0) ((trunc i64 %2 to i32) > 0)
 ; // CHECK-NEXT: arg#3: 2-D box extent=[(sext i32 (trunc i64 %1 to i32) to i64), (sext i32 (trunc i64 %2 to i32) to i64)] stride=[(4 * (sext i32 (trunc i64 %2 to i32) to i64))<nsw>, 4] offset=(4 * (sext i32 (trunc i64 %2 to i32) to i64))<nsw> (trusts loop-variable trunc)
 
 source_filename = "Inputs/collapse2_int_offset.cpp"

@@ -13,6 +13,7 @@
 ; }
 ;
 ; // CHECK: [gicc-write] kernel {{.*}}
+; // CHECK-NEXT: when ((trunc i64 %1 to i32) > 0) ((trunc i64 %2 to i32) > 0)
 ; // CHECK-NEXT: store to ptr not analysable: store address: sign extension of index arithmetic that may have wrapped (no nsw)
 
 source_filename = "Inputs/reject_step2_int.cpp"

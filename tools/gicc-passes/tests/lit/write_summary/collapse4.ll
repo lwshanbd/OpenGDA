@@ -15,7 +15,8 @@
 ; }
 ;
 ; // CHECK: [gicc-write] kernel {{.*}}
-; // CHECK-NEXT: arg#5: 1-D stride=4 offset=0 extent=[(%1 * %2 * %3 * %4)]
+; // CHECK-NEXT: when (%1 > 0) (%2 > 0) (%3 > 0) (%4 > 0)
+; // CHECK-NEXT: arg#5: 4-D box extent=[%1, %2, %3, %4] stride=[(4 * %2 * %3 * %4), (4 * %3 * %4), (4 * %4), 4] offset=0
 
 source_filename = "Inputs/collapse4.cpp"
 target datalayout = "e-p6:32:32-i64:64-i128:128-v16:16-v32:32-n16:32:64"

@@ -4,8 +4,10 @@
 ; RUN:   -passes=gicc-write-summary -disable-output %s 2>&1 | %FileCheck %s
 ;
 ; // OpenMP 5 non-rectangular collapse (inner bound depends on i): clang walks
-; // the bounding rectangle and skips the points outside the triangle, so the
-; // store is a conditional (may-write) box over the rectangle.
+; // the bounding rectangle, with inner extent max(n, 1) - 1, and skips the
+; // points outside the triangle. That radix is 0 for n = 1, so it cannot be
+; // proven positive and the store is not described -- conservative: at best it
+; // would be a conditional box.
 ; typedef long long llint;
 ; void step(float* a, llint n) {
 ;     #pragma omp target teams distribute parallel for collapse(2) is_device_ptr(a)
@@ -15,7 +17,8 @@
 ; }
 ;
 ; // CHECK: [gicc-write] kernel {{.*}}
-; // CHECK-NEXT: arg#2: 2-D box extent=[%1, (-1 + (1 smax %1))<nsw>] stride=[(4 * %1), 4] offset=0 (conditional)
+; // CHECK-NEXT: when (%1 > 0)
+; // CHECK-NEXT: store to ptr not analysable: store address: collapse radix (-1 + (1 smax %4))<nsw> cannot be proven positive (a division the source wrote?)
 
 source_filename = "Inputs/collapse2_nonrectangular.cpp"
 target datalayout = "e-p6:32:32-i64:64-i128:128-v16:16-v32:32-n16:32:64"
@@ -33,19 +36,19 @@ target triple = "nvptx64-nvidia-cuda"
 @__omp_rtl_assume_no_nested_parallelism = weak_odr hidden local_unnamed_addr constant i32 0
 @0 = private unnamed_addr constant [23 x i8] c";unknown;unknown;0;0;;\00", align 1
 @1 = private unnamed_addr constant %struct.ident_t { i32 0, i32 2, i32 0, i32 22, ptr @0 }, align 8
-@__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l6_dynamic_environment = weak_odr protected global %struct.DynamicEnvironmentTy zeroinitializer
-@__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l6_kernel_environment = weak_odr protected constant %struct.KernelEnvironmentTy { %struct.ConfigurationEnvironmentTy { i8 0, i8 0, i8 2, i32 1, i32 128, i32 0, i32 0, i32 0, i32 0 }, ptr @1, ptr @__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l6_dynamic_environment }
+@__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l8_dynamic_environment = weak_odr protected global %struct.DynamicEnvironmentTy zeroinitializer
+@__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l8_kernel_environment = weak_odr protected constant %struct.KernelEnvironmentTy { %struct.ConfigurationEnvironmentTy { i8 0, i8 0, i8 2, i32 1, i32 128, i32 0, i32 0, i32 0, i32 0 }, ptr @1, ptr @__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l8_dynamic_environment }
 @2 = private unnamed_addr constant %struct.ident_t { i32 0, i32 2050, i32 0, i32 22, ptr @0 }, align 8
 @3 = private unnamed_addr constant %struct.ident_t { i32 0, i32 514, i32 0, i32 22, ptr @0 }, align 8
 
 ; Function Attrs: alwaysinline norecurse nounwind
-define weak_odr protected ptx_kernel void @__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l6(ptr noalias noundef %0, i64 noundef %1, ptr noundef %2) local_unnamed_addr #0 {
+define weak_odr protected ptx_kernel void @__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l8(ptr noalias noundef %0, i64 noundef %1, ptr noundef %2) local_unnamed_addr #0 {
   %4 = alloca i64, align 8
   %5 = alloca i64, align 8
   %6 = alloca i64, align 8
   %7 = alloca i32, align 4
   %8 = alloca [4 x ptr], align 8
-  %9 = tail call i32 @__kmpc_target_init(ptr nonnull @__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l6_kernel_environment, ptr %0) #2
+  %9 = tail call i32 @__kmpc_target_init(ptr nonnull @__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l8_kernel_environment, ptr %0) #2
   %10 = icmp eq i32 %9, -1
   br i1 %10, label %12, label %11
 
@@ -103,7 +106,7 @@ define weak_odr protected ptx_kernel void @__omp_offloading_6bc59cba_a5004525__Z
   store ptr %41, ptr addrspace(5) %31, align 8, !tbaa !17, !noalias !8
   store ptr %33, ptr addrspace(5) %34, align 8, !tbaa !17, !noalias !8
   store ptr %2, ptr addrspace(5) %36, align 8, !tbaa !17, !noalias !8
-  call void @__kmpc_parallel_51(ptr nonnull @1, i32 %13, i32 1, i32 -1, i32 -1, ptr nonnull @__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l6_omp_outlined_omp_outlined, ptr null, ptr nonnull %8, i64 4) #2, !noalias !8
+  call void @__kmpc_parallel_51(ptr nonnull @1, i32 %13, i32 1, i32 -1, i32 -1, ptr nonnull @__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l8_omp_outlined_omp_outlined, ptr null, ptr nonnull %8, i64 4) #2, !noalias !8
   %42 = load i64, ptr addrspace(5) %22, align 8, !tbaa !11, !noalias !8
   %43 = load i64, ptr addrspace(5) %20, align 8, !tbaa !11, !noalias !8
   %44 = add nsw i64 %43, %42
@@ -141,7 +144,7 @@ declare void @llvm.lifetime.end.p0(i64 immarg, ptr captures(none)) #1
 declare void @__kmpc_distribute_static_init_8(ptr, i32, i32, ptr, ptr, ptr, ptr, i64, i64) local_unnamed_addr #2
 
 ; Function Attrs: alwaysinline norecurse nounwind
-define internal void @__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l6_omp_outlined_omp_outlined(ptr noalias noundef readonly captures(none) %0, ptr noalias readnone captures(none) %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, ptr noundef writeonly captures(none) %5) #3 {
+define internal void @__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l8_omp_outlined_omp_outlined(ptr noalias noundef readonly captures(none) %0, ptr noalias readnone captures(none) %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, ptr noundef writeonly captures(none) %5) #3 {
   %7 = alloca i64, align 8
   %8 = alloca i64, align 8
   %9 = alloca i64, align 8
@@ -241,7 +244,7 @@ attributes #6 = { nounwind memory(readwrite) }
 !llvm.module.flags = !{!1, !2, !3, !4, !5, !6}
 !llvm.ident = !{!7}
 
-!0 = !{i32 0, i32 1808112826, i32 -1526708955, !"_Z4stepPfx", i32 6, i32 0, i32 0}
+!0 = !{i32 0, i32 1808112826, i32 -1526708955, !"_Z4stepPfx", i32 8, i32 0, i32 0}
 !1 = !{i32 1, !"wchar_size", i32 4}
 !2 = !{i32 4, !"nvvm-reflect-ftz", i32 0}
 !3 = !{i32 7, !"openmp", i32 51}
@@ -250,8 +253,8 @@ attributes #6 = { nounwind memory(readwrite) }
 !6 = !{i32 7, !"frame-pointer", i32 2}
 !7 = !{!"clang version 21.1.8"}
 !8 = !{!9}
-!9 = distinct !{!9, !10, !"__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l6_omp_outlined: argument 0"}
-!10 = distinct !{!10, !"__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l6_omp_outlined"}
+!9 = distinct !{!9, !10, !"__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l8_omp_outlined: argument 0"}
+!10 = distinct !{!10, !"__omp_offloading_6bc59cba_a5004525__Z4stepPfx_l8_omp_outlined"}
 !11 = !{!12, !12, i64 0}
 !12 = !{!"long long", !13, i64 0}
 !13 = !{!"omnipotent char", !14, i64 0}

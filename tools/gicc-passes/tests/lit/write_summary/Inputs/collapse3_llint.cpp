@@ -12,4 +12,5 @@ void step(float* v, const float* u, llint x0, llint x1, llint y0, llint y1, llin
 }
 
 // CHECK: [gicc-write] kernel {{.*}}
+// CHECK-NEXT: when (((-1 * %2) + %1) > 0) (((-1 * %4) + %3) > 0) (((-1 * %6) + %5) > 0)
 // CHECK-NEXT: arg#10: 3-D box extent=[((-1 * %2) + %1), ((-1 * %4) + %3), ((-1 * %6) + %5)] stride=[(4 * ((2 * %7) + %8) * ((2 * %7) + %9)), ((4 * %9) + (8 * %7)), 4] offset=(4 * ((((2 * %7) + %9) * ((((2 * %7) + %8) * (%2 + %7)) + %4 + %7)) + %6 + %7))
