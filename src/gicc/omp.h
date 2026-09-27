@@ -12,7 +12,8 @@
 //
 //   Control:    ompx_init/finalize, ompx_get_rank_num/num_ranks
 //   Memory:     ompx_alloc, ompx_bind, ompx_free
-//   Movement:   ompx_peer_ptr (same-node direct access), ompx_put, ompx_get
+//   Movement:   ompx_peer_ptr (same-node direct access), ompx_put, ompx_get,
+//               ompx_put_no_db (a put whose doorbell rings at the next quiet)
 //   Signals:    ompx_put_signal, ompx_stage_put_signal, ompx_signal_wait,
 //               ompx_signal_read, ompx_signal_reset
 //   Completion: ompx_quiet, ompx_fence, ompx_barrier
@@ -112,6 +113,52 @@ void ompx_quiet_host(void);
 void ompx_barrier(void);
 void ompx_fence(void);      // quiet + barrier: call before reading peer writes
 
+// ---- deferred put -----------------------------------------------------------
+// ompx_put_no_db posts a put and leaves its doorbell for the next host ompx_quiet
+// (or ompx_fence): the source is read when the doorbell rings, not when the
+// put is posted. The call means exactly an ompx_put issued at the start of
+// that quiet, so the source may still be written in between -- post the halo
+// before the kernels that compute it:
+//
+//     ompx_fence();                               // delivers last step's halo
+//     ompx_put_no_db(peer, dst, src, bytes);      // this step's, sent next fence
+//     #pragma omp target teams loop ...           // writes src
+//     for (...) src[...] = ...;
+//
+// Built with the gicc-passes plugin in GICC_MODE=chunk-lower, every device
+// store into a posted source is also written into a same-node peer's dst as
+// it happens, and the quiet sends only what those stores did not cover. The
+// data sent is the same as a put at the quiet, given two rules:
+//   - dst belongs to the sender from the post until its quiet: the peer
+//     neither reads nor writes it in between (the same epoch rule a put
+//     issued at the quiet already needs, from the previous fence on).
+//   - Between the post and the quiet, the source is written only by device
+//     code built with the plugin, in the application's own device image --
+//     not by the host, `target update to`, a translation unit or shared
+//     library built without it, or a direct MPI transfer. Writes the runtime
+//     can see (a get into it, a self-put, a peer write ordered by
+//     ompx_barrier or ompx_signal_wait) make the quiet send it whole.
+// GICC_NODB_MIRROR=0 turns the mirroring off at run time.
+#define OMPX_NODB_MAX 8
+typedef struct ompx_nodb_entry {    // one mirrored post
+    char*              src;         // device address of the source
+    unsigned long long bytes;
+    char*              peer;        // the peer's dst, IPC-mapped
+    unsigned char*     map;         // one byte per 4-byte word: == epoch if sent
+} ompx_nodb_entry;
+typedef struct ompx_nodb_state {    // read by the plugin's instrumentation
+    char*           lo;             // [lo, hi) bounds every entry's source
+    char*           hi;
+    unsigned        n;
+    unsigned        epoch;          // 1..255, advanced by every quiet
+    int             poison;         // a write the plugin could not mirror
+    int             reserved;
+    ompx_nodb_entry e[OMPX_NODB_MAX];
+} ompx_nodb_state;
+// `state` is the device address of ompx__nodb in the application's image.
+void ompx_put_no_db_host(int peer, void* dst, const void* src, size_t bytes,
+                         void* state);
+
 // ---- explicit batched DWQ ---------------------------------------------------
 // ompx_put stages; nothing moves until a trigger is pulled. ompx_quiet pulls it
 // for you, so an application only calls ompx_trigger when it wants the transfer
@@ -127,6 +174,8 @@ ompx_ctx* ompx_prepare_ctx(void);
 #endif
 
 #if !defined(__HIPCC__) && !defined(__CUDACC__)
+#include <omp.h>
+
 // ---- one name, host or device ----------------------------------------------
 // These are `declare target`, so the same call works in ordinary code and
 // inside `#pragma omp target`. On the device they use the context published by
@@ -135,7 +184,16 @@ ompx_ctx* ompx_prepare_ctx(void);
 // issues those from the host and only pulls the trigger on the device.
 #pragma omp declare target
 static ompx_ctx* ompx__ctx = 0;
+// Weak, so every translation unit shares one copy in host and device image
+// alike; the plugin's instrumentation in any unit reads it by name.
+__attribute__((weak)) ompx_nodb_state ompx__nodb;
 #pragma omp end declare target
+
+static inline void ompx_put_no_db(int peer, void* dst, const void* src,
+                                  size_t bytes) {
+    ompx_put_no_db_host(peer, dst, src, bytes,
+                        omp_get_mapped_ptr(&ompx__nodb, omp_get_default_device()));
+}
 
 // The runtime's DeviceCtx is host-pinned and mapped and prepare() returns the
 // same device pointer for the life of the runtime, so this publishes it once;
@@ -182,10 +240,18 @@ inline void ompx_put(int peer, void* dst, const void* src, size_t bytes,
 #endif
 }
 
+// A get writes dst through the proxy, which no mirrored store sees: if dst
+// meets a posted source, the next quiet sends the sources whole.
+static inline void ompx__nodb_touch(const void* dst, size_t bytes) {
+    const char* p = (const char*)dst;
+    if (p < ompx__nodb.hi && p + bytes > ompx__nodb.lo) ompx__nodb.poison = 1;
+}
+
 inline void ompx_get(int peer, void* dst, const void* src, size_t bytes,
                      int lane = 0) {
 #if defined(__AMDGCN__) || defined(__NVPTX__)
     ompx_ctx* c = ompx__ctx;
+    ompx__nodb_touch(dst, bytes);
     gicc::omp::get(c, peer, c->heap_buf, ompx__off(c, src),
                    c->heap_buf, ompx__off(c, dst), bytes, lane);
 #else
@@ -198,6 +264,7 @@ inline void ompx_get(int peer, void* dst, const void* src, size_t bytes,
 inline void ompx_get_single(int peer, void* dst, const void* src, size_t bytes,
                             int lane = 0) {
     ompx_ctx* c = ompx__ctx;
+    ompx__nodb_touch(dst, bytes);
     gicc::omp::get_single(c, peer, c->heap_buf, ompx__off(c, src),
                           c->heap_buf, ompx__off(c, dst), bytes, lane);
 }

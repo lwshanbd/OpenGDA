@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <vector>
 
 #include "gicc/omp.h"
@@ -22,6 +23,16 @@
 #include "gicc/platform/ofi/runtime_helpers.h"
 
 namespace {
+
+// gicc-passes' GICCNoDbMirror.cpp reads ompx__nodb by these byte offsets.
+static_assert(offsetof(ompx_nodb_state, lo) == 0 && offsetof(ompx_nodb_state, hi) == 8 &&
+              offsetof(ompx_nodb_state, n) == 16 && offsetof(ompx_nodb_state, epoch) == 20 &&
+              offsetof(ompx_nodb_state, poison) == 24 && offsetof(ompx_nodb_state, e) == 32 &&
+              sizeof(ompx_nodb_entry) == 32 && sizeof(ompx_nodb_state) == 288,
+              "ompx_nodb_state layout");
+static_assert(offsetof(ompx_nodb_entry, src) == 0 && offsetof(ompx_nodb_entry, bytes) == 8 &&
+              offsetof(ompx_nodb_entry, peer) == 16 && offsetof(ompx_nodb_entry, map) == 24,
+              "ompx_nodb_entry layout");
 
 // gicc/omp.h mirrors these two leading fields for C target regions.
 static_assert(offsetof(gicc::DeviceCtx, trigger_addr_) == 0, "DeviceCtx layout");
@@ -238,6 +249,180 @@ size_t offset_of(const void* addr, const char* what) {
     std::abort();
 }
 
+// ---- deferred puts (ompx_put_no_db) -------------------------------------------
+// A posted put waits here for the next quiet. One the plugin can mirror --
+// same-node peer, word-aligned source, peer copy at the same offset modulo
+// 16, source disjoint from the other mirrored ones -- also takes a slot of
+// the device state, whose instrumented stores then repeat into the peer and
+// mark the words they covered. The quiet sends the rest.
+struct NoDbPut {
+    int    peer;
+    size_t dst_off, src_off, bytes;
+    int    slot;                    // entry in the device state, or -1
+};
+std::vector<NoDbPut> g_nodb;
+ompx_nodb_state* g_nodb_dev = nullptr;   // ompx__nodb in the application image
+ompx_nodb_state  g_nodb_shadow{};        // what the device holds
+// Set when a source may have been written behind the mirror's back: by a
+// get into it, by a self-put, or by another rank before a barrier or a
+// signal ordered its write ahead of our quiet.
+bool g_nodb_host_poison = false;
+int  g_nodb_mirror = -1;                 // GICC_NODB_MIRROR, read once
+// GICC_NODB_STATS=1 prints these at ompx_finalize. `mirrored` counts posts
+// given a device slot; whether any store fills it depends on the plugin.
+struct {
+    long posts, mirrored, poisoned_quiets;
+    double publish_s, flush_s;     // host time in post publishing and flushes
+} g_nodb_stats{};
+bool g_nodb_stats_on = false;
+unsigned long long* g_nodb_sent = nullptr;   // words the complements sent (stats)
+
+// Word maps outlive a post: an application posts the same ranges every
+// step. Stale bytes hold earlier epochs and never equal the current one,
+// until the epoch wraps and every map is cleared.
+struct NoDbMap { size_t src_off, bytes; unsigned char* map; };
+std::vector<NoDbMap> g_nodb_maps;
+
+bool nodb_mirror_enabled() {
+    if (g_nodb_mirror < 0) {
+        const char* e = std::getenv("GICC_NODB_MIRROR");
+        g_nodb_mirror = (e == nullptr || std::atoi(e) != 0) ? 1 : 0;
+    }
+    return g_nodb_mirror == 1;
+}
+
+unsigned char* nodb_map_for(size_t src_off, size_t bytes) {
+    for (const NoDbMap& m : g_nodb_maps)
+        if (m.src_off == src_off && m.bytes == bytes) return m.map;
+    void* map = nullptr;
+    const size_t words = bytes / 4;
+    require_gpu(gpuMalloc(&map, words), "allocate a put_no_db word map");
+    require_gpu(gpuMemset(map, 0, words), "clear a put_no_db word map");
+    g_nodb_maps.push_back(NoDbMap{src_off, bytes, static_cast<unsigned char*>(map)});
+    return static_cast<unsigned char*>(map);
+}
+
+// Copies [first, first + bytes) of the shadow to the device. A kernel still
+// running may read the state while it changes: every mix of old and new
+// fields only leaves words unmarked, provided an entry lands before the
+// count and bounds that expose it -- which the callers' order ensures.
+void nodb_publish(size_t first, size_t bytes) {
+    GpuStream_t s = gicc_runtime_ipc_stream(g_runtime);
+    require_gpu(gpuMemcpyAsync(reinterpret_cast<char*>(g_nodb_dev) + first,
+                               reinterpret_cast<char*>(&g_nodb_shadow) + first, bytes,
+                               gpuMemcpyHostToDevice, s),
+                "publish the put_no_db state");
+    require_gpu(gpuStreamSynchronize(s), "publish the put_no_db state");
+}
+
+constexpr size_t kNoDbHeader = offsetof(ompx_nodb_state, e);
+
+bool nodb_overlaps_mirrored(size_t off, size_t bytes) {
+    for (const NoDbPut& p : g_nodb)
+        if (p.slot >= 0 && off < p.src_off + p.bytes && p.src_off < off + bytes)
+            return true;
+    return false;
+}
+
+bool nodb_any_mirrored() {
+    for (const NoDbPut& p : g_nodb)
+        if (p.slot >= 0) return true;
+    return false;
+}
+
+// The words of `src` no mirrored store covered this epoch, copied into the
+// peer. Each thread takes four words and skips them on one map load when
+// all four are marked -- the common case.
+__global__ void nodb_complement(uint32_t* peer, const uint32_t* src,
+                                const unsigned char* map, size_t words,
+                                unsigned char epoch, unsigned long long* sent) {
+    unsigned long long n = 0;
+    const uint32_t all = 0x01010101u * epoch;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t w = ((size_t)blockIdx.x * blockDim.x + threadIdx.x) * 4; w < words;
+         w += stride * 4) {
+        if (w + 4 <= words && *reinterpret_cast<const uint32_t*>(map + w) == all)
+            continue;
+        for (size_t k = w; k < w + 4 && k < words; ++k)
+            if (map[k] != epoch) { peer[k] = src[k]; ++n; }
+    }
+    if (sent != nullptr && n != 0) atomicAdd(sent, n);
+}
+
+double nodb_now() {
+    timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+}
+
+// Rings every posted doorbell: what an ompx_put issued now would send.
+void nodb_flush() {
+    if (g_nodb.empty()) return;
+    const double t0 = nodb_now();
+    bool poisoned = g_nodb_host_poison;
+    ompx_nodb_entry slots[OMPX_NODB_MAX];
+    const unsigned mirrored = g_nodb_shadow.n;
+    if (mirrored > 0) {
+        // The writers have finished (the program would not put otherwise).
+        // Synchronizing makes their stores to the peer and the poison flag
+        // visible here; on CUDA it also catches a stray asynchronous writer,
+        // since libomptarget's streams share this context.
+        require_gpu(gpuDeviceSynchronize(), "wait for the source writers");
+        int dev_poison = 0;
+        require_gpu(gpuMemcpy(&dev_poison, &g_nodb_dev->poison, sizeof(int),
+                              gpuMemcpyDeviceToHost),
+                    "read the put_no_db poison flag");
+        poisoned = poisoned || dev_poison != 0;
+        std::memcpy(slots, g_nodb_shadow.e, sizeof(slots));
+    }
+    if (poisoned) ++g_nodb_stats.poisoned_quiets;
+
+    GpuStream_t s = gicc_runtime_ipc_stream(g_runtime);
+    const unsigned char epoch = (unsigned char)g_nodb_shadow.epoch;
+    for (const NoDbPut& p : g_nodb) {
+        if (p.slot < 0 || poisoned) {
+            ompx_put_host(p.peer, g_heap_base + p.dst_off, g_heap_base + p.src_off,
+                          p.bytes);
+            continue;
+        }
+        const ompx_nodb_entry& e = slots[p.slot];
+        const size_t words = p.bytes / 4;
+        if (words > 0) {
+            const unsigned threads = 256;
+            size_t blocks = (words / 4 + threads - 1) / threads;
+            if (blocks > 1024) blocks = 1024;
+            if (blocks == 0) blocks = 1;
+            nodb_complement<<<(unsigned)blocks, threads, 0, s>>>(
+                reinterpret_cast<uint32_t*>(e.peer), reinterpret_cast<const uint32_t*>(e.src),
+                e.map, words, epoch, g_nodb_sent);
+            require_gpu(gpuGetLastError(), "launch the put_no_db complement");
+        }
+        if (p.bytes % 4 != 0)
+            require_gpu(gpuMemcpyAsync(e.peer + words * 4, e.src + words * 4, p.bytes % 4,
+                                       gpuMemcpyDeviceToDevice, s),
+                        "send a put_no_db tail");
+        g_ipc_pending = true;
+    }
+    g_nodb.clear();
+    g_nodb_host_poison = false;
+
+    if (g_nodb_dev != nullptr) {
+        // Close the epoch. On wrap, clear every map after the complements
+        // above (same stream) have read them.
+        g_nodb_shadow.lo = g_nodb_shadow.hi = nullptr;
+        g_nodb_shadow.n = 0;
+        g_nodb_shadow.poison = 0;
+        if (++g_nodb_shadow.epoch > 255) {
+            g_nodb_shadow.epoch = 1;
+            for (const NoDbMap& m : g_nodb_maps)
+                require_gpu(gpuMemsetAsync(m.map, 0, m.bytes / 4, s),
+                            "clear a put_no_db word map");
+        }
+        nodb_publish(0, kNoDbHeader);
+    }
+    g_nodb_stats.flush_s += nodb_now() - t0;
+}
+
 }  // namespace
 
 extern "C" {
@@ -273,6 +458,23 @@ void ompx_init() {
 }
 
 void ompx_finalize() {
+    // A put still posted is sent, as the quiet it was waiting for would.
+    if (g_runtime != nullptr && !g_nodb.empty()) ompx_quiet_host();
+    if (g_runtime != nullptr && g_nodb_stats.posts > 0 && std::getenv("GICC_NODB_STATS")) {
+        unsigned long long sent = 0;
+        if (g_nodb_sent != nullptr)
+            (void)gpuMemcpy(&sent, g_nodb_sent, sizeof(sent), gpuMemcpyDeviceToHost);
+        std::printf("[giomp] rank %d put_no_db: %ld posts, %ld mirrored, %ld quiets "
+                    "poisoned, %llu words sent by complements, publish %.3f s, "
+                    "flush %.3f s\n", g_runtime->rank(), g_nodb_stats.posts,
+                    g_nodb_stats.mirrored, g_nodb_stats.poisoned_quiets, sent,
+                    g_nodb_stats.publish_s, g_nodb_stats.flush_s);
+    }
+    if (g_nodb_sent != nullptr) (void)gpuFree(g_nodb_sent);
+    g_nodb_sent = nullptr;
+    for (const NoDbMap& m : g_nodb_maps) (void)gpuFree(m.map);
+    g_nodb_maps.clear();
+    g_nodb_dev = nullptr;
     if (g_runtime != nullptr) g_runtime->reset();
     if (g_heap_base != nullptr) {
         (void)gpuFree(g_heap_base);
@@ -396,6 +598,8 @@ void ompx_put_host(int peer, void* dst, const void* src, size_t bytes) {
     if (g_runtime == nullptr) die("ompx_put before ompx_init");
     const size_t src_off = offset_of(src, "ompx_put src");
     const size_t dst_off = offset_of(dst, "ompx_put dst");
+    if (peer == g_runtime->rank() && nodb_overlaps_mirrored(dst_off, bytes))
+        g_nodb_host_poison = true;
 
     // Same node: copy straight into the peer's heap over NVLink/xGMI. The copy
     // rides the runtime's IPC stream, which ompx_quiet synchronizes.
@@ -426,6 +630,8 @@ void ompx_get_host(int peer, void* dst, const void* src, size_t bytes) {
     if (g_runtime == nullptr) die("ompx_get before ompx_init");
     const size_t dst_off = offset_of(dst, "ompx_get dst");
     const size_t src_off = offset_of(src, "ompx_get src");
+    // A copy no mirrored store sees: the next quiet sends the sources whole.
+    if (nodb_overlaps_mirrored(dst_off, bytes)) g_nodb_host_poison = true;
 
     void* peer_base = g_ipc_enabled ? g_runtime->peer_mapped(peer, g_heap.index)
                                     : nullptr;
@@ -449,6 +655,52 @@ void ompx_get_host(int peer, void* dst, const void* src, size_t bytes) {
     }
 }
 
+void ompx_put_no_db_host(int peer, void* dst, const void* src, size_t bytes,
+                         void* state) {
+    if (g_runtime == nullptr) die("ompx_put_no_db before ompx_init");
+    const size_t src_off = offset_of(src, "ompx_put_no_db src");
+    const size_t dst_off = offset_of(dst, "ompx_put_no_db dst");
+    if (bytes == 0) return;
+
+    // The one ompx__nodb of the application's device image (weak, so
+    // every unit shares it).
+    auto* dev = static_cast<ompx_nodb_state*>(state);
+    if (dev != nullptr && g_nodb_dev == nullptr) {
+        g_nodb_stats_on = std::getenv("GICC_NODB_STATS") != nullptr;
+        if (g_nodb_stats_on) {
+            require_gpu(gpuMalloc((void**)&g_nodb_sent, sizeof(*g_nodb_sent)), "stats");
+            require_gpu(gpuMemset(g_nodb_sent, 0, sizeof(*g_nodb_sent)), "stats");
+        }
+        g_nodb_dev = dev;
+        g_nodb_shadow = ompx_nodb_state{};
+        g_nodb_shadow.epoch = 1;
+        nodb_publish(0, sizeof(ompx_nodb_state));
+    }
+
+    NoDbPut p{peer, dst_off, src_off, bytes, -1};
+    char* peer_base = g_ipc_enabled
+        ? static_cast<char*>(g_runtime->peer_mapped(peer, g_heap.index)) : nullptr;
+    const unsigned k = g_nodb_shadow.n;
+    if (nodb_mirror_enabled() && g_nodb_dev != nullptr && peer_base != nullptr &&
+        k < OMPX_NODB_MAX && bytes >= 4 && src_off % 4 == 0 &&
+        ((dst_off - src_off) & 15) == 0 && !nodb_overlaps_mirrored(src_off, bytes)) {
+        const double t0 = nodb_now();
+        char* s0 = g_heap_base + src_off;
+        g_nodb_shadow.e[k] = ompx_nodb_entry{s0, bytes, peer_base + dst_off,
+                                             nodb_map_for(src_off, bytes)};
+        nodb_publish(kNoDbHeader + k * sizeof(ompx_nodb_entry), sizeof(ompx_nodb_entry));
+        g_nodb_shadow.n = k + 1;
+        if (k == 0 || s0 < g_nodb_shadow.lo) g_nodb_shadow.lo = s0;
+        if (k == 0 || s0 + bytes > g_nodb_shadow.hi) g_nodb_shadow.hi = s0 + bytes;
+        nodb_publish(0, offsetof(ompx_nodb_state, poison));
+        g_nodb_stats.publish_s += nodb_now() - t0;
+        p.slot = (int)k;
+        ++g_nodb_stats.mirrored;
+    }
+    ++g_nodb_stats.posts;
+    g_nodb.push_back(p);
+}
+
 // ---- signals ----------------------------------------------------------------
 
 unsigned long long ompx_signal_read_host(int sig) {
@@ -466,6 +718,8 @@ void ompx_signal_reset(int sig) {
 // forever.
 void ompx_signal_wait_host(int sig, unsigned long long ge) {
     check_slot(sig, "ompx_signal_wait");
+    // The signal may announce a peer's write into one of our sources.
+    if (nodb_any_mirrored()) g_nodb_host_poison = true;
     while (__atomic_load_n(&g_sig_host[sig], __ATOMIC_ACQUIRE) < ge) {
         ompx_trigger_host();          // release plain puts still staged
         g_runtime->progress();
@@ -510,6 +764,7 @@ void ompx_trigger_host(void);   // defined below, with the rest of the DWQ calls
 
 void ompx_quiet_host() {
     if (g_runtime == nullptr) return;
+    nodb_flush();
     // Descriptors staged by ompx_put sit in the queue until the NIC is told to
     // go; without this the completion counter below never reaches its threshold.
     ompx_trigger_host();
@@ -525,6 +780,10 @@ void ompx_quiet_host() {
 }
 
 void ompx_barrier() {
+    // A peer may have written one of our sources before this barrier, which
+    // orders that write ahead of our quiet. ompx_fence quiets first, so it
+    // never gets here with a post pending.
+    if (nodb_any_mirrored()) g_nodb_host_poison = true;
     MPI_Barrier(MPI_COMM_WORLD);
 }
 

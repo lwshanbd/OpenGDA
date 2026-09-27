@@ -187,6 +187,11 @@ uint64_t read_slot(int sig) {
     return *g_sig_host;
 }
 
+// ompx_put_no_db: this backend does not mirror, so a posted put is just an
+// ompx_put the next quiet issues.
+struct NoDbPut { int peer; void* dst; const void* src; size_t bytes; };
+std::vector<NoDbPut> g_nodb;
+
 }  // namespace
 
 extern "C" {
@@ -420,8 +425,18 @@ void ompx_stage_put_signal(int peer, void* dst, const void* src, size_t bytes,
 
 // Completes host-issued transfers and everything GPU threads have rung, which
 // is every device-side put of a target region that has returned.
+void ompx_put_no_db_host(int peer, void* dst, const void* src, size_t bytes,
+                         void* /*state*/) {
+    if (g_runtime == nullptr) die("ompx_put_no_db before ompx_init");
+    (void)offset_of(src, "ompx_put_no_db src");
+    (void)offset_of(dst, "ompx_put_no_db dst");
+    if (bytes != 0) g_nodb.push_back(NoDbPut{peer, dst, src, bytes});
+}
+
 void ompx_quiet_host() {
     if (g_runtime == nullptr) return;
+    for (const NoDbPut& p : g_nodb) ompx_put_host(p.peer, p.dst, p.src, p.bytes);
+    g_nodb.clear();
     if (g_ipc_pending) {
         g_ipc_pending = false;
         require_cuda(cudaStreamSynchronize(g_ipc_stream), "drain the IPC stream");

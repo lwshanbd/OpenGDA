@@ -37,6 +37,7 @@ using GpuIpcMemHandle_t = hipIpcMemHandle_t;
 #define gpuMemcpyDeviceToDevice  hipMemcpyDeviceToDevice
 #define gpuMemcpyDefault         hipMemcpyDefault
 #define gpuMemset                hipMemset
+#define gpuMemsetAsync           hipMemsetAsync
 #define gpuMemGetInfo            hipMemGetInfo
 #define gpuDeviceSynchronize     hipDeviceSynchronize
 #define gpuDeviceCanAccessPeer   hipDeviceCanAccessPeer
@@ -117,6 +118,7 @@ using GpuIpcMemHandle_t = cudaIpcMemHandle_t;
 #define gpuMemcpyDeviceToDevice  cudaMemcpyDeviceToDevice
 #define gpuMemcpyDefault         cudaMemcpyDefault
 #define gpuMemset                cudaMemset
+#define gpuMemsetAsync           cudaMemsetAsync
 #define gpuMemGetInfo            cudaMemGetInfo
 #define gpuDeviceSynchronize     cudaDeviceSynchronize
 #define gpuDeviceCanAccessPeer   cudaDeviceCanAccessPeer
