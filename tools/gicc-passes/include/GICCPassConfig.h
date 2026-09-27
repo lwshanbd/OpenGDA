@@ -34,13 +34,17 @@ enum class Target {
 //   GICC_FEATURES_OUT  ("")
 //   GICC_HINT_IN       ("")
 //   GICC_CHUNK_GRAIN   ("element")
+// How chunk-lower sends a pipelined put: every store mirrored to the peer
+// as it happens, or one send per distribute block as the block completes.
+enum class ChunkGrain { Element, Block };
+
 struct Config {
     Mode        mode           = Mode::Passthrough;
     Target      target         = Target::Auto;
     std::string metaDir        = "/tmp/gicc-meta";
     std::string featuresOut;
     std::string hintIn;
-    std::string chunkGrain     = "element";   // chunk-lower: element | block
+    ChunkGrain  chunkGrain     = ChunkGrain::Element;
 };
 
 // Returns a singleton Config, lazily populated from getenv() on first call.

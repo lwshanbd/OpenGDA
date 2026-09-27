@@ -3,11 +3,11 @@
 #include "llvm/IR/PassManager.h"
 namespace gicc::pass {
 // Decides, per ompx_pipelined_put in an OpenMP offload kernel, whether the
-// put can be split along the kernel's `distribute` blocks and issued as
-// each block finishes -- and reports why not when it cannot. In
-// GICC_MODE=chunk-analyze the IR is left unchanged; in chunk-lower each
-// splittable put becomes one ompx__block_put per block (gicc/omp_pipeline.h)
-// and an unsplittable one is a compile error.
+// put can be split into sends issued as the kernel's data becomes final --
+// and reports why not when it cannot. GICC_MODE=chunk-analyze leaves the IR
+// unchanged; chunk-lower rewrites each splittable put at the grain
+// GICC_CHUNK_GRAIN selects (element by default, or block; see
+// gicc/omp_pipeline.h) and makes an unsplittable one a compile error.
 class GICCChunkAnalysisPass
     : public llvm::PassInfoMixin<GICCChunkAnalysisPass> {
 public:
@@ -15,19 +15,10 @@ public:
     static llvm::StringRef name() { return "GICCChunkAnalysisPass"; }
 };
 
-// GICC_MODE=write-summary: for every offload kernel, what its worksharing
-// loop writes -- 1-D ranges or collapsed boxes (extents and byte strides in
-// terms of kernel values) -- and why a store could not be described.
-class GICCWriteSummaryPass : public llvm::PassInfoMixin<GICCWriteSummaryPass> {
-public:
-    llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &);
-    static llvm::StringRef name() { return "GICCWriteSummaryPass"; }
-};
-
 // Runs before any inlining in chunk-lower mode: keeps the outlined parallel
 // regions of kernels with an ompx_pipelined_put out of their wrappers, so
 // the element-grain lowering rewrites the code the workers run. The
-// lowering drops the noinline again.
+// lowering restores the regions' inlining attributes.
 class GICCChunkPrepPass : public llvm::PassInfoMixin<GICCChunkPrepPass> {
 public:
     llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &);

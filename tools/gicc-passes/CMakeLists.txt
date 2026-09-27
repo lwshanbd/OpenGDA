@@ -78,8 +78,11 @@ set(_GICC_PASS_SOURCES
     src/TraceTemplateBuilder.cpp
     src/GICCHostDiscovery.cpp
     src/GICCOmpHostDiscovery.cpp
-    src/GICCChunkAnalysis.cpp
+    src/OmpKernel.cpp
     src/AccessDecomposition.cpp
+    src/WriteSet.cpp
+    src/GICCChunkAnalysis.cpp
+    src/GICCWriteSummary.cpp
     src/GICCFeatureExtraction.cpp
     src/GICCTraceSynthesis.cpp
 )

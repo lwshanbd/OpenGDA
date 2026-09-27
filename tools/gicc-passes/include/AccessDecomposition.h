@@ -59,6 +59,9 @@ struct AccessDecomp {
     llvm::SmallVector<std::pair<const llvm::SCEV *, const llvm::SCEV *>, 2> assumedEqual;
 };
 
+// a == b as SCEVs, after sign-extending the narrower to the wider type.
+bool sameSCEV(llvm::ScalarEvolution &SE, const llvm::SCEV *a, const llvm::SCEV *b);
+
 // a / b when b divides a symbolically (equal, or b's factors are a subset of
 // a's, constants dividing exactly); null otherwise.
 const llvm::SCEV *exactDivide(llvm::ScalarEvolution &SE, const llvm::SCEV *a,
@@ -72,9 +75,6 @@ public:
 
     // The box `ptr` walks as the loop runs, or nullopt with `why` set.
     std::optional<AccessDecomp> decompose(llvm::Value *ptr, std::string &why);
-
-    // Radices found so far, outermost first.
-    const llvm::SmallVector<const llvm::SCEV *, 4> &radices() const { return chain; }
 
 private:
     // A value as a math integer: c0 + sum(coef * key), key -1 the IV and

@@ -1,4 +1,5 @@
 #include "GICCChunkAnalysis.h"
+#include "GICCWriteSummary.h"
 #include "GICCDeviceDiscovery.h"
 #include "GICCFeatureExtraction.h"
 #include "GICCHKAnalysis.h"

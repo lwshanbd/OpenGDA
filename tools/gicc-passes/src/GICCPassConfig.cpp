@@ -1,5 +1,7 @@
 #include "GICCPassConfig.h"
 
+#include "llvm/Support/ErrorHandling.h"
+
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -29,6 +31,12 @@ Target parseTarget(const char *e) {
     return Target::Auto;
 }
 
+ChunkGrain parseGrain(const char *e) {
+    if (!e || std::string_view(e) == "element") return ChunkGrain::Element;
+    if (std::string_view(e) == "block") return ChunkGrain::Block;
+    llvm::report_fatal_error("GICC_CHUNK_GRAIN must be 'element' or 'block'");
+}
+
 std::string envOr(const char *name, const char *fallback) {
     const char *v = std::getenv(name);
     return v ? std::string(v) : std::string(fallback);
@@ -41,7 +49,7 @@ Config buildConfig() {
     c.metaDir     = envOr("GICC_META_DIR", "/tmp/gicc-meta");
     c.featuresOut = envOr("GICC_FEATURES_OUT", "");
     c.hintIn      = envOr("GICC_HINT_IN", "");
-    c.chunkGrain  = envOr("GICC_CHUNK_GRAIN", "element");
+    c.chunkGrain  = parseGrain(std::getenv("GICC_CHUNK_GRAIN"));
     return c;
 }
 

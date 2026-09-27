@@ -12,8 +12,6 @@ AccessDecomposer::AccessDecomposer(ScalarEvolution &SE, const DataLayout &DL,
                                    Loop *L, PHINode *iv)
     : SE(SE), DL(DL), L(L), iv(iv), I64(Type::getInt64Ty(iv->getContext())) {}
 
-static bool sameSCEV(ScalarEvolution &SE, const SCEV *a, const SCEV *b);
-
 // s with every outer truncate / extend removed.
 const SCEV *AccessDecomposer::castBase(const SCEV *s) {
     while (auto *C = dyn_cast<SCEVCastExpr>(s)) s = C->getOperand();
@@ -53,7 +51,7 @@ AccessDecomposer::Lin AccessDecomposer::scale(const Lin &a, const SCEV *s) {
     return r;
 }
 
-static bool sameSCEV(ScalarEvolution &SE, const SCEV *a, const SCEV *b) {
+bool sameSCEV(ScalarEvolution &SE, const SCEV *a, const SCEV *b) {
     if (a->getType() != b->getType()) {
         Type *T = SE.getWiderType(a->getType(), b->getType());
         a = SE.getNoopOrSignExtend(a, T);
