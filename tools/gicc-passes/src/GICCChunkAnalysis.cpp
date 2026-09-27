@@ -162,6 +162,9 @@ Value *stripToObject(const OmpKernel &KI, Value *V, int64_t *off) {
 bool isAfterDistribute(const OmpKernel &KI, CallInst *CI, DominatorTree &DT, LoopInfo &LI) {
     if (LI.getLoopFor(CI->getParent())) return false;
     if (isPotentiallyReachable(CI, KI.distInit, nullptr, &DT, &LI)) return false;
+    // The put in the fini call's own block (a loop whose trip count folded
+    // away): every path to it runs the fini first iff the fini comes first.
+    if (CI->getParent() == KI.distFini->getParent()) return KI.distFini->comesBefore(CI);
     SmallPtrSet<BasicBlock *, 1> finiBlock{KI.distFini->getParent()};
     return !isPotentiallyReachable(KI.distInit->getParent(), CI->getParent(), &finiBlock,
                                    &DT, &LI);
