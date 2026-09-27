@@ -13,7 +13,22 @@
 //     ompx_fence();
 //
 // ompx_pipelined_put means: send these bytes once the kernel's writes to them
-// are complete, as a host ompx_put after the kernel would. The gicc-passes
+// are complete, as a host ompx_put after the kernel would.
+//
+// The put may instead be stated in the body of a combined construct, every
+// iteration with the same arguments:
+//
+//     #pragma omp target teams distribute parallel for is_device_ptr(src)
+//     for (i = 0; i < n; ++i) {
+//         src[i] = ...;
+//         ompx_pipelined_put(peer, dst, src, n * sizeof(*src));
+//     }
+//
+// It means the same as the put after the loop, for a loop that runs at least
+// once, and keeps the kernel in SPMD mode: any statement after the loop in
+// a teams region makes clang emit the kernel in generic mode, which cost a
+// stencil kernel a fifth of its speed on MI250X. This form always takes the
+// box lowering described below. The gicc-passes
 // plugin in GICC_MODE=chunk-lower proves the send can be split along the
 // distribute blocks (tools/gicc-passes/src/GICCChunkAnalysis.cpp) and
 // rewrites it at the grain GICC_CHUNK_GRAIN selects:
