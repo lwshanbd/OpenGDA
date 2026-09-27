@@ -27,7 +27,10 @@ bool isBenignCall(const CallBase &CB) {
            n.starts_with("__kmpc_distribute_static_fini") ||
            n == "__kmpc_global_thread_num" ||
            n == "__kmpc_target_init" || n == "__kmpc_target_deinit" ||
-           n == "__kmpc_parallel_51" || n == kPipelinedPut;
+           n == "__kmpc_parallel_51" || n == kPipelinedPut ||
+           // Queries the SPMD form of a combined construct makes.
+           n.starts_with("__kmpc_get_hardware_") || n == "__kmpc_get_warp_size" ||
+           n == "__kmpc_is_spmd_exec_mode";
 }
 
 bool isCallTo(const Instruction &I, StringRef prefix) {
