@@ -60,6 +60,7 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Triple.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 
 #include <cstdlib>
@@ -144,6 +145,8 @@ struct Kernel {
     bool          distSigned = true;
     bool          ubPlusOne  = false;   // a loop exits on i.next < UB + 1
     std::string   error;
+    // Stores in the outlined region, by the kernel object they write.
+    DenseMap<Value *, SmallVector<StoreInst *, 2>> storesTo;
 
     Kernel(Function &K) : K(K), DL(K.getParent()->getDataLayout()) {}
 
@@ -305,6 +308,10 @@ bool splitScaledLoad(const SCEV *S, const Value *slot, const SCEV *&c,
 // A put proven splittable, with everything needed to emit one send per
 // block. SCEVs are in terms of kernel formals only (lb0 too), so they can be
 // expanded anywhere in the kernel.
+// Attribute marking outlined parallel regions GICCChunkPrepPass kept out of
+// their wrappers; the lowering removes it together with the noinline.
+constexpr StringLiteral kPrepAttr = "gicc-chunk-noinline";
+
 struct Plan {
     CallInst   *put;
     Value      *srcObj;   // kernel formal the put reads
@@ -330,6 +337,16 @@ public:
             if (F.hasLocalLinkage()) continue;   // outlined helpers
             analyzeKernel(F);
         }
+        // Lowering done: let the device link inline these again.
+        for (Function &F : M)
+            if (F.hasFnAttribute(kPrepAttr)) {
+                const bool always =
+                    F.getFnAttribute(kPrepAttr).getValueAsString() == "alwaysinline";
+                F.removeFnAttr(kPrepAttr);
+                F.removeFnAttr(Attribute::NoInline);
+                if (always) F.addFnAttr(Attribute::AlwaysInline);
+                changed = true;
+            }
     }
 
 private:
@@ -500,6 +517,7 @@ private:
                             "' is written with more than one access pattern");
                 return false;
             }
+            KI.storesTo[obj].push_back(St);
         }
         return true;
     }
@@ -784,43 +802,136 @@ private:
         return V;
     }
 
-    // Replace the put with one ompx__block_put per block, placed right after
-    // the block's __kmpc_parallel_51 returns: the parallel region has joined,
-    // so all of the block's words are written. On a zero-trip path nothing
-    // is sent, where the original put sent c*(ub0 - lb0 + 1) <= 0 bytes.
+    // Replace the put with sends issued as the data becomes final, at the
+    // grain GICC_CHUNK_GRAIN selects:
+    //
+    //   block    one ompx__block_put per block, right after the block's
+    //            __kmpc_parallel_51 returns: the region has joined, so all
+    //            of the block's words are written.
+    //   element  every store to the source is followed by the same store
+    //            into a same-node peer's copy. P1 makes that store the
+    //            word's only write, so its value is final when stored. The
+    //            peer address comes from ompx__peer_addr, once per team;
+    //            when it is null (peer not IPC-mapped) the kernel falls
+    //            back at run time to one single-thread ompx_put per block
+    //            (ompx__block_put_one), which keeps the kernel SPMD-able.
+    //
+    // On a zero-trip path nothing is sent, where the original put sent
+    // c*(ub0 - lb0 + 1) <= 0 bytes.
     void lowerPut(Kernel &KI, const Plan &P, ScalarEvolution &SE) {
         LLVMContext &Ctx = M.getContext();
         Type *I64 = Type::getInt64Ty(Ctx);
         Type *I32 = Type::getInt32Ty(Ctx);
-        Type *Ptr = P.put->getArgOperand(1)->getType();
-        auto ext = [&](Value *V) {
-            const SCEV *S = SE.getSCEV(V);
-            return KI.distSigned ? SE.getNoopOrSignExtend(S, I64)
-                                 : SE.getNoopOrZeroExtend(S, I64);
-        };
-        const SCEV *LB = ext(slotBound(KI.slotValue(0)));
-        const SCEV *UB = ext(slotBound(KI.slotValue(1)));
+        Type *I8  = Type::getInt8Ty(Ctx);
+        auto *Ptr = cast<PointerType>(P.put->getArgOperand(1)->getType());
+        SCEVExpander X(SE, KI.DL, "gicc.chunk");
+
+        bool element = getConfig().chunkGrain != "block";
+        if (element && !wrapperCallsOutlined(KI)) {
+            out() << "[gicc-chunk]   the parallel region is inlined into its wrapper "
+                     "(GICCChunkPrepPass did not run): using block grain\n";
+            element = false;
+        }
+
+        // Per-block send after the region joins; under the element grain
+        // only when the team could not map the peer.
+        BasicBlock::iterator at = std::next(KI.parallel->getIterator());
+        Value *mirror = nullptr;
+        if (element) {
+            // Once per team, before the loop: where the source's first byte
+            // lands in the peer, as a byte delta from the local address.
+            BasicBlock::iterator pre = KI.distInit->getIterator();
+            const SCEV *srcStart = SE.getAddExpr(
+                SE.getSCEV(P.srcObj), SE.getAddExpr(SE.getMulExpr(P.c, P.lb0), P.d));
+            Value *peerV = X.expandCodeFor(P.peer, I32, pre);
+            Value *dstV  = X.expandCodeFor(P.dst, Ptr, pre);
+            Value *srcV  = X.expandCodeFor(srcStart, Ptr, pre);
+            IRBuilder<> B(KI.distInit);
+            FunctionCallee peerAddr = M.getOrInsertFunction(
+                "ompx__peer_addr", Ptr, I32, Ptr);
+            Value *pd = B.CreateCall(peerAddr, {peerV, dstV});
+            mirror = B.CreateICmpNE(pd, ConstantPointerNull::get(Ptr));
+            Value *delta = B.CreateSub(B.CreatePtrToInt(pd, I64), B.CreatePtrToInt(srcV, I64));
+            // Team-shared, like clang's own globalized captures: the main
+            // thread writes them before any parallel region starts.
+            auto shared = [&](Type *T, const char *name) {
+                return new GlobalVariable(M, T, false, GlobalValue::InternalLinkage,
+                                          PoisonValue::get(T), name, nullptr,
+                                          GlobalValue::NotThreadLocal, 3);
+            };
+            GlobalVariable *gDelta  = shared(I64, "gicc.chunk.delta");
+            GlobalVariable *gMirror = shared(I8, "gicc.chunk.mirror");
+            B.CreateStore(delta, gDelta);
+            B.CreateStore(B.CreateZExt(mirror, I8), gMirror);
+
+            Function &O = *KI.outlined;
+            IRBuilder<> BO(&*O.getEntryBlock().getFirstInsertionPt());
+            Value *oDelta  = BO.CreateLoad(I64, gDelta, "gicc.chunk.delta");
+            Value *oMirror = BO.CreateICmpNE(BO.CreateLoad(I8, gMirror), ConstantInt::get(I8, 0));
+            for (StoreInst *St : KI.storesTo.lookup(P.srcObj)) {
+                IRBuilder<> BS(St->getNextNode());
+                Value *remote = BS.CreateGEP(I8, St->getPointerOperand(), oDelta);
+                Value *target = BS.CreateSelect(oMirror, remote, St->getPointerOperand());
+                BS.CreateAlignedStore(St->getValueOperand(), target, St->getAlign());
+            }
+        }
+
+        const SCEV *LB = extTo64(SE, KI, slotBound(KI.slotValue(0)));
+        const SCEV *UB = extTo64(SE, KI, slotBound(KI.slotValue(1)));
         const SCEV *srcBlk = SE.getAddExpr(
             SE.getSCEV(P.srcObj), SE.getAddExpr(SE.getMulExpr(P.c, LB), P.d));
         const SCEV *dstBlk = SE.getAddExpr(
             P.dst, SE.getMulExpr(P.c, SE.getMinusSCEV(LB, P.lb0)));
         const SCEV *len = SE.getMulExpr(
             P.c, SE.getAddExpr(SE.getMinusSCEV(UB, LB), SE.getOne(I64)));
-
-        BasicBlock::iterator at = std::next(KI.parallel->getIterator());
-        SCEVExpander X(SE, KI.DL, "gicc.chunk");
-        Value *vPeer = X.expandCodeFor(P.peer, I32, at);
-        Value *vDst  = X.expandCodeFor(dstBlk, Ptr, at);
-        Value *vSrc  = X.expandCodeFor(srcBlk, Ptr, at);
-        Value *vLen  = X.expandCodeFor(len, I64, at);
-
+        // Expand everything before touching the CFG: SCEV, the expander and
+        // their dominance information describe the function as it is now.
+        SCEVExpander XB(SE, KI.DL, "gicc.chunk");
+        Value *vPeer = XB.expandCodeFor(P.peer, I32, at);
+        Value *vDst  = XB.expandCodeFor(dstBlk, Ptr, at);
+        Value *vSrc  = XB.expandCodeFor(srcBlk, Ptr, at);
+        Value *vLen  = XB.expandCodeFor(len, I64, at);
+        // The element grain's fallback is a single-thread put: a parallel
+        // region there would keep the device link from making the kernel
+        // SPMD, and the per-block state-machine round trips cost ~8% at
+        // compute-heavy sizes.
         FunctionCallee send = M.getOrInsertFunction(
-            "ompx__block_put", Type::getVoidTy(Ctx), I32, Ptr, Ptr, I64);
-        IRBuilder<> B(KI.parallel->getParent(), at);
-        B.CreateCall(send, {vPeer, vDst, vSrc, vLen});
-        out() << "[gicc-chunk]   lowered: ompx__block_put after each block's "
-                 "parallel region\n";
+            element ? "ompx__block_put_one" : "ompx__block_put",
+            Type::getVoidTy(Ctx), I32, Ptr, Ptr, I64);
+        CallInst *call =
+            IRBuilder<>(at->getParent(), at).CreateCall(send, {vPeer, vDst, vSrc, vLen});
+        if (mirror) {
+            Instruction *then = SplitBlockAndInsertIfThen(
+                IRBuilder<>(call).CreateNot(mirror), call->getIterator(), false);
+            call->moveBefore(then->getIterator());
+        }
+
+        out() << "[gicc-chunk]   lowered: "
+              << (element ? "element grain (store mirrored to the peer; one put "
+                            "per block if the peer is not mapped)"
+                          : "block grain (ompx__block_put after each block's "
+                            "parallel region)")
+              << "\n";
         P.put->eraseFromParent();
+    }
+
+    static const SCEV *extTo64(ScalarEvolution &SE, const Kernel &KI, Value *V) {
+        Type *I64 = Type::getInt64Ty(V->getContext());
+        const SCEV *S = SE.getSCEV(V);
+        return KI.distSigned ? SE.getNoopOrSignExtend(S, I64)
+                             : SE.getNoopOrZeroExtend(S, I64);
+    }
+
+    // Does the worker entry of the parallel region still call the outlined
+    // function? If the body was inlined into it, rewriting the outlined
+    // function alone would miss the code that runs.
+    static bool wrapperCallsOutlined(const Kernel &KI) {
+        auto *W = dyn_cast<Function>(KI.parallel->getArgOperand(6)->stripPointerCasts());
+        if (!W) return false;
+        for (const Instruction &I : instructions(*W))
+            if (auto *CB = dyn_cast<CallBase>(&I); CB && CB->getCalledFunction() == KI.outlined)
+                return true;
+        return false;
     }
 
     // Kernel object behind a put's source pointer, with its constant
@@ -931,6 +1042,32 @@ private:
 };
 
 }  // namespace
+
+PreservedAnalyses GICCChunkPrepPass::run(Module &M, ModuleAnalysisManager &) {
+    if (getConfig().mode != Mode::ChunkLower) return PreservedAnalyses::all();
+    if (!Triple(M.getTargetTriple()).isGPU()) return PreservedAnalyses::all();
+    bool changed = false;
+    for (Function &F : M) {
+        bool hasPut = false;
+        for (Instruction &I : instructions(F))
+            hasPut |= isCallTo(I, kPipelinedPut);
+        if (!hasPut) continue;
+        for (Instruction &I : instructions(F)) {
+            auto *CB = dyn_cast<CallBase>(&I);
+            if (!CB || calleeName(*CB) != "__kmpc_parallel_51") continue;
+            auto *O = dyn_cast<Function>(CB->getArgOperand(5)->stripPointerCasts());
+            if (!O || O->isDeclaration() || O->hasFnAttribute(kPrepAttr)) continue;
+            // Clang marks outlined regions alwaysinline; remember that so
+            // the lowering can put it back.
+            const bool always = O->hasFnAttribute(Attribute::AlwaysInline);
+            O->removeFnAttr(Attribute::AlwaysInline);
+            O->addFnAttr(Attribute::NoInline);
+            O->addFnAttr(kPrepAttr, always ? "alwaysinline" : "");
+            changed = true;
+        }
+    }
+    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}
 
 PreservedAnalyses GICCChunkAnalysisPass::run(Module &M,
                                              ModuleAnalysisManager &MAM) {

@@ -40,6 +40,7 @@ Config buildConfig() {
     c.metaDir     = envOr("GICC_META_DIR", "/tmp/gicc-meta");
     c.featuresOut = envOr("GICC_FEATURES_OUT", "");
     c.hintIn      = envOr("GICC_HINT_IN", "");
+    c.chunkGrain  = envOr("GICC_CHUNK_GRAIN", "element");
     return c;
 }
 

@@ -127,6 +127,12 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     MPM.addPass(GICCDeviceLoweringPass());
 #endif
                 });
+            // chunk-lower needs the outlined parallel regions intact before
+            // anything inlines them; self-gated on the mode.
+            PB.registerPipelineStartEPCallback(
+                [](ModulePassManager &MPM, OptimizationLevel) {
+                    MPM.addPass(GICCChunkPrepPass());
+                });
             // Named-pass registration so tests can drive the plugin via
             // opt -passes='gicc-sentinel' / 'gicc-device-discovery'.
             PB.registerPipelineParsingCallback(
@@ -158,6 +164,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-omp-device-discovery") {
                         MPM.addPass(GICCOmpDeviceDiscoveryPass());
+                        return true;
+                    }
+                    if (Name == "gicc-chunk-prep") {
+                        MPM.addPass(GICCChunkPrepPass());
                         return true;
                     }
                     if (Name == "gicc-chunk-analysis") {

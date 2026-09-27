@@ -14,4 +14,14 @@ public:
     llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &);
     static llvm::StringRef name() { return "GICCChunkAnalysisPass"; }
 };
+
+// Runs before any inlining in chunk-lower mode: keeps the outlined parallel
+// regions of kernels with an ompx_pipelined_put out of their wrappers, so
+// the element-grain lowering rewrites the code the workers run. The
+// lowering drops the noinline again.
+class GICCChunkPrepPass : public llvm::PassInfoMixin<GICCChunkPrepPass> {
+public:
+    llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &);
+    static llvm::StringRef name() { return "GICCChunkPrepPass"; }
+};
 }  // namespace gicc::pass
