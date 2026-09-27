@@ -51,6 +51,8 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/PostDominators.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/Dominators.h"
@@ -101,28 +103,35 @@ bool onlyFormals(const SCEV *S, const Function &F) {
 }
 
 // Is V (a value passed in slot 0/1) the current block bound derived from
-// `slot`? Accepts the load itself, the clamp to ub0, the advance by the
-// stride, and phis over those.
-bool isBlockBound(Value *V, const Value *slot, const Value *strideSlot,
+// `slot`? Accepts the load itself, its clamp against ub0 (`clamp`, the value
+// stored as the upper distribute bound), the advance by the stride, and
+// phis over those.
+bool isBlockBound(Value *V, const Value *slot, const Value *strideSlot, Value *clamp,
                   SmallPtrSetImpl<Value *> &seen) {
     V = stripIntCasts(V);
     if (!seen.insert(V).second) return true;
     if (auto *LI = dyn_cast<LoadInst>(V))
         return LI->getPointerOperand()->stripPointerCasts() == slot;
-    if (auto *MM = dyn_cast<MinMaxIntrinsic>(V))
-        return isBlockBound(MM->getLHS(), slot, strideSlot, seen);
+    if (auto *MM = dyn_cast<MinMaxIntrinsic>(V)) {
+        Value *c = stripIntCasts(clamp);
+        for (auto [bound, other] : {std::pair(MM->getLHS(), MM->getRHS()),
+                                    std::pair(MM->getRHS(), MM->getLHS())})
+            if (stripIntCasts(other) == c)
+                return isBlockBound(bound, slot, strideSlot, clamp, seen);
+        return false;
+    }
     if (auto *BO = dyn_cast<BinaryOperator>(V)) {
         if (BO->getOpcode() != Instruction::Add) return false;
         for (unsigned k = 0; k < 2; ++k) {
             auto *LI = dyn_cast<LoadInst>(BO->getOperand(1 - k));
             if (LI && LI->getPointerOperand()->stripPointerCasts() == strideSlot)
-                return isBlockBound(BO->getOperand(k), slot, strideSlot, seen);
+                return isBlockBound(BO->getOperand(k), slot, strideSlot, clamp, seen);
         }
         return false;
     }
     if (auto *PN = dyn_cast<PHINode>(V)) {
         for (Value *in : PN->incoming_values())
-            if (!isBlockBound(in, slot, strideSlot, seen)) return false;
+            if (!isBlockBound(in, slot, strideSlot, clamp, seen)) return false;
         return true;
     }
     return false;
@@ -198,13 +207,23 @@ std::string syncBeforePut(const OmpKernel &KI, CallInst *put, DominatorTree &DT,
     return "";
 }
 
-// Any store or unaccounted call in the kernel body that could write obj.
+// Any store or unaccounted call in the kernel body that could write obj. A
+// store may write obj unless every object it may point to is provably
+// another one: a different kernel formal (formals are assumed not to
+// overlap), a stack slot, or a global.
 std::string writesOutsideLoop(const OmpKernel &KI, Value *obj) {
     for (Instruction &I : instructions(KI.K)) {
         if (auto *SI = dyn_cast<StoreInst>(&I)) {
-            if (stripToObject(KI, SI->getPointerOperand(), nullptr) == obj)
-                return "'" + objName(obj) +
-                       "' is written in the teams region outside the worksharing loop";
+            SmallVector<const Value *, 4> objs;
+            getUnderlyingObjects(SI->getPointerOperand(), objs);
+            for (const Value *o : objs) {
+                Value *r = KI.resolve(const_cast<Value *>(o));
+                if (r == obj)
+                    return "'" + objName(obj) +
+                           "' is written in the teams region outside the worksharing loop";
+                if (!isa<Argument>(r) && !isa<AllocaInst>(r) && !isa<GlobalVariable>(r))
+                    return "a store in the teams region may write '" + objName(obj) + "'";
+            }
             continue;
         }
         auto *CB = dyn_cast<CallBase>(&I);
@@ -282,6 +301,7 @@ private:
         const WriteSet &W;
         ScalarEvolution &SE;
         DominatorTree &DT;
+        PostDominatorTree &PDT;
         LoopInfo &LI;
         StoreInst *lbSt, *ubSt;
     };
@@ -332,8 +352,10 @@ private:
         const Value *strideSlot = KI->distSlot(kmpc::InitStride);
         SmallPtrSet<Value *, 8> seen0, seen1;
         if (!bounds || !slot0 || !slot1 ||
-            !isBlockBound(slot0, KI->distSlot(kmpc::InitLower), strideSlot, seen0) ||
-            !isBlockBound(slot1, KI->distSlot(kmpc::InitUpper), strideSlot, seen1)) {
+            !isBlockBound(slot0, KI->distSlot(kmpc::InitLower), strideSlot,
+                          bounds->second->getValueOperand(), seen0) ||
+            !isBlockBound(slot1, KI->distSlot(kmpc::InitUpper), strideSlot,
+                          bounds->second->getValueOperand(), seen1)) {
             for (CallInst *CI : puts)
                 report(CI, Verdict::Illegal, "cannot identify the distribute block bounds");
             return;
@@ -348,7 +370,8 @@ private:
                        "' are written; use ompx_pipelined_put or put after the kernel");
         }
 
-        KernelFacts KF{*KI, *W, SE, DT, LI, bounds->first, bounds->second};
+        auto &PDT = FAM.getResult<PostDominatorTreeAnalysis>(F);
+        KernelFacts KF{*KI, *W, SE, DT, PDT, LI, bounds->first, bounds->second};
         SmallVector<Plan, 2> plans;
         for (CallInst *CI : puts)
             if (auto P = checkPut(KF, CI)) {
@@ -357,7 +380,16 @@ private:
                 plans.push_back(*P);
             }
         if (!lower) return;
-        for (const Plan &P : plans) lowerPut(*KI, *W, P, SE);
+        // Expand every plan before any CFG edit: SCEV, the expanders and the
+        // dominator tree all describe the function as it is now.
+        SmallVector<std::pair<CallInst *, Value *>, 2> fallbacks;
+        for (const Plan &P : plans)
+            if (auto fb = lowerPut(*KI, *W, P, SE)) fallbacks.push_back(*fb);
+        for (auto [call, mirror] : fallbacks) {
+            Instruction *then = SplitBlockAndInsertIfThen(
+                IRBuilder<>(call).CreateNot(mirror), call->getIterator(), false);
+            call->moveBefore(then->getIterator());
+        }
         if (!plans.empty()) {
             changed = true;
             if (verifyFunction(F, &errs()))
@@ -365,19 +397,22 @@ private:
         }
     }
 
-    // The put's arguments as they are when the distribute loop ran. A phi
-    // merging in a zero-trip path (clang folds n * size to 0 there) is read
-    // on the loop side only: the lowered form sends nothing on the zero-trip
-    // path, which the range check then compares with a loop that wrote
-    // nothing.
+    // The put's length as it is when the distribute loop ran. A phi merging
+    // in a zero-trip path is read on the loop side only, provided the
+    // zero-trip side is 0 (clang folds n * size to 0 there): the lowered
+    // form sends nothing on that path. Null when the zero-trip side sends
+    // something.
     Value *onLoopPath(const KernelFacts &KF, Value *V) {
         auto *PN = dyn_cast<PHINode>(V);
         if (!PN) return V;
         Value *pick = nullptr;
         for (unsigned k = 0; k < PN->getNumIncomingValues(); ++k) {
             if (!isPotentiallyReachable(KF.KI.distInit->getParent(), PN->getIncomingBlock(k),
-                                        nullptr, &KF.DT, &KF.LI))
+                                        nullptr, &KF.DT, &KF.LI)) {
+                auto *C = dyn_cast<ConstantInt>(KF.KI.resolve(PN->getIncomingValue(k)));
+                if (!C || !C->isZero()) return nullptr;
                 continue;
+            }
             Value *r = KF.KI.resolve(PN->getIncomingValue(k));
             if (pick && r != pick) return V;
             pick = r;
@@ -395,6 +430,14 @@ private:
         };
         if (!isAfterDistribute(KI, CI, KF.DT, KF.LI))
             return illegal("put is not after the distribute loop");
+        if (KF.LI.getLoopFor(KI.distInit->getParent()))
+            return illegal("the distribute loop is inside a sequential loop of the teams "
+                           "region: its blocks would be sent once per trip");
+        // Sends issued as blocks complete assume the put happens: it must
+        // run on every path through the loop.
+        if (!KF.PDT.dominates(CI->getParent(), KI.distInit->getParent()))
+            return illegal("the put does not run on every path after the distribute loop "
+                           "(it is conditional); guard the whole kernel instead");
         int64_t off = 0;
         Value *obj = stripToObject(KI, CI->getArgOperand(2), &off);
         if (!obj || !isa<Argument>(obj))
@@ -444,7 +487,9 @@ private:
         const SCEV *d   = first->offset;
         const SCEV *wantOff   = SE.getAddExpr(SE.getMulExpr(c, lb0), d);
         const SCEV *wantBytes = SE.getMulExpr(c, KI.extDist(SE, SE.getAddExpr(span, one), I64));
-        const SCEV *bytes = KI.normalize(SE, SE.getSCEV(onLoopPath(KF, CI->getArgOperand(3))));
+        Value *len = onLoopPath(KF, CI->getArgOperand(3));
+        if (!len) return illegal("the put sends bytes on the path that skips the loop");
+        const SCEV *bytes = KI.normalize(SE, SE.getSCEV(len));
         const SCEV *offS  = SE.getConstant(I64, off, true);
         if (!sameSCEV(SE, offS, wantOff) || !sameSCEV(SE, bytes, wantBytes))
             return illegal("put range [src+" + scevStr(offS) + ", +" + scevStr(bytes) +
@@ -489,17 +534,27 @@ private:
     //            single-thread ompx_put per block (ompx__block_put_one),
     //            which keeps the kernel SPMD-able.
     //
-    // On a zero-trip path nothing is sent, where the original put sent
-    // c*(ub0 - lb0 + 1) <= 0 bytes.
-    void lowerPut(const OmpKernel &KI, const WriteSet &W, const Plan &P, ScalarEvolution &SE) {
+    // On a zero-trip path nothing is sent; checkPut made sure the original
+    // put sent 0 bytes there.
+    //
+    // Returns the element grain's per-block fallback call and the flag it
+    // must be guarded by (run it only when the peer is not mapped); the
+    // caller splits the block once every plan is expanded.
+    std::optional<std::pair<CallInst *, Value *>>
+    lowerPut(const OmpKernel &KI, const WriteSet &W, const Plan &P, ScalarEvolution &SE) {
         bool element = getConfig().chunkGrain == ChunkGrain::Element;
+        if (element && !P.covered) {
+            out() << "[gicc-chunk]   no write covers the range on every iteration, and "
+                     "the element grain sends only what is stored: using block grain\n";
+            element = false;
+        }
         if (element && !wrapperCallsOutlined(KI)) {
             out() << "[gicc-chunk]   the parallel region is inlined into its wrapper "
                      "(GICCChunkPrepPass did not run): using block grain\n";
             element = false;
         }
         Value *mirror = element ? emitElementMirror(KI, W, P, SE) : nullptr;
-        emitBlockSend(KI, P, SE, mirror);
+        CallInst *send = emitBlockSend(KI, P, SE, mirror);
         out() << "[gicc-chunk]   lowered: "
               << (element ? "element grain (store mirrored to the peer; one put "
                             "per block if the peer is not mapped)"
@@ -507,6 +562,8 @@ private:
                             "parallel region)")
               << "\n";
         P.put->eraseFromParent();
+        if (!mirror) return std::nullopt;
+        return std::make_pair(send, mirror);
     }
 
     // Element grain: the peer address, once per team before the loop, and a
@@ -556,11 +613,12 @@ private:
         return mirror;
     }
 
-    // One send per block right after its parallel region joins; under the
-    // element grain only when the team could not map the peer (`mirror`
-    // false). The element grain's send is a single-thread put: a parallel
-    // region there would keep the device link from making the kernel SPMD.
-    void emitBlockSend(const OmpKernel &KI, const Plan &P, ScalarEvolution &SE, Value *mirror) {
+    // One send per block right after its parallel region joins. Under the
+    // element grain (`mirror` set) it is a single-thread put -- a parallel
+    // region there would keep the device link from making the kernel SPMD --
+    // which the caller guards to run only when the peer is not mapped.
+    CallInst *emitBlockSend(const OmpKernel &KI, const Plan &P, ScalarEvolution &SE,
+                            Value *mirror) {
         LLVMContext &Ctx = M.getContext();
         Type *I64 = Type::getInt64Ty(Ctx), *I32 = Type::getInt32Ty(Ctx);
         auto *Ptr = cast<PointerType>(P.put->getArgOperand(1)->getType());
@@ -572,8 +630,6 @@ private:
             SE.getSCEV(P.srcObj), SE.getAddExpr(SE.getMulExpr(P.c, LB), P.d));
         const SCEV *dstBlk = SE.getAddExpr(P.dst, SE.getMulExpr(P.c, SE.getMinusSCEV(LB, P.lb0)));
         const SCEV *len = SE.getMulExpr(P.c, SE.getAddExpr(SE.getMinusSCEV(UB, LB), SE.getOne(I64)));
-        // Expand everything before splitting the block for the fallback:
-        // SCEV and the expander describe the CFG as it is now.
         BasicBlock::iterator at = std::next(KI.parallel->getIterator());
         SCEVExpander X(SE, KI.DL, "gicc.chunk");
         Value *vPeer = X.expandCodeFor(P.peer, I32, at);
@@ -583,12 +639,7 @@ private:
         FunctionCallee send = M.getOrInsertFunction(
             mirror ? "ompx__block_put_one" : "ompx__block_put", Type::getVoidTy(Ctx), I32,
             Ptr, Ptr, I64);
-        CallInst *call = IRBuilder<>(at->getParent(), at).CreateCall(send, {vPeer, vDst, vSrc, vLen});
-        if (mirror) {
-            Instruction *then = SplitBlockAndInsertIfThen(
-                IRBuilder<>(call).CreateNot(mirror), call->getIterator(), false);
-            call->moveBefore(then->getIterator());
-        }
+        return IRBuilder<>(at->getParent(), at).CreateCall(send, {vPeer, vDst, vSrc, vLen});
     }
 
     void report(CallInst *CI, Verdict v, const std::string &why) {
