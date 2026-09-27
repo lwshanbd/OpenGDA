@@ -890,11 +890,17 @@ private:
         };
         Value *strideArr = array(strides, "gicc.box.stride");
         Value *extentArr = array(extents, "gicc.box.extent");
+        // Every thread of an SPMD kernel's team runs the code before its
+        // loop -- clang emitted it so, or the SPMD conversion that guards
+        // sequential code has already run -- so the team shares the copy.
+        // A generic kernel leaves it to one thread, even one the device
+        // link makes SPMD later.
         FunctionCallee residual = M.getOrInsertFunction(
-            "ompx__box_residual", Type::getVoidTy(Ctx), Ptr, Ptr, I64, Ptr, I32, Ptr, Ptr, I64, I32);
+            "ompx__box_residual", Type::getVoidTy(Ctx), Ptr, Ptr, I64, Ptr, I32, Ptr, Ptr, I64,
+            I32, I32);
         B.CreateCall(residual, {pd, srcV, lenV, boxV, ConstantInt::get(I32, D), strideArr,
                                 extentArr, ConstantInt::get(I64, P.elem),
-                                B.CreateZExt(runs, I32)});
+                                B.CreateZExt(runs, I32), ConstantInt::get(I32, KI.spmd())});
 
         auto shared = [&](Type *T, const char *name) {
             return new GlobalVariable(M, T, false, GlobalValue::InternalLinkage,

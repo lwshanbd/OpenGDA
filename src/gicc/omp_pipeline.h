@@ -114,7 +114,8 @@ static void ompx__block_put(int peer, void* dst, const void* src, size_t bytes)
     __asm__("ompx__peer_addr_mapped");
 [[omp::assume("ompx_spmd_amenable")]] static void
 ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* box, int dims,
-                   const int64_t* stride, const int64_t* extent, int64_t elem, int loop_runs)
+                   const int64_t* stride, const int64_t* extent, int64_t elem, int loop_runs,
+                   int team)
     __asm__("ompx__box_residual");
 
 #if defined(__NVPTX__) || defined(__AMDGCN__)
@@ -239,14 +240,19 @@ static __attribute__((used)) void* ompx__peer_addr_mapped(int peer, void* addr) 
 }
 
 #if defined(__NVPTX__) || defined(__AMDGCN__)
-static inline void ompx__copy_range(char* d, const char* s, const char* a, const char* b) {
+// [a, b) of s copied to the same offsets in d, word `id` of every `n` by
+// this thread: neighbouring threads take neighbouring words.
+static inline void ompx__copy_range(char* d, const char* s, const char* a, const char* b,
+                                    int64_t id, int64_t n) {
     char* to = d + (a - s);
     if (((reinterpret_cast<uintptr_t>(a) | reinterpret_cast<uintptr_t>(b) |
           reinterpret_cast<uintptr_t>(to)) & 3) == 0) {
-        for (; a < b; a += 4, to += 4)
-            *reinterpret_cast<uint32_t*>(to) = *reinterpret_cast<const uint32_t*>(a);
+        uint32_t* tw = reinterpret_cast<uint32_t*>(to);
+        const uint32_t* aw = reinterpret_cast<const uint32_t*>(a);
+        const int64_t words = (b - a) / 4;
+        for (int64_t i = id; i < words; i += n) tw[i] = aw[i];
     } else {
-        for (; a < b; ++a, ++to) *to = *a;
+        for (int64_t i = id; i < b - a; i += n) to[i] = a[i];
     }
 }
 #endif
@@ -257,17 +263,30 @@ static inline void ompx__copy_range(char* d, const char* s, const char* a, const
 // never race. `box` is the address of the point with every digit 0; the dims
 // (stride in bytes, extent in points) may come in any order and with either
 // sign. loop_runs is 0 when the kernel's loop does not run at all, which
-// leaves every byte of the range unwritten. Each team's sequential thread
-// takes one slice of the range and walks the box rows that cross it.
+// leaves every byte of the range unwritten. Each team takes one slice of the
+// range and walks the box rows that cross it. `team` is nonzero when every
+// thread of the team calls this, as in an SPMD kernel's code before its
+// loop; the threads then share each gap. Otherwise the team's sequential
+// thread copies alone, and a large residual holds the whole kernel back.
 static __attribute__((used)) void
 ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* box, int dims,
-                   const int64_t* stride, const int64_t* extent, int64_t elem, int loop_runs) {
+                   const int64_t* stride, const int64_t* extent, int64_t elem, int loop_runs,
+                   int team) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
-    if (peer_dst == nullptr || bytes == 0 || !ompx__sequential_thread()) return;
+    if (peer_dst == nullptr || bytes == 0) return;
+    int64_t id = 0, n_threads = 1;
+    if (team && __kmpc_is_spmd_exec_mode()) {
+        const int64_t bx = ompx_block_dim_x(), by = ompx_block_dim_y();
+        id = ompx_thread_id_x() + bx * (ompx_thread_id_y() + by * ompx_thread_id_z());
+        n_threads = bx * by * ompx_block_dim_z();
+    } else if (!ompx__sequential_thread()) {
+        return;
+    }
     constexpr int kMaxDims = 8;
     if (dims > kMaxDims) {
-        printf("ompx_pipelined_put: a %d-dimensional box has more than %d dims\n", dims,
-               kMaxDims);
+        if (id == 0)
+            printf("ompx_pipelined_put: a %d-dimensional box has more than %d dims\n", dims,
+                   kMaxDims);
         __builtin_trap();
     }
     const char* s = static_cast<const char*>(src);
@@ -278,8 +297,9 @@ ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* bo
     bool aligned = (s - b0) % elem == 0 && static_cast<int64_t>(bytes) % elem == 0;
     for (int k = 0; k < dims; ++k) aligned = aligned && stride[k] % elem == 0;
     if (!aligned) {
-        printf("ompx_pipelined_put: the put range and the written box are not aligned to "
-               "the %lld-byte stores\n", static_cast<long long>(elem));
+        if (id == 0)
+            printf("ompx_pipelined_put: the put range and the written box are not aligned "
+                   "to the %lld-byte stores\n", static_cast<long long>(elem));
         __builtin_trap();
     }
     const int64_t words = static_cast<int64_t>(bytes) / elem;
@@ -310,7 +330,7 @@ ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* bo
         E[j] = extent[k];
     }
     if (empty) {
-        ompx__copy_range(d, s, lo, hi);
+        ompx__copy_range(d, s, lo, hi, id, n_threads);
         return;
     }
     // A dense innermost dim is one contiguous row; otherwise each point is.
@@ -321,8 +341,9 @@ ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* bo
     int64_t span = row;
     for (int k = n - 1; k >= 0; --k) {
         if (S[k] < span) {
-            printf("ompx_pipelined_put: the rows of the written box overlap; cannot "
-                   "tell which bytes of the put it does not write\n");
+            if (id == 0)
+                printf("ompx_pipelined_put: the rows of the written box overlap; cannot "
+                       "tell which bytes of the put it does not write\n");
             __builtin_trap();
         }
         span += (E[k] - 1) * S[k];
@@ -342,7 +363,7 @@ ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* bo
         const char* rs = b0;
         for (int k = 0; k < n; ++k) rs += q[k] * S[k];
         if (rs >= hi) break;
-        if (rs > done) ompx__copy_range(d, s, done, rs);
+        if (rs > done) ompx__copy_range(d, s, done, rs, id, n_threads);
         if (rs + row > done) done = rs + row;
         if (done >= hi) break;
         int k = n - 1;
@@ -352,10 +373,10 @@ ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* bo
         }
         if (k < 0) break;
     }
-    if (done < hi) ompx__copy_range(d, s, done, hi);
+    if (done < hi) ompx__copy_range(d, s, done, hi, id, n_threads);
 #else
     (void)peer_dst; (void)src; (void)bytes; (void)box; (void)dims; (void)stride;
-    (void)extent; (void)elem; (void)loop_runs;
+    (void)extent; (void)elem; (void)loop_runs; (void)team;
 #endif
 }
 #pragma omp end declare target

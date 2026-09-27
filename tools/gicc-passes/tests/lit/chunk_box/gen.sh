@@ -64,7 +64,8 @@ done
 ; CHECK: _kernel_environment = {{.*}} { %struct.ConfigurationEnvironmentTy { i8 0, i8 {{[01]}}, i8 2,
 ; CHECK-LABEL: define {{.*}} @__omp_offloading_
 ; CHECK: call ptr @ompx__peer_addr_mapped(
-; CHECK: call void @ompx__box_residual(
+; The kernel is SPMD: the team shares the residual copy.
+; CHECK: call void @ompx__box_residual({{.*}}, i32 1)
 ; CHECK: call void @__kmpc_parallel_51(
 ; CHECK-LABEL: define internal void @__omp_offloading_{{.*}}_omp_outlined_omp_outlined(
 ; CHECK: %gicc.box.in = and i1
@@ -90,7 +91,9 @@ CHECKS
 ; hands the range and the peer offset to the region.
 ; CHECK-LABEL: define {{.*}} @__omp_offloading_
 ; CHECK: [[PD:%.*]] = call ptr @ompx__peer_addr_mapped(i32 {{%.*}}, ptr {{%.*}})
-; CHECK: call void @ompx__box_residual(ptr [[PD]], ptr {{%.*}}, i64 {{%.*}}, ptr {{%.*}}, i32 3, ptr {{%.*}}, ptr {{%.*}}, i64 4, i32 {{%.*}})
+; The kernel is still generic when the pass runs, so one thread per team
+; sends the residual.
+; CHECK: call void @ompx__box_residual(ptr [[PD]], ptr {{%.*}}, i64 {{%.*}}, ptr {{%.*}}, i32 3, ptr {{%.*}}, ptr {{%.*}}, i64 4, i32 {{%.*}}, i32 0)
 ; CHECK: store i64 {{%.*}}, ptr addrspace(3) @gicc.box.delta
 ; CHECK: store i64 {{%.*}}, ptr addrspace(3) @gicc.box.start
 ; CHECK: store i64 {{%.*}}, ptr addrspace(3) @gicc.box.len

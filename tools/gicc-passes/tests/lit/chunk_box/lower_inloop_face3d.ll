@@ -8,7 +8,8 @@
 ; CHECK: _kernel_environment = {{.*}} { %struct.ConfigurationEnvironmentTy { i8 0, i8 {{[01]}}, i8 2,
 ; CHECK-LABEL: define {{.*}} @__omp_offloading_
 ; CHECK: call ptr @ompx__peer_addr_mapped(
-; CHECK: call void @ompx__box_residual(
+; The kernel is SPMD: the team shares the residual copy.
+; CHECK: call void @ompx__box_residual({{.*}}, i32 1)
 ; CHECK: call void @__kmpc_parallel_51(
 ; CHECK-LABEL: define internal void @__omp_offloading_{{.*}}_omp_outlined_omp_outlined(
 ; CHECK: %gicc.box.in = and i1
