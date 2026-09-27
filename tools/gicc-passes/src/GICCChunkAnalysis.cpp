@@ -608,7 +608,10 @@ private:
             IRBuilder<> BS(St->getNextNode());
             Value *remote = BS.CreateGEP(I8, St->getPointerOperand(), oDelta);
             Value *target = BS.CreateSelect(oMirror, remote, St->getPointerOperand());
-            BS.CreateAlignedStore(St->getValueOperand(), target, St->getAlign());
+            StoreInst *Copy = BS.CreateAlignedStore(St->getValueOperand(), target,
+                                                    St->getAlign());
+            // It repeats St, which the put_no_db mirror already checks.
+            Copy->setMetadata("gicc.repeat", MDNode::get(Copy->getContext(), {}));
         }
         return mirror;
     }

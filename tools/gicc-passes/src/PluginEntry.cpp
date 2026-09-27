@@ -1,4 +1,5 @@
 #include "GICCChunkAnalysis.h"
+#include "GICCNoDbMirror.h"
 #include "GICCWriteSummary.h"
 #include "GICCDeviceDiscovery.h"
 #include "GICCFeatureExtraction.h"
@@ -121,6 +122,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                 GICC_EP_LAMBDA_HEAD(MPM) {
                     MPM.addPass(GICCWriteSummaryPass());
                     MPM.addPass(GICCChunkAnalysisPass());
+                    MPM.addPass(GICCNoDbMirrorPass());
                     MPM.addPass(GICCOmpDeviceDiscoveryPass());
                     MPM.addPass(GICCOmpHostDiscoveryPass());
                     MPM.addPass(GICCTraceSynthesisPass());
@@ -178,6 +180,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-chunk-analysis") {
                         MPM.addPass(GICCChunkAnalysisPass());
+                        return true;
+                    }
+                    if (Name == "gicc-nodb-mirror") {
+                        MPM.addPass(GICCNoDbMirrorPass());
                         return true;
                     }
                     if (Name == "gicc-omp-host-discovery") {
