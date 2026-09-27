@@ -94,6 +94,11 @@ public:
     // The stores of lb0 and ub0 that dominate the init call.
     std::optional<std::pair<llvm::StoreInst *, llvm::StoreInst *>>
     distBounds(llvm::DominatorTree &DT) const;
+    // Every thread of a team runs the kernel's code outside its parallel
+    // regions: the exec mode in the kernel environment has the SPMD bit.
+    // False for a generic kernel, even one the device link may yet make
+    // SPMD.
+    bool spmd() const;
 
 private:
     explicit OmpKernel(llvm::Function &K)

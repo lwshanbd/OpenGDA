@@ -74,6 +74,25 @@ StoreInst *uniqueStoreTo(Function &F, const Value *Obj) {
     return found;
 }
 
+bool OmpKernel::spmd() const {
+    // ConfigurationEnvironmentTy { i8 UseGenericStateMachine,
+    // i8 MayUseNestedParallelism, i8 ExecMode, ... }, the first field of the
+    // environment __kmpc_target_init is handed.
+    constexpr unsigned ExecModeField = 2;
+    constexpr uint64_t ExecModeSPMD = 2;
+    for (Instruction &I : instructions(K)) {
+        auto *CB = dyn_cast<CallBase>(&I);
+        if (!CB || calleeName(*CB) != "__kmpc_target_init") continue;
+        auto *GV = dyn_cast<GlobalVariable>(CB->getArgOperand(0)->stripPointerCasts());
+        if (!GV || !GV->hasInitializer()) return false;
+        Constant *Config = GV->getInitializer()->getAggregateElement(0u);
+        Constant *Mode = Config ? Config->getAggregateElement(ExecModeField) : nullptr;
+        auto *CI = dyn_cast_or_null<ConstantInt>(Mode);
+        return CI && (CI->getZExtValue() & ExecModeSPMD);
+    }
+    return false;
+}
+
 std::optional<OmpKernel> OmpKernel::locate(Function &K, std::string &why) {
     OmpKernel KI(K);
     for (Instruction &I : instructions(K)) {
