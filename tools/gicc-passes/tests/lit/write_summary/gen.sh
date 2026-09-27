@@ -24,6 +24,9 @@ for src in Inputs/*.cpp; do
         echo
         "$LLVM/bin/clang++" -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda \
             --offload-arch=sm_90 --offload-device-only -S -emit-llvm -O3 \
-            "$src" -o - | grep -v '^; ModuleID'
+            "$src" -o - | grep -v '^; ModuleID' |
+            # LLVM 19 (ROCm 6.4) parses only the pre-21 spelling; LLVM 21
+            # still reads it.
+            sed 's/captures(none)/nocapture/g'
     } > "$name.ll"
 done

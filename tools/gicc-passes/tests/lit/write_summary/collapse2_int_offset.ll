@@ -147,16 +147,16 @@ define weak_odr protected ptx_kernel void @__omp_offloading_6bc59cba_a500451b__Z
 declare i32 @__kmpc_target_init(ptr, ptr) local_unnamed_addr
 
 ; Function Attrs: mustprogress nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
-declare void @llvm.lifetime.start.p0(i64 immarg, ptr captures(none)) #1
+declare void @llvm.lifetime.start.p0(i64 immarg, ptr nocapture) #1
 
 ; Function Attrs: mustprogress nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
-declare void @llvm.lifetime.end.p0(i64 immarg, ptr captures(none)) #1
+declare void @llvm.lifetime.end.p0(i64 immarg, ptr nocapture) #1
 
 ; Function Attrs: nounwind
 declare void @__kmpc_distribute_static_init_8(ptr, i32, i32, ptr, ptr, ptr, ptr, i64, i64) local_unnamed_addr #2
 
 ; Function Attrs: alwaysinline norecurse nounwind
-define internal void @__omp_offloading_6bc59cba_a500451b__Z4stepPfPKfii_l5_omp_outlined_omp_outlined(ptr noalias noundef readonly captures(none) %0, ptr noalias readnone captures(none) %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, i64 noundef %5, ptr noundef writeonly captures(none) %6, ptr noundef readonly captures(none) %7) #3 {
+define internal void @__omp_offloading_6bc59cba_a500451b__Z4stepPfPKfii_l5_omp_outlined_omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, i64 noundef %5, ptr noundef writeonly nocapture %6, ptr noundef readonly nocapture %7) #3 {
   %9 = alloca i64, align 8
   %10 = alloca i64, align 8
   %11 = alloca i64, align 8

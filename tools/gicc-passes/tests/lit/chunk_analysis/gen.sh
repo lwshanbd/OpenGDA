@@ -11,13 +11,19 @@ set -euo pipefail
 cd "$(dirname "$0")"
 LLVM=${LLVM:-/projects/bfyi/lwshanbd/llvm-omp}
 
+# LLVM 21 spells nocapture as captures(none); LLVM 19 (ROCm 6.4, Tioga)
+# only parses the old form, which LLVM 21 still reads and upgrades.
+portable() {
+    grep -v '^; ModuleID' | sed 's/captures(none)/nocapture/g'
+}
+
 RUN='; RUN: env GICC_MODE=chunk-analyze %opt -load-pass-plugin=%gicc_passes_so \
 ; RUN:   -passes=gicc-chunk-analysis -disable-output %s 2>&1 | %FileCheck %s'
 
 device_ir() {
     "$LLVM/bin/clang++" -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda \
         --offload-arch=sm_90 --offload-device-only -S -emit-llvm -O2 \
-        "$1" -o - | grep -v '^; ModuleID'
+        "$1" -o - | portable
 }
 
 emit() {   # out.ll, header comment, source file, ir
@@ -99,7 +105,7 @@ lower_test dist_chunked legal_dist_chunked
 unoptimized_ir() {
     "$LLVM/bin/clang++" -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda \
         --offload-arch=sm_90 --offload-device-only -S -emit-llvm -O3 \
-        -Xclang -disable-llvm-passes "$1" -o - | grep -v '^; ModuleID'
+        -Xclang -disable-llvm-passes "$1" -o - | portable
 }
 lower_o3_test() {   # name, input, what it checks, CHECK lines (one per line)
     local ir

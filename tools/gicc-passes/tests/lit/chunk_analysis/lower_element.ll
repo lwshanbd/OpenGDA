@@ -305,10 +305,10 @@ define internal void @__omp_offloading_6bc59cba_a5003e92__Z4stepPjS_miimi_l16_om
 declare noalias ptr @__kmpc_alloc_shared(i64) #2
 
 ; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
-declare void @llvm.lifetime.start.p0(i64 immarg, ptr captures(none)) #3
+declare void @llvm.lifetime.start.p0(i64 immarg, ptr nocapture) #3
 
 ; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
-declare void @llvm.lifetime.end.p0(i64 immarg, ptr captures(none)) #3
+declare void @llvm.lifetime.end.p0(i64 immarg, ptr nocapture) #3
 
 ; Function Attrs: nounwind
 declare void @__kmpc_distribute_static_init_8u(ptr, i32, i32, ptr, ptr, ptr, ptr, i64, i64) #4
@@ -546,7 +546,7 @@ declare void @__kmpc_distribute_static_fini(ptr, i32) #4
 declare void @ompx_pipelined_put(i32 noundef, ptr noundef, ptr noundef, i64 noundef) #8
 
 ; Function Attrs: nosync nounwind
-declare void @__kmpc_free_shared(ptr allocptr captures(none), i64) #9
+declare void @__kmpc_free_shared(ptr allocptr nocapture, i64) #9
 
 ; Function Attrs: nounwind
 declare i32 @__kmpc_global_thread_num(ptr) #4
