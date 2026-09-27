@@ -388,7 +388,7 @@ private:
         for (auto [call, mirror] : fallbacks) {
             Instruction *then = SplitBlockAndInsertIfThen(
                 IRBuilder<>(call).CreateNot(mirror), call->getIterator(), false);
-            call->moveBefore(then->getIterator());
+            call->moveBefore(*then->getParent(), then->getIterator());
         }
         if (!plans.empty()) {
             changed = true;
@@ -661,7 +661,8 @@ private:
 
 PreservedAnalyses GICCChunkPrepPass::run(Module &M, ModuleAnalysisManager &) {
     if (getConfig().mode != Mode::ChunkLower) return PreservedAnalyses::all();
-    if (!Triple(M.getTargetTriple()).isGPU()) return PreservedAnalyses::all();
+    Triple T(M.getTargetTriple());
+    if (!T.isNVPTX() && !T.isAMDGPU()) return PreservedAnalyses::all();
     bool changed = false;
     for (Function &F : M) {
         bool hasPut = false;
@@ -687,7 +688,8 @@ PreservedAnalyses GICCChunkPrepPass::run(Module &M, ModuleAnalysisManager &) {
 PreservedAnalyses GICCChunkAnalysisPass::run(Module &M, ModuleAnalysisManager &MAM) {
     const Mode mode = getConfig().mode;
     if (mode != Mode::ChunkAnalyze && mode != Mode::ChunkLower) return PreservedAnalyses::all();
-    if (!Triple(M.getTargetTriple()).isGPU()) return PreservedAnalyses::all();
+    Triple T(M.getTargetTriple());
+    if (!T.isNVPTX() && !T.isAMDGPU()) return PreservedAnalyses::all();
     auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
     return ChunkAnalyzer(M, FAM, mode == Mode::ChunkLower).run() ? PreservedAnalyses::none()
                                                                  : PreservedAnalyses::all();

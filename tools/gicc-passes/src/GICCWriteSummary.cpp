@@ -50,7 +50,8 @@ void summarizeKernel(Function &F, FunctionAnalysisManager &FAM) {
 
 PreservedAnalyses GICCWriteSummaryPass::run(Module &M, ModuleAnalysisManager &MAM) {
     if (getConfig().mode != Mode::WriteSummary) return PreservedAnalyses::all();
-    if (!Triple(M.getTargetTriple()).isGPU()) return PreservedAnalyses::all();
+    Triple T(M.getTargetTriple());
+    if (!T.isNVPTX() && !T.isAMDGPU()) return PreservedAnalyses::all();
     auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
     for (Function &F : M)
         if (isOffloadKernel(F)) summarizeKernel(F, FAM);
