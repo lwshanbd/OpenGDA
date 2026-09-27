@@ -28,6 +28,26 @@
 //        synchronization epoch as the original put -- the epoch in which
 //        the program already guarantees the peer leaves dst alone.
 //
+// A loop that writes the source as a multi-dimensional box (collapse(D),
+// in any loop order) takes the box form instead of P1/P2: the put may be
+// any contiguous range of the written object, dst - src must be the same
+// in every team, and
+//
+//   (B1) every store to the object writes the same box, on every
+//        iteration, so each word of the range is either stored exactly once
+//        by the loop or not written by the kernel at all;
+//   (B2) the range, the box and the conditions under which the loop runs
+//        are kernel formals only, so the kernel can evaluate them before
+//        the loop.
+//
+// P3-P5 hold as before, and the kernel checks at run time that the range
+// and the box are aligned to the store size. The lowering is always element
+// grain: each store
+// that lands in the range is repeated into the peer's copy as it happens,
+// and the bytes of the range the box does not cover -- final before the
+// kernel starts, and sent by no mirrored store -- are copied once at its
+// start (ompx__box_residual). The peer must be same-node.
+//
 // GICC_MODE=chunk-analyze reports the verdict; chunk-lower also rewrites
 // each proven put at the grain GICC_CHUNK_GRAIN selects (see lowerPut) and
 // makes an unprovable one a compile error. GICCChunkPrepPass keeps the
@@ -269,6 +289,13 @@ struct Plan {
     // sends only what is stored, so it needs this; the block grain sends
     // whole blocks and does not.
     bool covered;
+    // Box form (a multi-dimensional write): the range [srcObj + rangeOff,
+    // + bytes), the box every store writes, and the loop's run conditions.
+    bool box = false;
+    const SCEV *rangeOff = nullptr, *bytes = nullptr, *boxOffset = nullptr;
+    SmallVector<const SCEV *, 4> boxStride, boxExtent;
+    SmallVector<EntryFact, 4> runs;
+    uint64_t elem = 0;
 };
 
 class ChunkAnalyzer {
@@ -395,7 +422,7 @@ private:
         }
         if (!plans.empty()) {
             changed = true;
-            if (verifyFunction(F, &errs()))
+            if (verifyFunction(F, &errs()) || verifyFunction(*KI->outlined, &errs()))
                 report_fatal_error("gicc-chunk: lowering produced invalid IR");
         }
     }
@@ -441,6 +468,11 @@ private:
         if (!KF.PDT.dominates(CI->getParent(), KI.distInit->getParent()))
             return illegal("the put does not run on every path after the distribute loop "
                            "(it is conditional); guard the whole kernel instead");
+        if (auto src = symbolicSource(KF, CI->getArgOperand(2)))
+            if (llvm::any_of(KF.W.boxes, [&](const BoxWrite &b) {
+                    return b.obj == src->first && b.stride.size() > 1;
+                }))
+                return checkBoxPut(KF, CI, src->first, src->second);
         int64_t off = 0;
         Value *obj = stripToObject(KI, CI->getArgOperand(2), &off);
         if (!obj || !isa<Argument>(obj))
@@ -505,7 +537,113 @@ private:
         return Plan{CI, obj, c, d, lb0, peer, dst, covered};
     }
 
+    // The kernel formal a pointer points into and its byte offset from it,
+    // symbolic; nullopt when it is not a formal plus an offset.
+    std::optional<std::pair<Value *, const SCEV *>> symbolicSource(const KernelFacts &KF,
+                                                                  Value *ptr) {
+        ScalarEvolution &SE = KF.SE;
+        const SCEV *S = KF.KI.normalize(SE, SE.getSCEV(ptr));
+        auto *base = dyn_cast<SCEVUnknown>(SE.getPointerBase(S));
+        if (!base) return std::nullopt;
+        Value *obj = KF.KI.resolve(base->getValue());
+        if (!isa<Argument>(obj)) return std::nullopt;
+        const SCEV *off = SE.removePointerBase(S);
+        if (isa<SCEVCouldNotCompute>(off)) return std::nullopt;
+        return std::make_pair(obj, off);
+    }
+
+    static bool sameBox(ScalarEvolution &SE, const BoxWrite &a, const BoxWrite &b) {
+        if (a.storeSize != b.storeSize || a.stride.size() != b.stride.size() ||
+            !sameSCEV(SE, a.offset, b.offset))
+            return false;
+        for (size_t d = 0; d < a.stride.size(); ++d)
+            if (!sameSCEV(SE, a.stride[d], b.stride[d]) || !sameSCEV(SE, a.extent[d], b.extent[d]))
+                return false;
+        return true;
+    }
+
+    // B1, B2 and P4 for a put of an object the loop writes as a box (P3 and
+    // P5 as in checkPut).
+    std::optional<Plan> checkBoxPut(const KernelFacts &KF, CallInst *CI, Value *obj,
+                                    const SCEV *off) {
+        const OmpKernel &KI = KF.KI;
+        ScalarEvolution &SE = KF.SE;
+        auto illegal = [&](const std::string &why) {
+            report(CI, Verdict::Illegal, why);
+            return std::nullopt;
+        };
+        const std::string name = "'" + objName(obj) + "'";
+        const BoxWrite *first = nullptr;
+        bool covered = false;
+        for (const BoxWrite &b : KF.W.boxes) {
+            if (b.obj != obj) continue;
+            if (first && !sameBox(SE, *first, b))
+                return illegal("object " + name + " is written with more than one access pattern");
+            first = first ? first : &b;
+            covered |= b.unconditional;
+        }
+        if (!covered)
+            return illegal("no store to " + name + " runs on every iteration: a put of a "
+                           "multi-dimensional write sends each word as it is stored, so the "
+                           "loop must store every point of its box");
+        if (std::string why = writesOutsideLoop(KI, obj); !why.empty()) return illegal(why);
+        if (lower && !wrapperCallsOutlined(KI))
+            return illegal("the parallel region is inlined into its wrapper (GICCChunkPrepPass "
+                           "did not run): its stores cannot be mirrored");
+        const uint64_t elem = first->storeSize;
+        if (!isPowerOf2_64(elem))
+            return illegal("the stores to " + name + " are " + std::to_string(elem) +
+                           " bytes, not a power of two");
+        // That the range and the box are aligned to the stores (so none
+        // straddles the range's edge) is checked at run time, by
+        // ompx__box_residual: a length is often a formal SCEV knows nothing of.
+        const SCEV *bytes = KI.normalize(SE, SE.getSCEV(CI->getArgOperand(3)));
+        // Everything the kernel evaluates before the loop must be the same in
+        // every team and on every path: formals and constants only.
+        if (!onlyFormals(off, KI.K) || !onlyFormals(bytes, KI.K))
+            return illegal("the put range [src+" + scevStr(off) + ", +" + scevStr(bytes) +
+                           ") is not made of kernel formals");
+        bool boxFormal = onlyFormals(first->offset, KI.K);
+        for (size_t d = 0; d < first->stride.size(); ++d)
+            boxFormal &= onlyFormals(first->stride[d], KI.K) &&
+                         onlyFormals(first->extent[d], KI.K);
+        if (!boxFormal)
+            return illegal("the box " + name + " is written in is not made of kernel formals");
+        for (const EntryFact &f : KF.W.preconditions)
+            if (!onlyFormals(f.x, KI.K))
+                return illegal("the condition " + scevStr(f.x) + " under which the loop runs "
+                               "is not made of kernel formals");
+        const SCEV *peer = KI.normalize(SE, SE.getSCEV(CI->getArgOperand(0)));
+        const SCEV *dst  = KI.normalize(SE, SE.getSCEV(CI->getArgOperand(1)));
+        if (!onlyFormals(peer, KI.K) || !onlyFormals(dst, KI.K))
+            return illegal("peer or dst differs between teams");
+        Plan P{CI, obj, nullptr, nullptr, nullptr, peer, dst, covered};
+        P.box = true;
+        P.rangeOff = off;
+        P.bytes = bytes;
+        P.boxOffset = first->offset;
+        P.boxStride.assign(first->stride.begin(), first->stride.end());
+        P.boxExtent.assign(first->extent.begin(), first->extent.end());
+        P.runs.assign(KF.W.preconditions.begin(), KF.W.preconditions.end());
+        P.elem = elem;
+        return P;
+    }
+
     void printPlan(const KernelFacts &KF, const Plan &P) {
+        if (P.box) {
+            auto list = [](const SmallVectorImpl<const SCEV *> &v) {
+                std::string r = "[";
+                for (size_t i = 0; i < v.size(); ++i) r += (i ? ", " : "") + scevStr(v[i]);
+                return r + "]";
+            };
+            out() << "[gicc-chunk]   box: " << P.boxStride.size() << "-D extent="
+                  << list(P.boxExtent) << " stride=" << list(P.boxStride)
+                  << " offset=" << scevStr(P.boxOffset) << "\n"
+                  << "[gicc-chunk]   range: [" << objName(P.srcObj) << " + "
+                  << scevStr(P.rangeOff) << ", + " << scevStr(P.bytes)
+                  << "): stores inside it are mirrored, the rest is sent at kernel start\n";
+            return;
+        }
         const OmpKernel &KI = KF.KI;
         ScalarEvolution &SE = KF.SE;
         Type *I64 = Type::getInt64Ty(KI.K.getContext());
@@ -545,6 +683,13 @@ private:
     // caller splits the block once every plan is expanded.
     std::optional<std::pair<CallInst *, Value *>>
     lowerPut(const OmpKernel &KI, const WriteSet &W, const Plan &P, ScalarEvolution &SE) {
+        if (P.box) {
+            lowerBoxPut(KI, W, P, SE);
+            out() << "[gicc-chunk]   lowered: element grain over the box (stores in the "
+                     "range mirrored to the peer, the rest sent at kernel start)\n";
+            P.put->eraseFromParent();
+            return std::nullopt;
+        }
         bool element = getConfig().chunkGrain == ChunkGrain::Element;
         if (element && !P.covered) {
             out() << "[gicc-chunk]   no write covers the range on every iteration, and "
@@ -617,6 +762,95 @@ private:
             Copy->setMetadata("gicc.repeat", MDNode::get(Copy->getContext(), {}));
         }
         return mirror;
+    }
+
+    // Box element grain. Before the loop, in the kernel: the peer address,
+    // the "loop runs" flag, and one call that sends the part of the range
+    // the box does not write. In the parallel region: each store to the
+    // source that lands in [start, start + len) is repeated at the same
+    // offset in the peer.
+    void lowerBoxPut(const OmpKernel &KI, const WriteSet &W, const Plan &P, ScalarEvolution &SE) {
+        LLVMContext &Ctx = M.getContext();
+        Type *I64 = Type::getInt64Ty(Ctx), *I32 = Type::getInt32Ty(Ctx), *I8 = Type::getInt8Ty(Ctx);
+        auto *Ptr = cast<PointerType>(P.put->getArgOperand(1)->getType());
+        BasicBlock::iterator pre = KI.distInit->getIterator();
+        SCEVExpander X(SE, KI.DL, "gicc.chunk");
+        const SCEV *obj = SE.getSCEV(P.srcObj);
+        Value *peerV = X.expandCodeFor(P.peer, I32, pre);
+        Value *dstV  = X.expandCodeFor(P.dst, Ptr, pre);
+        Value *srcV  = X.expandCodeFor(SE.getAddExpr(obj, P.rangeOff), Ptr, pre);
+        Value *lenV  = X.expandCodeFor(P.bytes, I64, pre);
+        Value *boxV  = X.expandCodeFor(SE.getAddExpr(obj, P.boxOffset), Ptr, pre);
+        SmallVector<Value *, 4> strides, extents, facts;
+        for (size_t d = 0; d < P.boxStride.size(); ++d) {
+            strides.push_back(X.expandCodeFor(P.boxStride[d], I64, pre));
+            extents.push_back(X.expandCodeFor(P.boxExtent[d], I64, pre));
+        }
+        for (const EntryFact &f : P.runs)
+            facts.push_back(X.expandCodeFor(f.x, f.x->getType(), pre));
+
+        IRBuilder<> B(KI.distInit);
+        FunctionCallee peerAddr =
+            M.getOrInsertFunction("ompx__peer_addr_mapped", Ptr, I32, Ptr);
+        Value *pd = B.CreateCall(peerAddr, {peerV, dstV});
+        Value *mirror = B.CreateICmpNE(pd, ConstantPointerNull::get(Ptr));
+        Value *delta = B.CreateSub(B.CreatePtrToInt(pd, I64), B.CreatePtrToInt(srcV, I64));
+        Value *runs = B.getTrue();
+        for (size_t i = 0; i < facts.size(); ++i) {
+            Value *z = Constant::getNullValue(facts[i]->getType());
+            runs = B.CreateAnd(runs, P.runs[i].nonzeroOnly ? B.CreateICmpNE(facts[i], z)
+                                                           : B.CreateICmpSGT(facts[i], z));
+        }
+        // The dims go by reference, in stack arrays of the kernel.
+        const unsigned D = P.boxStride.size();
+        auto array = [&](ArrayRef<Value *> vals, const char *name) {
+            IRBuilder<> EB(&*KI.K.getEntryBlock().getFirstInsertionPt());
+            auto *AT = ArrayType::get(I64, D);
+            AllocaInst *A = EB.CreateAlloca(AT, KI.DL.getAllocaAddrSpace(), nullptr, name);
+            for (unsigned d = 0; d < D; ++d)
+                B.CreateStore(vals[d], B.CreateConstInBoundsGEP2_32(AT, A, 0, d));
+            return B.CreateAddrSpaceCast(A, Ptr);
+        };
+        Value *strideArr = array(strides, "gicc.box.stride");
+        Value *extentArr = array(extents, "gicc.box.extent");
+        FunctionCallee residual = M.getOrInsertFunction(
+            "ompx__box_residual", Type::getVoidTy(Ctx), Ptr, Ptr, I64, Ptr, I32, Ptr, Ptr, I64, I32);
+        B.CreateCall(residual, {pd, srcV, lenV, boxV, ConstantInt::get(I32, D), strideArr,
+                                extentArr, ConstantInt::get(I64, P.elem),
+                                B.CreateZExt(runs, I32)});
+
+        auto shared = [&](Type *T, const char *name) {
+            return new GlobalVariable(M, T, false, GlobalValue::InternalLinkage,
+                                      PoisonValue::get(T), name, nullptr,
+                                      GlobalValue::NotThreadLocal, kmpc::SharedAddrSpace);
+        };
+        GlobalVariable *gDelta  = shared(I64, "gicc.box.delta");
+        GlobalVariable *gStart  = shared(I64, "gicc.box.start");
+        GlobalVariable *gLen    = shared(I64, "gicc.box.len");
+        GlobalVariable *gMirror = shared(I8, "gicc.box.mirror");
+        B.CreateStore(delta, gDelta);
+        B.CreateStore(B.CreatePtrToInt(srcV, I64), gStart);
+        B.CreateStore(lenV, gLen);
+        B.CreateStore(B.CreateZExt(mirror, I8), gMirror);
+
+        Function &O = *KI.outlined;
+        IRBuilder<> BO(&*O.getEntryBlock().getFirstInsertionPt());
+        Value *oDelta  = BO.CreateLoad(I64, gDelta, "gicc.box.delta");
+        Value *oStart  = BO.CreateLoad(I64, gStart, "gicc.box.start");
+        Value *oLen    = BO.CreateLoad(I64, gLen, "gicc.box.len");
+        Value *oMirror = BO.CreateICmpNE(BO.CreateLoad(I8, gMirror), ConstantInt::get(I8, 0));
+        for (StoreInst *St : W.storesTo.lookup(P.srcObj)) {
+            Instruction *next = St->getNextNode();
+            IRBuilder<> BS(next);
+            Value *rel = BS.CreateSub(BS.CreatePtrToInt(St->getPointerOperand(), I64), oStart);
+            Value *in = BS.CreateAnd(oMirror, BS.CreateICmpULT(rel, oLen), "gicc.box.in");
+            Instruction *then = SplitBlockAndInsertIfThen(in, next->getIterator(), false);
+            IRBuilder<> BT(then);
+            Value *remote = BT.CreateGEP(I8, St->getPointerOperand(), oDelta);
+            StoreInst *Copy = BT.CreateAlignedStore(St->getValueOperand(), remote, St->getAlign());
+            // It repeats St, which the put_no_db mirror already checks.
+            Copy->setMetadata("gicc.repeat", MDNode::get(Ctx, {}));
+        }
     }
 
     // One send per block right after its parallel region joins. Under the
