@@ -547,15 +547,16 @@ public:
         // table exists from here on so a context published before the first
         // put_signal is staged already points the device at it.
         if (gpuHostMalloc((void**)&signal_doorbells_host_,
-                          sizeof(void*) * kSignalSlots,
+                          sizeof(void*) * (kSignalSlots + kInternalSlots),
                           gpuHostMallocMapped) != GPU_SUCCESS ||
             gpuHostGetDevicePointer((void**)&signal_doorbells_dev_,
                                     signal_doorbells_host_, 0) != GPU_SUCCESS) {
             fprintf(stderr, "GICC: allocating the signal doorbell table failed\n");
             std::abort();
         }
-        std::memset((void*)signal_doorbells_host_, 0, sizeof(void*) * kSignalSlots);
-        signal_slots_.resize(kSignalSlots);
+        std::memset((void*)signal_doorbells_host_, 0,
+                    sizeof(void*) * (kSignalSlots + kInternalSlots));
+        signal_slots_.resize(kSignalSlots + kInternalSlots);
     }
 
 
@@ -976,6 +977,11 @@ public:
     // n and fires on the n-th increment, from the GPU or from the host.
     //--------------------------------------------------------------------------
     static constexpr int kSignalSlots = 64;
+    // Slots past the application's, each with a trigger of its own, for
+    // writes the library itself stages for a kernel to release (a put
+    // gicc/omp.h moves from after a kernel into it). The same calls serve
+    // them: slot kSignalSlots + i.
+    static constexpr int kInternalSlots = 8;
 
     // The inbox a device-side signal_wait polls, published by prepare().
     void set_signal_table(void* dev_base, int buf_index) {
@@ -1014,6 +1020,12 @@ public:
     // Release the oldest group still staged on `slot`, from the host.
     void signal_slot_fire(int slot) {
         *static_cast<volatile uint64_t*>(signal_slot_(slot).trigger.mmio) = 1;
+    }
+
+    // The device's doorbell for `slot`: a store of 1 releases the oldest
+    // group still staged there, as signal_slot_fire does.
+    volatile uint64_t* signal_slot_doorbell(int slot) {
+        return signal_slot_(slot).trigger.dev;
     }
 
     DeviceCtx* prepare(int peer_rank = -1, int remote_buf_index = -1) {
@@ -1510,16 +1522,16 @@ private:
         FabricDwqContext::TriggerCounter trigger;
         uint64_t                         staged = 0;   // groups staged so far
     };
-    std::vector<SignalSlot>            signal_slots_;            // kSignalSlots once DWQ is on
+    std::vector<SignalSlot>            signal_slots_;            // all slots once DWQ is on
     volatile uint64_t**                signal_doorbells_host_ = nullptr;
     volatile uint64_t**                signal_doorbells_dev_  = nullptr;
     void*                              sig_base_ = nullptr;
     int                                sig_buf_  = -1;
 
     SignalSlot& signal_slot_(int slot) {
-        if (!host_wait_mode_ || slot < 0 || slot >= kSignalSlots) {
+        if (!host_wait_mode_ || slot < 0 || slot >= kSignalSlots + kInternalSlots) {
             fprintf(stderr, "GICC: signal slot %d needs DWQ mode and 0 <= slot < %d\n",
-                    slot, kSignalSlots);
+                    slot, kSignalSlots + kInternalSlots);
             std::abort();
         }
         SignalSlot& s = signal_slots_[slot];
