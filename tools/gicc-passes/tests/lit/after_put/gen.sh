@@ -38,8 +38,8 @@ ir() {   # extra clang flags
 ; JSON: "sites":[{"kernel":"__omp_offloading_{{[^"]*}}step{{[^"]*}}","src_args":[[[ARG:[0-9]+]],[[ARG]]]}]
 ;
 ; BRACKET-LABEL: define {{.*}}@_Z4step
-; BRACKET: call void @ompx__after_post(i64 [[H:-?[0-9]+]], i32 0, i32 {{[0-9]+}}, i32 {{%.*}}, i32 [[L:%[0-9]+]],
-; BRACKET: call void @ompx__after_post(i64 [[H]], i32 1, i32 {{[0-9]+}}, i32 {{%.*}}, i32 [[R:%[0-9]+]],
+; BRACKET: call void @ompx__after_post(i64 [[H:-?[0-9]+]], i32 0, i32 {{[0-9]+}}, i32 {{%.*}}, i32 [[L:%[0-9]+]], ptr {{%[^,]+}}, ptr {{%[^,]+}}, i64 {{%[^,]+}}, i64
+; BRACKET: call void @ompx__after_post(i64 [[H]], i32 1, i32 {{[0-9]+}}, i32 {{%.*}}, i32 [[R:%[0-9]+]], ptr {{%[^,]+}}, ptr {{%[^,]+}}, i64 {{%[^,]+}}, i64
 ; BRACKET: call i32 @__tgt_target_kernel(
 ; BRACKET: call void @ompx__after_done(i64 [[H]], i32 0, i32 [[L]],
 ; BRACKET: call void @ompx__after_done(i64 [[H]], i32 1, i32 [[R]],
@@ -88,11 +88,13 @@ HEAD
 ; CHECK: [gicc-chunk] kernel __omp_offloading_{{.*}}fenced
 ; CHECK: ompx_put after the kernel: ILLEGAL: no store to {{.*}} runs on every iteration
 ; CHECK-NOT: error
-; The step kernel reads both posts before its loop and sends them itself.
+; The step kernel reads both posts before its loop and sends them itself,
+; each by its index among the posts (the doorbell of one the host queued).
 ; CHECK-LABEL: define {{.*}} @__omp_offloading_{{.*}}step
 ; CHECK: call void @ompx__after_put(i64 {{-?[0-9]+}}, i32 0, i32 [[ARG:[0-9]+]],
 ; CHECK: call void @ompx__after_put(i64 {{-?[0-9]+}}, i32 1, i32 [[ARG]],
-; CHECK: call ptr @ompx__box_peer(
+; CHECK-DAG: call ptr @ompx__box_peer({{.*}}, i32 {{[01]}}, i32 0, ptr
+; CHECK-DAG: call ptr @ompx__box_peer({{.*}}, i32 {{[01]}}, i32 1, ptr
 ; CHECK-NOT: call void @ompx_pipelined_put
 ; Nothing of the fenced kernel's put is left.
 ; CHECK-LABEL: define {{.*}} @__omp_offloading_{{.*}}fenced

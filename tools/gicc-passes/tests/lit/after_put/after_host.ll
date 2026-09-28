@@ -15,8 +15,8 @@
 ; JSON: "sites":[{"kernel":"__omp_offloading_{{[^"]*}}step{{[^"]*}}","src_args":[[[ARG:[0-9]+]],[[ARG]]]}]
 ;
 ; BRACKET-LABEL: define {{.*}}@_Z4step
-; BRACKET: call void @ompx__after_post(i64 [[H:-?[0-9]+]], i32 0, i32 {{[0-9]+}}, i32 {{%.*}}, i32 [[L:%[0-9]+]],
-; BRACKET: call void @ompx__after_post(i64 [[H]], i32 1, i32 {{[0-9]+}}, i32 {{%.*}}, i32 [[R:%[0-9]+]],
+; BRACKET: call void @ompx__after_post(i64 [[H:-?[0-9]+]], i32 0, i32 {{[0-9]+}}, i32 {{%.*}}, i32 [[L:%[0-9]+]], ptr {{%[^,]+}}, ptr {{%[^,]+}}, i64 {{%[^,]+}}, i64
+; BRACKET: call void @ompx__after_post(i64 [[H]], i32 1, i32 {{[0-9]+}}, i32 {{%.*}}, i32 [[R:%[0-9]+]], ptr {{%[^,]+}}, ptr {{%[^,]+}}, i64 {{%[^,]+}}, i64
 ; BRACKET: call i32 @__tgt_target_kernel(
 ; BRACKET: call void @ompx__after_done(i64 [[H]], i32 0, i32 [[L]],
 ; BRACKET: call void @ompx__after_done(i64 [[H]], i32 1, i32 [[R]],
@@ -90,7 +90,7 @@ target triple = "x86_64-unknown-linux-gnu"
 @.offloading.entry.__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { ptr @.__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16.region_id, ptr @.offloading.entry_name.3, i64 0, i32 0, i32 0 }, section "omp_offloading_entries", align 1
 @.offloading.entry_name.4 = internal unnamed_addr constant [53 x i8] c"__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29\00"
 @.offloading.entry.__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { ptr @.__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29.region_id, ptr @.offloading.entry_name.4, i64 0, i32 0, i32 0 }, section "omp_offloading_entries", align 1
-@llvm.compiler.used = appending global [10 x ptr] [ptr @_ZL15ompx__box_countPjiPvPKvm, ptr @ompx__after_put, ptr @ompx__block_put, ptr @ompx__block_put_one, ptr @ompx__box_due, ptr @ompx__box_hull, ptr @ompx__box_peer, ptr @ompx__box_plan, ptr @ompx__box_residual, ptr @ompx__peer_addr], section "llvm.metadata"
+@llvm.compiler.used = appending global [10 x ptr] [ptr @_ZL15ompx__box_countPjiPvPKvmi, ptr @ompx__after_put, ptr @ompx__block_put, ptr @ompx__block_put_one, ptr @ompx__box_due, ptr @ompx__box_hull, ptr @ompx__box_peer, ptr @ompx__box_plan, ptr @ompx__box_residual, ptr @ompx__peer_addr], section "llvm.metadata"
 
 ; Function Attrs: mustprogress uwtable
 define weak dso_local void @ompx_pipelined_put(i32 noundef %0, ptr noundef %1, ptr noundef %2, i64 noundef %3) local_unnamed_addr #0 {
@@ -124,8 +124,8 @@ define internal void @ompx__box_residual(ptr nocapture readnone %0, ptr nocaptur
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(argmem: write) uwtable
-define internal noalias noundef ptr @ompx__box_peer(i32 %0, ptr nocapture readnone %1, ptr nocapture readnone %2, i64 %3, i32 %4, ptr nocapture noundef writeonly %5) #4 {
-  store i32 0, ptr %5, align 4, !tbaa !13
+define internal noalias noundef ptr @ompx__box_peer(i32 %0, ptr nocapture readnone %1, ptr nocapture readnone %2, i64 %3, i32 %4, i32 %5, ptr nocapture noundef writeonly %6) #4 {
+  store i32 0, ptr %6, align 4, !tbaa !13
   ret ptr null
 }
 
@@ -143,12 +143,12 @@ define internal void @ompx__box_plan(i32 %0, ptr nocapture readnone %1, ptr noca
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
-define internal void @_ZL15ompx__box_countPjiPvPKvm(ptr nocapture readnone %0, i32 %1, ptr nocapture readnone %2, ptr nocapture readnone %3, i64 %4) #3 {
+define internal void @_ZL15ompx__box_countPjiPvPKvmi(ptr nocapture readnone %0, i32 %1, ptr nocapture readnone %2, ptr nocapture readnone %3, i64 %4, i32 %5) #3 {
   ret void
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
-define internal noundef i64 @ompx__box_due(i32 %0, i64 %1, ptr nocapture readnone %2, ptr nocapture readnone %3, ptr nocapture readnone %4, ptr nocapture readnone %5, ptr nocapture readnone %6, ptr nocapture readnone %7) #2 {
+define internal noundef i64 @ompx__box_due(i32 %0, i64 %1, ptr nocapture readnone %2, ptr nocapture readnone %3, ptr nocapture readnone %4, ptr nocapture readnone %5, ptr nocapture readnone %6, ptr nocapture readnone %7, ptr nocapture readnone %8) #2 {
   ret i64 9223372036854775807
 }
 

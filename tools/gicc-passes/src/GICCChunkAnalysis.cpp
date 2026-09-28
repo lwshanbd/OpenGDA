@@ -116,10 +116,18 @@ constexpr StringLiteral kPrepAttr = "gicc-chunk-noinline";
 enum class Verdict { Legal, Illegal, Race };
 
 // A put the host makes after the kernel (GICCAfterPut.h) is stated in the
-// kernel as a marker after its loop (kAfterMarker), its arguments read from
-// the host's post before the loop (kAfterSite).
+// kernel as a marker after its loop (kAfterMarker, whose operand is the
+// put's index among those the host posts), its arguments read from the
+// host's post before the loop (kAfterSite).
 constexpr StringLiteral kAfterMarker = "gicc.after";
 constexpr StringLiteral kAfterSite   = "gicc.after.site";
+
+// The index of the posted put a marker states, or -1 for one the source does.
+int afterIndex(const CallInst *CI) {
+    const MDNode *N = CI->getMetadata(kAfterMarker);
+    if (!N || N->getNumOperands() == 0) return -1;
+    return static_cast<int>(mdconst::extract<ConstantInt>(N->getOperand(0))->getSExtValue());
+}
 
 // True when every SCEVUnknown in S is a formal of F, or a value read from a
 // post before the loop (the value is then the same in every team).
@@ -442,7 +450,9 @@ private:
             P.values.push_back(src);
             P.marker = IRBuilder<>(KI->distFini->getNextNode())
                            .CreateCall(marker, {peer, dst, src, bytes});
-            P.marker->setMetadata(kAfterMarker, tag);
+            P.marker->setMetadata(
+                kAfterMarker,
+                MDNode::get(Ctx, {ConstantAsMetadata::get(ConstantInt::get(I32, i))}));
             made.push_back(std::move(P));
         }
         return made;
@@ -473,6 +483,7 @@ private:
         Value *counted;   // i1: the kernel sends it by count
         unsigned dims;
         uint64_t elem;
+        int after;        // afterIndex of the put
     };
 
     // State shared by the per-put checks of one kernel.
@@ -1038,11 +1049,13 @@ private:
         AllocaInst *countedSlot =
             EB.CreateAlloca(I32, KI.DL.getAllocaAddrSpace(), nullptr, "gicc.box.counted");
         // The peer's copy of the range when it is IPC-mapped; otherwise the
-        // kernel sends by count (canCount) or the next quiet does.
+        // kernel sends by count (canCount) or the host does.
+        const int after = afterIndex(P.put);
         FunctionCallee peerFn = M.getOrInsertFunction("ompx__box_peer", Ptr, I32, Ptr, Ptr,
-                                                      I64, I32, Ptr);
+                                                      I64, I32, I32, Ptr);
         Value *pd = B.CreateCall(peerFn, {peerV, dstV, srcV, lenV,
                                           ConstantInt::get(I32, canCount),
+                                          ConstantInt::get(I32, after),
                                           B.CreateAddrSpaceCast(countedSlot, Ptr)});
         Value *counted = B.CreateICmpNE(B.CreateLoad(I32, countedSlot), ConstantInt::get(I32, 0));
         Value *mirror = B.CreateICmpNE(pd, ConstantPointerNull::get(Ptr));
@@ -1109,7 +1122,8 @@ private:
             // It repeats St, which the put_no_db mirror already checks.
             Copy->setMetadata("gicc.repeat", MDNode::get(Ctx, {}));
         }
-        return BoxSend{peerV, dstV, srcV, lenV, boxV, strideArr, extentArr, counted, D, P.elem};
+        return BoxSend{peerV,  dstV,    srcV, lenV,   boxV, strideArr,
+                       extentArr, counted, D,   P.elem, after};
     }
 
     // The stores that hand the parallel region its block bounds (slots 0
@@ -1167,6 +1181,7 @@ private:
         AllocaInst *dstArr = array(Ptr, "gicc.box.dst"), *srcArr = array(Ptr, "gicc.box.src");
         AllocaInst *bytesArr = array(I64, "gicc.box.bytes");
         AllocaInst *counterArr = array(Ptr, "gicc.box.counter");
+        AllocaInst *afterArr = array(I32, "gicc.box.after");
         AllocaInst *shiftSlot = EB.CreateAlloca(I64, AS, nullptr, "gicc.box.shift");
         AllocaInst *nextSlot = EB.CreateAlloca(I64, AS, nullptr, "gicc.box.next");
         auto at = [&](IRBuilder<> &B, AllocaInst *A, unsigned i) {
@@ -1200,6 +1215,7 @@ private:
             B.CreateStore(S.src, at(B, srcArr, p));
             B.CreateStore(S.len, at(B, bytesArr, p));
             B.CreateStore(ConstantExpr::getAddrSpaceCast(counter, Ptr), at(B, counterArr, p));
+            B.CreateStore(ConstantInt::get(I32, S.after), at(B, afterArr, p));
             B.CreateCall(hullFn, {S.src, S.len, S.box, ConstantInt::get(I32, S.dims), S.stride,
                                   S.extent, ConstantInt::get(I64, S.elem),
                                   B.CreateAddrSpaceCast(at(B, loArr, p), Ptr),
@@ -1245,13 +1261,14 @@ private:
         RB.CreateStore(RB.CreateIntToPtr(ubR, slotT), ubSlot->getPointerOperand());
 
         FunctionCallee dueFn = M.getOrInsertFunction(
-            "ompx__box_due", I64, I32, I64, Ptr, Ptr, Ptr, Ptr, Ptr, Ptr);
+            "ompx__box_due", I64, I32, I64, Ptr, Ptr, Ptr, Ptr, Ptr, Ptr, Ptr);
         auto dueCall = [&](Instruction *where, Value *pos, Value *go) {
             Instruction *then = SplitBlockAndInsertIfThen(go, where->getIterator(), false, rarely);
             IRBuilder<> T(then);
             Value *left = T.CreateCall(dueFn, {ConstantInt::get(I32, n), pos, flat(T, dueArr),
                                                flat(T, peerArr), flat(T, dstArr), flat(T, srcArr),
-                                               flat(T, bytesArr), flat(T, counterArr)});
+                                               flat(T, bytesArr), flat(T, counterArr),
+                                               flat(T, afterArr)});
             T.CreateStore(uniform(T, left), nextSlot);
         };
         dueCall(counting, lb, RB.CreateICmpSGE(lb, RB.CreateLoad(I64, nextSlot)));

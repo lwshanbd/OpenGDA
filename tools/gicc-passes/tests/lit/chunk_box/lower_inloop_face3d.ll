@@ -8,8 +8,9 @@
 ; CHECK: _kernel_environment = {{.*}} { %struct.ConfigurationEnvironmentTy { i8 0, i8 {{[01]}}, i8 2,
 ; CHECK-LABEL: define {{.*}} @__omp_offloading_
 ; The kernel is SPMD, so it can send to a peer that is not IPC-mapped
-; itself, by counting the teams past the range.
-; CHECK: call ptr @ompx__box_peer({{.*}}, i32 1, ptr {{%.*}})
+; itself, by counting the teams past the range. The source states the put
+; (after index -1).
+; CHECK: call ptr @ompx__box_peer({{.*}}, i32 1, i32 -1, ptr {{%.*}})
 ; The team shares the residual copy.
 ; CHECK: call void @ompx__box_residual({{.*}}, i32 1)
 ; CHECK: call void @ompx__box_hull(

@@ -846,7 +846,8 @@ ompx_pipe_deferred* ompx__pipe_deferred_list() {
 // launch that fell back to the host, or a post for another put.
 
 void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, int peer,
-                      void* dst, long long src_rel, size_t bytes) {
+                      void* dst, const void* src, long long src_rel, size_t bytes) {
+    (void)src;
     ompx_pipe_deferred* q = g_pipe_deferred_host;
     if (q == nullptr || i < 0 || i >= OMPX_PIPE_AFTER_MAX) return;
     ompx_pipe_after_put& e = q->after.e[i];

@@ -318,7 +318,7 @@ void bracket(Module &M, FoundSite &S, DominatorTree &DT) {
     Type *I64 = Type::getInt64Ty(Ctx), *I32 = Type::getInt32Ty(Ctx);
     auto *Ptr = PointerType::get(Ctx, 0);
     FunctionCallee post = M.getOrInsertFunction("ompx__after_post", Type::getVoidTy(Ctx), I64,
-                                                I32, I32, I32, I32, Ptr, I64, I64);
+                                                I32, I32, I32, I32, Ptr, Ptr, I64, I64);
     FunctionCallee done = M.getOrInsertFunction("ompx__after_done", Type::getVoidTy(Ctx), I64,
                                                 I32, I32, Ptr, Ptr, I64);
     Constant *hash = ConstantInt::get(I64, afterPutHash(S.kernel));
@@ -335,7 +335,7 @@ void bracket(Module &M, FoundSite &S, DominatorTree &DT) {
         Value *src = arg(2);
         Value *rel = B.CreateSub(B.CreatePtrToInt(src, I64), B.CreatePtrToInt(P.base, I64));
         B.CreateCall(post, {hash, ConstantInt::get(I32, i), ConstantInt::get(I32, P.srcArg),
-                            B.CreateZExt(armed, I32), arg(0), arg(1), rel,
+                            B.CreateZExt(armed, I32), arg(0), arg(1), src, rel,
                             B.CreateZExtOrTrunc(arg(3), I64)});
         IRBuilder<> A(P.put);
         A.CreateCall(done, {hash, ConstantInt::get(I32, i), P.put->getArgOperand(0),

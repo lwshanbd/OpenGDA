@@ -208,7 +208,7 @@ typedef struct ompx_pipe_deferred {
 } ompx_pipe_deferred;
 ompx_pipe_deferred* ompx__pipe_deferred_list(void);   // its device address
 void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, int peer,
-                      void* dst, long long src_rel, size_t bytes);
+                      void* dst, const void* src, long long src_rel, size_t bytes);
 void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
                       const void* src, size_t bytes);
 

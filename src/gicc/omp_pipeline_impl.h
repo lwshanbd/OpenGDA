@@ -39,7 +39,7 @@ ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* bo
                    int team)
     __asm__("ompx__box_residual");
 [[omp::assume("ompx_spmd_amenable")]] static void*
-ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count,
+ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count, int after,
                int32_t* counted)
     __asm__("ompx__box_peer");
 [[omp::assume("ompx_spmd_amenable")]] static void
@@ -56,7 +56,8 @@ ompx__after_put(unsigned long long kernel, int i, int src_arg, int32_t* peer, vo
     __asm__("ompx__after_put");
 [[omp::assume("ompx_spmd_amenable")]] static int64_t
 ompx__box_due(int n, int64_t lb, int64_t* due, const int32_t* peer, void* const* dst,
-              const void* const* src, const int64_t* bytes, unsigned* const* counter)
+              const void* const* src, const int64_t* bytes, unsigned* const* counter,
+              const int32_t* after)
     __asm__("ompx__box_due");
 
 #if defined(__NVPTX__) || defined(__AMDGCN__)
@@ -338,11 +339,13 @@ ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* bo
 // Where the put's destination lives in a same-node peer's heap, or null,
 // with *counted saying who sends to a peer that has none: 1 when the kernel
 // does, by count (it can: it is SPMD and the CPU proxy is on), 0 when the
-// next quiet does -- team 0 leaves the put in the deferred list. A negative
-// peer sends nothing.
+// next quiet does -- team 0 leaves the put in the deferred list. `after` is
+// the put's index among those the host posted, or -1. A negative peer sends
+// nothing.
 static __attribute__((used)) void*
-ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count,
+ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count, int after,
                int32_t* counted) {
+    (void)after;
     *counted = 0;
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     if (peer < 0) return nullptr;
@@ -356,7 +359,7 @@ ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count
     }
     return nullptr;
 #else
-    (void)peer; (void)dst; (void)src; (void)bytes; (void)can_count;
+    (void)peer; (void)dst; (void)src; (void)bytes; (void)can_count; (void)after;
     return nullptr;
 #endif
 }
@@ -488,7 +491,9 @@ ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* 
 // then, and a system-scope fence writes it back for the NIC. The counter
 // is left at zero for the next launch.
 static __attribute__((used)) void
-ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t bytes) {
+ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t bytes,
+                int after) {
+    (void)after;
 #if defined(__NVPTX__) || defined(__AMDGCN__)
 #if defined(__AMDGCN__)
     __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
@@ -520,18 +525,21 @@ ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t 
 // less. Inlined into its rare branch it costs the loop none.
 static __attribute__((used)) int64_t
 ompx__box_due(int n, int64_t lb, int64_t* due, const int32_t* peer, void* const* dst,
-              const void* const* src, const int64_t* bytes, unsigned* const* counter) {
+              const void* const* src, const int64_t* bytes, unsigned* const* counter,
+              const int32_t* after) {
     int64_t next = INT64_MAX;
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     for (int p = 0; p < n; ++p) {
         if (due[p] <= lb) {
-            ompx__box_count(counter[p], peer[p], dst[p], src[p], static_cast<size_t>(bytes[p]));
+            ompx__box_count(counter[p], peer[p], dst[p], src[p], static_cast<size_t>(bytes[p]),
+                            after[p]);
             due[p] = INT64_MAX;
         }
         if (due[p] < next) next = due[p];
     }
 #else
     (void)n; (void)lb; (void)due; (void)peer; (void)dst; (void)src; (void)bytes; (void)counter;
+    (void)after;
 #endif
     return next;
 }

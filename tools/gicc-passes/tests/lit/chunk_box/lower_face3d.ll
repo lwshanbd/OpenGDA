@@ -10,7 +10,7 @@
 ; CHECK-LABEL: define {{.*}} @__omp_offloading_
 ; A generic kernel cannot count the teams past the range: a peer that is
 ; not IPC-mapped is left to the next quiet.
-; CHECK: [[PD:%.*]] = call ptr @ompx__box_peer(i32 {{%.*}}, ptr {{%.*}}, ptr {{%.*}}, i64 {{%.*}}, i32 0, ptr {{%.*}})
+; CHECK: [[PD:%.*]] = call ptr @ompx__box_peer(i32 {{%.*}}, ptr {{%.*}}, ptr {{%.*}}, i64 {{%.*}}, i32 0, i32 -1, ptr {{%.*}})
 ; The kernel is still generic when the pass runs, so one thread per team
 ; sends the residual.
 ; CHECK: call void @ompx__box_residual(ptr [[PD]], ptr {{%.*}}, i64 {{%.*}}, ptr {{%.*}}, i32 3, ptr {{%.*}}, ptr {{%.*}}, i64 4, i32 {{%.*}}, i32 0)
