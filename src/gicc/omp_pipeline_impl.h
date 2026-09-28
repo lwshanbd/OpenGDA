@@ -1,0 +1,305 @@
+// gicc/omp_pipeline_impl.h - internals of gicc/omp_pipeline.h.
+//
+// The device functions the gicc-passes plugin calls when it rewrites an
+// ompx_pipelined_put (tools/gicc-passes/src/GICCChunkAnalysis.cpp). None of
+// them is for application code; include gicc/omp_pipeline.h instead.
+#pragma once
+
+#include "gicc/omp.h"
+
+#include <ompx.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+
+#pragma omp declare target
+extern "C" int8_t __kmpc_is_spmd_exec_mode();
+
+// Internal linkage with fixed symbol names: the pass inserts calls by these
+// names, and an internal definition is one the device link can see into (a
+// weak one cannot be internalized, and openmp-opt then treats every call as a
+// possible parallel region and keeps the kernel in generic mode).
+//
+// ompx_spmd_amenable: both helpers stay correct when the device link turns
+// the kernel into SPMD mode and every thread runs the code between parallel
+// regions -- peer_addr only computes an address, and put_one sends from one
+// thread. Without the assumption those calls keep the kernel generic, one
+// state-machine round trip per block.
+[[omp::assume("ompx_spmd_amenable")]] static void* ompx__peer_addr(int peer, void* addr)
+    __asm__("ompx__peer_addr");
+[[omp::assume("ompx_spmd_amenable")]] static void
+ompx__block_put_one(int peer, void* dst, const void* src, size_t bytes)
+    __asm__("ompx__block_put_one");
+static void ompx__block_put(int peer, void* dst, const void* src, size_t bytes)
+    __asm__("ompx__block_put");
+[[omp::assume("ompx_spmd_amenable")]] static void* ompx__peer_addr_mapped(int peer, void* addr)
+    __asm__("ompx__peer_addr_mapped");
+[[omp::assume("ompx_spmd_amenable")]] static void
+ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* box, int dims,
+                   const int64_t* stride, const int64_t* extent, int64_t elem, int loop_runs,
+                   int team)
+    __asm__("ompx__box_residual");
+
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+// This unit's device context. A kernel launched before ompx_prepare() ran in
+// this unit would otherwise dereference null.
+static inline ompx_ctx* ompx__pipeline_ctx() {
+    ompx_ctx* c = ompx__ctx;
+    if (c == nullptr) {
+        printf("ompx_pipelined_put: no device context; call ompx_prepare() in "
+               "this translation unit before the kernel\n");
+        __builtin_trap();
+    }
+    return c;
+}
+
+// Where `addr`'s object lives in a same-node peer's heap, or null.
+static inline char* ompx__peer_base(ompx_ctx* c, int peer, void* addr) {
+    if (peer < 0 || c->peer_ipc_base == nullptr) return nullptr;
+    char* base = static_cast<char*>(c->peer_ipc_base[peer * c->ipc_n_bufs + c->heap_buf]);
+    if (base == nullptr) return nullptr;
+    return base + (static_cast<char*>(addr) - static_cast<char*>(c->heap_base));
+}
+
+// A block put through the CPU proxy. Without a proxy ring the device put
+// would return without sending anything.
+static inline void ompx__proxy_put(ompx_ctx* c, int peer, void* dst, const void* src,
+                                   size_t bytes) {
+    if (gicc::omp::detail::lane_to_ring(c, 0) == nullptr) {
+        printf("ompx_pipelined_put: peer %d is not IPC-mapped and the CPU proxy is "
+               "off; nothing could send the data\n", peer);
+        __builtin_trap();
+    }
+    ompx_put(peer, dst, src, bytes);
+}
+
+// The one thread that should act for the team between parallel regions:
+// the main thread in generic mode (the only one running there; lane 0 of
+// the last warp, not thread 0), hardware thread 0 in SPMD mode, where every
+// thread runs that code.
+static inline bool ompx__sequential_thread() {
+    return !__kmpc_is_spmd_exec_mode() ||
+           (ompx_thread_id_x() == 0 && ompx_thread_id_y() == 0 && ompx_thread_id_z() == 0);
+}
+#endif
+
+// Element-grain lowering: where `addr`'s object lives in a same-node peer's
+// heap, or null when the peer is not IPC-mapped (the pass then falls back to
+// ompx__block_put_one at run time). Called once per team.
+static __attribute__((used)) void* ompx__peer_addr(int peer, void* addr) {
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    return ompx__peer_base(ompx__pipeline_ctx(), peer, addr);
+#else
+    (void)peer; (void)addr;
+    return nullptr;
+#endif
+}
+
+// Element-grain fallback for a peer ompx__peer_addr could not map: one proxy
+// put per block. No parallel region, so a kernel that only calls this
+// between its parallel regions can still be made SPMD by the device link.
+static __attribute__((used)) void
+ompx__block_put_one(int peer, void* dst, const void* src, size_t bytes) {
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    if (peer >= 0 && ompx__sequential_thread())
+        ompx__proxy_put(ompx__pipeline_ctx(), peer, dst, src, bytes);
+#else
+    (void)peer; (void)dst; (void)src; (void)bytes;
+#endif
+}
+
+// Block-grain lowering target, called by a team's main thread right after
+// one block's parallel region joins, so every word of [src, src + bytes) is
+// written. The team's threads store the block into a same-node peer's copy
+// of dst over NVLink / xGMI; for any other peer one thread issues a proxy
+// put. Everything the copy loops use is firstprivate: a variable they shared
+// by reference would be globalized, a device-heap allocation per call.
+// schedule(static, 1) gives neighbouring threads neighbouring words.
+static __attribute__((used)) void
+ompx__block_put(int peer, void* dst, const void* src, size_t bytes) {
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    if (peer < 0) return;
+    ompx_ctx* c = ompx__pipeline_ctx();
+    char* d = ompx__peer_base(c, peer, dst);
+    if (d == nullptr) {
+        if (ompx__sequential_thread()) ompx__proxy_put(c, peer, dst, src, bytes);
+        return;
+    }
+    const char* s = static_cast<const char*>(src);
+    if (((reinterpret_cast<uintptr_t>(d) | reinterpret_cast<uintptr_t>(s)) & 3) == 0) {
+        uint32_t* dw = reinterpret_cast<uint32_t*>(d);
+        const uint32_t* sw = reinterpret_cast<const uint32_t*>(s);
+        const size_t words = bytes / 4;
+        #pragma omp parallel for schedule(static, 1) firstprivate(dw, sw, words)
+        for (size_t i = 0; i < words; ++i) dw[i] = sw[i];
+        if (ompx__sequential_thread())
+            for (size_t i = words * 4; i < bytes; ++i) d[i] = s[i];
+    } else {
+        #pragma omp parallel for schedule(static, 1) firstprivate(d, s, bytes)
+        for (size_t i = 0; i < bytes; ++i) d[i] = s[i];
+    }
+#else
+    (void)peer; (void)dst; (void)src; (void)bytes;
+#endif
+}
+// Box element grain: where `addr`'s object lives in a same-node peer's heap.
+// Null for a negative peer, which sends nothing; any other peer must be
+// IPC-mapped, as a box has no per-block fallback. Called once per team.
+static __attribute__((used)) void* ompx__peer_addr_mapped(int peer, void* addr) {
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    if (peer < 0) return nullptr;
+    void* p = ompx__peer_base(ompx__pipeline_ctx(), peer, addr);
+    if (p == nullptr) {
+        printf("ompx_pipelined_put: peer %d is not IPC-mapped; a put of a "
+               "multi-dimensional write needs a same-node peer\n", peer);
+        __builtin_trap();
+    }
+    return p;
+#else
+    (void)peer; (void)addr;
+    return nullptr;
+#endif
+}
+
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+// [a, b) of s copied to the same offsets in d, word `id` of every `n` by
+// this thread: neighbouring threads take neighbouring words.
+static inline void ompx__copy_range(char* d, const char* s, const char* a, const char* b,
+                                    int64_t id, int64_t n) {
+    char* to = d + (a - s);
+    if (((reinterpret_cast<uintptr_t>(a) | reinterpret_cast<uintptr_t>(b) |
+          reinterpret_cast<uintptr_t>(to)) & 3) == 0) {
+        uint32_t* tw = reinterpret_cast<uint32_t*>(to);
+        const uint32_t* aw = reinterpret_cast<const uint32_t*>(a);
+        const int64_t words = (b - a) / 4;
+        for (int64_t i = id; i < words; i += n) tw[i] = aw[i];
+    } else {
+        for (int64_t i = id; i < b - a; i += n) to[i] = a[i];
+    }
+}
+#endif
+
+// Box element grain: the bytes of [src, src + bytes) that the kernel's box
+// does not write, copied to peer_dst. The kernel never changes them, so they
+// may go at any time, and no mirrored store sends any of them, so the two
+// never race. `box` is the address of the point with every digit 0; the dims
+// (stride in bytes, extent in points) may come in any order and with either
+// sign. loop_runs is 0 when the kernel's loop does not run at all, which
+// leaves every byte of the range unwritten. Each team takes one slice of the
+// range and walks the box rows that cross it. `team` is nonzero when every
+// thread of the team calls this, as in an SPMD kernel's code before its
+// loop; the threads then share each gap. Otherwise the team's sequential
+// thread copies alone, and a large residual holds the whole kernel back.
+static __attribute__((used)) void
+ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* box, int dims,
+                   const int64_t* stride, const int64_t* extent, int64_t elem, int loop_runs,
+                   int team) {
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    if (peer_dst == nullptr || bytes == 0) return;
+    int64_t id = 0, n_threads = 1;
+    if (team && __kmpc_is_spmd_exec_mode()) {
+        const int64_t bx = ompx_block_dim_x(), by = ompx_block_dim_y();
+        id = ompx_thread_id_x() + bx * (ompx_thread_id_y() + by * ompx_thread_id_z());
+        n_threads = bx * by * ompx_block_dim_z();
+    } else if (!ompx__sequential_thread()) {
+        return;
+    }
+    constexpr int kMaxDims = 8;
+    if (dims > kMaxDims) {
+        if (id == 0)
+            printf("ompx_pipelined_put: a %d-dimensional box has more than %d dims\n", dims,
+                   kMaxDims);
+        __builtin_trap();
+    }
+    const char* s = static_cast<const char*>(src);
+    char* d = static_cast<char*>(peer_dst);
+    const char* b0 = static_cast<const char*>(box);
+    // Mirrored stores are matched by their first byte: one straddling the
+    // range's edge would send bytes outside it or leave some unsent.
+    bool aligned = (s - b0) % elem == 0 && static_cast<int64_t>(bytes) % elem == 0;
+    for (int k = 0; k < dims; ++k) aligned = aligned && stride[k] % elem == 0;
+    if (!aligned) {
+        if (id == 0)
+            printf("ompx_pipelined_put: the put range and the written box are not aligned "
+                   "to the %lld-byte stores\n", static_cast<long long>(elem));
+        __builtin_trap();
+    }
+    const int64_t words = static_cast<int64_t>(bytes) / elem;
+    const int64_t nt = omp_get_num_teams(), t = omp_get_team_num();
+    const char* lo = s + words * t / nt * elem;
+    const char* hi = s + words * (t + 1) / nt * elem;
+    if (lo >= hi) return;
+
+    // Normalize: positive strides, dims of one point dropped, outermost
+    // (largest stride) first.
+    int64_t S[kMaxDims], E[kMaxDims];
+    int n = 0;
+    bool empty = loop_runs == 0;
+    for (int k = 0; k < dims; ++k) {
+        if (extent[k] <= 0) empty = true;
+        if (extent[k] <= 1) continue;
+        int64_t st = stride[k];
+        if (st < 0) {
+            b0 += (extent[k] - 1) * st;
+            st = -st;
+        }
+        int j = n++;
+        for (; j > 0 && S[j - 1] < st; --j) {
+            S[j] = S[j - 1];
+            E[j] = E[j - 1];
+        }
+        S[j] = st;
+        E[j] = extent[k];
+    }
+    if (empty) {
+        ompx__copy_range(d, s, lo, hi, id, n_threads);
+        return;
+    }
+    // A dense innermost dim is one contiguous row; otherwise each point is.
+    int64_t row = elem;
+    if (n > 0 && S[n - 1] == elem) row = E[--n] * elem;
+    // The rows must come in address order without overlapping for the gaps
+    // between them to be exactly what the box does not write.
+    int64_t span = row;
+    for (int k = n - 1; k >= 0; --k) {
+        if (S[k] < span) {
+            if (id == 0)
+                printf("ompx_pipelined_put: the rows of the written box overlap; cannot "
+                       "tell which bytes of the put it does not write\n");
+            __builtin_trap();
+        }
+        span += (E[k] - 1) * S[k];
+    }
+
+    // The last row starting at or before lo (row 0 if none).
+    int64_t q[kMaxDims];
+    int64_t rel = lo - b0;
+    for (int k = 0; k < n; ++k) {
+        int64_t qk = rel > 0 ? rel / S[k] : 0;
+        if (qk >= E[k]) qk = E[k] - 1;
+        q[k] = qk;
+        rel -= qk * S[k];
+    }
+    const char* done = lo;   // everything below is written or already sent
+    for (;;) {
+        const char* rs = b0;
+        for (int k = 0; k < n; ++k) rs += q[k] * S[k];
+        if (rs >= hi) break;
+        if (rs > done) ompx__copy_range(d, s, done, rs, id, n_threads);
+        if (rs + row > done) done = rs + row;
+        if (done >= hi) break;
+        int k = n - 1;
+        for (; k >= 0; --k) {
+            if (++q[k] < E[k]) break;
+            q[k] = 0;
+        }
+        if (k < 0) break;
+    }
+    if (done < hi) ompx__copy_range(d, s, done, hi, id, n_threads);
+#else
+    (void)peer_dst; (void)src; (void)bytes; (void)box; (void)dims; (void)stride;
+    (void)extent; (void)elem; (void)loop_runs; (void)team;
+#endif
+}
+#pragma omp end declare target
