@@ -19,7 +19,10 @@
 //                                   its loop would, when that can be proven.
 //
 // The two sides meet at run time only, through the post, so a kernel the
-// device side could not rewrite simply leaves the put to the host. One it
+// device side could not rewrite simply leaves the put to the host. Under
+// DWQ the post also queues a put to a peer that is not IPC-mapped, on a
+// trigger of its own that the kernel rings once the source is written; a
+// kernel that does not leaves the host to ring it after the launch. One it
 // cannot read at all: ROCm clang emits a combined construct whose loop
 // makes no call as a specialized kernel (big-jump-loop / no-loop), with no
 // distribute loop; -fno-openmp-target-big-jump-loop and

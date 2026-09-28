@@ -68,7 +68,11 @@
 // Built in two passes (examples/omp/build_giomp_after.sh: GICC_MODE=
 // put-discover, then chunk-lower), the plugin sends such a put from the
 // kernel as if it were an ompx_pipelined_put after the loop, and the host
-// skips it. It does so only when nothing between the launch and the put can
+// skips it. Under DWQ, where the NIC runs only transfers the host queued,
+// the host queues the put to a peer that is not IPC-mapped before the
+// launch, and the kernel releases it once every team has stored its part
+// -- where it would send it through the proxy -- so it no longer waits for
+// the fence. It does so only when nothing between the launch and the put can
 // order this rank with another or change the source (no call with side
 // effects, no fence, atomic or volatile access), and when the put's
 // arguments, and whether it runs, can be computed before the launch;
