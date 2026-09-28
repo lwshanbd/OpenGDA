@@ -72,6 +72,9 @@ int          g_sig_next_cell = 0;
 // ---- pipelined puts left to the quiet (ompx_pipe_deferred in gicc/omp.h) ----
 ompx_pipe_deferred* g_pipe_deferred_host = nullptr;
 ompx_pipe_deferred* g_pipe_deferred_dev  = nullptr;
+// Put i after a launch, queued under DWQ on slot kSigSlots + i when it was
+// posted; set until its bell has rung.
+bool g_after_queued[OMPX_PIPE_AFTER_MAX] = {};
 
 // ---- symmetric heap ---------------------------------------------------------
 gicc::Buffer g_heap{};              // the heap as an address-book entry
@@ -771,11 +774,16 @@ void ompx_stage_put_signal(int peer, void* dst, const void* src, size_t bytes,
 
 void ompx_trigger_host(void);   // defined below, with the rest of the DWQ calls
 
+static void release_after(int i);   // below, with the rest of ompx_pipe_after
+
 // Put what kernels left in the deferred list. Their kernels have finished
 // (a quiet follows them), so the sources hold their final values.
 static void send_deferred_pipelined() {
     ompx_pipe_deferred* q = g_pipe_deferred_host;
     if (q == nullptr) return;
+    // A put after a launch is released by ompx__after_done; one still queued
+    // here never reached it, and would keep the drain below waiting.
+    for (int i = 0; i < OMPX_PIPE_AFTER_MAX; ++i) release_after(i);
     const unsigned n = __atomic_load_n(&q->n, __ATOMIC_ACQUIRE);
     if (n == 0) return;
     if (n > OMPX_PIPE_DEFERRED_MAX) die("more pipelined puts deferred than the list holds");
@@ -844,21 +852,53 @@ ompx_pipe_deferred* ompx__pipe_deferred_list() {
 // after it. The kernel reads the post and sends what it can; the put is
 // made here only if it did not -- no list, no lowering for this kernel, a
 // launch that fell back to the host, or a post for another put.
+//
+// Under DWQ the post also queues a put the kernel would otherwise leave to
+// the quiet -- its peer is not IPC-mapped -- on a trigger of its own, which
+// the kernel rings once the source is written. The kernel's table of mapped
+// peers (ompx__peer_base) decides which those are, so the test here is the
+// same one.
+static bool peer_ipc_mapped(int peer) {
+    return g_runtime->is_local_peer(peer) &&
+           g_runtime->peer_mapped(peer, g_heap.index) != nullptr;
+}
+
+// Rings put i's bell unless the kernel has. Every group queued on a slot
+// must ring exactly once: the n-th ring releases the n-th group, and the
+// quiet waits for all of them.
+static void release_after(int i) {
+    if (!g_after_queued[i]) return;
+    g_after_queued[i] = false;
+    const ompx_pipe_after_put& e = g_pipe_deferred_host->after.e[i];
+    if (!__atomic_load_n(&e.fired, __ATOMIC_ACQUIRE))
+        g_runtime->signal_slot_fire(kSigSlots + i);
+}
 
 void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, int peer,
                       void* dst, const void* src, long long src_rel, size_t bytes) {
-    (void)src;
     ompx_pipe_deferred* q = g_pipe_deferred_host;
     if (q == nullptr || i < 0 || i >= OMPX_PIPE_AFTER_MAX) return;
+    release_after(i);
     ompx_pipe_after_put& e = q->after.e[i];
     e.armed = 0;
     e.handled = 0;
+    e.bell = nullptr;
+    e.fired = 0;
     if (armed) {
         e.peer    = peer;
         e.src_arg = src_arg;
         e.dst_off = offset_of(dst, "ompx_put dst");
         e.src_rel = src_rel;
         e.bytes   = bytes;
+        if (g_dwq_enabled && peer >= 0 && bytes > 0 && !peer_ipc_mapped(peer)) {
+            const int slot = kSigSlots + i;
+            g_runtime->signal_slot_write(slot, g_runtime->signal_slot_next(slot), g_heap, peer,
+                                         g_heap.index, bytes, offset_of(src, "ompx_put src"),
+                                         e.dst_off);
+            e.bell = reinterpret_cast<volatile unsigned long long*>(
+                g_runtime->signal_slot_doorbell(slot));
+            g_after_queued[i] = true;
+        }
         e.armed   = 1;
     }
     q->after.kernel = kernel;
@@ -870,7 +910,8 @@ void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
     bool sent = false;
     if (q != nullptr && i >= 0 && i < OMPX_PIPE_AFTER_MAX && q->after.kernel == kernel) {
         ompx_pipe_after_put& e = q->after.e[i];
-        sent = e.armed && __atomic_load_n(&e.handled, __ATOMIC_ACQUIRE);
+        sent = e.armed && (g_after_queued[i] || __atomic_load_n(&e.handled, __ATOMIC_ACQUIRE));
+        release_after(i);
         e.armed = 0;
         e.handled = 0;
     }

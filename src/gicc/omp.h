@@ -185,6 +185,12 @@ typedef struct ompx_pipe_deferred_put {
 // Before the launch the host posts each one here; the kernel sends the ones
 // it can itself, as an ompx_pipelined_put after its loop would, and says
 // so; after it, each put is made only if the kernel did not.
+//
+// Under DWQ a kernel cannot start a transfer the host has not queued, so a
+// put to a peer that is not IPC-mapped is queued when it is posted, on a
+// trigger of its own (one per i), and `bell` rings it: the kernel does once
+// the source is written, and says so in `fired`; otherwise the host does
+// after the kernel. The NIC reads the source when the bell rings.
 #define OMPX_PIPE_AFTER_MAX 8
 typedef struct ompx_pipe_after_put {
     int                armed;     // posted, and the host will reach the put
@@ -194,6 +200,9 @@ typedef struct ompx_pipe_after_put {
     unsigned long long dst_off;   // into the symmetric heap
     long long          src_rel;   // src minus that argument
     unsigned long long bytes;
+    volatile unsigned long long* bell;   // device doorbell; null if not queued
+    int                fired;     // the kernel rang it
+    int                reserved;
 } ompx_pipe_after_put;
 typedef struct ompx_pipe_after {
     unsigned long long  kernel;   // FNV-1a of the kernel's name

@@ -115,6 +115,15 @@ static inline void ompx__pipe_defer(ompx_ctx* c, int peer, void* dst, const void
     q->e[i].bytes   = bytes;
 }
 
+// The doorbell of put `after` of the launch, when the host queued it on DWQ
+// as it posted it (ompx_pipe_after_put in gicc/omp.h); null for a put the
+// source states (after < 0) or one the host did not queue.
+static inline volatile unsigned long long* ompx__after_bell(int after) {
+    ompx_pipe_deferred* q = ompx__pipe_deferred;
+    if (after < 0 || after >= OMPX_PIPE_AFTER_MAX || q == nullptr) return nullptr;
+    return q->after.e[after].bell;
+}
+
 // The one thread that should act for the team between parallel regions:
 // the main thread in generic mode (the only one running there; lane 0 of
 // the last warp, not thread 0), hardware thread 0 in SPMD mode, where every
@@ -327,33 +336,39 @@ ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* bo
 
 // ---- a box put to a peer that is not IPC-mapped ------------------------------
 //
-// No store can be repeated into such a peer. In an SPMD kernel with the CPU
-// proxy on, the kernel sends the range through the proxy once every team
-// has stored its last word of it. To make that early, the distribute loop
-// takes its chunks in a rotated order that starts with the ones storing
-// into the ranges (ompx__box_plan), and a team that has moved past a range's
-// last chunk says so (ompx__box_count). The team that says so last sends
-// the range; the kernel goes on with the rest of its loop while it travels.
-// Otherwise the put is left for the next quiet.
+// No store can be repeated into such a peer. In an SPMD kernel the kernel
+// sends the range once every team has stored its last word of it: through
+// the CPU proxy, or under DWQ by ringing the bell of a put the host queued
+// when it posted it (a put the host makes after the kernel). To make that
+// early, the distribute loop takes its chunks in a rotated order that
+// starts with the ones storing into the ranges (ompx__box_plan), and a team
+// that has moved past a range's last chunk says so (ompx__box_count). The
+// team that says so last sends the range; the kernel goes on with the rest
+// of its loop while it travels. Otherwise the put is left for the next
+// quiet, or, if queued, for the host to ring after the kernel.
 
 // Where the put's destination lives in a same-node peer's heap, or null,
 // with *counted saying who sends to a peer that has none: 1 when the kernel
-// does, by count (it can: it is SPMD and the CPU proxy is on), 0 when the
-// next quiet does -- team 0 leaves the put in the deferred list. `after` is
-// the put's index among those the host posted, or -1. A negative peer sends
-// nothing.
+// does, by count (it can: it is SPMD, and the CPU proxy is on or the put is
+// queued), 0 when the host does -- after the kernel if the put is queued,
+// else at the next quiet, team 0 leaving it in the deferred list. `after`
+// is the put's index among those the host posted, or -1. A negative peer
+// sends nothing.
 static __attribute__((used)) void*
 ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count, int after,
                int32_t* counted) {
-    (void)after;
     *counted = 0;
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     if (peer < 0) return nullptr;
     ompx_ctx* c = ompx__pipeline_ctx();
     void* p = ompx__peer_base(c, peer, dst);
     if (p != nullptr) return p;
-    if (can_count && gicc::omp::detail::lane_to_ring(c, 0) != nullptr) {
-        *counted = 1;
+    if (gicc::omp::detail::lane_to_ring(c, 0) != nullptr) {
+        if (can_count) *counted = 1;
+        else if (omp_get_team_num() == 0 && ompx__sequential_thread())
+            ompx__pipe_defer(c, peer, dst, src, bytes);
+    } else if (ompx__after_bell(after) != nullptr) {
+        *counted = can_count;
     } else if (omp_get_team_num() == 0 && ompx__sequential_thread()) {
         ompx__pipe_defer(c, peer, dst, src, bytes);
     }
@@ -493,7 +508,6 @@ ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* 
 static __attribute__((used)) void
 ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t bytes,
                 int after) {
-    (void)after;
 #if defined(__NVPTX__) || defined(__AMDGCN__)
 #if defined(__AMDGCN__)
     __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
@@ -509,10 +523,17 @@ ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t 
     __scoped_atomic_store_n(counter, 0u, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     ompx_ctx* c = ompx__pipeline_ctx();
-    if (gicc::omp::detail::lane_to_ring(c, 0) != nullptr) ompx__proxy_put(c, peer, dst, src, bytes);
-    else ompx__pipe_defer(c, peer, dst, src, bytes);
+    volatile unsigned long long* bell;
+    if (gicc::omp::detail::lane_to_ring(c, 0) != nullptr) {
+        ompx__proxy_put(c, peer, dst, src, bytes);
+    } else if ((bell = ompx__after_bell(after)) != nullptr) {
+        *bell = 1;
+        __atomic_store_n(&ompx__pipe_deferred->after.e[after].fired, 1, __ATOMIC_RELAXED);
+    } else {
+        ompx__pipe_defer(c, peer, dst, src, bytes);
+    }
 #else
-    (void)counter; (void)peer; (void)dst; (void)src; (void)bytes;
+    (void)counter; (void)peer; (void)dst; (void)src; (void)bytes; (void)after;
 #endif
 }
 
