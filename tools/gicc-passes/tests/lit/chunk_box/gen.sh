@@ -63,10 +63,22 @@ done
 ; CHECK: lowered: element grain over the box
 ; CHECK: _kernel_environment = {{.*}} { %struct.ConfigurationEnvironmentTy { i8 0, i8 {{[01]}}, i8 2,
 ; CHECK-LABEL: define {{.*}} @__omp_offloading_
-; CHECK: call ptr @ompx__peer_addr_mapped(
-; The kernel is SPMD: the team shares the residual copy.
+; The kernel is SPMD, so it can send to a peer that is not IPC-mapped
+; itself, by counting the teams past the range.
+; CHECK: call ptr @ompx__box_peer({{.*}}, i32 1, ptr {{%.*}})
+; The team shares the residual copy.
 ; CHECK: call void @ompx__box_residual({{.*}}, i32 1)
+; CHECK: call void @ompx__box_hull(
+; CHECK: call void @ompx__box_plan(i32 1,
+; CHECK: call void @__kmpc_distribute_static_init
+; Before each chunk: the rotated chunk's bounds, then the count of a team
+; past the range.
+; CHECK: [[UB:%.*]] = call i64 @llvm.umin.i64(
+; CHECK: call void @ompx__box_count(ptr addrspacecast (ptr addrspace(1) @gicc.box.count to ptr)
 ; CHECK: call void @__kmpc_parallel_51(
+; And once past the loop.
+; CHECK: call void @ompx__box_count(ptr addrspacecast (ptr addrspace(1) @gicc.box.count to ptr)
+; CHECK: call void @__kmpc_distribute_static_fini(
 ; CHECK-LABEL: define internal void @__omp_offloading_{{.*}}_omp_outlined_omp_outlined(
 ; CHECK: %gicc.box.in = and i1
 ; CHECK-NOT: ompx_pipelined_put
@@ -90,7 +102,9 @@ CHECKS
 ; The kernel resolves the peer, sends the unwritten part of the range, and
 ; hands the range and the peer offset to the region.
 ; CHECK-LABEL: define {{.*}} @__omp_offloading_
-; CHECK: [[PD:%.*]] = call ptr @ompx__peer_addr_mapped(i32 {{%.*}}, ptr {{%.*}})
+; A generic kernel cannot count the teams past the range: a peer that is
+; not IPC-mapped is left to the next quiet.
+; CHECK: [[PD:%.*]] = call ptr @ompx__box_peer(i32 {{%.*}}, ptr {{%.*}}, ptr {{%.*}}, i64 {{%.*}}, i32 0, ptr {{%.*}})
 ; The kernel is still generic when the pass runs, so one thread per team
 ; sends the residual.
 ; CHECK: call void @ompx__box_residual(ptr [[PD]], ptr {{%.*}}, i64 {{%.*}}, ptr {{%.*}}, i32 3, ptr {{%.*}}, ptr {{%.*}}, i64 4, i32 {{%.*}}, i32 0)
@@ -109,6 +123,7 @@ CHECKS
 ; CHECK: [[R:%.*]] = getelementptr i8, ptr [[P]], i64 [[DELTA]]
 ; CHECK-NEXT: store float [[V]], ptr [[R]], align 4, !gicc.repeat
 ; CHECK-NOT: gicc-chunk-noinline
+; CHECK-NOT: ompx__box_count(
 CHECKS
     echo
     device_ir Inputs/legal_face3d.cpp "-O3 -Xclang -disable-llvm-passes"

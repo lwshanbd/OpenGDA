@@ -44,13 +44,18 @@
 // the put any contiguous range of the written object: part of what the loop
 // writes (a halo face of a slab), bytes the kernel does not write at all
 // (ghost cells between the rows), or both. Such a put is split at element
-// grain whatever GICC_CHUNK_GRAIN says: each store that lands in the range
-// is repeated into the peer's copy, and the bytes of the range the kernel
-// never writes are sent once, at the start of the kernel. It needs a
-// same-node peer.
+// grain whatever GICC_CHUNK_GRAIN says: to a same-node peer each store that
+// lands in the range is repeated into the peer's copy, and the bytes of the
+// range the kernel never writes are sent once, at the start of the kernel.
+// To any other peer the range goes whole, once every team has stored its
+// part of it: the kernel runs the loop's chunks that store into the range
+// first and sends it through the CPU proxy while the rest of the loop runs.
+// That needs an SPMD kernel (the put in the loop's body) and the proxy;
+// otherwise the next ompx_quiet or ompx_fence sends it, as it would a put
+// after the kernel.
 //
 // A negative peer sends nothing, so a kernel can state a put that applies
-// to only some ranks (no neighbour, or one that is not on this node).
+// to only some ranks (no neighbour at the edge of a decomposition).
 //
 // When the pass cannot prove the split, compilation fails with the reason.
 // ompx_pipelined_put has no device definition: a build without the pass
@@ -59,8 +64,7 @@
 // runs and the pass finds no worksharing loop.
 //
 // Call ompx_prepare() in every translation unit that launches such a kernel:
-// the helpers read that unit's device context. A peer that is not IPC-mapped
-// is sent to through the CPU proxy (there is no DWQ staging for it).
+// the helpers read that unit's device context.
 //
 // C++ only.
 #pragma once

@@ -33,13 +33,26 @@ ompx__block_put_one(int peer, void* dst, const void* src, size_t bytes)
     __asm__("ompx__block_put_one");
 static void ompx__block_put(int peer, void* dst, const void* src, size_t bytes)
     __asm__("ompx__block_put");
-[[omp::assume("ompx_spmd_amenable")]] static void* ompx__peer_addr_mapped(int peer, void* addr)
-    __asm__("ompx__peer_addr_mapped");
 [[omp::assume("ompx_spmd_amenable")]] static void
 ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* box, int dims,
                    const int64_t* stride, const int64_t* extent, int64_t elem, int loop_runs,
                    int team)
     __asm__("ompx__box_residual");
+[[omp::assume("ompx_spmd_amenable")]] static void*
+ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count,
+               int32_t* counted)
+    __asm__("ompx__box_peer");
+[[omp::assume("ompx_spmd_amenable")]] static void
+ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, const int64_t* stride,
+               const int64_t* extent, int64_t elem, int64_t* lo, int64_t* hi)
+    __asm__("ompx__box_hull");
+[[omp::assume("ompx_spmd_amenable")]] static void
+ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* hi,
+               int64_t iters, int64_t chunk, int64_t* shift, int64_t* last)
+    __asm__("ompx__box_plan");
+[[omp::assume("ompx_spmd_amenable")]] static void
+ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t bytes)
+    __asm__("ompx__box_count");
 
 #if defined(__NVPTX__) || defined(__AMDGCN__)
 // This unit's device context. A kernel launched before ompx_prepare() ran in
@@ -165,25 +178,6 @@ ompx__block_put(int peer, void* dst, const void* src, size_t bytes) {
     (void)peer; (void)dst; (void)src; (void)bytes;
 #endif
 }
-// Box element grain: where `addr`'s object lives in a same-node peer's heap.
-// Null for a negative peer, which sends nothing; any other peer must be
-// IPC-mapped, as a box has no per-block fallback. Called once per team.
-static __attribute__((used)) void* ompx__peer_addr_mapped(int peer, void* addr) {
-#if defined(__NVPTX__) || defined(__AMDGCN__)
-    if (peer < 0) return nullptr;
-    void* p = ompx__peer_base(ompx__pipeline_ctx(), peer, addr);
-    if (p == nullptr) {
-        printf("ompx_pipelined_put: peer %d is not IPC-mapped; a put of a "
-               "multi-dimensional write needs a same-node peer\n", peer);
-        __builtin_trap();
-    }
-    return p;
-#else
-    (void)peer; (void)addr;
-    return nullptr;
-#endif
-}
-
 #if defined(__NVPTX__) || defined(__AMDGCN__)
 // [a, b) of s copied to the same offsets in d, word `id` of every `n` by
 // this thread: neighbouring threads take neighbouring words.
@@ -322,6 +316,187 @@ ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* bo
 #else
     (void)peer_dst; (void)src; (void)bytes; (void)box; (void)dims; (void)stride;
     (void)extent; (void)elem; (void)loop_runs; (void)team;
+#endif
+}
+
+// ---- a box put to a peer that is not IPC-mapped ------------------------------
+//
+// No store can be repeated into such a peer. In an SPMD kernel with the CPU
+// proxy on, the kernel sends the range through the proxy once every team
+// has stored its last word of it. To make that early, the distribute loop
+// takes its chunks in a rotated order that starts with the ones storing
+// into the ranges (ompx__box_plan), and a team that has moved past a range's
+// last chunk says so (ompx__box_count). The team that says so last sends
+// the range; the kernel goes on with the rest of its loop while it travels.
+// Otherwise the put is left for the next quiet.
+
+// Where the put's destination lives in a same-node peer's heap, or null,
+// with *counted saying who sends to a peer that has none: 1 when the kernel
+// does, by count (it can: it is SPMD and the CPU proxy is on), 0 when the
+// next quiet does -- team 0 leaves the put in the deferred list. A negative
+// peer sends nothing.
+static __attribute__((used)) void*
+ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count,
+               int32_t* counted) {
+    *counted = 0;
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    if (peer < 0) return nullptr;
+    ompx_ctx* c = ompx__pipeline_ctx();
+    void* p = ompx__peer_base(c, peer, dst);
+    if (p != nullptr) return p;
+    if (can_count && gicc::omp::detail::lane_to_ring(c, 0) != nullptr) {
+        *counted = 1;
+    } else if (omp_get_team_num() == 0 && ompx__sequential_thread()) {
+        ompx__pipe_defer(c, peer, dst, src, bytes);
+    }
+    return nullptr;
+#else
+    (void)peer; (void)dst; (void)src; (void)bytes; (void)can_count;
+    return nullptr;
+#endif
+}
+
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+static inline int64_t ompx__floor_div(int64_t a, int64_t b) {
+    const int64_t q = a / b;
+    return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q;
+}
+static inline int64_t ompx__ceil_div(int64_t a, int64_t b) {
+    const int64_t q = a / b;
+    return (a % b != 0 && ((a < 0) == (b < 0))) ? q + 1 : q;
+}
+#endif
+
+// The iterations [*lo, *hi] of the kernel's collapsed loop that include
+// every one storing into [src, src + bytes); *hi < *lo when none does. The
+// dims are as the loop nests them, outermost first, so iteration x has the
+// digits x = q_0 * R_1 + ... with R_1 the product of the inner extents:
+// the interval is the slabs of q_0 whose stores reach the range.
+static __attribute__((used)) void
+ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, const int64_t* stride,
+               const int64_t* extent, int64_t elem, int64_t* lo, int64_t* hi) {
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    *lo = 0;
+    *hi = -1;
+    if (dims <= 0 || bytes == 0 || extent[0] <= 0) return;
+    int64_t inner = 1, min_rest = 0, max_rest = 0;
+    for (int d = 1; d < dims; ++d) {
+        if (extent[d] <= 0) return;
+        inner *= extent[d];
+        const int64_t span = stride[d] * (extent[d] - 1);
+        (span < 0 ? min_rest : max_rest) += span;
+    }
+    // Slab q stores into [S0*q + min_rest, S0*q + max_rest + elem) from the
+    // box's origin; it meets the range [s, e) when S0*q lies in [a, b].
+    const int64_t s = static_cast<const char*>(src) - static_cast<const char*>(box);
+    const int64_t e = s + static_cast<int64_t>(bytes);
+    const int64_t a = s - elem - max_rest + 1, b = e - min_rest - 1;
+    const int64_t s0 = stride[0];
+    int64_t q_lo = 0, q_hi = extent[0] - 1;
+    if (s0 > 0) {
+        q_lo = ompx__ceil_div(a, s0);
+        q_hi = ompx__floor_div(b, s0);
+    } else if (s0 < 0) {
+        q_lo = ompx__ceil_div(b, s0);
+        q_hi = ompx__floor_div(a, s0);
+    } else if (a > 0 || b < 0) {
+        return;
+    }
+    if (q_lo < 0) q_lo = 0;
+    if (q_hi > extent[0] - 1) q_hi = extent[0] - 1;
+    if (q_lo > q_hi) return;
+    *lo = q_lo * inner;
+    *hi = (q_hi + 1) * inner - 1;
+#else
+    (void)src; (void)bytes; (void)box; (void)dims; (void)stride; (void)extent; (void)elem;
+    *lo = 0;
+    *hi = -1;
+#endif
+}
+
+// The chunk order of a distribute loop of `iters` iterations in chunks of
+// `chunk`, for n puts of which those with counted[p] are sent by count:
+// the loop runs chunk (k + *shift) mod nchunks as its k-th, which puts the
+// counted puts' chunks first -- the rotation starts right after the widest
+// stretch of chunks none of them stores in. last[p] is the position of the
+// last chunk put p needs: a team past it has stored all of its part of
+// the range. -1 when no chunk stores into the range (it is final already);
+// INT64_MAX for a put not counted.
+static __attribute__((used)) void
+ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* hi,
+               int64_t iters, int64_t chunk, int64_t* shift, int64_t* last) {
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    constexpr int kMaxPuts = 8;
+    const int64_t chunks = (iters + chunk - 1) / chunk;
+    // The counted puts' chunk intervals, sorted by start, then merged.
+    int64_t a[kMaxPuts], b[kMaxPuts];
+    int m = 0;
+    for (int p = 0; p < n && p < kMaxPuts; ++p) {
+        if (!counted[p] || lo[p] > hi[p]) continue;
+        int j = m++;
+        for (; j > 0 && a[j - 1] > lo[p] / chunk; --j) {
+            a[j] = a[j - 1];
+            b[j] = b[j - 1];
+        }
+        a[j] = lo[p] / chunk;
+        b[j] = hi[p] / chunk;
+    }
+    int merged = 0;
+    for (int i = 0; i < m; ++i) {
+        if (merged > 0 && a[i] <= b[merged - 1] + 1) {
+            if (b[i] > b[merged - 1]) b[merged - 1] = b[i];
+        } else {
+            a[merged] = a[i];
+            b[merged] = b[i];
+            ++merged;
+        }
+    }
+    int64_t start = 0, widest = -1;
+    for (int i = 0; i < merged; ++i) {
+        const int64_t next = i + 1 < merged ? a[i + 1] : a[0] + chunks;
+        if (next - b[i] - 1 > widest) {
+            widest = next - b[i] - 1;
+            start = next % chunks;
+        }
+    }
+    *shift = start;
+    for (int p = 0; p < n; ++p) {
+        if (!counted[p]) last[p] = INT64_MAX;
+        else if (lo[p] > hi[p]) last[p] = -1;
+        else last[p] = ((hi[p] / chunk - start) % chunks + chunks) % chunks;
+    }
+#else
+    (void)n; (void)counted; (void)lo; (void)hi; (void)iters; (void)chunk; (void)last;
+    *shift = 0;
+#endif
+}
+
+// Called by every thread of a team, once the team has stored the last word
+// it stores into [src, src + bytes). The team to call it last sends the
+// range: every other team's part of it has reached the device's L2 by
+// then, and a system-scope fence writes it back for the NIC. The counter
+// is left at zero for the next launch.
+static __attribute__((used)) void
+ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t bytes) {
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+#if defined(__AMDGCN__)
+    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
+#else
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+#endif
+    ompx_sync_block_acq_rel();
+    if (ompx_thread_id_x() != 0 || ompx_thread_id_y() != 0 || ompx_thread_id_z() != 0) return;
+    const unsigned teams = static_cast<unsigned>(omp_get_num_teams());
+    if (__scoped_atomic_fetch_add(counter, 1u, __ATOMIC_ACQ_REL, __MEMORY_SCOPE_DEVICE) !=
+        teams - 1)
+        return;
+    __scoped_atomic_store_n(counter, 0u, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    ompx_ctx* c = ompx__pipeline_ctx();
+    if (gicc::omp::detail::lane_to_ring(c, 0) != nullptr) ompx__proxy_put(c, peer, dst, src, bytes);
+    else ompx__pipe_defer(c, peer, dst, src, bytes);
+#else
+    (void)counter; (void)peer; (void)dst; (void)src; (void)bytes;
 #endif
 }
 #pragma omp end declare target

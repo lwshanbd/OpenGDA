@@ -8,7 +8,9 @@
 ; The kernel resolves the peer, sends the unwritten part of the range, and
 ; hands the range and the peer offset to the region.
 ; CHECK-LABEL: define {{.*}} @__omp_offloading_
-; CHECK: [[PD:%.*]] = call ptr @ompx__peer_addr_mapped(i32 {{%.*}}, ptr {{%.*}})
+; A generic kernel cannot count the teams past the range: a peer that is
+; not IPC-mapped is left to the next quiet.
+; CHECK: [[PD:%.*]] = call ptr @ompx__box_peer(i32 {{%.*}}, ptr {{%.*}}, ptr {{%.*}}, i64 {{%.*}}, i32 0, ptr {{%.*}})
 ; The kernel is still generic when the pass runs, so one thread per team
 ; sends the residual.
 ; CHECK: call void @ompx__box_residual(ptr [[PD]], ptr {{%.*}}, i64 {{%.*}}, ptr {{%.*}}, i32 3, ptr {{%.*}}, ptr {{%.*}}, i64 4, i32 {{%.*}}, i32 0)
@@ -27,6 +29,7 @@
 ; CHECK: [[R:%.*]] = getelementptr i8, ptr [[P]], i64 [[DELTA]]
 ; CHECK-NEXT: store float [[V]], ptr [[R]], align 4, !gicc.repeat
 ; CHECK-NOT: gicc-chunk-noinline
+; CHECK-NOT: ompx__box_count(
 
 source_filename = "Inputs/legal_face3d.cpp"
 target datalayout = "e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9"

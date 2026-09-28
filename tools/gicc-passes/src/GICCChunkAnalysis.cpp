@@ -92,6 +92,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/PromoteMemToReg.h"
 #include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 
 #include <optional>
@@ -309,6 +310,9 @@ struct Plan {
     uint64_t elem = 0;
 };
 
+// The most box puts one kernel sends by count (ompx__box_plan's kMaxPuts).
+constexpr unsigned kMaxCountedPuts = 8;
+
 class ChunkAnalyzer {
     Module &M;
     FunctionAnalysisManager &FAM;
@@ -336,6 +340,15 @@ public:
     }
 
 private:
+    // What the kernel-level counting (lowerBoxCounting) needs of one box
+    // put, expanded before the distribute loop.
+    struct BoxSend {
+        Value *peer, *dst, *src, *len, *box, *stride, *extent;
+        Value *counted;   // i1: the kernel sends it by count
+        unsigned dims;
+        uint64_t elem;
+    };
+
     // State shared by the per-put checks of one kernel.
     struct KernelFacts {
         const OmpKernel &KI;
@@ -445,15 +458,35 @@ private:
                 plans.push_back(*P);
             }
         if (!lower) return;
+        // A box put to a peer that is not IPC-mapped is sent by the kernel
+        // itself once its range is written, when the kernel can count the
+        // teams past it: SPMD, a chunked distribute loop over 64-bit bounds.
+        // Otherwise the next quiet sends it.
+        const unsigned nBox = llvm::count_if(plans, [](const Plan &P) { return P.box; });
+        const bool canCount =
+            nBox > 0 && nBox <= kMaxCountedPuts && KI->spmd() && bounds &&
+            cast<ConstantInt>(KI->distInit->getArgOperand(kmpc::InitSched))->getSExtValue() ==
+                kmpc::SchedDistChunked &&
+            KI->distInit->getArgOperand(kmpc::InitChunk)->getType()->isIntegerTy(64) &&
+            bounds->first->getValueOperand()->getType()->isIntegerTy(64);
         // Expand every plan before any CFG edit: SCEV, the expanders and the
         // dominator tree all describe the function as it is now.
         SmallVector<std::pair<CallInst *, Value *>, 2> fallbacks;
+        SmallVector<BoxSend, 2> sends;
         for (const Plan &P : plans)
-            if (auto fb = lowerPut(*KI, *W, P, SE)) fallbacks.push_back(*fb);
+            if (auto fb = lowerPut(*KI, *W, P, SE, canCount, sends)) fallbacks.push_back(*fb);
         for (auto [call, mirror] : fallbacks) {
             Instruction *then = SplitBlockAndInsertIfThen(
                 IRBuilder<>(call).CreateNot(mirror), call->getIterator(), false);
             call->moveBefore(*then->getParent(), then->getIterator());
+        }
+        if (canCount) {
+            lowerBoxCounting(*KI, bounds->first, bounds->second, sends);
+            out() << "[gicc-chunk]   a peer that is not IPC-mapped is sent to by the kernel, "
+                     "once every team is past the range (chunks rotated to store it first)\n";
+        } else if (nBox > 0) {
+            out() << "[gicc-chunk]   a peer that is not IPC-mapped is sent to by the next "
+                     "ompx_quiet\n";
         }
         if (!plans.empty()) {
             changed = true;
@@ -759,9 +792,10 @@ private:
     // must be guarded by (run it only when the peer is not mapped); the
     // caller splits the block once every plan is expanded.
     std::optional<std::pair<CallInst *, Value *>>
-    lowerPut(const OmpKernel &KI, const WriteSet &W, const Plan &P, ScalarEvolution &SE) {
+    lowerPut(const OmpKernel &KI, const WriteSet &W, const Plan &P, ScalarEvolution &SE,
+             bool canCount, SmallVectorImpl<BoxSend> &sends) {
         if (P.box) {
-            lowerBoxPut(KI, W, P, SE);
+            sends.push_back(lowerBoxPut(KI, W, P, SE, canCount));
             out() << "[gicc-chunk]   lowered: element grain over the box (stores in the "
                      "range mirrored to the peer, the rest sent at kernel start)\n";
             P.put->eraseFromParent();
@@ -846,7 +880,8 @@ private:
     // the box does not write. In the parallel region: each store to the
     // source that lands in [start, start + len) is repeated at the same
     // offset in the peer.
-    void lowerBoxPut(const OmpKernel &KI, const WriteSet &W, const Plan &P, ScalarEvolution &SE) {
+    BoxSend lowerBoxPut(const OmpKernel &KI, const WriteSet &W, const Plan &P,
+                        ScalarEvolution &SE, bool canCount) {
         LLVMContext &Ctx = M.getContext();
         Type *I64 = Type::getInt64Ty(Ctx), *I32 = Type::getInt32Ty(Ctx), *I8 = Type::getInt8Ty(Ctx);
         auto *Ptr = cast<PointerType>(P.put->getArgOperand(1)->getType());
@@ -867,9 +902,17 @@ private:
             facts.push_back(X.expandCodeFor(f.x, f.x->getType(), pre));
 
         IRBuilder<> B(KI.distInit);
-        FunctionCallee peerAddr =
-            M.getOrInsertFunction("ompx__peer_addr_mapped", Ptr, I32, Ptr);
-        Value *pd = B.CreateCall(peerAddr, {peerV, dstV});
+        IRBuilder<> EB(&*KI.K.getEntryBlock().getFirstInsertionPt());
+        AllocaInst *countedSlot =
+            EB.CreateAlloca(I32, KI.DL.getAllocaAddrSpace(), nullptr, "gicc.box.counted");
+        // The peer's copy of the range when it is IPC-mapped; otherwise the
+        // kernel sends by count (canCount) or the next quiet does.
+        FunctionCallee peerFn = M.getOrInsertFunction("ompx__box_peer", Ptr, I32, Ptr, Ptr,
+                                                      I64, I32, Ptr);
+        Value *pd = B.CreateCall(peerFn, {peerV, dstV, srcV, lenV,
+                                          ConstantInt::get(I32, canCount),
+                                          B.CreateAddrSpaceCast(countedSlot, Ptr)});
+        Value *counted = B.CreateICmpNE(B.CreateLoad(I32, countedSlot), ConstantInt::get(I32, 0));
         Value *mirror = B.CreateICmpNE(pd, ConstantPointerNull::get(Ptr));
         Value *delta = B.CreateSub(B.CreatePtrToInt(pd, I64), B.CreatePtrToInt(srcV, I64));
         Value *runs = B.getTrue();
@@ -934,6 +977,140 @@ private:
             // It repeats St, which the put_no_db mirror already checks.
             Copy->setMetadata("gicc.repeat", MDNode::get(Ctx, {}));
         }
+        return BoxSend{peerV, dstV, srcV, lenV, boxV, strideArr, extentArr, counted, D, P.elem};
+    }
+
+    // A box put the kernel sends by count (BoxSend::counted, decided at run
+    // time): its peer is not IPC-mapped and the CPU proxy is on. The
+    // distribute loop runs its chunks rotated so that those storing into the
+    // counted ranges come first (ompx__box_plan), by rewriting the block
+    // bounds handed to the parallel region -- chunk k of the team's sequence
+    // runs chunk (k + shift) mod nchunks, the outlined loop unchanged. Before
+    // each chunk, and once the loop is done, a team past the last chunk a
+    // range needs calls ompx__box_count, whose last caller sends the range.
+    // SPMD only: every thread of the team runs this code, and
+    // ompx__box_count synchronizes them.
+    void lowerBoxCounting(const OmpKernel &KI, StoreInst *lbSt, StoreInst *ubSt,
+                          ArrayRef<BoxSend> sends) {
+        LLVMContext &Ctx = M.getContext();
+        Type *I64 = Type::getInt64Ty(Ctx), *I32 = Type::getInt32Ty(Ctx);
+        Type *I1 = Type::getInt1Ty(Ctx);
+        auto *Ptr = PointerType::get(Ctx, 0);
+        const unsigned n = sends.size();
+        const unsigned AS = KI.DL.getAllocaAddrSpace();
+        IRBuilder<> EB(&*KI.K.getEntryBlock().getFirstInsertionPt());
+        auto array = [&](Type *T, const char *name) {
+            return EB.CreateAlloca(ArrayType::get(T, n), AS, nullptr, name);
+        };
+        AllocaInst *countedArr = array(I32, "gicc.box.counted.all");
+        AllocaInst *loArr = array(I64, "gicc.box.lo"), *hiArr = array(I64, "gicc.box.hi");
+        AllocaInst *lastArr = array(I64, "gicc.box.last");
+        AllocaInst *shiftSlot = EB.CreateAlloca(I64, AS, nullptr, "gicc.box.shift");
+        AllocaInst *kSlot = EB.CreateAlloca(I64, AS, nullptr, "gicc.box.k");
+        SmallVector<AllocaInst *, 4> doneSlots;
+        for (unsigned p = 0; p < n; ++p)
+            doneSlots.push_back(EB.CreateAlloca(I1, AS, nullptr, "gicc.box.done"));
+        auto elemPtr = [&](IRBuilder<> &B, AllocaInst *A, unsigned i) {
+            return B.CreateAddrSpaceCast(
+                B.CreateConstInBoundsGEP2_32(A->getAllocatedType(), A, 0, i), Ptr);
+        };
+
+        // Before the loop: the hulls, the rotation, and the last chunk of each.
+        IRBuilder<> B(KI.distInit);
+        FunctionCallee hullFn = M.getOrInsertFunction(
+            "ompx__box_hull", Type::getVoidTy(Ctx), Ptr, I64, Ptr, I32, Ptr, Ptr, I64, Ptr, Ptr);
+        for (unsigned p = 0; p < n; ++p) {
+            const BoxSend &S = sends[p];
+            B.CreateStore(B.CreateZExt(S.counted, I32),
+                          B.CreateConstInBoundsGEP2_32(countedArr->getAllocatedType(),
+                                                       countedArr, 0, p));
+            B.CreateCall(hullFn, {S.src, S.len, S.box, ConstantInt::get(I32, S.dims), S.stride,
+                                  S.extent, ConstantInt::get(I64, S.elem), elemPtr(B, loArr, p),
+                                  elemPtr(B, hiArr, p)});
+            B.CreateStore(B.getFalse(), doneSlots[p]);
+        }
+        Value *lb0 = lbSt->getValueOperand(), *ub0 = ubSt->getValueOperand();
+        Value *chunk = KI.distInit->getArgOperand(kmpc::InitChunk);
+        Value *iters = B.CreateAdd(B.CreateSub(ub0, lb0), ConstantInt::get(I64, 1));
+        Value *chunks = B.CreateUDiv(B.CreateAdd(iters, B.CreateSub(chunk, ConstantInt::get(I64, 1))),
+                                     chunk);
+        FunctionCallee planFn = M.getOrInsertFunction(
+            "ompx__box_plan", Type::getVoidTy(Ctx), I32, Ptr, Ptr, Ptr, I64, I64, Ptr, Ptr);
+        B.CreateCall(planFn, {ConstantInt::get(I32, n), elemPtr(B, countedArr, 0),
+                              elemPtr(B, loArr, 0), elemPtr(B, hiArr, 0), iters, chunk,
+                              B.CreateAddrSpaceCast(shiftSlot, Ptr), elemPtr(B, lastArr, 0)});
+        Value *shift = B.CreateLoad(I64, shiftSlot, "gicc.box.shift");
+        SmallVector<Value *, 4> last;
+        for (unsigned p = 0; p < n; ++p)
+            last.push_back(B.CreateLoad(I64, B.CreateConstInBoundsGEP2_32(
+                                                 lastArr->getAllocatedType(), lastArr, 0, p)));
+
+        // The team's first chunk and its step, once the runtime has set them.
+        IRBuilder<> A(KI.distInit->getNextNode());
+        Value *lbFirst = A.CreateLoad(I64, KI.distInit->getArgOperand(kmpc::InitLower));
+        Value *stride = A.CreateLoad(I64, KI.distInit->getArgOperand(kmpc::InitStride));
+        A.CreateStore(A.CreateUDiv(A.CreateSub(lbFirst, lb0), chunk), kSlot);
+        Value *kStep = A.CreateUDiv(stride, chunk);
+
+        FunctionCallee countFn = M.getOrInsertFunction(
+            "ompx__box_count", Type::getVoidTy(Ctx), Ptr, I32, Ptr, Ptr, I64);
+        auto countIf = [&](Instruction *at, unsigned p, Value *go) {
+            Instruction *then = SplitBlockAndInsertIfThen(go, at->getIterator(), false);
+            IRBuilder<> T(then);
+            auto *counter = new GlobalVariable(
+                M, I32, false, GlobalValue::InternalLinkage, ConstantInt::get(I32, 0),
+                "gicc.box.count", nullptr, GlobalValue::NotThreadLocal,
+                kmpc::GlobalAddrSpace);
+            const BoxSend &S = sends[p];
+            T.CreateCall(countFn, {ConstantExpr::getAddrSpaceCast(counter, Ptr), S.peer, S.dst,
+                                   S.src, S.len});
+            T.CreateStore(T.getTrue(), doneSlots[p]);
+            return counter;
+        };
+
+        // Each chunk: the bounds of the chunk it stands for, and the counts
+        // of the ranges the team is now past.
+        CallInst *par = KI.parallel;
+        IRBuilder<> PB(par);
+        Value *k = PB.CreateLoad(I64, kSlot, "gicc.box.k");
+        Value *c = PB.CreateAdd(k, shift);
+        c = PB.CreateSelect(PB.CreateICmpUGE(c, chunks), PB.CreateSub(c, chunks), c);
+        Value *lb = PB.CreateAdd(lb0, PB.CreateMul(c, chunk));
+        Value *ub = PB.CreateBinaryIntrinsic(
+            Intrinsic::umin, PB.CreateAdd(lb, PB.CreateSub(chunk, ConstantInt::get(I64, 1))), ub0);
+        auto *slots = cast<AllocaInst>(KI.argsArray);
+        Type *slotT = cast<ArrayType>(slots->getAllocatedType())->getElementType();
+        PB.CreateStore(PB.CreateIntToPtr(lb, slotT),
+                       PB.CreateConstInBoundsGEP2_32(slots->getAllocatedType(), slots, 0, 0));
+        PB.CreateStore(PB.CreateIntToPtr(ub, slotT),
+                       PB.CreateConstInBoundsGEP2_32(slots->getAllocatedType(), slots, 0, 1));
+        SmallVector<GlobalVariable *, 4> counters;
+        for (unsigned p = 0; p < n; ++p) {
+            IRBuilder<> GB(par);
+            Value *go = GB.CreateAnd(
+                GB.CreateAnd(sends[p].counted, GB.CreateNot(GB.CreateLoad(I1, doneSlots[p]))),
+                GB.CreateICmpSGT(k, last[p]));
+            counters.push_back(countIf(par, p, go));
+        }
+        IRBuilder<>(par).CreateStore(IRBuilder<>(par).CreateAdd(k, kStep), kSlot);
+
+        // Past the loop: every range the team has not counted yet.
+        for (unsigned p = 0; p < n; ++p) {
+            IRBuilder<> FB(KI.distFini);
+            Value *go = FB.CreateAnd(sends[p].counted,
+                                     FB.CreateNot(FB.CreateLoad(I1, doneSlots[p])));
+            Instruction *then = SplitBlockAndInsertIfThen(go, KI.distFini->getIterator(), false);
+            IRBuilder<> T(then);
+            const BoxSend &S = sends[p];
+            T.CreateCall(countFn, {ConstantExpr::getAddrSpaceCast(counters[p], Ptr), S.peer,
+                                   S.dst, S.src, S.len});
+            T.CreateStore(T.getTrue(), doneSlots[p]);
+        }
+
+        SmallVector<AllocaInst *, 8> scalars(doneSlots.begin(), doneSlots.end());
+        scalars.push_back(kSlot);
+        DominatorTree DT(KI.K);
+        PromoteMemToReg(scalars, DT);
     }
 
     // One send per block right after its parallel region joins. Under the

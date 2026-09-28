@@ -37,8 +37,9 @@ constexpr unsigned InitSched = 2, InitLower = 4, InitUpper = 5, InitStride = 6,
 constexpr unsigned OutlinedFirstSlot = 2, OutlinedLB = 2, OutlinedUB = 3;
 // __kmpc_distribute_static_init schedule with a dist_schedule chunk.
 constexpr int SchedDistChunked = 91;
-// NVPTX / AMDGPU team-shared memory.
+// NVPTX / AMDGPU team-shared memory, and global memory.
 constexpr unsigned SharedAddrSpace = 3;
+constexpr unsigned GlobalAddrSpace = 1;
 }  // namespace kmpc
 
 // GICC entry points the analyses recognise.
