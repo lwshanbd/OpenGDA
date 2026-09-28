@@ -30,7 +30,9 @@ bool isBenignCall(const CallBase &CB) {
            n == "__kmpc_parallel_51" || n == kPipelinedPut ||
            // Queries the SPMD form of a combined construct makes.
            n.starts_with("__kmpc_get_hardware_") || n == "__kmpc_get_warp_size" ||
-           n == "__kmpc_is_spmd_exec_mode";
+           n == "__kmpc_is_spmd_exec_mode" ||
+           // Reads a put the host posted into stack slots (GICCAfterPut.h).
+           n == "ompx__after_put";
 }
 
 bool isCallTo(const Instruction &I, StringRef prefix) {

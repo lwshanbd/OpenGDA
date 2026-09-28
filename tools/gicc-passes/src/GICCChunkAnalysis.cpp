@@ -71,6 +71,7 @@
 
 #include "GICCChunkAnalysis.h"
 #include "AccessDecomposition.h"
+#include "GICCAfterPut.h"
 #include "GICCPassConfig.h"
 #include "OmpKernel.h"
 #include "WriteSet.h"
@@ -114,8 +115,14 @@ constexpr StringLiteral kPrepAttr = "gicc-chunk-noinline";
 
 enum class Verdict { Legal, Illegal, Race };
 
-// True when every SCEVUnknown in S is a formal of F (the value is then the
-// same in every team).
+// A put the host makes after the kernel (GICCAfterPut.h) is stated in the
+// kernel as a marker after its loop (kAfterMarker), its arguments read from
+// the host's post before the loop (kAfterSite).
+constexpr StringLiteral kAfterMarker = "gicc.after";
+constexpr StringLiteral kAfterSite   = "gicc.after.site";
+
+// True when every SCEVUnknown in S is a formal of F, or a value read from a
+// post before the loop (the value is then the same in every team).
 bool onlyFormals(const SCEV *S, const Function &F) {
     bool ok = true;
     struct V {
@@ -123,7 +130,10 @@ bool onlyFormals(const SCEV *S, const Function &F) {
         bool follow(const SCEV *S) {
             if (auto *U = dyn_cast<SCEVUnknown>(S)) {
                 auto *A = dyn_cast<Argument>(U->getValue());
-                if (!A || A->getParent() != &F) ok = false;
+                auto *L = dyn_cast<LoadInst>(U->getValue());
+                const bool posted =
+                    L && L->getFunction() == &F && L->hasMetadata(kAfterSite);
+                if (!posted && (!A || A->getParent() != &F)) ok = false;
             }
             return ok;
         }
@@ -326,8 +336,20 @@ public:
         : M(M), FAM(FAM), lower(lower) {}
 
     bool run() {
-        for (Function &F : M)
-            if (isOffloadKernel(F)) analyzeKernel(F);
+        const StringMap<AfterPutSite> after = readAfterPutSites();
+        for (Function &F : M) {
+            if (!isOffloadKernel(F)) continue;
+            SmallVector<AfterPut, 2> made;
+            if (auto it = after.find(F.getName()); it != after.end()) {
+                made = stateAfterPuts(F, it->second);
+                FAM.invalidate(F, PreservedAnalyses::none());
+            }
+            analyzeKernel(F);
+            if (!made.empty()) {
+                unstateAfterPuts(F, made);
+                changed = true;
+            }
+        }
         // Lowering done: let the device link inline these again.
         for (Function &F : M)
             if (F.hasFnAttribute(kPrepAttr)) {
@@ -342,6 +364,100 @@ public:
     }
 
 private:
+    // A put the host makes after the kernel, stated in it (stateAfterPuts).
+    struct AfterPut {
+        CallInst *read;                         // ompx__after_put
+        SmallVector<Instruction *, 5> values;   // its loads and the source address
+        CallInst *marker;
+    };
+
+    // States each put the first compile found after this kernel's launches
+    // as an ompx_pipelined_put after the loop, its arguments read from the
+    // host's post (ompx__after_put) before the loop, so that analyzeKernel
+    // proves and lowers it like one the source had stated. The source is the
+    // kernel argument the host found it an offset from, plus that offset.
+    SmallVector<AfterPut, 2> stateAfterPuts(Function &F, const AfterPutSite &site) {
+        SmallVector<AfterPut, 2> made;
+        auto keep = [&](const std::string &why) {
+            out() << "[gicc-chunk] kernel " << F.getName() << "\n[gicc-chunk]   ompx_put "
+                  << "after the kernel: stays on the host: " << why << "\n";
+        };
+        std::string why;
+        auto KI = OmpKernel::locate(F, why);
+        if (!KI) {
+            keep(why);
+            return made;
+        }
+        Function *read = M.getFunction("ompx__after_put");
+        if (!read || read->isDeclaration()) {
+            keep("this unit does not include gicc/omp_pipeline.h");
+            return made;
+        }
+        LLVMContext &Ctx = M.getContext();
+        Type *I64 = Type::getInt64Ty(Ctx), *I32 = Type::getInt32Ty(Ctx);
+        auto *Ptr = PointerType::get(Ctx, 0);
+        FunctionCallee marker =
+            M.getOrInsertFunction(kPipelinedPut, Type::getVoidTy(Ctx), I32, Ptr, Ptr, I64);
+        MDNode *tag = MDNode::get(Ctx, {});
+        const unsigned AS = KI->DL.getAllocaAddrSpace();
+        IRBuilder<> EB(&*F.getEntryBlock().getFirstInsertionPt());
+        for (unsigned i = 0; i < site.srcArgs.size(); ++i) {
+            const unsigned j = site.srcArgs[i];
+            if (j + 1 >= F.arg_size() || !F.getArg(j + 1)->getType()->isPointerTy()) {
+                keep("put " + std::to_string(i) + ": the host hands the kernel no pointer as "
+                     "argument " + std::to_string(j));
+                continue;
+            }
+            AllocaInst *aPeer  = EB.CreateAlloca(I32, AS, nullptr, "gicc.after.peer");
+            AllocaInst *aDst   = EB.CreateAlloca(Ptr, AS, nullptr, "gicc.after.dst");
+            AllocaInst *aRel   = EB.CreateAlloca(I64, AS, nullptr, "gicc.after.rel");
+            AllocaInst *aBytes = EB.CreateAlloca(I64, AS, nullptr, "gicc.after.bytes");
+            IRBuilder<> B(KI->distInit);
+            auto flat = [&](AllocaInst *A) { return B.CreateAddrSpaceCast(A, Ptr); };
+            AfterPut P;
+            P.read = B.CreateCall(read->getFunctionType(), read,
+                                  {ConstantInt::get(I64, afterPutHash(F.getName())),
+                                   ConstantInt::get(I32, i), ConstantInt::get(I32, j),
+                                   flat(aPeer), flat(aDst), flat(aRel), flat(aBytes)});
+            auto load = [&](Type *T, AllocaInst *A, const char *name) {
+                LoadInst *L = B.CreateLoad(T, A, name);
+                L->setMetadata(kAfterSite, tag);
+                P.values.push_back(L);
+                return L;
+            };
+            Value *peer  = load(I32, aPeer, "gicc.after.peer");
+            Value *dst   = load(Ptr, aDst, "gicc.after.dst");
+            Value *rel   = load(I64, aRel, "gicc.after.rel");
+            Value *bytes = load(I64, aBytes, "gicc.after.bytes");
+            auto *src = cast<Instruction>(B.CreateGEP(Type::getInt8Ty(Ctx), F.getArg(j + 1), rel,
+                                                      "gicc.after.src"));
+            P.values.push_back(src);
+            P.marker = IRBuilder<>(KI->distFini->getNextNode())
+                           .CreateCall(marker, {peer, dst, src, bytes});
+            P.marker->setMetadata(kAfterMarker, tag);
+            made.push_back(std::move(P));
+        }
+        return made;
+    }
+
+    // A stated put analyzeKernel did not lower goes back to the host: its
+    // marker and the read of the post go, so the kernel neither sends it nor
+    // marks it handled. (A lowered marker is gone; only stated ones carry
+    // kAfterMarker, and none is made after the analysis.)
+    void unstateAfterPuts(Function &F, ArrayRef<AfterPut> made) {
+        SmallPtrSet<CallInst *, 4> left;
+        for (Instruction &I : instructions(F))
+            if (auto *CI = dyn_cast<CallInst>(&I); CI && CI->hasMetadata(kAfterMarker))
+                left.insert(CI);
+        for (const AfterPut &P : made) {
+            if (!left.count(P.marker)) continue;
+            P.marker->eraseFromParent();
+            for (Instruction *V : llvm::reverse(P.values))
+                if (V->use_empty()) V->eraseFromParent();
+            P.read->eraseFromParent();
+        }
+    }
+
     // What the kernel-level counting (lowerBoxCounting) needs of one box
     // put, expanded before the distribute loop.
     struct BoxSend {
@@ -539,11 +655,16 @@ private:
         if (!KF.PDT.dominates(CI->getParent(), KI.distInit->getParent()))
             return illegal("the put does not run on every path after the distribute loop "
                            "(it is conditional); guard the whole kernel instead");
+        // A put after the kernel takes the box form whatever the dims, as one
+        // in the loop's body does: its range is read from the host's post,
+        // so it is any part of what the loop writes, not a whole block.
+        const bool after = CI->hasMetadata(kAfterMarker);
         if (auto src = symbolicSource(KF, CI->getArgOperand(2)))
             if (llvm::any_of(KF.W.boxes, [&](const BoxWrite &b) {
-                    return b.obj == src->first && b.stride.size() > 1;
+                    return b.obj == src->first && (b.stride.size() > 1 || after);
                 }))
                 return checkBoxPut(KF, CI, src->first, src->second);
+        if (after) return illegal("put source is not written by the worksharing loop");
         int64_t off = 0;
         Value *obj = stripToObject(KI, CI->getArgOperand(2), &off);
         if (!obj || !isa<Argument>(obj))
@@ -1169,9 +1290,13 @@ private:
 
     void report(CallInst *CI, Verdict v, const std::string &why) {
         const char *name = v == Verdict::Legal ? "LEGAL" : v == Verdict::Race ? "RACE" : "ILLEGAL";
-        if (lower && v == Verdict::Illegal && calleeName(*CI) == kPipelinedPut)
+        // A put after the kernel that cannot be moved into it simply stays
+        // on the host.
+        const bool after = CI->hasMetadata(kAfterMarker);
+        if (lower && v == Verdict::Illegal && calleeName(*CI) == kPipelinedPut && !after)
             CI->getContext().emitError(CI, "cannot pipeline ompx_pipelined_put: " + why);
-        out() << "[gicc-chunk]   " << calleeName(*CI);
+        out() << "[gicc-chunk]   " << (after ? StringRef("ompx_put after the kernel")
+                                              : calleeName(*CI));
         if (const DebugLoc &DLc = CI->getDebugLoc()) out() << " (line " << DLc.getLine() << ")";
         out() << ": " << name;
         if (!why.empty()) out() << ": " << why;
@@ -1205,9 +1330,21 @@ PreservedAnalyses GICCChunkPrepPass::run(Module &M, ModuleAnalysisManager &) {
             if (isCallTo(I, kPipelinedPut)) return true;
         return false;
     };
+    // A kernel the host puts after (GICCAfterPut.h) gets its put stated only
+    // at OptimizerLast, and needs its region kept out of line by then too:
+    // the kernel itself, or its teams region, which clang outlines as
+    // <kernel>_omp_outlined.
+    const StringMap<AfterPutSite> after = readAfterPutSites();
+    auto hasAfter = [&](const Function &F) {
+        for (const auto &e : after)
+            if (F.getName() == e.getKey() ||
+                F.getName().starts_with((e.getKey() + "_omp_outlined").str()))
+                return true;
+        return false;
+    };
     for (Function &F : M) {
         if (F.isDeclaration()) continue;
-        const bool kernelHasPut = hasPut(F);
+        const bool kernelHasPut = hasPut(F) || hasAfter(F);
         for (Instruction &I : instructions(F)) {
             auto *CB = dyn_cast<CallBase>(&I);
             if (!CB || calleeName(*CB) != "__kmpc_parallel_51") continue;

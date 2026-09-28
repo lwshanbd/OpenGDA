@@ -20,6 +20,7 @@ Mode parseMode(const char *e) {
     if (s == "chunk-analyze")   return Mode::ChunkAnalyze;
     if (s == "chunk-lower")     return Mode::ChunkLower;
     if (s == "write-summary")   return Mode::WriteSummary;
+    if (s == "put-discover")    return Mode::PutDiscover;
     return Mode::Passthrough;
 }
 
@@ -47,6 +48,7 @@ Config buildConfig() {
     c.mode        = parseMode(std::getenv("GICC_MODE"));
     c.target      = parseTarget(std::getenv("GICC_TARGET"));
     c.metaDir     = envOr("GICC_META_DIR", "/tmp/gicc-meta");
+    c.metaDirSet  = std::getenv("GICC_META_DIR") != nullptr;
     c.featuresOut = envOr("GICC_FEATURES_OUT", "");
     c.hintIn      = envOr("GICC_HINT_IN", "");
     c.chunkGrain  = parseGrain(std::getenv("GICC_CHUNK_GRAIN"));
@@ -69,6 +71,7 @@ const char *modeName(Mode m) {
         case Mode::ChunkAnalyze:    return "chunk-analyze";
         case Mode::ChunkLower:      return "chunk-lower";
         case Mode::WriteSummary:    return "write-summary";
+        case Mode::PutDiscover:     return "put-discover";
         case Mode::Passthrough:     return "passthrough";
     }
     return "?";

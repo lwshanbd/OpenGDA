@@ -12,6 +12,7 @@ enum class Mode {
     ChunkAnalyze,  // report whether pipelined puts can be split per block
     ChunkLower,    // ... and split the ones that can
     WriteSummary,  // report every kernel's write sets
+    PutDiscover,   // host: record the puts that follow a kernel launch
     Passthrough,
 };
 
@@ -42,6 +43,10 @@ struct Config {
     Mode        mode           = Mode::Passthrough;
     Target      target         = Target::Auto;
     std::string metaDir        = "/tmp/gicc-meta";
+    // GICC_META_DIR was given. The puts a kernel is followed by (put-discover)
+    // are read back only from a directory the build named, never from the
+    // default one, where another build's files may lie.
+    bool        metaDirSet     = false;
     std::string featuresOut;
     std::string hintIn;
     ChunkGrain  chunkGrain     = ChunkGrain::Element;

@@ -1,3 +1,4 @@
+#include "GICCAfterPut.h"
 #include "GICCChunkAnalysis.h"
 #include "GICCNoDbMirror.h"
 #include "GICCWriteSummary.h"
@@ -123,6 +124,8 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
             PB.registerOptimizerLastEPCallback(
                 GICC_EP_LAMBDA_HEAD(MPM) {
                     MPM.addPass(GICCWriteSummaryPass());
+                    // Host side of puts after a launch; self-gated.
+                    MPM.addPass(GICCAfterPutPass());
                     MPM.addPass(GICCChunkAnalysisPass());
                     MPM.addPass(GICCNoDbMirrorPass());
                     if (getConfig().mode != Mode::OmpDwq) return;
@@ -187,6 +190,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-nodb-mirror") {
                         MPM.addPass(GICCNoDbMirrorPass());
+                        return true;
+                    }
+                    if (Name == "gicc-after-put") {
+                        MPM.addPass(GICCAfterPutPass());
                         return true;
                     }
                     if (Name == "gicc-omp-host-discovery") {

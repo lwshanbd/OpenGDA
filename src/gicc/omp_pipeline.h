@@ -57,6 +57,26 @@
 // A negative peer sends nothing, so a kernel can state a put that applies
 // to only some ranks (no neighbour at the edge of a decomposition).
 //
+// The marker is not needed when the put is an ordinary ompx_put right after
+// a synchronous target region -- after it on the host, from an object the
+// kernel was handed:
+//
+//     #pragma omp target teams distribute parallel for is_device_ptr(src)
+//     for (i = 0; i < n; ++i) src[i] = ...;
+//     if (peer >= 0) ompx_put(peer, dst, src + off, bytes);
+//
+// Built in two passes (examples/omp/build_giomp_after.sh: GICC_MODE=
+// put-discover, then chunk-lower), the plugin sends such a put from the
+// kernel as if it were an ompx_pipelined_put after the loop, and the host
+// skips it. It does so only when nothing between the launch and the put can
+// order this rank with another or change the source (no call with side
+// effects, no fence, atomic or volatile access), and when the put's
+// arguments, and whether it runs, can be computed before the launch;
+// otherwise the put simply stays on the host. The unit must include this
+// header. With ROCm clang, a loop that makes no call is emitted as a
+// specialized kernel the plugin does not read; build with
+// -fno-openmp-target-big-jump-loop -fno-openmp-target-no-loop to keep it.
+//
 // When the pass cannot prove the split, compilation fails with the reason.
 // ompx_pipelined_put has no device definition: a build without the pass
 // does not link, so the marker can never run untransformed. Build with
