@@ -48,11 +48,12 @@ ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, const i
     __asm__("ompx__box_hull");
 [[omp::assume("ompx_spmd_amenable")]] static void
 ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* hi,
-               int64_t iters, int64_t chunk, int64_t* shift, int64_t* last)
+               int64_t lb0, int64_t iters, int64_t chunk, int64_t* shift, int64_t* due)
     __asm__("ompx__box_plan");
-[[omp::assume("ompx_spmd_amenable")]] static void
-ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t bytes)
-    __asm__("ompx__box_count");
+[[omp::assume("ompx_spmd_amenable")]] static int64_t
+ompx__box_due(int n, int64_t lb, int64_t* due, const int32_t* peer, void* const* dst,
+              const void* const* src, const int64_t* bytes, unsigned* const* counter)
+    __asm__("ompx__box_due");
 
 #if defined(__NVPTX__) || defined(__AMDGCN__)
 // This unit's device context. A kernel launched before ompx_prepare() ran in
@@ -414,17 +415,17 @@ ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, const i
 #endif
 }
 
-// The chunk order of a distribute loop of `iters` iterations in chunks of
-// `chunk`, for n puts of which those with counted[p] are sent by count:
-// the loop runs chunk (k + *shift) mod nchunks as its k-th, which puts the
-// counted puts' chunks first -- the rotation starts right after the widest
-// stretch of chunks none of them stores in. last[p] is the position of the
-// last chunk put p needs: a team past it has stored all of its part of
-// the range. -1 when no chunk stores into the range (it is final already);
-// INT64_MAX for a put not counted.
+// The chunk order of a distribute loop over [lb0, lb0 + iters) in chunks of
+// `chunk`, for n puts of which those with counted[p] are sent by count. The
+// loop runs, where it would run the chunk at lb, the one at
+// lb0 + (lb - lb0 + *shift) mod (chunks * chunk): that puts the counted
+// puts' chunks first, the rotation starting right after the widest stretch
+// of chunks none of them stores in. due[p] is the first lb at which a team
+// has run every chunk put p needs -- lb0 when no chunk stores into the
+// range, which is then final already -- and INT64_MAX for a put not counted.
 static __attribute__((used)) void
 ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* hi,
-               int64_t iters, int64_t chunk, int64_t* shift, int64_t* last) {
+               int64_t lb0, int64_t iters, int64_t chunk, int64_t* shift, int64_t* due) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     constexpr int kMaxPuts = 8;
     const int64_t chunks = (iters + chunk - 1) / chunk;
@@ -459,14 +460,20 @@ ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* 
             start = next % chunks;
         }
     }
-    *shift = start;
+    *shift = start * chunk;
     for (int p = 0; p < n; ++p) {
-        if (!counted[p]) last[p] = INT64_MAX;
-        else if (lo[p] > hi[p]) last[p] = -1;
-        else last[p] = ((hi[p] / chunk - start) % chunks + chunks) % chunks;
+        if (!counted[p]) {
+            due[p] = INT64_MAX;
+        } else if (lo[p] > hi[p]) {
+            due[p] = lb0;
+        } else {
+            const int64_t last = ((hi[p] / chunk - start) % chunks + chunks) % chunks;
+            due[p] = lb0 + (last + 1) * chunk;
+        }
     }
 #else
-    (void)n; (void)counted; (void)lo; (void)hi; (void)iters; (void)chunk; (void)last;
+    (void)n; (void)counted; (void)lo; (void)hi; (void)lb0; (void)iters; (void)chunk;
+    (void)due;
     *shift = 0;
 #endif
 }
@@ -498,5 +505,30 @@ ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t 
 #else
     (void)counter; (void)peer; (void)dst; (void)src; (void)bytes;
 #endif
+}
+
+// Called by every thread of a team before the chunk at lb (lb near INT64_MAX
+// once the loop is done) when some counted put may be due: counts the team
+// past every put whose due[p] <= lb, marks those INT64_MAX, and returns the
+// smallest due[] left. Not kept out of line: a kernel is given the vector
+// registers of the hungriest function it calls, and this one, compiled on
+// its own, needed 85 where the minimod stencil needs 78 -- a wave per SIMD
+// less. Inlined into its rare branch it costs the loop none.
+static __attribute__((used)) int64_t
+ompx__box_due(int n, int64_t lb, int64_t* due, const int32_t* peer, void* const* dst,
+              const void* const* src, const int64_t* bytes, unsigned* const* counter) {
+    int64_t next = INT64_MAX;
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    for (int p = 0; p < n; ++p) {
+        if (due[p] <= lb) {
+            ompx__box_count(counter[p], peer[p], dst[p], src[p], static_cast<size_t>(bytes[p]));
+            due[p] = INT64_MAX;
+        }
+        if (due[p] < next) next = due[p];
+    }
+#else
+    (void)n; (void)lb; (void)due; (void)peer; (void)dst; (void)src; (void)bytes; (void)counter;
+#endif
+    return next;
 }
 #pragma omp end declare target

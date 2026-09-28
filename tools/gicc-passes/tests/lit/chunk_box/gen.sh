@@ -71,13 +71,13 @@ done
 ; CHECK: call void @ompx__box_hull(
 ; CHECK: call void @ompx__box_plan(i32 1,
 ; CHECK: call void @__kmpc_distribute_static_init
-; Before each chunk: the rotated chunk's bounds, then the count of a team
-; past the range.
+; Before each chunk: the rotated chunk's bounds, then, once a counted put
+; may be due, the count of a team past its range.
 ; CHECK: [[UB:%.*]] = call i64 @llvm.umin.i64(
-; CHECK: call void @ompx__box_count(ptr addrspacecast (ptr addrspace(1) @gicc.box.count to ptr)
+; CHECK: call i64 @ompx__box_due(i32 1, i64
 ; CHECK: call void @__kmpc_parallel_51(
 ; And once past the loop.
-; CHECK: call void @ompx__box_count(ptr addrspacecast (ptr addrspace(1) @gicc.box.count to ptr)
+; CHECK: call i64 @ompx__box_due(i32 1, i64 9223372036854775806,
 ; CHECK: call void @__kmpc_distribute_static_fini(
 ; CHECK-LABEL: define internal void @__omp_offloading_{{.*}}_omp_outlined_omp_outlined(
 ; CHECK: %gicc.box.in = and i1
@@ -123,7 +123,7 @@ CHECKS
 ; CHECK: [[R:%.*]] = getelementptr i8, ptr [[P]], i64 [[DELTA]]
 ; CHECK-NEXT: store float [[V]], ptr [[R]], align 4, !gicc.repeat
 ; CHECK-NOT: gicc-chunk-noinline
-; CHECK-NOT: ompx__box_count(
+; CHECK-NOT: ompx__box_due(
 CHECKS
     echo
     device_ir Inputs/legal_face3d.cpp "-O3 -Xclang -disable-llvm-passes"
