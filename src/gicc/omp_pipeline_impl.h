@@ -74,6 +74,28 @@ static inline void ompx__proxy_put(ompx_ctx* c, int peer, void* dst, const void*
     ompx_put(peer, dst, src, bytes);
 }
 
+// A put the kernel cannot send, left in the deferred list for the next
+// ompx_quiet on the host (ompx_pipe_deferred in gicc/omp.h).
+static inline void ompx__pipe_defer(ompx_ctx* c, int peer, void* dst, const void* src,
+                                    size_t bytes) {
+    ompx_pipe_deferred* q = ompx__pipe_deferred;
+    if (q == nullptr) {
+        printf("ompx_pipelined_put: no deferred-put list; call ompx_prepare() in this "
+               "translation unit before the kernel\n");
+        __builtin_trap();
+    }
+    const unsigned i = __atomic_fetch_add(&q->n, 1u, __ATOMIC_RELAXED);
+    if (i >= OMPX_PIPE_DEFERRED_MAX) {
+        printf("ompx_pipelined_put: more than %d puts left for the quiet\n",
+               OMPX_PIPE_DEFERRED_MAX);
+        __builtin_trap();
+    }
+    q->e[i].peer    = peer;
+    q->e[i].dst_off = ompx__off(c, dst);
+    q->e[i].src_off = ompx__off(c, src);
+    q->e[i].bytes   = bytes;
+}
+
 // The one thread that should act for the team between parallel regions:
 // the main thread in generic mode (the only one running there; lane 0 of
 // the last warp, not thread 0), hardware thread 0 in SPMD mode, where every

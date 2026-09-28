@@ -169,6 +169,23 @@ void ompx_trigger_host(void);
 // ---- device-side ------------------------------------------------------------
 ompx_ctx* ompx_prepare_ctx(void);
 
+// Internal: pipelined puts a kernel could not send itself (its peer is not
+// IPC-mapped and the CPU proxy is off, or the kernel is not SPMD), left for
+// the next ompx_quiet / ompx_fence to put. Host memory the device writes; the
+// offsets are into the symmetric heap.
+#define OMPX_PIPE_DEFERRED_MAX 64
+typedef struct ompx_pipe_deferred_put {
+    int                peer;
+    int                reserved;
+    unsigned long long dst_off, src_off, bytes;
+} ompx_pipe_deferred_put;
+typedef struct ompx_pipe_deferred {
+    unsigned               n;
+    unsigned               reserved;
+    ompx_pipe_deferred_put e[OMPX_PIPE_DEFERRED_MAX];
+} ompx_pipe_deferred;
+ompx_pipe_deferred* ompx__pipe_deferred_list(void);   // its device address
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
@@ -184,6 +201,7 @@ ompx_ctx* ompx_prepare_ctx(void);
 // issues those from the host and only pulls the trigger on the device.
 #pragma omp declare target
 static ompx_ctx* ompx__ctx = 0;
+static ompx_pipe_deferred* ompx__pipe_deferred = 0;   // ompx__pipe_deferred_list
 // Weak, so every translation unit shares one copy in host and device image
 // alike; the plugin's instrumentation in any unit reads it by name.
 __attribute__((weak)) ompx_nodb_state ompx__nodb;
@@ -196,14 +214,17 @@ static inline void ompx_put_no_db(int peer, void* dst, const void* src,
 }
 
 // The runtime's DeviceCtx is host-pinned and mapped and prepare() returns the
-// same device pointer for the life of the runtime, so this publishes it once;
-// later calls only update contents the device already sees.
+// same device pointer for the life of the runtime, so this publishes it (and
+// the deferred-put list) once; later calls only update contents the device
+// already sees.
 static inline ompx_ctx* ompx_prepare(void) {
     ompx_ctx* c = ompx_prepare_ctx();
-    if (ompx__ctx != c) {
+    ompx_pipe_deferred* q = ompx__pipe_deferred_list();
+    if (ompx__ctx != c || ompx__pipe_deferred != q) {
         ompx__ctx = c;
-        #pragma omp target is_device_ptr(c)
-        { ompx__ctx = c; }
+        ompx__pipe_deferred = q;
+        #pragma omp target is_device_ptr(c, q)
+        { ompx__ctx = c; ompx__pipe_deferred = q; }
     }
     return c;
 }

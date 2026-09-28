@@ -69,6 +69,10 @@ uint64_t*    g_sig_host = nullptr;
 uint64_t*    g_sig_dev  = nullptr;
 int          g_sig_next_cell = 0;
 
+// ---- pipelined puts left to the quiet (ompx_pipe_deferred in gicc/omp.h) ----
+ompx_pipe_deferred* g_pipe_deferred_host = nullptr;
+ompx_pipe_deferred* g_pipe_deferred_dev  = nullptr;
+
 // ---- symmetric heap ---------------------------------------------------------
 gicc::Buffer g_heap{};              // the heap as an address-book entry
 char*  g_heap_base  = nullptr;
@@ -484,6 +488,11 @@ void ompx_finalize() {
         g_binds.clear();
         g_ipc_pending = false;
     }
+    if (g_pipe_deferred_host != nullptr) {
+        (void)gpuHostFree(g_pipe_deferred_host);
+        g_pipe_deferred_host = nullptr;
+        g_pipe_deferred_dev  = nullptr;
+    }
     if (g_sig_host != nullptr) {
         (void)gpuHostFree(g_sig_host);
         g_sig_host = nullptr;
@@ -762,8 +771,25 @@ void ompx_stage_put_signal(int peer, void* dst, const void* src, size_t bytes,
 
 void ompx_trigger_host(void);   // defined below, with the rest of the DWQ calls
 
+// Put what kernels left in the deferred list. Their kernels have finished
+// (a quiet follows them), so the sources hold their final values.
+static void send_deferred_pipelined() {
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    if (q == nullptr) return;
+    const unsigned n = __atomic_load_n(&q->n, __ATOMIC_ACQUIRE);
+    if (n == 0) return;
+    if (n > OMPX_PIPE_DEFERRED_MAX) die("more pipelined puts deferred than the list holds");
+    for (unsigned i = 0; i < n; ++i) {
+        const ompx_pipe_deferred_put& e = q->e[i];
+        ompx_put_host(e.peer, g_heap_base + e.dst_off, g_heap_base + e.src_off,
+                      static_cast<size_t>(e.bytes));
+    }
+    __atomic_store_n(&q->n, 0u, __ATOMIC_RELEASE);
+}
+
 void ompx_quiet_host() {
     if (g_runtime == nullptr) return;
+    send_deferred_pipelined();
     nodb_flush();
     // Descriptors staged by ompx_put sit in the queue until the NIC is told to
     // go; without this the completion counter below never reaches its threshold.
@@ -796,6 +822,20 @@ void ompx_fence() {
 
 ompx_ctx* ompx_prepare_ctx() {
     return g_runtime->prepare();
+}
+
+ompx_pipe_deferred* ompx__pipe_deferred_list() {
+    if (g_runtime == nullptr) die("ompx_prepare before ompx_init");
+    if (g_pipe_deferred_dev == nullptr) {
+        void* h = nullptr;
+        require_gpu(gpuHostMalloc(&h, sizeof(ompx_pipe_deferred), gpuHostMallocMapped),
+                    "allocate the deferred pipelined puts");
+        std::memset(h, 0, sizeof(ompx_pipe_deferred));
+        g_pipe_deferred_host = static_cast<ompx_pipe_deferred*>(h);
+        require_gpu(gpuHostGetDevicePointer((void**)&g_pipe_deferred_dev, h, 0),
+                    "map the deferred pipelined puts");
+    }
+    return g_pipe_deferred_dev;
 }
 
 // ---- explicit batched DWQ ---------------------------------------------------
