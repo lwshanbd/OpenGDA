@@ -50,6 +50,10 @@ ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, const i
 ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* hi,
                int64_t lb0, int64_t iters, int64_t chunk, int64_t* shift, int64_t* due)
     __asm__("ompx__box_plan");
+[[omp::assume("ompx_spmd_amenable")]] static void
+ompx__after_put(unsigned long long kernel, int i, int src_arg, int32_t* peer, void** dst,
+                int64_t* src_rel, int64_t* bytes)
+    __asm__("ompx__after_put");
 [[omp::assume("ompx_spmd_amenable")]] static int64_t
 ompx__box_due(int n, int64_t lb, int64_t* due, const int32_t* peer, void* const* dst,
               const void* const* src, const int64_t* bytes, unsigned* const* counter)
@@ -530,5 +534,36 @@ ompx__box_due(int n, int64_t lb, int64_t* due, const int32_t* peer, void* const*
     (void)n; (void)lb; (void)due; (void)peer; (void)dst; (void)src; (void)bytes; (void)counter;
 #endif
     return next;
+}
+
+// ---- a put the host makes after the kernel ----------------------------------
+//
+// Put i of a launch the host brackets (ompx_pipe_after in gicc/omp.h), as the
+// host posted it: src is the kernel argument src_arg plus *src_rel. The
+// kernel sends it as an ompx_pipelined_put after its loop would, and marks it
+// handled, so the host does not put it again. A negative peer -- which sends
+// nothing -- when the post is for another kernel, another source, or a put
+// the host will not reach.
+static __attribute__((used)) void
+ompx__after_put(unsigned long long kernel, int i, int src_arg, int32_t* peer, void** dst,
+                int64_t* src_rel, int64_t* bytes) {
+    *peer = -1;
+    *dst = nullptr;
+    *src_rel = 0;
+    *bytes = 0;
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    ompx_pipe_deferred* q = ompx__pipe_deferred;
+    if (q == nullptr || i < 0 || i >= OMPX_PIPE_AFTER_MAX || q->after.kernel != kernel) return;
+    ompx_pipe_after_put* e = &q->after.e[i];
+    if (!e->armed || e->src_arg != src_arg) return;
+    ompx_ctx* c = ompx__pipeline_ctx();
+    *peer = e->peer;
+    *dst = static_cast<char*>(c->heap_base) + e->dst_off;
+    *src_rel = e->src_rel;
+    *bytes = static_cast<int64_t>(e->bytes);
+    if (omp_get_team_num() == 0 && ompx__sequential_thread()) e->handled = 1;
+#else
+    (void)kernel; (void)i; (void)src_arg;
+#endif
 }
 #pragma omp end declare target

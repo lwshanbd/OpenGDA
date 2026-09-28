@@ -838,6 +838,44 @@ ompx_pipe_deferred* ompx__pipe_deferred_list() {
     return g_pipe_deferred_dev;
 }
 
+// ---- puts after a kernel launch (ompx_pipe_after in gicc/omp.h) --------------
+// The plugin's second compile brackets a launch followed by ompx_put calls:
+// each put is posted before the launch, and replaced by ompx__after_done
+// after it. The kernel reads the post and sends what it can; the put is
+// made here only if it did not -- no list, no lowering for this kernel, a
+// launch that fell back to the host, or a post for another put.
+
+void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, int peer,
+                      void* dst, long long src_rel, size_t bytes) {
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    if (q == nullptr || i < 0 || i >= OMPX_PIPE_AFTER_MAX) return;
+    ompx_pipe_after_put& e = q->after.e[i];
+    e.armed = 0;
+    e.handled = 0;
+    if (armed) {
+        e.peer    = peer;
+        e.src_arg = src_arg;
+        e.dst_off = offset_of(dst, "ompx_put dst");
+        e.src_rel = src_rel;
+        e.bytes   = bytes;
+        e.armed   = 1;
+    }
+    q->after.kernel = kernel;
+}
+
+void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
+                      const void* src, size_t bytes) {
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    bool sent = false;
+    if (q != nullptr && i >= 0 && i < OMPX_PIPE_AFTER_MAX && q->after.kernel == kernel) {
+        ompx_pipe_after_put& e = q->after.e[i];
+        sent = e.armed && __atomic_load_n(&e.handled, __ATOMIC_ACQUIRE);
+        e.armed = 0;
+        e.handled = 0;
+    }
+    if (!sent) ompx_put_host(peer, dst, src, bytes);
+}
+
 // ---- explicit batched DWQ ---------------------------------------------------
 // Defined below, next to the other compiler-facing helpers.
 void ompx_trigger_host() {

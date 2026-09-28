@@ -179,12 +179,38 @@ typedef struct ompx_pipe_deferred_put {
     int                reserved;
     unsigned long long dst_off, src_off, bytes;
 } ompx_pipe_deferred_put;
+
+// Internal: the ompx_put calls that follow a kernel launch, as the
+// gicc-passes plugin found them in a first compile (GICC_MODE=put-discover).
+// Before the launch the host posts each one here; the kernel sends the ones
+// it can itself, as an ompx_pipelined_put after its loop would, and says
+// so; after it, each put is made only if the kernel did not.
+#define OMPX_PIPE_AFTER_MAX 8
+typedef struct ompx_pipe_after_put {
+    int                armed;     // posted, and the host will reach the put
+    int                handled;   // the kernel sent it
+    int                peer;
+    int                src_arg;   // the kernel argument src is an offset from
+    unsigned long long dst_off;   // into the symmetric heap
+    long long          src_rel;   // src minus that argument
+    unsigned long long bytes;
+} ompx_pipe_after_put;
+typedef struct ompx_pipe_after {
+    unsigned long long  kernel;   // FNV-1a of the kernel's name
+    ompx_pipe_after_put e[OMPX_PIPE_AFTER_MAX];
+} ompx_pipe_after;
+
 typedef struct ompx_pipe_deferred {
     unsigned               n;
     unsigned               reserved;
     ompx_pipe_deferred_put e[OMPX_PIPE_DEFERRED_MAX];
+    ompx_pipe_after        after;   // the one launch posted at a time
 } ompx_pipe_deferred;
 ompx_pipe_deferred* ompx__pipe_deferred_list(void);   // its device address
+void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, int peer,
+                      void* dst, long long src_rel, size_t bytes);
+void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
+                      const void* src, size_t bytes);
 
 #ifdef __cplusplus
 }  // extern "C"
