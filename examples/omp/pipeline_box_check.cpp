@@ -20,9 +20,10 @@
 // checks its receive buffers word for word, including the words just
 // outside every range, which must still hold their sentinel.
 //
-// A neighbour that is not IPC-mapped cannot take a multi-dimensional
-// pipelined put; the kernel then gets a negative peer and the host puts the
-// range after it, so the check also runs across nodes.
+// Every neighbour gets the pipelined put. A same-node one takes the stores
+// as they happen; one across nodes is sent the range by the kernel once all
+// teams are past it (CPU proxy, SPMD kernel) or by the fence (DWQ, or the
+// generic slab kernel). Run it on two nodes to check the second kind.
 //
 // Build with GICC_MODE=chunk-lower and -foffload-lto -fpass-plugin=...
 // Usage: pipeline_box_check [steps]
@@ -154,21 +155,12 @@ int main(int argc, char** argv) {
     ompx_prepare();
     ompx_fence();
 
-    // Same-node neighbours take the pipelined put; the others the host put.
-    auto mapped = [&](int peer, void* obj) { return peer >= 0 && ompx_peer_ptr(peer, obj); };
-    const bool pl = mapped(left, recv_r), pr = mapped(right, recv_l);
-    const bool pring = mapped(ring_right, recv_b);
-
     long bad_total = 0;
     int bad_steps = 0;
     for (int s = 1; s <= steps; ++s) {
-        slab_kernel(a, s, rank, pl ? left : -1, recv_r, pr ? right : -1, recv_l);
-        if (left >= 0 && !pl) ompx_put(left, recv_r, a, face_w * 4);
-        if (right >= 0 && !pr) ompx_put(right, recv_l, a + (NX - W) * PLANE, face_w * 4);
-        grid_kernel(b, s, rank, pring ? ring_right : -1, recv_b + GRID_LO);
-        if (!pring) ompx_put(ring_right, recv_b + GRID_LO, b + GRID_LO, (GRID_HI - GRID_LO) * 4);
-        trans_kernel(c, s, rank, pring ? ring_right : -1, recv_c);
-        if (!pring) ompx_put(ring_right, recv_c, c, TRANS_WORDS * 4);
+        slab_kernel(a, s, rank, left, recv_r, right, recv_l);
+        grid_kernel(b, s, rank, ring_right, recv_b + GRID_LO);
+        trans_kernel(c, s, rank, ring_right, recv_c);
         ompx_fence();
 
         // recv_l holds the left neighbour's right face, recv_r the right
@@ -188,14 +180,17 @@ int main(int argc, char** argv) {
         ompx_barrier();   // the next step may overwrite what was just checked
     }
 
+    // How many sends had a peer on this node, for the log.
+    auto mapped = [&](int peer, void* obj) { return peer >= 0 && ompx_peer_ptr(peer, obj); };
     long all = 0;
-    int pipelined = (int)pl + (int)pr + 2 * (int)pring, total = 0;
+    int local = (int)mapped(left, recv_r) + (int)mapped(right, recv_l) +
+                2 * (int)mapped(ring_right, recv_b);
     MPI_Allreduce(&bad_total, &all, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE, &pipelined, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-    total = 2 * (n - 1) + 2 * n;
+    MPI_Allreduce(MPI_IN_PLACE, &local, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    const int total = 2 * (n - 1) + 2 * n;
     if (rank == 0)
-        std::printf("pipeline_box_check: %d ranks, %d steps, %d of %d sends pipelined, "
-                    "%ld words wrong: %s\n", n, steps, pipelined, total, all,
+        std::printf("pipeline_box_check: %d ranks, %d steps, %d pipelined sends (%d to a "
+                    "same-node peer), %ld words wrong: %s\n", n, steps, total, local, all,
                     all == 0 ? "PASS" : "FAIL");
     ompx_finalize();
     return all == 0 ? 0 : 1;
