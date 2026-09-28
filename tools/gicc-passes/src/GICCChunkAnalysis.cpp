@@ -130,9 +130,9 @@ bool onlyFormals(const SCEV *S, const Function &F) {
         bool follow(const SCEV *S) {
             if (auto *U = dyn_cast<SCEVUnknown>(S)) {
                 auto *A = dyn_cast<Argument>(U->getValue());
-                auto *L = dyn_cast<LoadInst>(U->getValue());
+                auto *I = dyn_cast<Instruction>(U->getValue());
                 const bool posted =
-                    L && L->getFunction() == &F && L->hasMetadata(kAfterSite);
+                    I && I->getFunction() == &F && I->hasMetadata(kAfterSite);
                 if (!posted && (!A || A->getParent() != &F)) ok = false;
             }
             return ok;
@@ -367,7 +367,7 @@ private:
     // A put the host makes after the kernel, stated in it (stateAfterPuts).
     struct AfterPut {
         CallInst *read;                         // ompx__after_put
-        SmallVector<Instruction *, 5> values;   // its loads and the source address
+        SmallVector<Instruction *, 9> values;   // what it reads, and the source address
         CallInst *marker;
     };
 
@@ -400,6 +400,7 @@ private:
             M.getOrInsertFunction(kPipelinedPut, Type::getVoidTy(Ctx), I32, Ptr, Ptr, I64);
         MDNode *tag = MDNode::get(Ctx, {});
         const unsigned AS = KI->DL.getAllocaAddrSpace();
+        const bool amdgpu = Triple(M.getTargetTriple()).isAMDGPU();
         IRBuilder<> EB(&*F.getEntryBlock().getFirstInsertionPt());
         for (unsigned i = 0; i < site.srcArgs.size(); ++i) {
             const unsigned j = site.srcArgs[i];
@@ -419,11 +420,18 @@ private:
                                   {ConstantInt::get(I64, afterPutHash(F.getName())),
                                    ConstantInt::get(I32, i), ConstantInt::get(I32, j),
                                    flat(aPeer), flat(aDst), flat(aRel), flat(aBytes)});
-            auto load = [&](Type *T, AllocaInst *A, const char *name) {
-                LoadInst *L = B.CreateLoad(T, A, name);
-                L->setMetadata(kAfterSite, tag);
-                P.values.push_back(L);
-                return L;
+            // The post is the same in every thread: said so on AMDGPU, where
+            // a value loaded from private memory would otherwise take a vector
+            // register (and enough of them a wave per SIMD).
+            auto load = [&](Type *T, AllocaInst *A, const char *name) -> Value * {
+                Instruction *V = B.CreateLoad(T, A, name);
+                P.values.push_back(V);
+                if (amdgpu) {
+                    V = B.CreateIntrinsic(Intrinsic::amdgcn_readfirstlane, {T}, {V});
+                    P.values.push_back(V);
+                }
+                V->setMetadata(kAfterSite, tag);
+                return V;
             };
             Value *peer  = load(I32, aPeer, "gicc.after.peer");
             Value *dst   = load(Ptr, aDst, "gicc.after.dst");
