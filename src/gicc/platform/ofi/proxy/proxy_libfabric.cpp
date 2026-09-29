@@ -23,6 +23,15 @@
 namespace gicc {
 namespace proxy {
 
+// What completing a write must mean: the data is in the target's memory, not
+// only in the target NIC. A quiet returns on these completions, and the
+// peer may read the data as soon as the barrier after it returns. With the
+// provider's default (transmit completion on CXI) that barrier can overtake
+// a write still on its way into GPU memory: a BFS over two nodes lost
+// vertices in one search out of four (examples/omp/graph/bfs.cpp). Asking
+// for delivery completion cost nothing measurable there.
+constexpr uint64_t kWriteDone = FI_COMPLETION | FI_DELIVERY_COMPLETE;
+
 ProxyLibfabric::ProxyLibfabric(::gicc::Fabric& fab, ::gicc::Runtime& rt,
                                int ep_idx)
     : fab_(fab), rt_(rt), ep_(nullptr), cq_(nullptr), ep_idx_(ep_idx)
@@ -113,7 +122,7 @@ int ProxyLibfabric::submit_write_batch(const TransferCmd* cmds,
     // Submit with FI_MORE on all but the last. Last call (no FI_MORE) is
     // what actually rings the CXI doorbell.
     for (size_t i = 0; i < n; ++i) {
-        uint64_t flags = (i + 1 < n) ? FI_MORE : 0ULL;
+        uint64_t flags = ((i + 1 < n) ? FI_MORE : 0ULL) | kWriteDone;
         int ret = (int)fi_writemsg(ep_, &msg_arr[i], flags);
         if (ret == -FI_EAGAIN) {
             // Provider couldn't enqueue. The FI_MORE-prefixed messages
@@ -152,16 +161,23 @@ int ProxyLibfabric::submit_write(const TransferCmd& c, uint64_t slot)
                        : (ri.rma_addr - ri.base_addr) + c.dst_offset;
     uint64_t rkey  = ri.rma_key;
 
-    int ret = fi_write(ep_,
-                       src, c.bytes, desc,
-                       peer, raddr, rkey,
-                       reinterpret_cast<void*>(slot));
+    struct iovec     iov{src, c.bytes};
+    struct fi_rma_iov rma{raddr, c.bytes, rkey};
+    struct fi_msg_rma msg{};
+    msg.msg_iov       = &iov;
+    msg.desc          = &desc;
+    msg.iov_count     = 1;
+    msg.addr          = peer;
+    msg.rma_iov       = &rma;
+    msg.rma_iov_count = 1;
+    msg.context       = reinterpret_cast<void*>(slot);
+    int ret = fi_writemsg(ep_, &msg, kWriteDone);
     if (ret == -FI_EAGAIN) {
         return -FI_EAGAIN;
     }
     if (ret != 0) {
         fprintf(stderr,
-            "ProxyLibfabric[%d]::submit_write: fi_write failed: %s\n",
+            "ProxyLibfabric[%d]::submit_write: fi_writemsg failed: %s\n",
             ep_idx_, fi_strerror(-ret));
         std::abort();
     }
@@ -256,7 +272,7 @@ int ProxyLibfabric::submit_signal(const TransferCmd& c, uint64_t slot)
     msg.rma_iov_count = 1;
     msg.context       = reinterpret_cast<void*>(slot);
 
-    int ret = fi_writemsg(ep_, &msg, FI_INJECT | FI_COMPLETION);
+    int ret = fi_writemsg(ep_, &msg, FI_INJECT | kWriteDone);
     if (ret == -FI_EAGAIN) {
         return -FI_EAGAIN;
     }
