@@ -252,8 +252,13 @@ struct Transport {
 #else
 const char* kBackend = "giomp";
 
-// Values put per chunk: one team packs a chunk and puts it at once.
-constexpr int64_t kChunk = int64_t{1} << 16;
+// Values per work item: one team packs a chunk, and puts it at once when its
+// rank is on another node. A put costs a proxy round, so those chunks are
+// large; a same-node rank takes plain stores, so its chunks are small enough
+// to spread over the whole GPU (with 64K, scale 20 on 8 GPUs packed with 7
+// teams).
+constexpr int64_t kChunkPut = int64_t{1} << 16;
+constexpr int64_t kChunkStore = int64_t{1} << 12;
 
 struct Transport {
     const Plan& p;
@@ -283,10 +288,11 @@ struct Transport {
             if (r == me) continue;
             peers[r] = static_cast<double*>(ompx_peer_ptr(r, xval));
             const int64_t c = p.sdispl[r + 1] - p.sdispl[r];
-            for (int64_t o = 0; o < c; o += kChunk) {
+            const int64_t chunk = peers[r] != nullptr ? kChunkStore : kChunkPut;
+            for (int64_t o = 0; o < c; o += chunk) {
                 ir.push_back(r);
                 is.push_back(o);
-                il.push_back(std::min(kChunk, c - o));
+                il.push_back(std::min(chunk, c - o));
             }
         }
         nitems = static_cast<int>(ir.size());
