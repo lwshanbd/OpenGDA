@@ -16,9 +16,10 @@
 // The graph is undirected, so a vertex's in-neighbours are its neighbours and
 // its out-degree is its degree. rank'(v) = (1 - d) / n + d * sum over
 // neighbours u of rank(u) / deg(u); a vertex with no neighbour gives nothing.
-// Every transport sums in the same order (neighbours on this rank, then the
-// others, each ascending), so at a given rank count the transports agree bit
-// for bit and print the same checksum.
+// Every transport runs the same kernels, which sum in a fixed order (the
+// neighbours on this rank, the others, then the two sums; a vertex with more
+// than kHeavy neighbours by a team, in a fixed tree), so at a given rank
+// count the transports agree bit for bit and print the same checksum.
 //
 // Build: examples/omp/graph/build_graph.sh
 // Run  : pagerank_{mpi,giomp} --scale=22 --iters=20 --reps=3
@@ -39,6 +40,12 @@ namespace {
 
 constexpr double kDamping = 0.85;
 
+// A vertex with more neighbours than this is summed by a whole team: R-MAT's
+// hubs have hundreds of thousands, and one thread each made them the whole
+// run time.
+constexpr int32_t kHeavy = 256;
+constexpr int kTeam = 256;
+
 // What moves each iteration, found once. Ghosts are the vertices other ranks
 // own that some neighbour list here names; they are numbered in increasing
 // order, which groups them by owner.
@@ -51,6 +58,7 @@ struct Plan {
     std::vector<int64_t> sdispl;         // sent to rank r: sendidx[sdispl[r] .. sdispl[r + 1])
     std::vector<uint32_t> sendidx;       // local indices, in the receiver's ghost order
     std::vector<int64_t> roff;           // where rank r keeps the ghosts it gets from here
+    std::vector<uint32_t> heavy;         // vertices with more than kHeavy neighbours
 };
 
 Plan make_plan(const Graph& g, MPI_Comm comm) {
@@ -77,6 +85,8 @@ Plan make_plan(const Graph& g, MPI_Comm comm) {
         p.lrow[v + 1] = p.lrow[v] + here;
         p.rrow[v + 1] = p.rrow[v] + p.deg[v] - here;
     }
+    for (int64_t v = 0; v < g.nlocal; ++v)
+        if (p.deg[v] > kHeavy) p.heavy.push_back(static_cast<uint32_t>(v));
     p.lcol.resize(p.lrow[g.nlocal]);
     p.rcol.resize(p.rrow[g.nlocal]);
     #pragma omp parallel for schedule(dynamic, 1024)
@@ -121,26 +131,46 @@ void contrib(int64_t n, const double* rank, const int32_t* deg, double* x) {
     for (int64_t v = 0; v < n; ++v) x[v] = deg[v] ? rank[v] / deg[v] : 0.0;
 }
 
-// What v's neighbours on this rank give it.
-void gather_local(int64_t n, const int64_t* row, const uint32_t* col, const double* x,
-                  double* acc) {
-    #pragma omp target teams distribute parallel for is_device_ptr(row, col, x, acc)
+// out[v] = the sum of x over v's entries in (row, col): one thread per
+// vertex, one team per heavy one. Each sums in a fixed order, the same for
+// every transport.
+void gather(int64_t n, const int32_t* deg, const int64_t* row, const uint32_t* col,
+            const double* x, int64_t nheavy, const uint32_t* heavy, double* out) {
+    #pragma omp target teams distribute parallel for is_device_ptr(deg, row, col, x, out)
     for (int64_t v = 0; v < n; ++v) {
+        if (deg[v] > kHeavy) continue;
         double s = 0.0;
         for (int64_t j = row[v]; j < row[v + 1]; ++j) s += x[col[j]];
-        acc[v] = s;
+        out[v] = s;
+    }
+    if (nheavy == 0) return;
+    #pragma omp target teams num_teams(nheavy) thread_limit(kTeam) \
+            is_device_ptr(heavy, row, col, x, out)
+    {
+        double part[kTeam];
+        const uint32_t v = heavy[omp_get_team_num()];
+        #pragma omp parallel num_threads(kTeam)
+        {
+            const int tid = omp_get_thread_num(), nth = omp_get_num_threads();
+            for (int i = tid; i < kTeam; i += nth) part[i] = 0.0;
+            #pragma omp barrier
+            double s = 0.0;
+            for (int64_t j = row[v] + tid; j < row[v + 1]; j += nth) s += x[col[j]];
+            part[tid] += s;
+            for (int w = kTeam / 2; w > 0; w /= 2) {
+                #pragma omp barrier
+                for (int i = tid; i < w; i += nth) part[i] += part[i + w];
+            }
+            #pragma omp barrier
+            if (tid == 0) out[v] = part[0];
+        }
     }
 }
 
-// v's new rank: acc[v] plus what its neighbours elsewhere give it.
-void gather_remote(int64_t n, const int64_t* row, const uint32_t* col, const double* ghost,
-                   const double* acc, double* rank, double base) {
-    #pragma omp target teams distribute parallel for is_device_ptr(row, col, ghost, acc, rank)
-    for (int64_t v = 0; v < n; ++v) {
-        double s = acc[v];
-        for (int64_t j = row[v]; j < row[v + 1]; ++j) s += ghost[col[j]];
-        rank[v] = base + kDamping * s;
-    }
+// v's new rank from what its neighbours here (acc) and elsewhere (rem) give.
+void finish(int64_t n, const double* acc, const double* rem, double* rank, double base) {
+    #pragma omp target teams distribute parallel for is_device_ptr(acc, rem, rank)
+    for (int64_t v = 0; v < n; ++v) rank[v] = base + kDamping * (acc[v] + rem[v]);
 }
 
 void fill(int64_t n, double* a, double value) {
@@ -153,9 +183,21 @@ void fill(int64_t n, double* a, double value) {
 struct Dev {
     int32_t* deg;
     int64_t *lrow, *rrow;
-    uint32_t *lcol, *rcol, *sendidx;
-    double *rank, *acc;
+    uint32_t *lcol, *rcol, *sendidx, *heavy;
+    int64_t nheavy;
+    double *rank, *acc, *rem;
 };
+
+// The sums over this rank's neighbours, while the exchange is in flight.
+void sum_local(int64_t n, const Dev& d, const double* x) {
+    gather(n, d.deg, d.lrow, d.lcol, x, d.nheavy, d.heavy, d.acc);
+}
+
+// The sums over the received ghosts, then the new ranks.
+void sum_remote(int64_t n, const Dev& d, const double* ghost, double base) {
+    gather(n, d.deg, d.rrow, d.rcol, ghost, d.nheavy, d.heavy, d.rem);
+    finish(n, d.acc, d.rem, d.rank, base);
+}
 
 #if defined(GRAPH_BACKEND_MPI)
 const char* kBackend = "mpi";
@@ -202,9 +244,9 @@ struct Transport {
                 MPI_Isend(sendbuf + p.sdispl[r], static_cast<int>(c), MPI_DOUBLE, r, 7, comm,
                           &req[nr++]);
         }
-        gather_local(p.nlocal, d.lrow, d.lcol, x, d.acc);
+        sum_local(p.nlocal, d, x);
         MPI_Waitall(nr, req.data(), MPI_STATUSES_IGNORE);
-        gather_remote(p.nlocal, d.rrow, d.rcol, ghost, d.acc, d.rank, base);
+        sum_remote(p.nlocal, d, ghost, base);
     }
 };
 #else
@@ -303,9 +345,9 @@ struct Transport {
                 }
             }
         }
-        gather_local(p.nlocal, d.lrow, d.lcol, x, d.acc);
+        sum_local(p.nlocal, d, x);
         ompx_fence();
-        gather_remote(p.nlocal, d.rrow, d.rcol, x + gbase, d.acc, d.rank, base);
+        sum_remote(p.nlocal, d, x + gbase, base);
         parity ^= 1;
     }
 };
@@ -351,8 +393,11 @@ int main(int argc, char** argv) {
     d.lcol = dev_copy(p.lcol);
     d.rcol = dev_copy(p.rcol);
     d.sendidx = dev_copy(p.sendidx);
+    d.heavy = dev_copy(p.heavy);
+    d.nheavy = static_cast<int64_t>(p.heavy.size());
     d.rank = dev_alloc<double>(p.nlocal);
     d.acc = dev_alloc<double>(p.nlocal);
+    d.rem = dev_alloc<double>(p.nlocal);
     std::vector<uint32_t>().swap(g.col);
     const double base = (1.0 - kDamping) / static_cast<double>(g.n);
 
@@ -361,6 +406,10 @@ int main(int argc, char** argv) {
     double sum = 0;
     {
         Transport tr(p, comm);
+        // Untimed: the first steps pay for first touches of peer memory and
+        // the transports' own set-up.
+        fill(p.nlocal, d.rank, 1.0 / static_cast<double>(g.n));
+        for (int it = 0; it < 3; ++it) tr.step(d, base);
         for (int rep = 0; rep < o.reps; ++rep) {
             fill(p.nlocal, d.rank, 1.0 / static_cast<double>(g.n));
             MPI_Barrier(comm);
@@ -384,17 +433,20 @@ int main(int argc, char** argv) {
     if (me == 0) {
         std::vector<double> sorted = times;
         std::sort(sorted.begin(), sorted.end());
-        const double med = sorted[sorted.size() / 2];
+        const size_t k = sorted.size();
+        const double med = k % 2 ? sorted[k / 2] : 0.5 * (sorted[k / 2 - 1] + sorted[k / 2]);
         std::printf("pagerank backend=%s ranks=%d scale=%d iters=%d: median %.4f s "
-                    "(%.3f ms/iter, %.2f GTEPS)  reps:",
+                    "(%.3f ms/iter, %.2f GTEPS), best %.3f ms/iter  reps:",
                     kBackend, P, o.scale, o.iters, med, 1e3 * med / o.iters,
-                    static_cast<double>(tot[0]) * o.iters / med * 1e-9);
+                    static_cast<double>(tot[0]) * o.iters / med * 1e-9,
+                    1e3 * sorted[0] / o.iters);
         for (double t : times) std::printf(" %.4f", t);
         std::printf("\npagerank checksum %016llx sum %.12f\n", (unsigned long long)hash, sum);
     }
 
     for (void* q : {(void*)d.deg, (void*)d.lrow, (void*)d.rrow, (void*)d.lcol, (void*)d.rcol,
-                    (void*)d.sendidx, (void*)d.rank, (void*)d.acc})
+                    (void*)d.sendidx, (void*)d.heavy, (void*)d.rank, (void*)d.acc,
+                    (void*)d.rem})
         dev_free(q);
 #if defined(GRAPH_BACKEND_GIOMP)
     ompx_finalize();
