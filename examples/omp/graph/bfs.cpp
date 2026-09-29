@@ -41,8 +41,10 @@ struct Dev {
     int64_t* row;
     uint32_t* col;
     int32_t* level;
-    uint32_t *cur, *next;      // frontiers, local indices
-    int64_t* ncount;           // size of next
+    // Frontiers, local indices: vertices with at most kHeavy neighbours from
+    // the front, the others from the back.
+    uint32_t *cur, *next;
+    int64_t* ncount;           // [light, heavy] sizes of next
     int64_t* scount;           // per rank: entries bucketed for it this level
     int64_t* sdispl;           // per rank: where its bucket starts in sendbuf
     uint32_t* sendbuf;
@@ -53,66 +55,74 @@ struct Dev {
     uint32_t* inbox;
 };
 
-// Claims wl for level `lv`; a winner joins the next frontier.
+// A vertex with more neighbours than this is expanded by a whole team: R-MAT's
+// hubs have hundreds of thousands, and one thread each made them the whole
+// run time.
+constexpr int64_t kHeavy = 256;
+constexpr int kTeam = 256;
+
 #pragma omp declare target
-inline void visit(int32_t* level, uint32_t* next, int64_t* ncount, uint32_t wl, int32_t lv) {
+// Claims wl for level `lv`; a winner joins the next frontier, at the front if
+// light, at the back if heavy.
+inline void visit(const int64_t* row, int32_t* level, uint32_t* next, int64_t* ncount,
+                  int64_t nlocal, uint32_t wl, int32_t lv) {
     if (__atomic_load_n(&level[wl], __ATOMIC_RELAXED) != -1) return;
     int32_t expected = -1;
-    if (__scoped_atomic_compare_exchange_n(&level[wl], &expected, lv, false, __ATOMIC_RELAXED,
-                                           __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE))
-        next[__scoped_atomic_fetch_add(ncount, int64_t{1}, __ATOMIC_RELAXED,
-                                       __MEMORY_SCOPE_DEVICE)] = wl;
+    if (!__scoped_atomic_compare_exchange_n(&level[wl], &expected, lv, false, __ATOMIC_RELAXED,
+                                            __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE))
+        return;
+    const bool heavy = row[wl + 1] - row[wl] > kHeavy;
+    const int64_t k = __scoped_atomic_fetch_add(&ncount[heavy], int64_t{1}, __ATOMIC_RELAXED,
+                                                __MEMORY_SCOPE_DEVICE);
+    next[heavy ? nlocal - 1 - k : k] = wl;
+}
+
+// Neighbour w of a frontier vertex: claimed if it is here, else bucketed for
+// its owner -- stored straight into a same-node owner's inbox when `peer`
+// has it.
+inline void edge(const Dev& d, uint32_t w, int32_t lv) {
+    const int q = static_cast<int>(w / d.nlocal);
+    if (q == d.me) {
+        visit(d.row, d.level, d.next, d.ncount, d.nlocal, static_cast<uint32_t>(w - d.lo), lv);
+        return;
+    }
+    const int64_t slot = __scoped_atomic_fetch_add(&d.scount[q], int64_t{1}, __ATOMIC_RELAXED,
+                                                   __MEMORY_SCOPE_DEVICE);
+    uint32_t* pq = d.peer[q];
+    if (pq != nullptr) pq[d.peer_off[q] + slot] = w;
+    else d.sendbuf[d.sdispl[q] + slot] = w;
 }
 #pragma omp end declare target
 
-// Level lv - 1 -> lv from this rank's frontier: neighbours here are claimed,
-// the rest bucketed for their owners -- stored straight into a same-node
-// owner's inbox when `peer` has it.
-void expand(const Dev& d, int64_t fcount, int32_t lv) {
-    const int64_t nlocal = d.nlocal, lo = d.lo;
-    const int me = d.me;
-    const int64_t* row = d.row;
-    const uint32_t* col = d.col;
-    const uint32_t* cur = d.cur;
-    int32_t* level = d.level;
-    uint32_t *next = d.next, *sendbuf = d.sendbuf;
-    int64_t *ncount = d.ncount, *scount = d.scount;
-    const int64_t *sdispl = d.sdispl, *peer_off = d.peer_off;
-    uint32_t* const* peer = d.peer;
-    #pragma omp target teams distribute parallel for schedule(static, 1) \
-            is_device_ptr(row, col, cur, level, next, sendbuf, ncount, scount, sdispl, \
-                          peer_off, peer) firstprivate(nlocal, lo, me, lv)
-    for (int64_t i = 0; i < fcount; ++i) {
-        const uint32_t u = cur[i];
-        for (int64_t j = row[u]; j < row[u + 1]; ++j) {
-            const uint32_t w = col[j];
-            const int q = static_cast<int>(w / nlocal);
-            if (q == me) {
-                visit(level, next, ncount, static_cast<uint32_t>(w - lo), lv);
-                continue;
-            }
-            const int64_t slot = __scoped_atomic_fetch_add(&scount[q], int64_t{1},
-                                                           __ATOMIC_RELAXED,
-                                                           __MEMORY_SCOPE_DEVICE);
-            uint32_t* pq = peer[q];
-            if (pq != nullptr) pq[peer_off[q] + slot] = w;
-            else sendbuf[sdispl[q] + slot] = w;
+// Level lv - 1 -> lv from this rank's frontier: a thread per light vertex,
+// a team per heavy one.
+void expand(const Dev& d, int64_t nlight, int64_t nheavy, int32_t lv) {
+    const Dev dv = d;   // by value into the kernels: its pointers are device addresses
+    if (nlight > 0) {
+        #pragma omp target teams distribute parallel for schedule(static, 1) firstprivate(dv, lv)
+        for (int64_t i = 0; i < nlight; ++i) {
+            const uint32_t u = dv.cur[i];
+            for (int64_t j = dv.row[u]; j < dv.row[u + 1]; ++j) edge(dv, dv.col[j], lv);
+        }
+    }
+    if (nheavy > 0) {
+        #pragma omp target teams num_teams(nheavy) thread_limit(kTeam) firstprivate(dv, lv)
+        #pragma omp parallel
+        {
+            const uint32_t u = dv.cur[dv.nlocal - 1 - omp_get_team_num()];
+            for (int64_t j = dv.row[u] + omp_get_thread_num(); j < dv.row[u + 1];
+                 j += omp_get_num_threads())
+                edge(dv, dv.col[j], lv);
         }
     }
 }
 
 // Claims what arrived: segment s is inbox[seg_off[s] .. + seg_len[s]).
 void receive(const Dev& d, int32_t lv) {
-    const int P = d.P;
-    const int64_t lo = d.lo;
-    const int64_t *off = d.seg_off, *len = d.seg_len;
-    const uint32_t* inbox = d.inbox;
-    int32_t* level = d.level;
-    uint32_t* next = d.next;
-    int64_t* ncount = d.ncount;
+    const Dev dv = d;
     constexpr int kTeamsPerSegment = 64;
-    #pragma omp target teams num_teams(P * kTeamsPerSegment) thread_limit(256) \
-            is_device_ptr(off, len, inbox, level, next, ncount) firstprivate(lo, lv)
+    #pragma omp target teams num_teams(d.P * kTeamsPerSegment) thread_limit(256) \
+            firstprivate(dv, lv)
     #pragma omp parallel
     {
         const int t = omp_get_team_num();
@@ -120,9 +130,10 @@ void receive(const Dev& d, int32_t lv) {
         const int64_t stride = int64_t{kTeamsPerSegment} * omp_get_num_threads();
         const int64_t first = int64_t{t % kTeamsPerSegment} * omp_get_num_threads() +
                               omp_get_thread_num();
-        const uint32_t* seg = inbox + off[s];
-        for (int64_t k = first; k < len[s]; k += stride)
-            visit(level, next, ncount, static_cast<uint32_t>(seg[k] - lo), lv);
+        const uint32_t* seg = dv.inbox + dv.seg_off[s];
+        for (int64_t k = first; k < dv.seg_len[s]; k += stride)
+            visit(dv.row, dv.level, dv.next, dv.ncount, dv.nlocal,
+                  static_cast<uint32_t>(seg[k] - dv.lo), lv);
     }
 }
 
@@ -322,7 +333,7 @@ int main(int argc, char** argv) {
     d.level = dev_alloc<int32_t>(g.nlocal);
     d.cur = dev_alloc<uint32_t>(g.nlocal);
     d.next = dev_alloc<uint32_t>(g.nlocal);
-    d.ncount = dev_alloc<int64_t>(1);
+    d.ncount = dev_alloc<int64_t>(2);
 #if defined(GRAPH_BACKEND_MPI)
     d.scount = dev_alloc<int64_t>(P);
 #endif
@@ -344,36 +355,40 @@ int main(int argc, char** argv) {
     {
         Transport tr(d, caps, comm);
         std::vector<int32_t> lv(g.nlocal);
-        for (int rep = 0; rep < o.reps; ++rep) {
+        // Rep -1 is an untimed search from the first root: it pays for first
+        // touches of peer memory and the transports' own set-up.
+        for (int rep = -1; rep < o.reps; ++rep) {
             for (size_t ri = 0; ri < roots.size(); ++ri) {
+                if (rep < 0 && ri > 0) break;
                 const int64_t root = roots[ri];
                 std::fill(lv.begin(), lv.end(), -1);
-                int64_t fcount = 0;
+                int64_t fcount[2] = {0, 0};   // light, heavy
                 if (g.owner(root) == me) {
                     lv[root - g.lo] = 0;
                     const uint32_t rl = static_cast<uint32_t>(root - g.lo);
-                    to_dev(d.cur, &rl, 1);
-                    fcount = 1;
+                    const bool heavy = g.rowptr[rl + 1] - g.rowptr[rl] > kHeavy;
+                    to_dev(d.cur + (heavy ? g.nlocal - 1 : 0), &rl, 1);
+                    fcount[heavy] = 1;
                 }
                 to_dev(d.level, lv.data(), lv.size());
                 MPI_Barrier(comm);
                 const double ts = MPI_Wtime();
                 int32_t depth = 0;
                 for (;;) {
-                    zero(1, d.ncount);
+                    zero(2, d.ncount);
                     zero(P, d.scount);
-                    if (fcount > 0) expand(d, fcount, depth + 1);
+                    expand(d, fcount[0], fcount[1], depth + 1);
                     tr.exchange();
                     receive(d, depth + 1);
-                    to_host(&fcount, d.ncount, 1);
-                    int64_t all = 0;
-                    MPI_Allreduce(&fcount, &all, 1, MPI_INT64_T, MPI_SUM, comm);
+                    to_host(fcount, d.ncount, 2);
+                    int64_t mine = fcount[0] + fcount[1], all = 0;
+                    MPI_Allreduce(&mine, &all, 1, MPI_INT64_T, MPI_SUM, comm);
                     if (all == 0) break;
                     std::swap(d.cur, d.next);
                     ++depth;
                 }
                 const double t = max_time(MPI_Wtime() - ts, comm);
-                {
+                if (rep >= 0) {
                     // Check every search: the level of every vertex, and the
                     // edges the search covered (each counted from both ends).
                     // A root must give the same levels every time.
@@ -397,8 +412,8 @@ int main(int argc, char** argv) {
                     } else if (hh != checks[ri]) {
                         ++unstable;
                     }
+                    times.push_back(t);
                 }
-                times.push_back(t);
             }
         }
     }
