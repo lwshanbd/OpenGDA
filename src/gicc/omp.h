@@ -188,10 +188,13 @@ typedef struct ompx_pipe_deferred_put {
 //
 // Under DWQ a kernel cannot start a transfer the host has not queued, so a
 // put to a peer that is not IPC-mapped is queued when it is posted, on a
-// trigger of its own (one per i), and `bell` rings it: the kernel does once
-// the source is written, and says so in `fired`; otherwise the host does
+// trigger of its own (one per i), in `pieces` groups of `piece` bytes
+// (ompx__pipe_piece), and `bell` rings them: each ring releases the next
+// group, so the kernel rings a piece once it and every piece before it is
+// written, and leaves in `fired` how many it rang; the host rings the rest
 // after the kernel. The NIC reads the source when the bell rings.
 #define OMPX_PIPE_AFTER_MAX 8
+#define OMPX_PIPE_PIECES_MAX 64
 typedef struct ompx_pipe_after_put {
     int                armed;     // posted, and the host will reach the put
     int                handled;   // the kernel sent it
@@ -201,8 +204,9 @@ typedef struct ompx_pipe_after_put {
     long long          src_rel;   // src minus that argument
     unsigned long long bytes;
     volatile unsigned long long* bell;   // device doorbell; null if not queued
-    int                fired;     // the kernel rang it
-    int                reserved;
+    int                fired;     // groups the kernel rang
+    int                pieces;    // groups queued behind `bell`
+    unsigned long long piece;     // bytes per group, the last one shorter
 } ompx_pipe_after_put;
 typedef struct ompx_pipe_after {
     unsigned long long  kernel;   // FNV-1a of the kernel's name
@@ -238,6 +242,28 @@ void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, 
                       void* dst, const void* src, long long src_rel, size_t bytes);
 void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
                       const void* src, size_t bytes);
+
+// Internal: the size of the pieces a pipelined put to a peer that is not
+// IPC-mapped goes out in, each sent once the kernel has written it: at least
+// 4 MB, 4 KB aligned, no more than pieces_max (a power of two) of them; the
+// whole put when it is too small to split. The host queues a put under DWQ
+// in these pieces and the kernel counts them the same way, so both sides
+// call this one function. No division: every thread of a kernel may call it.
+#if defined(_OPENMP) && !defined(__HIPCC__) && !defined(__CUDACC__)
+#pragma omp declare target
+#endif
+static inline unsigned long long ompx__pipe_piece(unsigned long long bytes, int pieces_max) {
+    const unsigned long long want = bytes >> 22;
+    if (want <= 1 || pieces_max <= 1) return bytes;
+    const unsigned long long most = (unsigned long long)pieces_max;
+    const unsigned long long pieces =
+        want >= most ? most : 1ull << (63 - __builtin_clzll(want));
+    const int lg = __builtin_ctzll(pieces);
+    return (((bytes + pieces - 1) >> lg) + 4095) & ~4095ull;
+}
+#if defined(_OPENMP) && !defined(__HIPCC__) && !defined(__CUDACC__)
+#pragma omp end declare target
+#endif
 
 #ifdef __cplusplus
 }  // extern "C"
