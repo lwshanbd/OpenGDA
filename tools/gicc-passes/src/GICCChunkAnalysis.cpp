@@ -1253,7 +1253,7 @@ private:
         FunctionCallee hullFn = M.getOrInsertFunction(
             "ompx__box_hull", Type::getVoidTy(Ctx), Ptr, I64, Ptr, I32, Ptr, Ptr, I64, Ptr, Ptr);
         FunctionCallee pieceFn =
-            M.getOrInsertFunction("ompx__box_piece", I64, I64, I32, I32);
+            M.getOrInsertFunction("ompx__box_piece", I64, I64, I32, I32, I32);
         Type *I8 = Type::getInt8Ty(Ctx);
         for (unsigned p = 0; p < nPuts; ++p) {
             const BoxSend &S = sends[p];
@@ -1262,7 +1262,8 @@ private:
                 M, CT, false, GlobalValue::InternalLinkage, ConstantAggregateZero::get(CT),
                 "gicc.box.count", nullptr, GlobalValue::NotThreadLocal, kmpc::GlobalAddrSpace);
             Value *counted = B.CreateZExt(S.counted, I32);
-            Value *piece = B.CreateCall(pieceFn, {S.len, counted, ConstantInt::get(I32, K)});
+            Value *piece = B.CreateCall(pieceFn, {S.len, counted, ConstantInt::get(I32, K),
+                                                  ConstantInt::get(I32, S.after)});
             // Piece k: [k * piece, (k + 1) * piece) of the range, clipped to
             // it. The first is always there, the whole put when it is one
             // piece; one that clips to nothing is not counted. A loop, not K
@@ -1352,14 +1353,14 @@ private:
         RB.CreateStore(RB.CreateIntToPtr(ubR, slotT), ubSlot->getPointerOperand());
 
         FunctionCallee dueFn = M.getOrInsertFunction(
-            "ompx__box_due", I64, I32, I64, Ptr, Ptr, Ptr, Ptr, Ptr, Ptr, Ptr);
+            "ompx__box_due", I64, I32, I64, Ptr, Ptr, Ptr, Ptr, Ptr, Ptr, Ptr, I32);
         auto dueCall = [&](Instruction *where, Value *pos, Value *go) {
             Instruction *then = SplitBlockAndInsertIfThen(go, where->getIterator(), false, rarely);
             IRBuilder<> T(then);
             Value *left = T.CreateCall(dueFn, {ConstantInt::get(I32, n), pos, flat(T, dueArr),
                                                flat(T, peerArr), flat(T, dstArr), flat(T, srcArr),
                                                flat(T, bytesArr), flat(T, counterArr),
-                                               flat(T, afterArr)});
+                                               flat(T, afterArr), ConstantInt::get(I32, K)});
             T.CreateStore(uniform(T, left), nextSlot);
         };
         dueCall(counting, pos, RB.CreateICmpSGE(pos, RB.CreateLoad(I64, nextSlot)));

@@ -16,7 +16,7 @@
 ; A counted put goes out in pieces, each counted on its own: 64 entries
 ; for the one put, filled by a loop, the first the whole range when it is
 ; one piece.
-; CHECK: call i64 @ompx__box_piece(i64 {{.*}}, i32 64)
+; CHECK: call i64 @ompx__box_piece(i64 {{.*}}, i32 64, i32 -1)
 ; CHECK: %iv = phi i64 [ 0,
 ; CHECK: getelementptr inbounds [64 x i64], ptr addrspace(3) @gicc.box.lo, i64 0, i64
 ; CHECK: call void @ompx__box_hull(
