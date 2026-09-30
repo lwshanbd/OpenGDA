@@ -42,18 +42,28 @@ ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* bo
 ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count, int after,
                int32_t* counted)
     __asm__("ompx__box_peer");
+[[omp::assume("ompx_spmd_amenable")]] static int64_t
+ompx__box_piece(size_t bytes, int32_t counted, int pieces_max)
+    __asm__("ompx__box_piece");
 [[omp::assume("ompx_spmd_amenable")]] static void
 ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, const int64_t* stride,
                const int64_t* extent, int64_t elem, int64_t* lo, int64_t* hi)
     __asm__("ompx__box_hull");
 [[omp::assume("ompx_spmd_amenable")]] static void
 ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* hi,
-               int64_t lb0, int64_t iters, int64_t chunk, int64_t* shift, int64_t* due)
+               int64_t lb0, int64_t iters, int64_t chunk, int64_t* shift, int64_t* due,
+               int64_t* first)
     __asm__("ompx__box_plan");
 [[omp::assume("ompx_spmd_amenable")]] static void
 ompx__after_put(unsigned long long kernel, int i, int src_arg, int32_t* peer, void** dst,
                 int64_t* src_rel, int64_t* bytes)
     __asm__("ompx__after_put");
+[[omp::assume("ompx_spmd_amenable")]] static int64_t
+ompx__box_grab(unsigned long long* next, int64_t* slot)
+    __asm__("ompx__box_grab");
+[[omp::assume("ompx_spmd_amenable")]] static void
+ompx__box_grab_done(unsigned long long* next, unsigned* done)
+    __asm__("ompx__box_grab_done");
 [[omp::assume("ompx_spmd_amenable")]] static int64_t
 ompx__box_due(int n, int64_t lb, int64_t* due, const int32_t* peer, void* const* dst,
               const void* const* src, const int64_t* bytes, unsigned* const* counter,
@@ -495,6 +505,34 @@ static inline int64_t ompx__ceil_div(int64_t a, int64_t b) {
 }
 #endif
 
+// A counted put goes out in pieces, each sent once every team is past it
+// (ompx__box_count): sent whole, a put over most of the loop would leave
+// only when the loop ends, with nothing left to hide it behind. Returns the
+// size of the pieces of a put of `bytes`: at least kOmpxPieceMin, 4 KB
+// aligned, no more than pieces_max (a power of two) of them; the pass makes
+// piece k [k * size, (k + 1) * size) of the range, clipped to it. One piece,
+// the whole put, when the put is not counted or the CPU proxy is off: under
+// DWQ a counted put is the one descriptor the host queued. No division:
+// every thread of every team of a counting launch calls this for every put.
+constexpr int kOmpxPieceMinLog2 = 22;   // 4 MB
+
+static __attribute__((used)) int64_t
+ompx__box_piece(size_t bytes, int32_t counted, int pieces_max) {
+    uint64_t piece = bytes;
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    const uint64_t want = static_cast<uint64_t>(bytes) >> kOmpxPieceMinLog2;
+    if (counted && want > 1 && pieces_max > 1 && ompx__pipe_list()->proxy_on) {
+        const uint64_t most = static_cast<uint64_t>(pieces_max);
+        const uint64_t pieces = want >= most ? most : uint64_t(1) << (63 - __builtin_clzll(want));
+        const int lg = __builtin_ctzll(pieces);
+        piece = (((static_cast<uint64_t>(bytes) + pieces - 1) >> lg) + 4095) & ~uint64_t(4095);
+    }
+#else
+    (void)counted; (void)pieces_max;
+#endif
+    return static_cast<int64_t>(piece);
+}
+
 // ompx__box_hull's interval, as values.
 #if defined(__NVPTX__) || defined(__AMDGCN__)
 static inline void ompx__hull(const void* src, size_t bytes, const void* box, int dims,
@@ -560,11 +598,14 @@ ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, const i
 // puts' chunks first, the rotation starting right after the widest stretch
 // of chunks none of them stores in. due[p] is the first lb at which a team
 // has run every chunk put p needs -- lb0 when no chunk stores into the
-// range, which is then final already -- and INT64_MAX for a put not counted.
-// shift and due are team memory: in an SPMD kernel every thread calls this,
-// and thread 0 plans for the team, in team memory too (see ompx_gap_list).
+// range, which is then final already -- and INT64_MAX for a put not counted;
+// *first is the smallest due[p], so that the kernel reads one value, not n
+// (read together, n of them took a vector register each). shift, due and
+// first are team memory: in an SPMD kernel every thread calls this, and
+// thread 0 plans for the team, in team memory too (see ompx_gap_list).
 #if defined(__NVPTX__) || defined(__AMDGCN__)
-constexpr int kOmpxPlanPutsMax = 8;
+// Puts a plan orders: pieces of puts, as the pass lays them out.
+constexpr int kOmpxPlanPutsMax = 64;
 struct ompx_plan_scratch {
     int64_t a[kOmpxPlanPutsMax], b[kOmpxPlanPutsMax];
 };
@@ -574,7 +615,7 @@ struct ompx_plan_scratch {
 // ompx__box_plan's work, done by one thread of the team.
 static inline void ompx__plan_team(int n, const int32_t* counted, const int64_t* lo,
                                    const int64_t* hi, int64_t lb0, int64_t iters, int64_t chunk,
-                                   int64_t* shift, int64_t* due) {
+                                   int64_t* shift, int64_t* due, int64_t* first) {
     constexpr int kMaxPuts = kOmpxPlanPutsMax;
     const int64_t chunks = (iters + chunk - 1) / chunk;
     // The counted puts' chunk intervals, sorted by start, then merged.
@@ -610,33 +651,40 @@ static inline void ompx__plan_team(int n, const int32_t* counted, const int64_t*
         }
     }
     *shift = start * chunk;
+    int64_t soonest = INT64_MAX;
     for (int p = 0; p < n; ++p) {
+        int64_t d;
         if (!counted[p]) {
-            due[p] = INT64_MAX;
+            d = INT64_MAX;
         } else if (lo[p] > hi[p]) {
-            due[p] = lb0;
+            d = lb0;
         } else {
             const int64_t last = ((hi[p] / chunk - start) % chunks + chunks) % chunks;
-            due[p] = lb0 + (last + 1) * chunk;
+            d = lb0 + (last + 1) * chunk;
         }
+        due[p] = d;
+        if (d < soonest) soonest = d;
     }
+    *first = soonest;
 }
 #endif
 
 static __attribute__((used)) void
 ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* hi,
-               int64_t lb0, int64_t iters, int64_t chunk, int64_t* shift, int64_t* due) {
+               int64_t lb0, int64_t iters, int64_t chunk, int64_t* shift, int64_t* due,
+               int64_t* first) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     // One barrier, which every thread of an SPMD team reaches at this one
     // call: it is an aligned barrier, and the optimizer relies on that.
     const bool spmd = __kmpc_is_spmd_exec_mode();
     if (!spmd || (ompx_thread_id_x() == 0 && ompx_thread_id_y() == 0 && ompx_thread_id_z() == 0))
-        ompx__plan_team(n, counted, lo, hi, lb0, iters, chunk, shift, due);
+        ompx__plan_team(n, counted, lo, hi, lb0, iters, chunk, shift, due, first);
     if (spmd) ompx_sync_block_acq_rel();
 #else
     (void)n; (void)counted; (void)lo; (void)hi; (void)lb0; (void)iters; (void)chunk;
     (void)due;
     *shift = 0;
+    *first = INT64_MAX;
 #endif
 }
 
@@ -674,6 +722,51 @@ ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t 
     }
 #else
     (void)counter; (void)peer; (void)dst; (void)src; (void)bytes; (void)after;
+#endif
+}
+
+// A counting launch hands its chunks out in order, each to the first team
+// ready for one, instead of chunk t + j * teams to team t. Waves are
+// scheduled oldest first, so the teams that start last fall behind; a range
+// goes out only once every team is past it, and with chunks dealt round
+// robin the ranges came out slowly at first and in a rush at the end, where
+// nothing is left to hide them behind. Each team still runs as many chunks
+// as it was dealt, so every chunk is taken once. Returns the number of the
+// chunk to run next, in the order the plan's shift rotates. Called by every
+// thread of the team: thread 0 takes it, and the team reads it from team
+// memory (*slot) between two barriers, the second so that no thread still
+// reads it when thread 0 writes the next.
+static __attribute__((used)) int64_t
+ompx__box_grab(unsigned long long* next, int64_t* slot) {
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    if (ompx_thread_id_x() == 0 && ompx_thread_id_y() == 0 && ompx_thread_id_z() == 0)
+        *slot = static_cast<int64_t>(
+            __scoped_atomic_fetch_add(next, 1ull, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE));
+    ompx_sync_block_acq_rel();
+    const int64_t g = *slot;
+    ompx_sync_block_acq_rel();
+    return g;
+#else
+    (void)next; (void)slot;
+    return 0;
+#endif
+}
+
+// Called by every thread of a team of a counting launch once its loop is
+// done: the last team to get here leaves the chunk counter at zero for the
+// next launch.
+static __attribute__((used)) void
+ompx__box_grab_done(unsigned long long* next, unsigned* done) {
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    if (ompx_thread_id_x() != 0 || ompx_thread_id_y() != 0 || ompx_thread_id_z() != 0) return;
+    const unsigned teams = static_cast<unsigned>(omp_get_num_teams());
+    if (__scoped_atomic_fetch_add(done, 1u, __ATOMIC_ACQ_REL, __MEMORY_SCOPE_DEVICE) ==
+        teams - 1) {
+        __scoped_atomic_store_n(next, 0ull, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+        __scoped_atomic_store_n(done, 0u, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+    }
+#else
+    (void)next; (void)done;
 #endif
 }
 
