@@ -32,7 +32,7 @@
 
 // libomptarget's host allocation the device can write (not in ROCm's omp.h).
 extern "C" void* llvm_omp_target_alloc_host(size_t size, int device);
-extern "C" void omp_target_free(void* ptr, int device);
+extern "C" void llvm_omp_target_free_host(void* ptr, int device);
 
 #include <algorithm>
 #include <cmath>
@@ -448,7 +448,7 @@ int main(int argc, char** argv) {
     omp_target_free(dpart, dev);
     omp_target_free(team_sum, dev);
     omp_target_free(done, dev);
-    omp_target_free(hpart, dev);
+    llvm_omp_target_free_host(hpart, dev);
     if (giomp) ompx_finalize();
     MPI_Finalize();
     return bad;
