@@ -12,7 +12,8 @@
 ;
 ; FIND-DAG: [gicc-after] __omp_offloading_{{.*}}fenced{{.*}}: a put stays after the kernel: code between the launch and the put may synchronize or write the source: ompx_barrier
 ; FIND-DAG: [gicc-after] __omp_offloading_{{.*}}step{{.*}}: 2 put(s) after the launch can go from the kernel
-; JSON: "sites":[{"kernel":"__omp_offloading_{{[^"]*}}step{{[^"]*}}","src_args":[[[ARG:[0-9]+]],[[ARG]]]}]
+; FIND-DAG: [gicc-after] __omp_offloading_{{.*}}gated{{.*}}: 1 put(s) after the launch can go from the kernel
+; JSON: "sites":[{"kernel":"__omp_offloading_{{[^"]*}}step{{[^"]*}}","src_args":[[[ARG:[0-9]+]],[[ARG]]]},{"kernel":"__omp_offloading_{{[^"]*}}gated{{[^"]*}}","src_args":[{{[0-9]+}}]}]
 ;
 ; BRACKET-LABEL: define {{.*}}@_Z4step
 ; BRACKET: call void @ompx__after_post(i64 [[H:-?[0-9]+]], i32 0, i32 {{[0-9]+}}, i32 {{%.*}}, i32 [[L:%[0-9]+]], ptr {{%[^,]+}}, ptr {{%[^,]+}}, i64 {{%[^,]+}}, i64
@@ -25,6 +26,14 @@
 ; BRACKET-NOT: ompx__after_post
 ; BRACKET: call void @ompx_barrier()
 ; BRACKET: call void @ompx_put_host(
+; The gated region's put is posted before the launch; the run on the host
+; posts nothing, and the done after both makes the put from the host.
+; BRACKET-LABEL: define {{.*}}@_Z5gated
+; BRACKET: call void @ompx__after_post(i64 [[G:-?[0-9]+]], i32 0,
+; BRACKET: call i32 @__tgt_target_kernel(
+; BRACKET: call void (ptr, i32, ptr, ...) @__kmpc_fork_teams(
+; BRACKET: call void @ompx__after_done(i64 [[G]], i32 0,
+; BRACKET-NOT: call void @ompx_put_host(
 ;
 ; // Puts after a kernel launch (GICCAfterPut.h).
 ; #include "gicc/omp.h"
@@ -60,6 +69,19 @@
 ;     ompx_barrier();
 ;     ompx_put(peer, v, v, n * sizeof(float));
 ; }
+;
+; // A region that may run on the host (an if clause), over int loop
+; // variables: the launch no longer dominates the put, yet every path to it
+; // runs the region first; the inner index is lb + digit narrowed to int with
+; // no flags. The last row's interior can go from the kernel.
+; void gated(float* v, int x_min, int x_max, int y_min, int y_max, int peer, bool on) {
+;     const size_t sx = x_max + 4;
+;     #pragma omp target teams distribute parallel for collapse(2) is_device_ptr(v) if(target: on)
+;     for (int j = y_min + 1; j < y_max + 2; ++j)
+;         for (int i = x_min + 1; i < x_max + 2; ++i)
+;             v[i + j * sx] = wave(3.f, i + j);
+;     if (peer >= 0) ompx_put(peer, v + (y_max + 1) * sx + 2, v + (y_max + 1) * sx + 2, x_max * sizeof(float));
+; }
 
 source_filename = "Inputs/after.cpp"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
@@ -84,17 +106,22 @@ target triple = "x86_64-unknown-linux-gnu"
 @.__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29.region_id = weak constant i8 0
 @.offload_sizes.1 = private unnamed_addr constant [2 x i64] [i64 8, i64 8]
 @.offload_maptypes.2 = private unnamed_addr constant [2 x i64] [i64 288, i64 288]
+@.__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42.region_id = weak constant i8 0
+@.offload_sizes.3 = private unnamed_addr constant [6 x i64] [i64 4, i64 4, i64 4, i64 4, i64 8, i64 8]
+@.offload_maptypes.4 = private unnamed_addr constant [6 x i64] [i64 800, i64 800, i64 800, i64 800, i64 288, i64 800]
 @.offloading.entry_name = internal unnamed_addr constant [11 x i8] c"ompx__nodb\00"
 @.offloading.entry.ompx__nodb = weak local_unnamed_addr constant %struct.__tgt_offload_entry { ptr @ompx__nodb, ptr @.offloading.entry_name, i64 288, i32 0, i32 0 }, section "omp_offloading_entries", align 1
-@.offloading.entry_name.3 = internal unnamed_addr constant [54 x i8] c"__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16\00"
-@.offloading.entry.__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { ptr @.__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16.region_id, ptr @.offloading.entry_name.3, i64 0, i32 0, i32 0 }, section "omp_offloading_entries", align 1
-@.offloading.entry_name.4 = internal unnamed_addr constant [53 x i8] c"__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29\00"
-@.offloading.entry.__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { ptr @.__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29.region_id, ptr @.offloading.entry_name.4, i64 0, i32 0, i32 0 }, section "omp_offloading_entries", align 1
+@.offloading.entry_name.5 = internal unnamed_addr constant [54 x i8] c"__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16\00"
+@.offloading.entry.__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { ptr @.__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16.region_id, ptr @.offloading.entry_name.5, i64 0, i32 0, i32 0 }, section "omp_offloading_entries", align 1
+@.offloading.entry_name.6 = internal unnamed_addr constant [53 x i8] c"__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29\00"
+@.offloading.entry.__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { ptr @.__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29.region_id, ptr @.offloading.entry_name.6, i64 0, i32 0, i32 0 }, section "omp_offloading_entries", align 1
+@.offloading.entry_name.7 = internal unnamed_addr constant [56 x i8] c"__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42\00"
+@.offloading.entry.__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { ptr @.__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42.region_id, ptr @.offloading.entry_name.7, i64 0, i32 0, i32 0 }, section "omp_offloading_entries", align 1
 @llvm.compiler.used = appending global [10 x ptr] [ptr @_ZL15ompx__box_countPjiPvPKvmi, ptr @ompx__after_put, ptr @ompx__block_put, ptr @ompx__block_put_one, ptr @ompx__box_due, ptr @ompx__box_hull, ptr @ompx__box_peer, ptr @ompx__box_plan, ptr @ompx__box_residual, ptr @ompx__peer_addr], section "llvm.metadata"
 
 ; Function Attrs: mustprogress uwtable
 define weak dso_local void @ompx_pipelined_put(i32 noundef %0, ptr noundef %1, ptr noundef %2, i64 noundef %3) local_unnamed_addr #0 {
-  %5 = load ptr, ptr @stderr, align 8, !tbaa !9
+  %5 = load ptr, ptr @stderr, align 8, !tbaa !10
   %6 = tail call i64 @fwrite(ptr nonnull @.str, i64 91, i64 1, ptr %5) #13
   tail call void @abort() #14
   unreachable
@@ -125,20 +152,20 @@ define internal void @ompx__box_residual(ptr nocapture readnone %0, ptr nocaptur
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(argmem: write) uwtable
 define internal noalias noundef ptr @ompx__box_peer(i32 %0, ptr nocapture readnone %1, ptr nocapture readnone %2, i64 %3, i32 %4, i32 %5, ptr nocapture noundef writeonly %6) #4 {
-  store i32 0, ptr %6, align 4, !tbaa !13
+  store i32 0, ptr %6, align 4, !tbaa !14
   ret ptr null
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(argmem: write) uwtable
 define internal void @ompx__box_hull(ptr nocapture readnone %0, i64 %1, ptr nocapture readnone %2, i32 %3, ptr nocapture readnone %4, ptr nocapture readnone %5, i64 %6, ptr nocapture noundef writeonly %7, ptr nocapture noundef writeonly %8) #4 {
-  store i64 0, ptr %7, align 8, !tbaa !15
-  store i64 -1, ptr %8, align 8, !tbaa !15
+  store i64 0, ptr %7, align 8, !tbaa !16
+  store i64 -1, ptr %8, align 8, !tbaa !16
   ret void
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(argmem: write) uwtable
 define internal void @ompx__box_plan(i32 %0, ptr nocapture readnone %1, ptr nocapture readnone %2, ptr nocapture readnone %3, i64 %4, i64 %5, i64 %6, ptr nocapture noundef writeonly %7, ptr nocapture readnone %8) #4 {
-  store i64 0, ptr %7, align 8, !tbaa !15
+  store i64 0, ptr %7, align 8, !tbaa !16
   ret void
 }
 
@@ -160,10 +187,10 @@ declare void @llvm.lifetime.end.p0(i64 immarg, ptr nocapture) #5
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(argmem: write) uwtable
 define internal void @ompx__after_put(i64 %0, i32 %1, i32 %2, ptr nocapture noundef writeonly %3, ptr nocapture noundef writeonly %4, ptr nocapture noundef writeonly %5, ptr nocapture noundef writeonly %6) #4 {
-  store i32 -1, ptr %3, align 4, !tbaa !13
-  store ptr null, ptr %4, align 8, !tbaa !9
-  store i64 0, ptr %5, align 8, !tbaa !15
-  store i64 0, ptr %6, align 8, !tbaa !15
+  store i32 -1, ptr %3, align 4, !tbaa !14
+  store ptr null, ptr %4, align 8, !tbaa !10
+  store i64 0, ptr %5, align 8, !tbaa !16
+  store i64 0, ptr %6, align 8, !tbaa !16
   ret void
 }
 
@@ -254,19 +281,19 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16.omp_
   %15 = mul nuw nsw i64 %3, %2
   %16 = add nsw i64 %15, -1
   call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %7) #8
-  store i64 0, ptr %7, align 8, !tbaa !15
+  store i64 0, ptr %7, align 8, !tbaa !16
   call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %8) #8
-  store i64 %16, ptr %8, align 8, !tbaa !15
+  store i64 %16, ptr %8, align 8, !tbaa !16
   call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %9) #8
-  store i64 1, ptr %9, align 8, !tbaa !15
+  store i64 1, ptr %9, align 8, !tbaa !16
   call void @llvm.lifetime.start.p0(i64 4, ptr nonnull %10) #8
-  store i32 0, ptr %10, align 4, !tbaa !13
-  %17 = load i32, ptr %0, align 4, !tbaa !13
+  store i32 0, ptr %10, align 4, !tbaa !14
+  %17 = load i32, ptr %0, align 4, !tbaa !14
   call void @__kmpc_for_static_init_8(ptr nonnull @1, i32 %17, i32 92, ptr nonnull %10, ptr nonnull %7, ptr nonnull %8, ptr nonnull %9, i64 1, i64 1)
   %18 = load i64, ptr %8, align 8
   %19 = call i64 @llvm.smin.i64(i64 %18, i64 %16)
-  store i64 %19, ptr %8, align 8, !tbaa !15
-  %20 = load i64, ptr %7, align 8, !tbaa !15
+  store i64 %19, ptr %8, align 8, !tbaa !16
+  %20 = load i64, ptr %7, align 8, !tbaa !16
   %21 = icmp sgt i64 %20, %19
   br i1 %21, label %32, label %22
 
@@ -279,7 +306,7 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16.omp_
   %26 = phi i64 [ %20, %22 ], [ %29, %24 ]
   %27 = load i64, ptr %7, align 8
   call void (ptr, i32, ptr, ...) @__kmpc_fork_call(ptr nonnull @3, i32 6, ptr nonnull @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16.omp_outlined.omp_outlined, i64 %27, i64 %25, i64 %2, i64 %3, ptr %4, i64 %23)
-  %28 = load i64, ptr %9, align 8, !tbaa !15
+  %28 = load i64, ptr %9, align 8, !tbaa !16
   %29 = add nsw i64 %28, %26
   %30 = load i64, ptr %8, align 8
   %31 = icmp sgt i64 %29, %30
@@ -318,18 +345,18 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16.omp_
   %20 = add nsw i64 %19, -1
   call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %9) #8
   call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %10) #8
-  store i64 %2, ptr %9, align 8, !tbaa !15
-  store i64 %3, ptr %10, align 8, !tbaa !15
+  store i64 %2, ptr %9, align 8, !tbaa !16
+  store i64 %3, ptr %10, align 8, !tbaa !16
   call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %11) #8
-  store i64 1, ptr %11, align 8, !tbaa !15
+  store i64 1, ptr %11, align 8, !tbaa !16
   call void @llvm.lifetime.start.p0(i64 4, ptr nonnull %12) #8
-  store i32 0, ptr %12, align 4, !tbaa !13
-  %21 = load i32, ptr %0, align 4, !tbaa !13
+  store i32 0, ptr %12, align 4, !tbaa !14
+  %21 = load i32, ptr %0, align 4, !tbaa !14
   call void @__kmpc_for_static_init_8(ptr nonnull @2, i32 %21, i32 34, ptr nonnull %12, ptr nonnull %9, ptr nonnull %10, ptr nonnull %11, i64 1, i64 1)
   %22 = load i64, ptr %10, align 8
   %23 = call i64 @llvm.smin.i64(i64 %22, i64 %20)
-  store i64 %23, ptr %10, align 8, !tbaa !15
-  %24 = load i64, ptr %9, align 8, !tbaa !15
+  store i64 %23, ptr %10, align 8, !tbaa !16
+  %24 = load i64, ptr %9, align 8, !tbaa !16
   %25 = icmp sgt i64 %24, %23
   br i1 %25, label %61, label %26
 
@@ -347,7 +374,7 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16.omp_
   %35 = sitofp i64 %34 to float
   %36 = fmul float %14, %35
   %37 = getelementptr inbounds float, ptr %6, i64 %24
-  store float %36, ptr %37, align 4, !tbaa !17
+  store float %36, ptr %37, align 4, !tbaa !18
   %38 = add i64 %24, 1
   br label %39
 
@@ -365,7 +392,7 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16.omp_
   %48 = sitofp i64 %47 to float
   %49 = fmul float %14, %48
   %50 = getelementptr inbounds float, ptr %6, i64 %43
-  store float %49, ptr %50, align 4, !tbaa !17
+  store float %49, ptr %50, align 4, !tbaa !18
   %51 = add i64 %43, 1
   %52 = sdiv i64 %51, %5
   %53 = mul i64 %52, %5
@@ -374,7 +401,7 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16.omp_
   %56 = sitofp i64 %55 to float
   %57 = fmul float %14, %56
   %58 = getelementptr inbounds float, ptr %6, i64 %51
-  store float %57, ptr %58, align 4, !tbaa !17
+  store float %57, ptr %58, align 4, !tbaa !18
   %59 = add i64 %43, 2
   %60 = icmp eq i64 %51, %23
   br i1 %60, label %61, label %42
@@ -397,10 +424,10 @@ declare dso_local i32 @__gxx_personality_v0(...)
 declare void @__kmpc_for_static_fini(ptr, i32) local_unnamed_addr #8
 
 ; Function Attrs: nounwind
-declare !callback !19 void @__kmpc_fork_call(ptr, i32, ptr, ...) local_unnamed_addr #8
+declare !callback !20 void @__kmpc_fork_call(ptr, i32, ptr, ...) local_unnamed_addr #8
 
 ; Function Attrs: nounwind
-declare !callback !19 void @__kmpc_fork_teams(ptr, i32, ptr, ...) local_unnamed_addr #8
+declare !callback !20 void @__kmpc_fork_teams(ptr, i32, ptr, ...) local_unnamed_addr #8
 
 ; Function Attrs: nounwind
 declare i32 @__tgt_target_kernel(ptr, i64, i32, i32, ptr, ptr) local_unnamed_addr #8
@@ -462,19 +489,19 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29.omp_o
 10:                                               ; preds = %4
   %11 = add nsw i64 %2, -1
   call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %5) #8
-  store i64 0, ptr %5, align 8, !tbaa !15
+  store i64 0, ptr %5, align 8, !tbaa !16
   call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %6) #8
-  store i64 %11, ptr %6, align 8, !tbaa !15
+  store i64 %11, ptr %6, align 8, !tbaa !16
   call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %7) #8
-  store i64 1, ptr %7, align 8, !tbaa !15
+  store i64 1, ptr %7, align 8, !tbaa !16
   call void @llvm.lifetime.start.p0(i64 4, ptr nonnull %8) #8
-  store i32 0, ptr %8, align 4, !tbaa !13
-  %12 = load i32, ptr %0, align 4, !tbaa !13
+  store i32 0, ptr %8, align 4, !tbaa !14
+  %12 = load i32, ptr %0, align 4, !tbaa !14
   call void @__kmpc_for_static_init_8(ptr nonnull @1, i32 %12, i32 92, ptr nonnull %8, ptr nonnull %5, ptr nonnull %6, ptr nonnull %7, i64 1, i64 1)
   %13 = load i64, ptr %6, align 8
   %14 = call i64 @llvm.smin.i64(i64 %13, i64 %11)
-  store i64 %14, ptr %6, align 8, !tbaa !15
-  %15 = load i64, ptr %5, align 8, !tbaa !15
+  store i64 %14, ptr %6, align 8, !tbaa !16
+  %15 = load i64, ptr %5, align 8, !tbaa !16
   %16 = icmp sgt i64 %15, %14
   br i1 %16, label %25, label %17
 
@@ -483,7 +510,7 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29.omp_o
   %19 = phi i64 [ %22, %17 ], [ %15, %10 ]
   %20 = load i64, ptr %5, align 8
   call void (ptr, i32, ptr, ...) @__kmpc_fork_call(ptr nonnull @3, i32 4, ptr nonnull @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29.omp_outlined.omp_outlined, i64 %20, i64 %18, i64 %2, ptr %3)
-  %21 = load i64, ptr %7, align 8, !tbaa !15
+  %21 = load i64, ptr %7, align 8, !tbaa !16
   %22 = add nsw i64 %21, %19
   %23 = load i64, ptr %6, align 8
   %24 = icmp sgt i64 %22, %23
@@ -514,18 +541,18 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29.omp_o
   %13 = add nsw i64 %4, -1
   call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %7) #8
   call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %8) #8
-  store i64 %2, ptr %7, align 8, !tbaa !15
-  store i64 %3, ptr %8, align 8, !tbaa !15
+  store i64 %2, ptr %7, align 8, !tbaa !16
+  store i64 %3, ptr %8, align 8, !tbaa !16
   call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %9) #8
-  store i64 1, ptr %9, align 8, !tbaa !15
+  store i64 1, ptr %9, align 8, !tbaa !16
   call void @llvm.lifetime.start.p0(i64 4, ptr nonnull %10) #8
-  store i32 0, ptr %10, align 4, !tbaa !13
-  %14 = load i32, ptr %0, align 4, !tbaa !13
+  store i32 0, ptr %10, align 4, !tbaa !14
+  %14 = load i32, ptr %0, align 4, !tbaa !14
   call void @__kmpc_for_static_init_8(ptr nonnull @2, i32 %14, i32 34, ptr nonnull %10, ptr nonnull %7, ptr nonnull %8, ptr nonnull %9, i64 1, i64 1)
   %15 = load i64, ptr %8, align 8
   %16 = call i64 @llvm.smin.i64(i64 %15, i64 %13)
-  store i64 %16, ptr %8, align 8, !tbaa !15
-  %17 = load i64, ptr %7, align 8, !tbaa !15
+  store i64 %16, ptr %8, align 8, !tbaa !16
+  %17 = load i64, ptr %7, align 8, !tbaa !16
   %18 = icmp sgt i64 %17, %16
   br i1 %18, label %51, label %19
 
@@ -543,7 +570,7 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29.omp_o
 26:                                               ; preds = %23
   %27 = sitofp i64 %17 to float
   %28 = getelementptr inbounds float, ptr %5, i64 %17
-  store float %27, ptr %28, align 4, !tbaa !17
+  store float %27, ptr %28, align 4, !tbaa !18
   br label %29
 
 29:                                               ; preds = %26, %23
@@ -564,7 +591,7 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29.omp_o
 38:                                               ; preds = %34
   %39 = sitofp i64 %35 to float
   %40 = getelementptr inbounds float, ptr %5, i64 %35
-  store float %39, ptr %40, align 4, !tbaa !17
+  store float %39, ptr %40, align 4, !tbaa !18
   br label %41
 
 41:                                               ; preds = %38, %34
@@ -576,7 +603,7 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29.omp_o
 45:                                               ; preds = %41
   %46 = sitofp i64 %42 to float
   %47 = getelementptr inbounds float, ptr %5, i64 %42
-  store float %46, ptr %47, align 4, !tbaa !17
+  store float %46, ptr %47, align 4, !tbaa !18
   br label %48
 
 48:                                               ; preds = %45, %41
@@ -597,6 +624,247 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29.omp_o
 }
 
 declare dso_local void @ompx_barrier() local_unnamed_addr #9
+
+; Function Attrs: uwtable
+define dso_local void @_Z5gatedPfiiiiib(ptr noundef %0, i32 noundef %1, i32 noundef %2, i32 noundef %3, i32 noundef %4, i32 noundef %5, i1 noundef zeroext %6) local_unnamed_addr #6 {
+  %8 = alloca [6 x ptr], align 8
+  %9 = alloca [6 x ptr], align 8
+  %10 = alloca %struct.__tgt_kernel_arguments, align 8
+  %11 = add nsw i32 %2, 4
+  %12 = sext i32 %11 to i64
+  %13 = zext i32 %4 to i64
+  %14 = zext i32 %3 to i64
+  %15 = zext i32 %2 to i64
+  %16 = zext i32 %1 to i64
+  br i1 %6, label %17, label %46
+
+17:                                               ; preds = %7
+  store i64 %13, ptr %8, align 8
+  store i64 %13, ptr %9, align 8
+  %18 = getelementptr inbounds i8, ptr %8, i64 8
+  store i64 %14, ptr %18, align 8
+  %19 = getelementptr inbounds i8, ptr %9, i64 8
+  store i64 %14, ptr %19, align 8
+  %20 = getelementptr inbounds i8, ptr %8, i64 16
+  store i64 %15, ptr %20, align 8
+  %21 = getelementptr inbounds i8, ptr %9, i64 16
+  store i64 %15, ptr %21, align 8
+  %22 = getelementptr inbounds i8, ptr %8, i64 24
+  store i64 %16, ptr %22, align 8
+  %23 = getelementptr inbounds i8, ptr %9, i64 24
+  store i64 %16, ptr %23, align 8
+  %24 = getelementptr inbounds i8, ptr %8, i64 32
+  store ptr %0, ptr %24, align 8
+  %25 = getelementptr inbounds i8, ptr %9, i64 32
+  store ptr %0, ptr %25, align 8
+  %26 = getelementptr inbounds i8, ptr %8, i64 40
+  store i64 %12, ptr %26, align 8
+  %27 = getelementptr inbounds i8, ptr %9, i64 40
+  store i64 %12, ptr %27, align 8
+  %28 = sub i32 %4, %3
+  %29 = add i32 %28, 1
+  %30 = zext i32 %29 to i64
+  %31 = sub i32 %2, %1
+  %32 = add i32 %31, 1
+  %33 = zext i32 %32 to i64
+  %34 = mul nuw nsw i64 %30, %33
+  store i32 3, ptr %10, align 8
+  %35 = getelementptr inbounds i8, ptr %10, i64 4
+  store i32 6, ptr %35, align 4
+  %36 = getelementptr inbounds i8, ptr %10, i64 8
+  store ptr %8, ptr %36, align 8
+  %37 = getelementptr inbounds i8, ptr %10, i64 16
+  store ptr %9, ptr %37, align 8
+  %38 = getelementptr inbounds i8, ptr %10, i64 24
+  store ptr @.offload_sizes.3, ptr %38, align 8
+  %39 = getelementptr inbounds i8, ptr %10, i64 32
+  store ptr @.offload_maptypes.4, ptr %39, align 8
+  %40 = getelementptr inbounds i8, ptr %10, i64 40
+  %41 = getelementptr inbounds i8, ptr %10, i64 56
+  call void @llvm.memset.p0.i64(ptr noundef nonnull align 8 dereferenceable(16) %40, i8 0, i64 16, i1 false)
+  store i64 %34, ptr %41, align 8
+  %42 = getelementptr inbounds i8, ptr %10, i64 64
+  call void @llvm.memset.p0.i64(ptr noundef nonnull align 8 dereferenceable(36) %42, i8 0, i64 36, i1 false)
+  %43 = call i32 @__tgt_target_kernel(ptr nonnull @3, i64 -1, i32 0, i32 0, ptr nonnull @.__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42.region_id, ptr nonnull %10)
+  %44 = icmp eq i32 %43, 0
+  br i1 %44, label %47, label %45
+
+45:                                               ; preds = %17
+  call void (ptr, i32, ptr, ...) @__kmpc_fork_teams(ptr nonnull @3, i32 6, ptr nonnull @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42.omp_outlined, i64 %13, i64 %14, i64 %15, i64 %16, ptr %0, i64 %12)
+  br label %47
+
+46:                                               ; preds = %7
+  tail call void (ptr, i32, ptr, ...) @__kmpc_fork_teams(ptr nonnull @3, i32 6, ptr nonnull @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42.omp_outlined, i64 %13, i64 %14, i64 %15, i64 %16, ptr %0, i64 %12)
+  br label %47
+
+47:                                               ; preds = %17, %45, %46
+  %48 = icmp sgt i32 %5, -1
+  br i1 %48, label %49, label %57
+
+49:                                               ; preds = %47
+  %50 = add nsw i32 %4, 1
+  %51 = sext i32 %50 to i64
+  %52 = mul nsw i64 %51, %12
+  %53 = getelementptr inbounds float, ptr %0, i64 %52
+  %54 = getelementptr inbounds i8, ptr %53, i64 8
+  %55 = sext i32 %2 to i64
+  %56 = shl nsw i64 %55, 2
+  call void @ompx_put_host(i32 noundef %5, ptr noundef nonnull %54, ptr noundef nonnull %54, i64 noundef %56)
+  br label %57
+
+57:                                               ; preds = %49, %47
+  ret void
+}
+
+; Function Attrs: alwaysinline norecurse nounwind uwtable
+define internal void @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42.omp_outlined(ptr noalias nocapture noundef readonly %0, ptr noalias nocapture readnone %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, i64 noundef %5, ptr noundef %6, i64 noundef %7) #7 {
+  %9 = alloca i64, align 8
+  %10 = alloca i64, align 8
+  %11 = alloca i64, align 8
+  %12 = alloca i32, align 4
+  %13 = trunc i64 %2 to i32
+  %14 = trunc i64 %3 to i32
+  %15 = trunc i64 %4 to i32
+  %16 = trunc i64 %5 to i32
+  %17 = add nsw i32 %14, 1
+  %18 = add nsw i32 %13, 2
+  %19 = add nsw i32 %16, 1
+  %20 = add nsw i32 %15, 2
+  %21 = icmp slt i32 %17, %18
+  %22 = icmp slt i32 %19, %20
+  %23 = select i1 %21, i1 %22, i1 false
+  br i1 %23, label %24, label %50
+
+24:                                               ; preds = %8
+  %25 = sub i32 %18, %17
+  %26 = zext i32 %25 to i64
+  %27 = sub i32 %20, %19
+  %28 = zext i32 %27 to i64
+  %29 = mul nuw nsw i64 %28, %26
+  %30 = add nsw i64 %29, -1
+  call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %9) #8
+  store i64 0, ptr %9, align 8, !tbaa !16
+  call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %10) #8
+  store i64 %30, ptr %10, align 8, !tbaa !16
+  call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %11) #8
+  store i64 1, ptr %11, align 8, !tbaa !16
+  call void @llvm.lifetime.start.p0(i64 4, ptr nonnull %12) #8
+  store i32 0, ptr %12, align 4, !tbaa !14
+  %31 = load i32, ptr %0, align 4, !tbaa !14
+  call void @__kmpc_for_static_init_8(ptr nonnull @1, i32 %31, i32 92, ptr nonnull %12, ptr nonnull %9, ptr nonnull %10, ptr nonnull %11, i64 1, i64 1)
+  %32 = load i64, ptr %10, align 8
+  %33 = call i64 @llvm.smin.i64(i64 %32, i64 %30)
+  store i64 %33, ptr %10, align 8, !tbaa !16
+  %34 = load i64, ptr %9, align 8, !tbaa !16
+  %35 = icmp sgt i64 %34, %33
+  br i1 %35, label %49, label %36
+
+36:                                               ; preds = %24
+  %37 = and i64 %2, 4294967295
+  %38 = and i64 %3, 4294967295
+  %39 = and i64 %4, 4294967295
+  %40 = and i64 %5, 4294967295
+  br label %41
+
+41:                                               ; preds = %36, %41
+  %42 = phi i64 [ %33, %36 ], [ %47, %41 ]
+  %43 = phi i64 [ %34, %36 ], [ %46, %41 ]
+  %44 = load i64, ptr %9, align 8
+  call void (ptr, i32, ptr, ...) @__kmpc_fork_call(ptr nonnull @3, i32 8, ptr nonnull @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42.omp_outlined.omp_outlined, i64 %44, i64 %42, i64 %37, i64 %38, i64 %39, i64 %40, ptr %6, i64 %7)
+  %45 = load i64, ptr %11, align 8, !tbaa !16
+  %46 = add nsw i64 %45, %43
+  %47 = load i64, ptr %10, align 8
+  %48 = icmp sgt i64 %46, %47
+  br i1 %48, label %49, label %41
+
+49:                                               ; preds = %41, %24
+  call void @__kmpc_for_static_fini(ptr nonnull @1, i32 %31)
+  br label %50
+
+50:                                               ; preds = %49, %8
+  call void @llvm.lifetime.end.p0(i64 4, ptr nonnull %12) #8
+  call void @llvm.lifetime.end.p0(i64 8, ptr nonnull %11) #8
+  call void @llvm.lifetime.end.p0(i64 8, ptr nonnull %10) #8
+  call void @llvm.lifetime.end.p0(i64 8, ptr nonnull %9) #8
+  ret void
+}
+
+; Function Attrs: alwaysinline norecurse nounwind uwtable
+define internal void @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42.omp_outlined.omp_outlined(ptr noalias nocapture noundef readonly %0, ptr noalias nocapture readnone %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, i64 noundef %5, i64 noundef %6, i64 noundef %7, ptr nocapture noundef writeonly %8, i64 noundef %9) #7 {
+  %11 = alloca i64, align 8
+  %12 = alloca i64, align 8
+  %13 = alloca i64, align 8
+  %14 = alloca i32, align 4
+  %15 = trunc i64 %4 to i32
+  %16 = trunc i64 %5 to i32
+  %17 = trunc i64 %6 to i32
+  %18 = trunc i64 %7 to i32
+  %19 = add nsw i32 %16, 1
+  %20 = add nsw i32 %15, 2
+  %21 = add nsw i32 %18, 1
+  %22 = add nsw i32 %17, 2
+  %23 = sub i32 %22, %21
+  %24 = zext i32 %23 to i64
+  %25 = icmp slt i32 %19, %20
+  %26 = icmp slt i32 %21, %22
+  %27 = select i1 %25, i1 %26, i1 false
+  br i1 %27, label %28, label %58
+
+28:                                               ; preds = %10
+  %29 = sub i32 %20, %19
+  %30 = zext i32 %29 to i64
+  %31 = mul nuw nsw i64 %24, %30
+  %32 = add nsw i64 %31, -1
+  call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %11) #8
+  call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %12) #8
+  store i64 %2, ptr %11, align 8, !tbaa !16
+  store i64 %3, ptr %12, align 8, !tbaa !16
+  call void @llvm.lifetime.start.p0(i64 8, ptr nonnull %13) #8
+  store i64 1, ptr %13, align 8, !tbaa !16
+  call void @llvm.lifetime.start.p0(i64 4, ptr nonnull %14) #8
+  store i32 0, ptr %14, align 4, !tbaa !14
+  %33 = load i32, ptr %0, align 4, !tbaa !14
+  call void @__kmpc_for_static_init_8(ptr nonnull @2, i32 %33, i32 34, ptr nonnull %14, ptr nonnull %11, ptr nonnull %12, ptr nonnull %13, i64 1, i64 1)
+  %34 = load i64, ptr %12, align 8
+  %35 = call i64 @llvm.smin.i64(i64 %34, i64 %32)
+  store i64 %35, ptr %12, align 8, !tbaa !16
+  %36 = load i64, ptr %11, align 8, !tbaa !16
+  %37 = icmp sgt i64 %36, %35
+  br i1 %37, label %57, label %38
+
+38:                                               ; preds = %28, %38
+  %39 = phi i64 [ %55, %38 ], [ %36, %28 ]
+  %40 = sdiv i64 %39, %24
+  %41 = trunc i64 %40 to i32
+  %42 = add i32 %19, %41
+  %43 = mul nsw i64 %40, %24
+  %44 = srem i64 %39, %24
+  %45 = trunc i64 %44 to i32
+  %46 = add i32 %21, %45
+  %47 = add nsw i32 %46, %42
+  %48 = sitofp i32 %47 to float
+  %49 = fmul float %48, 3.000000e+00
+  %50 = sext i32 %46 to i64
+  %51 = sext i32 %42 to i64
+  %52 = mul i64 %51, %9
+  %53 = getelementptr float, ptr %8, i64 %52
+  %54 = getelementptr float, ptr %53, i64 %50
+  store float %49, ptr %54, align 4, !tbaa !18
+  %55 = add i64 %39, 1
+  %56 = icmp eq i64 %39, %35
+  br i1 %56, label %57, label %38
+
+57:                                               ; preds = %38, %28
+  call void @__kmpc_for_static_fini(ptr nonnull @2, i32 %33)
+  call void @llvm.lifetime.end.p0(i64 4, ptr nonnull %14) #8
+  call void @llvm.lifetime.end.p0(i64 8, ptr nonnull %13) #8
+  call void @llvm.lifetime.end.p0(i64 8, ptr nonnull %12) #8
+  call void @llvm.lifetime.end.p0(i64 8, ptr nonnull %11) #8
+  br label %58
+
+58:                                               ; preds = %57, %10
+  ret void
+}
 
 ; Function Attrs: nofree nounwind
 declare noundef i64 @fwrite(ptr nocapture noundef, i64 noundef, i64 noundef, ptr nocapture noundef) local_unnamed_addr #10
@@ -623,28 +891,29 @@ attributes #12 = { nocallback nofree nounwind willreturn memory(argmem: write) }
 attributes #13 = { cold }
 attributes #14 = { noreturn nounwind }
 
-!omp_offload.info = !{!0, !1, !2, !3, !4}
-!llvm.module.flags = !{!5, !6, !7}
-!llvm.ident = !{!8}
+!omp_offload.info = !{!0, !1, !2, !3, !4, !5}
+!llvm.module.flags = !{!6, !7, !8}
+!llvm.ident = !{!9}
 
 !0 = !{i32 0, i32 1549388176, i32 -1962934268, !"_Z4stepPflliif", i32 16, i32 0, i32 3}
-!1 = !{i32 0, i32 1549388176, i32 -1962934268, !"_Z6fencedPfli", i32 29, i32 0, i32 4}
-!2 = !{i32 1, !"_ZL19ompx__pipe_deferred", i32 0, i32 1}
-!3 = !{i32 1, !"_ZL9ompx__ctx", i32 0, i32 0}
-!4 = !{i32 1, !"ompx__nodb", i32 0, i32 2}
-!5 = !{i32 1, !"wchar_size", i32 4}
-!6 = !{i32 7, !"openmp", i32 51}
-!7 = !{i32 7, !"uwtable", i32 2}
-!8 = !{!"AMD clang version 19.0.0git (https://github.com/RadeonOpenCompute/llvm-project roc-6.4.0 25133 c7fe45cf4b819c5991fe208aaa96edf142730f1d)"}
-!9 = !{!10, !10, i64 0}
-!10 = !{!"any pointer", !11, i64 0}
-!11 = !{!"omnipotent char", !12, i64 0}
-!12 = !{!"Simple C++ TBAA"}
-!13 = !{!14, !14, i64 0}
-!14 = !{!"int", !11, i64 0}
-!15 = !{!16, !16, i64 0}
-!16 = !{!"long", !11, i64 0}
-!17 = !{!18, !18, i64 0}
-!18 = !{!"float", !11, i64 0}
-!19 = !{!20}
-!20 = !{i64 2, i64 -1, i64 -1, i1 true}
+!1 = !{i32 0, i32 1549388176, i32 -1962934268, !"_Z5gatedPfiiiiib", i32 42, i32 0, i32 5}
+!2 = !{i32 0, i32 1549388176, i32 -1962934268, !"_Z6fencedPfli", i32 29, i32 0, i32 4}
+!3 = !{i32 1, !"_ZL19ompx__pipe_deferred", i32 0, i32 1}
+!4 = !{i32 1, !"_ZL9ompx__ctx", i32 0, i32 0}
+!5 = !{i32 1, !"ompx__nodb", i32 0, i32 2}
+!6 = !{i32 1, !"wchar_size", i32 4}
+!7 = !{i32 7, !"openmp", i32 51}
+!8 = !{i32 7, !"uwtable", i32 2}
+!9 = !{!"AMD clang version 19.0.0git (https://github.com/RadeonOpenCompute/llvm-project roc-6.4.0 25133 c7fe45cf4b819c5991fe208aaa96edf142730f1d)"}
+!10 = !{!11, !11, i64 0}
+!11 = !{!"any pointer", !12, i64 0}
+!12 = !{!"omnipotent char", !13, i64 0}
+!13 = !{!"Simple C++ TBAA"}
+!14 = !{!15, !15, i64 0}
+!15 = !{!"int", !12, i64 0}
+!16 = !{!17, !17, i64 0}
+!17 = !{!"long", !12, i64 0}
+!18 = !{!19, !19, i64 0}
+!19 = !{!"float", !12, i64 0}
+!20 = !{!21}
+!21 = !{i64 2, i64 -1, i64 -1, i1 true}

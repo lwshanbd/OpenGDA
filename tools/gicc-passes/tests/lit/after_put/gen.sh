@@ -35,7 +35,8 @@ ir() {   # extra clang flags
 ;
 ; FIND-DAG: [gicc-after] __omp_offloading_{{.*}}fenced{{.*}}: a put stays after the kernel: code between the launch and the put may synchronize or write the source: ompx_barrier
 ; FIND-DAG: [gicc-after] __omp_offloading_{{.*}}step{{.*}}: 2 put(s) after the launch can go from the kernel
-; JSON: "sites":[{"kernel":"__omp_offloading_{{[^"]*}}step{{[^"]*}}","src_args":[[[ARG:[0-9]+]],[[ARG]]]}]
+; FIND-DAG: [gicc-after] __omp_offloading_{{.*}}gated{{.*}}: 1 put(s) after the launch can go from the kernel
+; JSON: "sites":[{"kernel":"__omp_offloading_{{[^"]*}}step{{[^"]*}}","src_args":[[[ARG:[0-9]+]],[[ARG]]]},{"kernel":"__omp_offloading_{{[^"]*}}gated{{[^"]*}}","src_args":[{{[0-9]+}}]}]
 ;
 ; BRACKET-LABEL: define {{.*}}@_Z4step
 ; BRACKET: call void @ompx__after_post(i64 [[H:-?[0-9]+]], i32 0, i32 {{[0-9]+}}, i32 {{%.*}}, i32 [[L:%[0-9]+]], ptr {{%[^,]+}}, ptr {{%[^,]+}}, i64 {{%[^,]+}}, i64
@@ -48,6 +49,14 @@ ir() {   # extra clang flags
 ; BRACKET-NOT: ompx__after_post
 ; BRACKET: call void @ompx_barrier()
 ; BRACKET: call void @ompx_put_host(
+; The gated region's put is posted before the launch; the run on the host
+; posts nothing, and the done after both makes the put from the host.
+; BRACKET-LABEL: define {{.*}}@_Z5gated
+; BRACKET: call void @ompx__after_post(i64 [[G:-?[0-9]+]], i32 0,
+; BRACKET: call i32 @__tgt_target_kernel(
+; BRACKET: call void (ptr, i32, ptr, ...) @__kmpc_fork_teams(
+; BRACKET: call void @ompx__after_done(i64 [[G]], i32 0,
+; BRACKET-NOT: call void @ompx_put_host(
 ;
 HEAD
     sed 's/^/; /; s/ *$//' Inputs/after.cpp
@@ -87,6 +96,9 @@ HEAD
 ; CHECK: lowered: element grain over the box
 ; CHECK: [gicc-chunk] kernel __omp_offloading_{{.*}}fenced
 ; CHECK: ompx_put after the kernel: ILLEGAL: no store to {{.*}} runs on every iteration
+; CHECK: [gicc-chunk] kernel __omp_offloading_{{.*}}gated
+; CHECK: ompx_put after the kernel: LEGAL
+; CHECK: lowered: element grain over the box
 ; CHECK-NOT: error
 ; The step kernel reads both posts before its loop and sends them itself,
 ; each by its index among the posts (the doorbell of one the host queued).
@@ -101,6 +113,9 @@ HEAD
 ; CHECK-NOT: ompx__after_put(
 ; CHECK-NOT: call void @ompx_pipelined_put
 ; CHECK: ret void
+; The gated kernel sends its put itself.
+; CHECK-LABEL: define {{.*}} @__omp_offloading_{{.*}}gated
+; CHECK: call void @ompx__after_put(i64 {{-?[0-9]+}}, i32 0,
 CHECKS
     echo
     sed 's/^/; /; s/ *$//' Inputs/after.cpp

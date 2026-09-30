@@ -19,6 +19,9 @@
 ; CHECK: lowered: element grain over the box
 ; CHECK: [gicc-chunk] kernel __omp_offloading_{{.*}}fenced
 ; CHECK: ompx_put after the kernel: ILLEGAL: no store to {{.*}} runs on every iteration
+; CHECK: [gicc-chunk] kernel __omp_offloading_{{.*}}gated
+; CHECK: ompx_put after the kernel: LEGAL
+; CHECK: lowered: element grain over the box
 ; CHECK-NOT: error
 ; The step kernel reads both posts before its loop and sends them itself,
 ; each by its index among the posts (the doorbell of one the host queued).
@@ -33,6 +36,9 @@
 ; CHECK-NOT: ompx__after_put(
 ; CHECK-NOT: call void @ompx_pipelined_put
 ; CHECK: ret void
+; The gated kernel sends its put itself.
+; CHECK-LABEL: define {{.*}} @__omp_offloading_{{.*}}gated
+; CHECK: call void @ompx__after_put(i64 {{-?[0-9]+}}, i32 0,
 
 ; // Puts after a kernel launch (GICCAfterPut.h).
 ; #include "gicc/omp.h"
@@ -68,6 +74,19 @@
 ;     ompx_barrier();
 ;     ompx_put(peer, v, v, n * sizeof(float));
 ; }
+;
+; // A region that may run on the host (an if clause), over int loop
+; // variables: the launch no longer dominates the put, yet every path to it
+; // runs the region first; the inner index is lb + digit narrowed to int with
+; // no flags. The last row's interior can go from the kernel.
+; void gated(float* v, int x_min, int x_max, int y_min, int y_max, int peer, bool on) {
+;     const size_t sx = x_max + 4;
+;     #pragma omp target teams distribute parallel for collapse(2) is_device_ptr(v) if(target: on)
+;     for (int j = y_min + 1; j < y_max + 2; ++j)
+;         for (int i = x_min + 1; i < x_max + 2; ++i)
+;             v[i + j * sx] = wave(3.f, i + j);
+;     if (peer >= 0) ompx_put(peer, v + (y_max + 1) * sx + 2, v + (y_max + 1) * sx + 2, x_max * sizeof(float));
+; }
 
 source_filename = "Inputs/after.cpp"
 target datalayout = "e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9"
@@ -81,18 +100,18 @@ target triple = "amdgcn-amd-amdhsa"
 %struct.ompx_nodb_entry = type { ptr, i64, ptr, ptr }
 %"struct.gicc::DeviceCtx" = type { ptr, i64, ptr, ptr, i32, ptr, i32, ptr, i32, ptr, i32, ptr }
 %varfn_args_store = type { i32, i32, i32, i32 }
-%varfn_args_store.1 = type { i32, i32, i32, i32, i32, i32 }
+%varfn_args_store.2 = type { i32, i32, i32, i32, i32, i32 }
 %"struct.gicc::proxy::TransferCmd" = type { i8, i8, i8, i8, i32, i64, i64 }
 %"struct.gicc::proxy::D2HRing" = type { i64, i64, [4096 x %"struct.gicc::proxy::TransferCmd"], [64 x i64], i64, [104 x i8] }
-%varfn_args_store.2 = type { i32, i32, i32, i32, i32, i32, i32, i32 }
-%varfn_args_store.3 = type { i32, i32, i32, i32, i32, i32, i64 }
-%varfn_args_store.4 = type { i32, i32, i32, i32 }
+%varfn_args_store.3 = type { i32, i32, i32, i32, i32, i32, i32, i32 }
+%varfn_args_store.4 = type { i32, i32, i32, i32, i32, i32, i64 }
 %varfn_args_store.5 = type { i32, i32, i32, i32 }
+%varfn_args_store.6 = type { i32, i32, i32, i32 }
 %struct.ompx_pipe_deferred = type { i32, i32, [64 x %struct.ompx_pipe_deferred_put], %struct.ompx_pipe_after }
 %struct.ompx_pipe_deferred_put = type { i32, i32, i64, i64, i64 }
 %struct.ompx_pipe_after = type { i64, [8 x %struct.ompx_pipe_after_put] }
 %struct.ompx_pipe_after_put = type { i32, i32, i32, i32, i64, i64, i64, ptr, i32, i32 }
-%varfn_args_store.6 = type { i32, i32, i32, i32, i32, i32 }
+%varfn_args_store.7 = type { i32, i32, i32, i32, i32, i32 }
 
 $_ZN4gicc3omp6detail12lane_to_ringEPNS_9DeviceCtxEi = comdat any
 
@@ -122,6 +141,10 @@ $_ZN4gicc3omp6detail12fence_systemEv = comdat any
 @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_kernel_environment = weak_odr protected addrspace(1) constant %struct.KernelEnvironmentTy { %struct.ConfigurationEnvironmentTy { i8 0, i8 1, i8 2, i32 1, i32 -1, i32 0, i32 0, i32 0, i32 0 }, ptr addrspacecast (ptr addrspace(1) @1 to ptr), ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_dynamic_environment to ptr) }
 @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_wg_size = weak addrspace(1) constant i16 256
 @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_exec_mode = weak addrspace(1) constant i8 2
+@__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42_dynamic_environment = weak_odr protected addrspace(1) global %struct.DynamicEnvironmentTy zeroinitializer
+@__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42_kernel_environment = weak_odr protected addrspace(1) constant %struct.KernelEnvironmentTy { %struct.ConfigurationEnvironmentTy { i8 0, i8 1, i8 2, i32 1, i32 -1, i32 0, i32 0, i32 0, i32 0 }, ptr addrspacecast (ptr addrspace(1) @1 to ptr), ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42_dynamic_environment to ptr) }
+@__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42_wg_size = weak addrspace(1) constant i16 256
+@__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42_exec_mode = weak addrspace(1) constant i8 2
 @_ZL9ompx__ctx = internal addrspace(1) global ptr null, align 8
 @"__ZL9ompx__ctx$ref" = internal constant ptr addrspace(1) @_ZL9ompx__ctx, align 8
 @_ZL19ompx__pipe_deferred = internal addrspace(1) global ptr null, align 8
@@ -135,7 +158,7 @@ $_ZN4gicc3omp6detail12fence_systemEv = comdat any
 @.str.6 = private unnamed_addr addrspace(4) constant [106 x i8] c"ompx_pipelined_put: no deferred-put list; call ompx_prepare() in this translation unit before the kernel\0A\00", align 1
 @.str.7 = private unnamed_addr addrspace(4) constant [58 x i8] c"ompx_pipelined_put: more than %d puts left for the quiet\0A\00", align 1
 @.str.8 = private unnamed_addr addrspace(4) constant [6 x i8] c"agent\00", align 1
-@llvm.compiler.used = appending addrspace(1) global [17 x ptr] [ptr addrspacecast (ptr addrspace(1) @__omp_plugin_enable_fast_reduction to ptr), ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16_wg_size to ptr), ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16_exec_mode to ptr), ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_wg_size to ptr), ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_exec_mode to ptr), ptr @"__ZL9ompx__ctx$ref", ptr @"__ZL19ompx__pipe_deferred$ref", ptr @ompx__peer_addr, ptr @ompx__block_put_one, ptr @ompx__block_put, ptr @ompx__box_residual, ptr @ompx__box_peer, ptr @ompx__box_hull, ptr @ompx__box_plan, ptr @_ZL15ompx__box_countPjiPvPKvmi, ptr @ompx__box_due, ptr @ompx__after_put], section "llvm.metadata"
+@llvm.compiler.used = appending addrspace(1) global [19 x ptr] [ptr addrspacecast (ptr addrspace(1) @__omp_plugin_enable_fast_reduction to ptr), ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16_wg_size to ptr), ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16_exec_mode to ptr), ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_wg_size to ptr), ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_exec_mode to ptr), ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42_wg_size to ptr), ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42_exec_mode to ptr), ptr @"__ZL9ompx__ctx$ref", ptr @"__ZL19ompx__pipe_deferred$ref", ptr @ompx__peer_addr, ptr @ompx__block_put_one, ptr @ompx__block_put, ptr @ompx__box_residual, ptr @ompx__box_peer, ptr @ompx__box_hull, ptr @ompx__box_plan, ptr @_ZL15ompx__box_countPjiPvPKvmi, ptr @ompx__box_due, ptr @ompx__after_put], section "llvm.metadata"
 @__oclc_ABI_version = weak_odr hidden local_unnamed_addr addrspace(4) constant i32 600
 
 ; Function Attrs: alwaysinline convergent mustprogress norecurse nounwind
@@ -160,29 +183,29 @@ define weak_odr protected amdgpu_kernel void @__omp_offloading_5c59c990_8b000004
   %23 = addrspacecast ptr addrspace(5) %13 to ptr
   %24 = addrspacecast ptr addrspace(5) %14 to ptr
   %25 = addrspacecast ptr addrspace(5) %15 to ptr
-  store ptr %0, ptr %16, align 8, !tbaa !14
-  store i64 %1, ptr %17, align 8, !tbaa !18
-  store i64 %2, ptr %18, align 8, !tbaa !18
-  store ptr %3, ptr %19, align 8, !tbaa !14
-  store i64 %4, ptr %20, align 8, !tbaa !18
+  store ptr %0, ptr %16, align 8, !tbaa !16
+  store i64 %1, ptr %17, align 8, !tbaa !20
+  store i64 %2, ptr %18, align 8, !tbaa !20
+  store ptr %3, ptr %19, align 8, !tbaa !16
+  store i64 %4, ptr %20, align 8, !tbaa !20
   %26 = call i32 @__kmpc_target_init(ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16_kernel_environment to ptr), ptr %0)
   %27 = icmp eq i32 %26, -1
   br i1 %27, label %28, label %37
 
 28:                                               ; preds = %5
   %29 = call i32 @__kmpc_global_thread_num(ptr addrspacecast (ptr addrspace(1) @1 to ptr))
-  %30 = load i64, ptr %17, align 8, !tbaa !18
-  store i64 %30, ptr %21, align 8, !tbaa !18
-  %31 = load i64, ptr %21, align 8, !tbaa !18
-  %32 = load i64, ptr %18, align 8, !tbaa !18
-  store i64 %32, ptr %22, align 8, !tbaa !18
-  %33 = load i64, ptr %22, align 8, !tbaa !18
-  %34 = load ptr, ptr %19, align 8, !tbaa !14
-  %35 = load float, ptr %20, align 4, !tbaa !20
-  store float %35, ptr %23, align 4, !tbaa !20
-  %36 = load i64, ptr %23, align 8, !tbaa !18
+  %30 = load i64, ptr %17, align 8, !tbaa !20
+  store i64 %30, ptr %21, align 8, !tbaa !20
+  %31 = load i64, ptr %21, align 8, !tbaa !20
+  %32 = load i64, ptr %18, align 8, !tbaa !20
+  store i64 %32, ptr %22, align 8, !tbaa !20
+  %33 = load i64, ptr %22, align 8, !tbaa !20
+  %34 = load ptr, ptr %19, align 8, !tbaa !16
+  %35 = load float, ptr %20, align 4, !tbaa !22
+  store float %35, ptr %23, align 4, !tbaa !22
+  %36 = load i64, ptr %23, align 8, !tbaa !20
   store i32 0, ptr %24, align 4
-  store i32 %29, ptr %25, align 4, !tbaa !22
+  store i32 %29, ptr %25, align 4, !tbaa !24
   call void @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16_omp_outlined(ptr %25, ptr %24, i64 %31, i64 %33, ptr %34, i64 %36) #3
   call void @__kmpc_target_deinit()
   ret void
@@ -243,84 +266,84 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16_omp_
   %52 = addrspacecast ptr addrspace(5) %28 to ptr
   %53 = addrspacecast ptr addrspace(5) %29 to ptr
   %54 = addrspacecast ptr addrspace(5) %30 to ptr
-  store ptr %0, ptr %31, align 8, !tbaa !14
-  store ptr %1, ptr %32, align 8, !tbaa !14
-  store i64 %2, ptr %33, align 8, !tbaa !18
-  store i64 %3, ptr %34, align 8, !tbaa !18
-  store ptr %4, ptr %35, align 8, !tbaa !14
-  store i64 %5, ptr %36, align 8, !tbaa !18
+  store ptr %0, ptr %31, align 8, !tbaa !16
+  store ptr %1, ptr %32, align 8, !tbaa !16
+  store i64 %2, ptr %33, align 8, !tbaa !20
+  store i64 %3, ptr %34, align 8, !tbaa !20
+  store ptr %4, ptr %35, align 8, !tbaa !16
+  store i64 %5, ptr %36, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %13) #3
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %16) #3
-  %55 = load i64, ptr %33, align 8, !tbaa !18
-  store i64 %55, ptr %40, align 8, !tbaa !18
+  %55 = load i64, ptr %33, align 8, !tbaa !20
+  store i64 %55, ptr %40, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %17) #3
-  %56 = load i64, ptr %34, align 8, !tbaa !18
-  store i64 %56, ptr %41, align 8, !tbaa !18
+  %56 = load i64, ptr %34, align 8, !tbaa !20
+  store i64 %56, ptr %41, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %18) #3
-  %57 = load i64, ptr %40, align 8, !tbaa !18
+  %57 = load i64, ptr %40, align 8, !tbaa !20
   %58 = sub nsw i64 %57, 0
   %59 = sdiv i64 %58, 1
-  %60 = load i64, ptr %41, align 8, !tbaa !18
+  %60 = load i64, ptr %41, align 8, !tbaa !20
   %61 = sub nsw i64 %60, 0
   %62 = sdiv i64 %61, 1
   %63 = mul nsw i64 %59, %62
   %64 = sub nsw i64 %63, 1
-  store i64 %64, ptr %42, align 8, !tbaa !18
+  store i64 %64, ptr %42, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %19) #3
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %20) #3
-  store i64 0, ptr %43, align 8, !tbaa !18
-  store i64 0, ptr %44, align 8, !tbaa !18
+  store i64 0, ptr %43, align 8, !tbaa !20
+  store i64 0, ptr %44, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %20) #3
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %19) #3
-  %65 = load i64, ptr %40, align 8, !tbaa !18
+  %65 = load i64, ptr %40, align 8, !tbaa !20
   %66 = icmp slt i64 0, %65
   br i1 %66, label %67, label %139
 
 67:                                               ; preds = %6
-  %68 = load i64, ptr %41, align 8, !tbaa !18
+  %68 = load i64, ptr %41, align 8, !tbaa !20
   %69 = icmp slt i64 0, %68
   br i1 %69, label %70, label %139
 
 70:                                               ; preds = %67
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %21) #3
-  store i64 0, ptr %45, align 8, !tbaa !18
+  store i64 0, ptr %45, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %22) #3
-  %71 = load i64, ptr %42, align 8, !tbaa !18
-  store i64 %71, ptr %46, align 8, !tbaa !18
+  %71 = load i64, ptr %42, align 8, !tbaa !20
+  store i64 %71, ptr %46, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %23) #3
-  store i64 1, ptr %47, align 8, !tbaa !18
+  store i64 1, ptr %47, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %24) #3
-  store i32 0, ptr %48, align 4, !tbaa !22
+  store i32 0, ptr %48, align 4, !tbaa !24
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %25) #3
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %26) #3
   %72 = call i32 @__kmpc_get_hardware_num_threads_in_block()
   %73 = zext i32 %72 to i64
   %74 = load ptr, ptr %31, align 8
-  %75 = load i32, ptr %74, align 4, !tbaa !22
+  %75 = load i32, ptr %74, align 4, !tbaa !24
   call void @__kmpc_distribute_static_init_8(ptr addrspacecast (ptr addrspace(1) @2 to ptr), i32 %75, i32 91, ptr %48, ptr %45, ptr %46, ptr %47, i64 1, i64 %73)
-  %76 = load i64, ptr %46, align 8, !tbaa !18
-  %77 = load i64, ptr %42, align 8, !tbaa !18
+  %76 = load i64, ptr %46, align 8, !tbaa !20
+  %77 = load i64, ptr %42, align 8, !tbaa !20
   %78 = icmp sgt i64 %76, %77
   br i1 %78, label %79, label %81
 
 79:                                               ; preds = %70
-  %80 = load i64, ptr %42, align 8, !tbaa !18
+  %80 = load i64, ptr %42, align 8, !tbaa !20
   br label %83
 
 81:                                               ; preds = %70
-  %82 = load i64, ptr %46, align 8, !tbaa !18
+  %82 = load i64, ptr %46, align 8, !tbaa !20
   br label %83
 
 83:                                               ; preds = %81, %79
   %84 = phi i64 [ %80, %79 ], [ %82, %81 ]
-  store i64 %84, ptr %46, align 8, !tbaa !18
-  %85 = load i64, ptr %45, align 8, !tbaa !18
-  store i64 %85, ptr %37, align 8, !tbaa !18
+  store i64 %84, ptr %46, align 8, !tbaa !20
+  %85 = load i64, ptr %45, align 8, !tbaa !20
+  store i64 %85, ptr %37, align 8, !tbaa !20
   br label %86
 
 86:                                               ; preds = %132, %83
-  %87 = load i64, ptr %37, align 8, !tbaa !18
-  %88 = load i64, ptr %42, align 8, !tbaa !18
+  %87 = load i64, ptr %37, align 8, !tbaa !20
+  %88 = load i64, ptr %42, align 8, !tbaa !20
   %89 = add nsw i64 %88, 1
   %90 = icmp slt i64 %87, %89
   br i1 %90, label %92, label %91
@@ -331,69 +354,69 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16_omp_
 92:                                               ; preds = %86
   %93 = load i64, ptr %45, align 8
   %94 = load i64, ptr %46, align 8
-  %95 = load i64, ptr %33, align 8, !tbaa !18
-  store i64 %95, ptr %51, align 8, !tbaa !18
-  %96 = load i64, ptr %51, align 8, !tbaa !18
-  %97 = load i64, ptr %34, align 8, !tbaa !18
-  store i64 %97, ptr %52, align 8, !tbaa !18
-  %98 = load i64, ptr %52, align 8, !tbaa !18
-  %99 = load ptr, ptr %35, align 8, !tbaa !14
-  %100 = load float, ptr %36, align 4, !tbaa !20
-  store float %100, ptr %53, align 4, !tbaa !20
-  %101 = load i64, ptr %53, align 8, !tbaa !18
+  %95 = load i64, ptr %33, align 8, !tbaa !20
+  store i64 %95, ptr %51, align 8, !tbaa !20
+  %96 = load i64, ptr %51, align 8, !tbaa !20
+  %97 = load i64, ptr %34, align 8, !tbaa !20
+  store i64 %97, ptr %52, align 8, !tbaa !20
+  %98 = load i64, ptr %52, align 8, !tbaa !20
+  %99 = load ptr, ptr %35, align 8, !tbaa !16
+  %100 = load float, ptr %36, align 4, !tbaa !22
+  store float %100, ptr %53, align 4, !tbaa !22
+  %101 = load i64, ptr %53, align 8, !tbaa !20
   %102 = getelementptr inbounds [6 x ptr], ptr %54, i64 0, i64 0
   %103 = inttoptr i64 %93 to ptr
-  store ptr %103, ptr %102, align 8, !tbaa !14
+  store ptr %103, ptr %102, align 8, !tbaa !16
   %104 = getelementptr inbounds [6 x ptr], ptr %54, i64 0, i64 1
   %105 = inttoptr i64 %94 to ptr
-  store ptr %105, ptr %104, align 8, !tbaa !14
+  store ptr %105, ptr %104, align 8, !tbaa !16
   %106 = getelementptr inbounds [6 x ptr], ptr %54, i64 0, i64 2
   %107 = inttoptr i64 %96 to ptr
-  store ptr %107, ptr %106, align 8, !tbaa !14
+  store ptr %107, ptr %106, align 8, !tbaa !16
   %108 = getelementptr inbounds [6 x ptr], ptr %54, i64 0, i64 3
   %109 = inttoptr i64 %98 to ptr
-  store ptr %109, ptr %108, align 8, !tbaa !14
+  store ptr %109, ptr %108, align 8, !tbaa !16
   %110 = getelementptr inbounds [6 x ptr], ptr %54, i64 0, i64 4
-  store ptr %99, ptr %110, align 8, !tbaa !14
+  store ptr %99, ptr %110, align 8, !tbaa !16
   %111 = getelementptr inbounds [6 x ptr], ptr %54, i64 0, i64 5
   %112 = inttoptr i64 %101 to ptr
-  store ptr %112, ptr %111, align 8, !tbaa !14
+  store ptr %112, ptr %111, align 8, !tbaa !16
   %113 = load ptr, ptr %31, align 8
-  %114 = load i32, ptr %113, align 4, !tbaa !22
+  %114 = load i32, ptr %113, align 4, !tbaa !24
   call void @__kmpc_parallel_51(ptr addrspacecast (ptr addrspace(1) @1 to ptr), i32 %114, i32 1, i32 -1, i32 -1, ptr @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16_omp_outlined_omp_outlined, ptr null, ptr %54, i64 6)
   br label %115
 
 115:                                              ; preds = %92
-  %116 = load i64, ptr %37, align 8, !tbaa !18
-  %117 = load i64, ptr %47, align 8, !tbaa !18
+  %116 = load i64, ptr %37, align 8, !tbaa !20
+  %117 = load i64, ptr %47, align 8, !tbaa !20
   %118 = add nsw i64 %116, %117
-  store i64 %118, ptr %37, align 8, !tbaa !18
-  %119 = load i64, ptr %45, align 8, !tbaa !18
-  %120 = load i64, ptr %47, align 8, !tbaa !18
+  store i64 %118, ptr %37, align 8, !tbaa !20
+  %119 = load i64, ptr %45, align 8, !tbaa !20
+  %120 = load i64, ptr %47, align 8, !tbaa !20
   %121 = add nsw i64 %119, %120
-  store i64 %121, ptr %45, align 8, !tbaa !18
-  %122 = load i64, ptr %46, align 8, !tbaa !18
-  %123 = load i64, ptr %47, align 8, !tbaa !18
+  store i64 %121, ptr %45, align 8, !tbaa !20
+  %122 = load i64, ptr %46, align 8, !tbaa !20
+  %123 = load i64, ptr %47, align 8, !tbaa !20
   %124 = add nsw i64 %122, %123
-  store i64 %124, ptr %46, align 8, !tbaa !18
-  %125 = load i64, ptr %46, align 8, !tbaa !18
-  %126 = load i64, ptr %42, align 8, !tbaa !18
+  store i64 %124, ptr %46, align 8, !tbaa !20
+  %125 = load i64, ptr %46, align 8, !tbaa !20
+  %126 = load i64, ptr %42, align 8, !tbaa !20
   %127 = icmp sgt i64 %125, %126
   br i1 %127, label %128, label %130
 
 128:                                              ; preds = %115
-  %129 = load i64, ptr %42, align 8, !tbaa !18
+  %129 = load i64, ptr %42, align 8, !tbaa !20
   br label %132
 
 130:                                              ; preds = %115
-  %131 = load i64, ptr %46, align 8, !tbaa !18
+  %131 = load i64, ptr %46, align 8, !tbaa !20
   br label %132
 
 132:                                              ; preds = %130, %128
   %133 = phi i64 [ %129, %128 ], [ %131, %130 ]
-  store i64 %133, ptr %46, align 8, !tbaa !18
-  %134 = load i64, ptr %45, align 8, !tbaa !18
-  store i64 %134, ptr %37, align 8, !tbaa !18
+  store i64 %133, ptr %46, align 8, !tbaa !20
+  %134 = load i64, ptr %45, align 8, !tbaa !20
+  store i64 %134, ptr %37, align 8, !tbaa !20
   br label %86
 
 135:                                              ; preds = %91
@@ -401,7 +424,7 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16_omp_
 
 136:                                              ; preds = %135
   %137 = load ptr, ptr %31, align 8
-  %138 = load i32, ptr %137, align 4, !tbaa !22
+  %138 = load i32, ptr %137, align 4, !tbaa !24
   call void @__kmpc_distribute_static_fini(ptr addrspacecast (ptr addrspace(1) @2 to ptr), i32 %138)
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %26) #3
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %25) #3
@@ -476,72 +499,72 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16_omp_
   %50 = addrspacecast ptr addrspace(5) %28 to ptr
   %51 = addrspacecast ptr addrspace(5) %29 to ptr
   %52 = addrspacecast ptr addrspace(5) %30 to ptr
-  store ptr %0, ptr %31, align 8, !tbaa !14
-  store ptr %1, ptr %32, align 8, !tbaa !14
-  store i64 %2, ptr %33, align 8, !tbaa !18
-  store i64 %3, ptr %34, align 8, !tbaa !18
-  store i64 %4, ptr %35, align 8, !tbaa !18
-  store i64 %5, ptr %36, align 8, !tbaa !18
-  store ptr %6, ptr %37, align 8, !tbaa !14
-  store i64 %7, ptr %38, align 8, !tbaa !18
+  store ptr %0, ptr %31, align 8, !tbaa !16
+  store ptr %1, ptr %32, align 8, !tbaa !16
+  store i64 %2, ptr %33, align 8, !tbaa !20
+  store i64 %3, ptr %34, align 8, !tbaa !20
+  store i64 %4, ptr %35, align 8, !tbaa !20
+  store i64 %5, ptr %36, align 8, !tbaa !20
+  store ptr %6, ptr %37, align 8, !tbaa !16
+  store i64 %7, ptr %38, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %17) #3
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %20) #3
-  %53 = load i64, ptr %35, align 8, !tbaa !18
-  store i64 %53, ptr %42, align 8, !tbaa !18
+  %53 = load i64, ptr %35, align 8, !tbaa !20
+  store i64 %53, ptr %42, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %21) #3
-  %54 = load i64, ptr %36, align 8, !tbaa !18
-  store i64 %54, ptr %43, align 8, !tbaa !18
+  %54 = load i64, ptr %36, align 8, !tbaa !20
+  store i64 %54, ptr %43, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %22) #3
-  %55 = load i64, ptr %42, align 8, !tbaa !18
+  %55 = load i64, ptr %42, align 8, !tbaa !20
   %56 = sub nsw i64 %55, 0
   %57 = sdiv i64 %56, 1
-  %58 = load i64, ptr %43, align 8, !tbaa !18
+  %58 = load i64, ptr %43, align 8, !tbaa !20
   %59 = sub nsw i64 %58, 0
   %60 = sdiv i64 %59, 1
   %61 = mul nsw i64 %57, %60
   %62 = sub nsw i64 %61, 1
-  store i64 %62, ptr %44, align 8, !tbaa !18
+  store i64 %62, ptr %44, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %23) #3
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %24) #3
-  store i64 0, ptr %45, align 8, !tbaa !18
-  store i64 0, ptr %46, align 8, !tbaa !18
+  store i64 0, ptr %45, align 8, !tbaa !20
+  store i64 0, ptr %46, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %24) #3
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %23) #3
-  %63 = load i64, ptr %42, align 8, !tbaa !18
+  %63 = load i64, ptr %42, align 8, !tbaa !20
   %64 = icmp slt i64 0, %63
   br i1 %64, label %65, label %125
 
 65:                                               ; preds = %8
-  %66 = load i64, ptr %43, align 8, !tbaa !18
+  %66 = load i64, ptr %43, align 8, !tbaa !20
   %67 = icmp slt i64 0, %66
   br i1 %67, label %68, label %125
 
 68:                                               ; preds = %65
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %25) #3
-  store i64 0, ptr %47, align 8, !tbaa !18
+  store i64 0, ptr %47, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %26) #3
-  %69 = load i64, ptr %44, align 8, !tbaa !18
-  store i64 %69, ptr %48, align 8, !tbaa !18
-  %70 = load i64, ptr %33, align 8, !tbaa !18
-  %71 = load i64, ptr %34, align 8, !tbaa !18
-  store i64 %70, ptr %47, align 8, !tbaa !18
-  store i64 %71, ptr %48, align 8, !tbaa !18
+  %69 = load i64, ptr %44, align 8, !tbaa !20
+  store i64 %69, ptr %48, align 8, !tbaa !20
+  %70 = load i64, ptr %33, align 8, !tbaa !20
+  %71 = load i64, ptr %34, align 8, !tbaa !20
+  store i64 %70, ptr %47, align 8, !tbaa !20
+  store i64 %71, ptr %48, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %27) #3
-  store i64 1, ptr %49, align 8, !tbaa !18
+  store i64 1, ptr %49, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %28) #3
-  store i32 0, ptr %50, align 4, !tbaa !22
+  store i32 0, ptr %50, align 4, !tbaa !24
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %29) #3
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %30) #3
   %72 = load ptr, ptr %31, align 8
-  %73 = load i32, ptr %72, align 4, !tbaa !22
+  %73 = load i32, ptr %72, align 4, !tbaa !24
   call void @__kmpc_for_static_init_8(ptr addrspacecast (ptr addrspace(1) @3 to ptr), i32 %73, i32 33, ptr %50, ptr %47, ptr %48, ptr %49, i64 1, i64 1)
-  %74 = load i64, ptr %47, align 8, !tbaa !18
-  store i64 %74, ptr %39, align 8, !tbaa !18
+  %74 = load i64, ptr %47, align 8, !tbaa !20
+  store i64 %74, ptr %39, align 8, !tbaa !20
   br label %75
 
 75:                                               ; preds = %117, %68
-  %76 = load i64, ptr %39, align 8, !tbaa !18
-  %77 = load i64, ptr %34, align 8, !tbaa !18
+  %76 = load i64, ptr %39, align 8, !tbaa !20
+  %77 = load i64, ptr %34, align 8, !tbaa !20
   %78 = icmp ule i64 %76, %77
   br i1 %78, label %80, label %79
 
@@ -549,23 +572,23 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16_omp_
   br label %121
 
 80:                                               ; preds = %75
-  %81 = load i64, ptr %39, align 8, !tbaa !18
-  %82 = load i64, ptr %43, align 8, !tbaa !18
+  %81 = load i64, ptr %39, align 8, !tbaa !20
+  %82 = load i64, ptr %43, align 8, !tbaa !20
   %83 = sub nsw i64 %82, 0
   %84 = sdiv i64 %83, 1
   %85 = mul nsw i64 1, %84
   %86 = sdiv i64 %81, %85
   %87 = mul nsw i64 %86, 1
   %88 = add nsw i64 0, %87
-  store i64 %88, ptr %51, align 8, !tbaa !18
-  %89 = load i64, ptr %39, align 8, !tbaa !18
-  %90 = load i64, ptr %39, align 8, !tbaa !18
-  %91 = load i64, ptr %43, align 8, !tbaa !18
+  store i64 %88, ptr %51, align 8, !tbaa !20
+  %89 = load i64, ptr %39, align 8, !tbaa !20
+  %90 = load i64, ptr %39, align 8, !tbaa !20
+  %91 = load i64, ptr %43, align 8, !tbaa !20
   %92 = sub nsw i64 %91, 0
   %93 = sdiv i64 %92, 1
   %94 = mul nsw i64 1, %93
   %95 = sdiv i64 %90, %94
-  %96 = load i64, ptr %43, align 8, !tbaa !18
+  %96 = load i64, ptr %43, align 8, !tbaa !20
   %97 = sub nsw i64 %96, 0
   %98 = sdiv i64 %97, 1
   %99 = mul nsw i64 1, %98
@@ -573,30 +596,30 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16_omp_
   %101 = sub nsw i64 %89, %100
   %102 = mul nsw i64 %101, 1
   %103 = add nsw i64 0, %102
-  store i64 %103, ptr %52, align 8, !tbaa !18
-  %104 = load float, ptr %38, align 4, !tbaa !20
-  %105 = load i64, ptr %51, align 8, !tbaa !18
-  %106 = load i64, ptr %52, align 8, !tbaa !18
+  store i64 %103, ptr %52, align 8, !tbaa !20
+  %104 = load float, ptr %38, align 4, !tbaa !22
+  %105 = load i64, ptr %51, align 8, !tbaa !20
+  %106 = load i64, ptr %52, align 8, !tbaa !20
   %107 = add nsw i64 %105, %106
   %108 = call noundef float @_ZL4wavefl(float noundef %104, i64 noundef %107) #15
-  %109 = load ptr, ptr %37, align 8, !tbaa !14
-  %110 = load i64, ptr %51, align 8, !tbaa !18
-  %111 = load i64, ptr %36, align 8, !tbaa !18
+  %109 = load ptr, ptr %37, align 8, !tbaa !16
+  %110 = load i64, ptr %51, align 8, !tbaa !20
+  %111 = load i64, ptr %36, align 8, !tbaa !20
   %112 = mul nsw i64 %110, %111
-  %113 = load i64, ptr %52, align 8, !tbaa !18
+  %113 = load i64, ptr %52, align 8, !tbaa !20
   %114 = add nsw i64 %112, %113
   %115 = getelementptr inbounds float, ptr %109, i64 %114
-  store float %108, ptr %115, align 4, !tbaa !20
+  store float %108, ptr %115, align 4, !tbaa !22
   br label %116
 
 116:                                              ; preds = %80
   br label %117
 
 117:                                              ; preds = %116
-  %118 = load i64, ptr %39, align 8, !tbaa !18
-  %119 = load i64, ptr %49, align 8, !tbaa !18
+  %118 = load i64, ptr %39, align 8, !tbaa !20
+  %119 = load i64, ptr %49, align 8, !tbaa !20
   %120 = add nsw i64 %118, %119
-  store i64 %120, ptr %39, align 8, !tbaa !18
+  store i64 %120, ptr %39, align 8, !tbaa !20
   br label %75
 
 121:                                              ; preds = %79
@@ -604,7 +627,7 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16_omp_
 
 122:                                              ; preds = %121
   %123 = load ptr, ptr %31, align 8
-  %124 = load i32, ptr %123, align 4, !tbaa !22
+  %124 = load i32, ptr %123, align 4, !tbaa !24
   call void @__kmpc_for_static_fini(ptr addrspacecast (ptr addrspace(1) @3 to ptr), i32 %124)
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %30) #3
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %29) #3
@@ -633,10 +656,10 @@ define internal noundef float @_ZL4wavefl(float noundef %0, i64 noundef %1) #4 {
   %6 = addrspacecast ptr addrspace(5) %3 to ptr
   %7 = addrspacecast ptr addrspace(5) %4 to ptr
   %8 = addrspacecast ptr addrspace(5) %5 to ptr
-  store float %0, ptr %7, align 4, !tbaa !20
-  store i64 %1, ptr %8, align 8, !tbaa !18
-  %9 = load float, ptr %7, align 4, !tbaa !20
-  %10 = load i64, ptr %8, align 8, !tbaa !18
+  store float %0, ptr %7, align 4, !tbaa !22
+  store i64 %1, ptr %8, align 8, !tbaa !20
+  %9 = load float, ptr %7, align 4, !tbaa !22
+  %10 = load i64, ptr %8, align 8, !tbaa !20
   %11 = sitofp i64 %10 to float
   %12 = fmul float %9, %11
   ret float %12
@@ -670,21 +693,21 @@ define weak_odr protected amdgpu_kernel void @__omp_offloading_5c59c990_8b000004
   %13 = addrspacecast ptr addrspace(5) %7 to ptr
   %14 = addrspacecast ptr addrspace(5) %8 to ptr
   %15 = addrspacecast ptr addrspace(5) %9 to ptr
-  store ptr %0, ptr %10, align 8, !tbaa !14
-  store i64 %1, ptr %11, align 8, !tbaa !18
-  store ptr %2, ptr %12, align 8, !tbaa !14
+  store ptr %0, ptr %10, align 8, !tbaa !16
+  store i64 %1, ptr %11, align 8, !tbaa !20
+  store ptr %2, ptr %12, align 8, !tbaa !16
   %16 = call i32 @__kmpc_target_init(ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_kernel_environment to ptr), ptr %0)
   %17 = icmp eq i32 %16, -1
   br i1 %17, label %18, label %23
 
 18:                                               ; preds = %3
   %19 = call i32 @__kmpc_global_thread_num(ptr addrspacecast (ptr addrspace(1) @1 to ptr))
-  %20 = load i64, ptr %11, align 8, !tbaa !18
-  store i64 %20, ptr %13, align 8, !tbaa !18
-  %21 = load i64, ptr %13, align 8, !tbaa !18
-  %22 = load ptr, ptr %12, align 8, !tbaa !14
+  %20 = load i64, ptr %11, align 8, !tbaa !20
+  store i64 %20, ptr %13, align 8, !tbaa !20
+  %21 = load i64, ptr %13, align 8, !tbaa !20
+  %22 = load ptr, ptr %12, align 8, !tbaa !16
   store i32 0, ptr %14, align 4
-  store i32 %19, ptr %15, align 4, !tbaa !22
+  store i32 %19, ptr %15, align 4, !tbaa !24
   call void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_omp_outlined(ptr %15, ptr %14, i64 %21, ptr %22) #3
   call void @__kmpc_target_deinit()
   ret void
@@ -727,66 +750,66 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_omp_o
   %34 = addrspacecast ptr addrspace(5) %18 to ptr
   %35 = addrspacecast ptr addrspace(5) %19 to ptr
   %36 = addrspacecast ptr addrspace(5) %20 to ptr
-  store ptr %0, ptr %21, align 8, !tbaa !14
-  store ptr %1, ptr %22, align 8, !tbaa !14
-  store i64 %2, ptr %23, align 8, !tbaa !18
-  store ptr %3, ptr %24, align 8, !tbaa !14
+  store ptr %0, ptr %21, align 8, !tbaa !16
+  store ptr %1, ptr %22, align 8, !tbaa !16
+  store i64 %2, ptr %23, align 8, !tbaa !20
+  store ptr %3, ptr %24, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %9) #3
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %11) #3
-  %37 = load i64, ptr %23, align 8, !tbaa !18
-  store i64 %37, ptr %27, align 8, !tbaa !18
+  %37 = load i64, ptr %23, align 8, !tbaa !20
+  store i64 %37, ptr %27, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %12) #3
-  %38 = load i64, ptr %27, align 8, !tbaa !18
+  %38 = load i64, ptr %27, align 8, !tbaa !20
   %39 = sub nsw i64 %38, 0
   %40 = sdiv i64 %39, 1
   %41 = sub nsw i64 %40, 1
-  store i64 %41, ptr %28, align 8, !tbaa !18
+  store i64 %41, ptr %28, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %13) #3
-  store i64 0, ptr %29, align 8, !tbaa !18
+  store i64 0, ptr %29, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %13) #3
-  %42 = load i64, ptr %27, align 8, !tbaa !18
+  %42 = load i64, ptr %27, align 8, !tbaa !20
   %43 = icmp slt i64 0, %42
   br i1 %43, label %44, label %105
 
 44:                                               ; preds = %4
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %14) #3
-  store i64 0, ptr %30, align 8, !tbaa !18
+  store i64 0, ptr %30, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %15) #3
-  %45 = load i64, ptr %28, align 8, !tbaa !18
-  store i64 %45, ptr %31, align 8, !tbaa !18
+  %45 = load i64, ptr %28, align 8, !tbaa !20
+  store i64 %45, ptr %31, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %16) #3
-  store i64 1, ptr %32, align 8, !tbaa !18
+  store i64 1, ptr %32, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %17) #3
-  store i32 0, ptr %33, align 4, !tbaa !22
+  store i32 0, ptr %33, align 4, !tbaa !24
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %18) #3
   %46 = call i32 @__kmpc_get_hardware_num_threads_in_block()
   %47 = zext i32 %46 to i64
   %48 = load ptr, ptr %21, align 8
-  %49 = load i32, ptr %48, align 4, !tbaa !22
+  %49 = load i32, ptr %48, align 4, !tbaa !24
   call void @__kmpc_distribute_static_init_8(ptr addrspacecast (ptr addrspace(1) @2 to ptr), i32 %49, i32 91, ptr %33, ptr %30, ptr %31, ptr %32, i64 1, i64 %47)
-  %50 = load i64, ptr %31, align 8, !tbaa !18
-  %51 = load i64, ptr %28, align 8, !tbaa !18
+  %50 = load i64, ptr %31, align 8, !tbaa !20
+  %51 = load i64, ptr %28, align 8, !tbaa !20
   %52 = icmp sgt i64 %50, %51
   br i1 %52, label %53, label %55
 
 53:                                               ; preds = %44
-  %54 = load i64, ptr %28, align 8, !tbaa !18
+  %54 = load i64, ptr %28, align 8, !tbaa !20
   br label %57
 
 55:                                               ; preds = %44
-  %56 = load i64, ptr %31, align 8, !tbaa !18
+  %56 = load i64, ptr %31, align 8, !tbaa !20
   br label %57
 
 57:                                               ; preds = %55, %53
   %58 = phi i64 [ %54, %53 ], [ %56, %55 ]
-  store i64 %58, ptr %31, align 8, !tbaa !18
-  %59 = load i64, ptr %30, align 8, !tbaa !18
-  store i64 %59, ptr %25, align 8, !tbaa !18
+  store i64 %58, ptr %31, align 8, !tbaa !20
+  %59 = load i64, ptr %30, align 8, !tbaa !20
+  store i64 %59, ptr %25, align 8, !tbaa !20
   br label %60
 
 60:                                               ; preds = %98, %57
-  %61 = load i64, ptr %25, align 8, !tbaa !18
-  %62 = load i64, ptr %28, align 8, !tbaa !18
+  %61 = load i64, ptr %25, align 8, !tbaa !20
+  %62 = load i64, ptr %28, align 8, !tbaa !20
   %63 = add nsw i64 %62, 1
   %64 = icmp slt i64 %61, %63
   br i1 %64, label %66, label %65
@@ -797,57 +820,57 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_omp_o
 66:                                               ; preds = %60
   %67 = load i64, ptr %30, align 8
   %68 = load i64, ptr %31, align 8
-  %69 = load i64, ptr %23, align 8, !tbaa !18
-  store i64 %69, ptr %35, align 8, !tbaa !18
-  %70 = load i64, ptr %35, align 8, !tbaa !18
-  %71 = load ptr, ptr %24, align 8, !tbaa !14
+  %69 = load i64, ptr %23, align 8, !tbaa !20
+  store i64 %69, ptr %35, align 8, !tbaa !20
+  %70 = load i64, ptr %35, align 8, !tbaa !20
+  %71 = load ptr, ptr %24, align 8, !tbaa !16
   %72 = getelementptr inbounds [4 x ptr], ptr %36, i64 0, i64 0
   %73 = inttoptr i64 %67 to ptr
-  store ptr %73, ptr %72, align 8, !tbaa !14
+  store ptr %73, ptr %72, align 8, !tbaa !16
   %74 = getelementptr inbounds [4 x ptr], ptr %36, i64 0, i64 1
   %75 = inttoptr i64 %68 to ptr
-  store ptr %75, ptr %74, align 8, !tbaa !14
+  store ptr %75, ptr %74, align 8, !tbaa !16
   %76 = getelementptr inbounds [4 x ptr], ptr %36, i64 0, i64 2
   %77 = inttoptr i64 %70 to ptr
-  store ptr %77, ptr %76, align 8, !tbaa !14
+  store ptr %77, ptr %76, align 8, !tbaa !16
   %78 = getelementptr inbounds [4 x ptr], ptr %36, i64 0, i64 3
-  store ptr %71, ptr %78, align 8, !tbaa !14
+  store ptr %71, ptr %78, align 8, !tbaa !16
   %79 = load ptr, ptr %21, align 8
-  %80 = load i32, ptr %79, align 4, !tbaa !22
+  %80 = load i32, ptr %79, align 4, !tbaa !24
   call void @__kmpc_parallel_51(ptr addrspacecast (ptr addrspace(1) @1 to ptr), i32 %80, i32 1, i32 -1, i32 -1, ptr @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_omp_outlined_omp_outlined, ptr null, ptr %36, i64 4)
   br label %81
 
 81:                                               ; preds = %66
-  %82 = load i64, ptr %25, align 8, !tbaa !18
-  %83 = load i64, ptr %32, align 8, !tbaa !18
+  %82 = load i64, ptr %25, align 8, !tbaa !20
+  %83 = load i64, ptr %32, align 8, !tbaa !20
   %84 = add nsw i64 %82, %83
-  store i64 %84, ptr %25, align 8, !tbaa !18
-  %85 = load i64, ptr %30, align 8, !tbaa !18
-  %86 = load i64, ptr %32, align 8, !tbaa !18
+  store i64 %84, ptr %25, align 8, !tbaa !20
+  %85 = load i64, ptr %30, align 8, !tbaa !20
+  %86 = load i64, ptr %32, align 8, !tbaa !20
   %87 = add nsw i64 %85, %86
-  store i64 %87, ptr %30, align 8, !tbaa !18
-  %88 = load i64, ptr %31, align 8, !tbaa !18
-  %89 = load i64, ptr %32, align 8, !tbaa !18
+  store i64 %87, ptr %30, align 8, !tbaa !20
+  %88 = load i64, ptr %31, align 8, !tbaa !20
+  %89 = load i64, ptr %32, align 8, !tbaa !20
   %90 = add nsw i64 %88, %89
-  store i64 %90, ptr %31, align 8, !tbaa !18
-  %91 = load i64, ptr %31, align 8, !tbaa !18
-  %92 = load i64, ptr %28, align 8, !tbaa !18
+  store i64 %90, ptr %31, align 8, !tbaa !20
+  %91 = load i64, ptr %31, align 8, !tbaa !20
+  %92 = load i64, ptr %28, align 8, !tbaa !20
   %93 = icmp sgt i64 %91, %92
   br i1 %93, label %94, label %96
 
 94:                                               ; preds = %81
-  %95 = load i64, ptr %28, align 8, !tbaa !18
+  %95 = load i64, ptr %28, align 8, !tbaa !20
   br label %98
 
 96:                                               ; preds = %81
-  %97 = load i64, ptr %31, align 8, !tbaa !18
+  %97 = load i64, ptr %31, align 8, !tbaa !20
   br label %98
 
 98:                                               ; preds = %96, %94
   %99 = phi i64 [ %95, %94 ], [ %97, %96 ]
-  store i64 %99, ptr %31, align 8, !tbaa !18
-  %100 = load i64, ptr %30, align 8, !tbaa !18
-  store i64 %100, ptr %25, align 8, !tbaa !18
+  store i64 %99, ptr %31, align 8, !tbaa !20
+  %100 = load i64, ptr %30, align 8, !tbaa !20
+  store i64 %100, ptr %25, align 8, !tbaa !20
   br label %60
 
 101:                                              ; preds = %65
@@ -855,7 +878,7 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_omp_o
 
 102:                                              ; preds = %101
   %103 = load ptr, ptr %21, align 8
-  %104 = load i32, ptr %103, align 4, !tbaa !22
+  %104 = load i32, ptr %103, align 4, !tbaa !24
   call void @__kmpc_distribute_static_fini(ptr addrspacecast (ptr addrspace(1) @2 to ptr), i32 %104)
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %18) #3
   br label %105
@@ -905,54 +928,54 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_omp_o
   %36 = addrspacecast ptr addrspace(5) %20 to ptr
   %37 = addrspacecast ptr addrspace(5) %21 to ptr
   %38 = addrspacecast ptr addrspace(5) %22 to ptr
-  store ptr %0, ptr %23, align 8, !tbaa !14
-  store ptr %1, ptr %24, align 8, !tbaa !14
-  store i64 %2, ptr %25, align 8, !tbaa !18
-  store i64 %3, ptr %26, align 8, !tbaa !18
-  store i64 %4, ptr %27, align 8, !tbaa !18
-  store ptr %5, ptr %28, align 8, !tbaa !14
+  store ptr %0, ptr %23, align 8, !tbaa !16
+  store ptr %1, ptr %24, align 8, !tbaa !16
+  store i64 %2, ptr %25, align 8, !tbaa !20
+  store i64 %3, ptr %26, align 8, !tbaa !20
+  store i64 %4, ptr %27, align 8, !tbaa !20
+  store ptr %5, ptr %28, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %13) #3
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %15) #3
-  %39 = load i64, ptr %27, align 8, !tbaa !18
-  store i64 %39, ptr %31, align 8, !tbaa !18
+  %39 = load i64, ptr %27, align 8, !tbaa !20
+  store i64 %39, ptr %31, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %16) #3
-  %40 = load i64, ptr %31, align 8, !tbaa !18
+  %40 = load i64, ptr %31, align 8, !tbaa !20
   %41 = sub nsw i64 %40, 0
   %42 = sdiv i64 %41, 1
   %43 = sub nsw i64 %42, 1
-  store i64 %43, ptr %32, align 8, !tbaa !18
+  store i64 %43, ptr %32, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %17) #3
-  store i64 0, ptr %33, align 8, !tbaa !18
+  store i64 0, ptr %33, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %17) #3
-  %44 = load i64, ptr %31, align 8, !tbaa !18
+  %44 = load i64, ptr %31, align 8, !tbaa !20
   %45 = icmp slt i64 0, %44
   br i1 %45, label %46, label %81
 
 46:                                               ; preds = %6
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %18) #3
-  store i64 0, ptr %34, align 8, !tbaa !18
+  store i64 0, ptr %34, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %19) #3
-  %47 = load i64, ptr %32, align 8, !tbaa !18
-  store i64 %47, ptr %35, align 8, !tbaa !18
-  %48 = load i64, ptr %25, align 8, !tbaa !18
-  %49 = load i64, ptr %26, align 8, !tbaa !18
-  store i64 %48, ptr %34, align 8, !tbaa !18
-  store i64 %49, ptr %35, align 8, !tbaa !18
+  %47 = load i64, ptr %32, align 8, !tbaa !20
+  store i64 %47, ptr %35, align 8, !tbaa !20
+  %48 = load i64, ptr %25, align 8, !tbaa !20
+  %49 = load i64, ptr %26, align 8, !tbaa !20
+  store i64 %48, ptr %34, align 8, !tbaa !20
+  store i64 %49, ptr %35, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %20) #3
-  store i64 1, ptr %36, align 8, !tbaa !18
+  store i64 1, ptr %36, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %21) #3
-  store i32 0, ptr %37, align 4, !tbaa !22
+  store i32 0, ptr %37, align 4, !tbaa !24
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %22) #3
   %50 = load ptr, ptr %23, align 8
-  %51 = load i32, ptr %50, align 4, !tbaa !22
+  %51 = load i32, ptr %50, align 4, !tbaa !24
   call void @__kmpc_for_static_init_8(ptr addrspacecast (ptr addrspace(1) @3 to ptr), i32 %51, i32 33, ptr %37, ptr %34, ptr %35, ptr %36, i64 1, i64 1)
-  %52 = load i64, ptr %34, align 8, !tbaa !18
-  store i64 %52, ptr %29, align 8, !tbaa !18
+  %52 = load i64, ptr %34, align 8, !tbaa !20
+  store i64 %52, ptr %29, align 8, !tbaa !20
   br label %53
 
 53:                                               ; preds = %73, %46
-  %54 = load i64, ptr %29, align 8, !tbaa !18
-  %55 = load i64, ptr %26, align 8, !tbaa !18
+  %54 = load i64, ptr %29, align 8, !tbaa !20
+  %55 = load i64, ptr %26, align 8, !tbaa !20
   %56 = icmp ule i64 %54, %55
   br i1 %56, label %58, label %57
 
@@ -960,22 +983,22 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_omp_o
   br label %77
 
 58:                                               ; preds = %53
-  %59 = load i64, ptr %29, align 8, !tbaa !18
+  %59 = load i64, ptr %29, align 8, !tbaa !20
   %60 = mul nsw i64 %59, 1
   %61 = add nsw i64 0, %60
-  store i64 %61, ptr %38, align 8, !tbaa !18
-  %62 = load i64, ptr %38, align 8, !tbaa !18
+  store i64 %61, ptr %38, align 8, !tbaa !20
+  %62 = load i64, ptr %38, align 8, !tbaa !20
   %63 = srem i64 %62, 3
   %64 = icmp ne i64 %63, 0
   br i1 %64, label %65, label %71
 
 65:                                               ; preds = %58
-  %66 = load i64, ptr %38, align 8, !tbaa !18
+  %66 = load i64, ptr %38, align 8, !tbaa !20
   %67 = call noundef float @_ZL4wavefl(float noundef 1.000000e+00, i64 noundef %66) #15
-  %68 = load ptr, ptr %28, align 8, !tbaa !14
-  %69 = load i64, ptr %38, align 8, !tbaa !18
+  %68 = load ptr, ptr %28, align 8, !tbaa !16
+  %69 = load i64, ptr %38, align 8, !tbaa !20
   %70 = getelementptr inbounds float, ptr %68, i64 %69
-  store float %67, ptr %70, align 4, !tbaa !20
+  store float %67, ptr %70, align 4, !tbaa !22
   br label %71
 
 71:                                               ; preds = %65, %58
@@ -985,10 +1008,10 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_omp_o
   br label %73
 
 73:                                               ; preds = %72
-  %74 = load i64, ptr %29, align 8, !tbaa !18
-  %75 = load i64, ptr %36, align 8, !tbaa !18
+  %74 = load i64, ptr %29, align 8, !tbaa !20
+  %75 = load i64, ptr %36, align 8, !tbaa !20
   %76 = add nsw i64 %74, %75
-  store i64 %76, ptr %29, align 8, !tbaa !18
+  store i64 %76, ptr %29, align 8, !tbaa !20
   br label %53
 
 77:                                               ; preds = %57
@@ -996,7 +1019,7 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_omp_o
 
 78:                                               ; preds = %77
   %79 = load ptr, ptr %23, align 8
-  %80 = load i32, ptr %79, align 4, !tbaa !22
+  %80 = load i32, ptr %79, align 4, !tbaa !24
   call void @__kmpc_for_static_fini(ptr addrspacecast (ptr addrspace(1) @3 to ptr), i32 %80)
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %22) #3
   call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %21) #3
@@ -1012,6 +1035,597 @@ define internal void @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29_omp_o
   ret void
 }
 
+; Function Attrs: alwaysinline convergent mustprogress norecurse nounwind
+define weak_odr protected amdgpu_kernel void @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42(ptr noalias noundef %0, i64 noundef %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, ptr noundef %5, i64 noundef %6) #0 {
+  %8 = alloca ptr, align 8, addrspace(5)
+  %9 = alloca i64, align 8, addrspace(5)
+  %10 = alloca i64, align 8, addrspace(5)
+  %11 = alloca i64, align 8, addrspace(5)
+  %12 = alloca i64, align 8, addrspace(5)
+  %13 = alloca ptr, align 8, addrspace(5)
+  %14 = alloca i64, align 8, addrspace(5)
+  %15 = alloca i64, align 8, addrspace(5)
+  %16 = alloca i64, align 8, addrspace(5)
+  %17 = alloca i64, align 8, addrspace(5)
+  %18 = alloca i64, align 8, addrspace(5)
+  %19 = alloca i64, align 8, addrspace(5)
+  %20 = alloca i32, align 4, addrspace(5)
+  %21 = alloca i32, align 4, addrspace(5)
+  %22 = addrspacecast ptr addrspace(5) %8 to ptr
+  %23 = addrspacecast ptr addrspace(5) %9 to ptr
+  %24 = addrspacecast ptr addrspace(5) %10 to ptr
+  %25 = addrspacecast ptr addrspace(5) %11 to ptr
+  %26 = addrspacecast ptr addrspace(5) %12 to ptr
+  %27 = addrspacecast ptr addrspace(5) %13 to ptr
+  %28 = addrspacecast ptr addrspace(5) %14 to ptr
+  %29 = addrspacecast ptr addrspace(5) %15 to ptr
+  %30 = addrspacecast ptr addrspace(5) %16 to ptr
+  %31 = addrspacecast ptr addrspace(5) %17 to ptr
+  %32 = addrspacecast ptr addrspace(5) %18 to ptr
+  %33 = addrspacecast ptr addrspace(5) %19 to ptr
+  %34 = addrspacecast ptr addrspace(5) %20 to ptr
+  %35 = addrspacecast ptr addrspace(5) %21 to ptr
+  store ptr %0, ptr %22, align 8, !tbaa !16
+  store i64 %1, ptr %23, align 8, !tbaa !20
+  store i64 %2, ptr %24, align 8, !tbaa !20
+  store i64 %3, ptr %25, align 8, !tbaa !20
+  store i64 %4, ptr %26, align 8, !tbaa !20
+  store ptr %5, ptr %27, align 8, !tbaa !16
+  store i64 %6, ptr %28, align 8, !tbaa !20
+  %36 = call i32 @__kmpc_target_init(ptr addrspacecast (ptr addrspace(1) @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42_kernel_environment to ptr), ptr %0)
+  %37 = icmp eq i32 %36, -1
+  br i1 %37, label %38, label %51
+
+38:                                               ; preds = %7
+  %39 = call i32 @__kmpc_global_thread_num(ptr addrspacecast (ptr addrspace(1) @1 to ptr))
+  %40 = load i32, ptr %23, align 4, !tbaa !24
+  store i32 %40, ptr %29, align 4, !tbaa !24
+  %41 = load i64, ptr %29, align 8, !tbaa !20
+  %42 = load i32, ptr %24, align 4, !tbaa !24
+  store i32 %42, ptr %30, align 4, !tbaa !24
+  %43 = load i64, ptr %30, align 8, !tbaa !20
+  %44 = load i32, ptr %25, align 4, !tbaa !24
+  store i32 %44, ptr %31, align 4, !tbaa !24
+  %45 = load i64, ptr %31, align 8, !tbaa !20
+  %46 = load i32, ptr %26, align 4, !tbaa !24
+  store i32 %46, ptr %32, align 4, !tbaa !24
+  %47 = load i64, ptr %32, align 8, !tbaa !20
+  %48 = load ptr, ptr %27, align 8, !tbaa !16
+  %49 = load i64, ptr %28, align 8, !tbaa !20
+  store i64 %49, ptr %33, align 8, !tbaa !20
+  %50 = load i64, ptr %33, align 8, !tbaa !20
+  store i32 0, ptr %34, align 4
+  store i32 %39, ptr %35, align 4, !tbaa !24
+  call void @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42_omp_outlined(ptr %35, ptr %34, i64 %41, i64 %43, i64 %45, i64 %47, ptr %48, i64 %50) #3
+  call void @__kmpc_target_deinit()
+  ret void
+
+51:                                               ; preds = %7
+  ret void
+}
+
+; Function Attrs: alwaysinline convergent norecurse nounwind
+define internal void @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42_omp_outlined(ptr noalias noundef %0, ptr noalias noundef %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, i64 noundef %5, ptr noundef %6, i64 noundef %7) #1 {
+  %9 = alloca ptr, align 8, addrspace(5)
+  %10 = alloca ptr, align 8, addrspace(5)
+  %11 = alloca i64, align 8, addrspace(5)
+  %12 = alloca i64, align 8, addrspace(5)
+  %13 = alloca i64, align 8, addrspace(5)
+  %14 = alloca i64, align 8, addrspace(5)
+  %15 = alloca ptr, align 8, addrspace(5)
+  %16 = alloca i64, align 8, addrspace(5)
+  %17 = alloca i64, align 8, addrspace(5)
+  %18 = alloca i32, align 4, addrspace(5)
+  %19 = alloca i32, align 4, addrspace(5)
+  %20 = alloca i32, align 4, addrspace(5)
+  %21 = alloca i32, align 4, addrspace(5)
+  %22 = alloca i32, align 4, addrspace(5)
+  %23 = alloca i32, align 4, addrspace(5)
+  %24 = alloca i64, align 8, addrspace(5)
+  %25 = alloca i32, align 4, addrspace(5)
+  %26 = alloca i32, align 4, addrspace(5)
+  %27 = alloca i64, align 8, addrspace(5)
+  %28 = alloca i64, align 8, addrspace(5)
+  %29 = alloca i64, align 8, addrspace(5)
+  %30 = alloca i32, align 4, addrspace(5)
+  %31 = alloca i32, align 4, addrspace(5)
+  %32 = alloca i32, align 4, addrspace(5)
+  %33 = alloca i64, align 8, addrspace(5)
+  %34 = alloca i64, align 8, addrspace(5)
+  %35 = alloca i64, align 8, addrspace(5)
+  %36 = alloca i64, align 8, addrspace(5)
+  %37 = alloca i64, align 8, addrspace(5)
+  %38 = alloca [8 x ptr], align 8, addrspace(5)
+  %39 = addrspacecast ptr addrspace(5) %9 to ptr
+  %40 = addrspacecast ptr addrspace(5) %10 to ptr
+  %41 = addrspacecast ptr addrspace(5) %11 to ptr
+  %42 = addrspacecast ptr addrspace(5) %12 to ptr
+  %43 = addrspacecast ptr addrspace(5) %13 to ptr
+  %44 = addrspacecast ptr addrspace(5) %14 to ptr
+  %45 = addrspacecast ptr addrspace(5) %15 to ptr
+  %46 = addrspacecast ptr addrspace(5) %16 to ptr
+  %47 = addrspacecast ptr addrspace(5) %17 to ptr
+  %48 = addrspacecast ptr addrspace(5) %18 to ptr
+  %49 = addrspacecast ptr addrspace(5) %19 to ptr
+  %50 = addrspacecast ptr addrspace(5) %20 to ptr
+  %51 = addrspacecast ptr addrspace(5) %21 to ptr
+  %52 = addrspacecast ptr addrspace(5) %22 to ptr
+  %53 = addrspacecast ptr addrspace(5) %23 to ptr
+  %54 = addrspacecast ptr addrspace(5) %24 to ptr
+  %55 = addrspacecast ptr addrspace(5) %25 to ptr
+  %56 = addrspacecast ptr addrspace(5) %26 to ptr
+  %57 = addrspacecast ptr addrspace(5) %27 to ptr
+  %58 = addrspacecast ptr addrspace(5) %28 to ptr
+  %59 = addrspacecast ptr addrspace(5) %29 to ptr
+  %60 = addrspacecast ptr addrspace(5) %30 to ptr
+  %61 = addrspacecast ptr addrspace(5) %31 to ptr
+  %62 = addrspacecast ptr addrspace(5) %32 to ptr
+  %63 = addrspacecast ptr addrspace(5) %33 to ptr
+  %64 = addrspacecast ptr addrspace(5) %34 to ptr
+  %65 = addrspacecast ptr addrspace(5) %35 to ptr
+  %66 = addrspacecast ptr addrspace(5) %36 to ptr
+  %67 = addrspacecast ptr addrspace(5) %37 to ptr
+  %68 = addrspacecast ptr addrspace(5) %38 to ptr
+  store ptr %0, ptr %39, align 8, !tbaa !16
+  store ptr %1, ptr %40, align 8, !tbaa !16
+  store i64 %2, ptr %41, align 8, !tbaa !20
+  store i64 %3, ptr %42, align 8, !tbaa !20
+  store i64 %4, ptr %43, align 8, !tbaa !20
+  store i64 %5, ptr %44, align 8, !tbaa !20
+  store ptr %6, ptr %45, align 8, !tbaa !16
+  store i64 %7, ptr %46, align 8, !tbaa !20
+  call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %17) #3
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %20) #3
+  %69 = load i32, ptr %42, align 4, !tbaa !24
+  %70 = add nsw i32 %69, 1
+  store i32 %70, ptr %50, align 4, !tbaa !24
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %21) #3
+  %71 = load i32, ptr %41, align 4, !tbaa !24
+  %72 = add nsw i32 %71, 2
+  store i32 %72, ptr %51, align 4, !tbaa !24
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %22) #3
+  %73 = load i32, ptr %44, align 4, !tbaa !24
+  %74 = add nsw i32 %73, 1
+  store i32 %74, ptr %52, align 4, !tbaa !24
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %23) #3
+  %75 = load i32, ptr %43, align 4, !tbaa !24
+  %76 = add nsw i32 %75, 2
+  store i32 %76, ptr %53, align 4, !tbaa !24
+  call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %24) #3
+  %77 = load i32, ptr %51, align 4, !tbaa !24
+  %78 = load i32, ptr %50, align 4, !tbaa !24
+  %79 = sub i32 %77, %78
+  %80 = sub i32 %79, 1
+  %81 = add i32 %80, 1
+  %82 = udiv i32 %81, 1
+  %83 = zext i32 %82 to i64
+  %84 = load i32, ptr %53, align 4, !tbaa !24
+  %85 = load i32, ptr %52, align 4, !tbaa !24
+  %86 = sub i32 %84, %85
+  %87 = sub i32 %86, 1
+  %88 = add i32 %87, 1
+  %89 = udiv i32 %88, 1
+  %90 = zext i32 %89 to i64
+  %91 = mul nsw i64 %83, %90
+  %92 = sub nsw i64 %91, 1
+  store i64 %92, ptr %54, align 8, !tbaa !20
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %25) #3
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %26) #3
+  %93 = load i32, ptr %50, align 4, !tbaa !24
+  store i32 %93, ptr %55, align 4, !tbaa !24
+  %94 = load i32, ptr %52, align 4, !tbaa !24
+  store i32 %94, ptr %56, align 4, !tbaa !24
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %26) #3
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %25) #3
+  %95 = load i32, ptr %50, align 4, !tbaa !24
+  %96 = load i32, ptr %51, align 4, !tbaa !24
+  %97 = icmp slt i32 %95, %96
+  br i1 %97, label %98, label %179
+
+98:                                               ; preds = %8
+  %99 = load i32, ptr %52, align 4, !tbaa !24
+  %100 = load i32, ptr %53, align 4, !tbaa !24
+  %101 = icmp slt i32 %99, %100
+  br i1 %101, label %102, label %179
+
+102:                                              ; preds = %98
+  call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %27) #3
+  store i64 0, ptr %57, align 8, !tbaa !20
+  call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %28) #3
+  %103 = load i64, ptr %54, align 8, !tbaa !20
+  store i64 %103, ptr %58, align 8, !tbaa !20
+  call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %29) #3
+  store i64 1, ptr %59, align 8, !tbaa !20
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %30) #3
+  store i32 0, ptr %60, align 4, !tbaa !24
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %31) #3
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %32) #3
+  %104 = call i32 @__kmpc_get_hardware_num_threads_in_block()
+  %105 = zext i32 %104 to i64
+  %106 = load ptr, ptr %39, align 8
+  %107 = load i32, ptr %106, align 4, !tbaa !24
+  call void @__kmpc_distribute_static_init_8(ptr addrspacecast (ptr addrspace(1) @2 to ptr), i32 %107, i32 91, ptr %60, ptr %57, ptr %58, ptr %59, i64 1, i64 %105)
+  %108 = load i64, ptr %58, align 8, !tbaa !20
+  %109 = load i64, ptr %54, align 8, !tbaa !20
+  %110 = icmp sgt i64 %108, %109
+  br i1 %110, label %111, label %113
+
+111:                                              ; preds = %102
+  %112 = load i64, ptr %54, align 8, !tbaa !20
+  br label %115
+
+113:                                              ; preds = %102
+  %114 = load i64, ptr %58, align 8, !tbaa !20
+  br label %115
+
+115:                                              ; preds = %113, %111
+  %116 = phi i64 [ %112, %111 ], [ %114, %113 ]
+  store i64 %116, ptr %58, align 8, !tbaa !20
+  %117 = load i64, ptr %57, align 8, !tbaa !20
+  store i64 %117, ptr %47, align 8, !tbaa !20
+  br label %118
+
+118:                                              ; preds = %172, %115
+  %119 = load i64, ptr %47, align 8, !tbaa !20
+  %120 = load i64, ptr %54, align 8, !tbaa !20
+  %121 = add nsw i64 %120, 1
+  %122 = icmp slt i64 %119, %121
+  br i1 %122, label %124, label %123
+
+123:                                              ; preds = %118
+  br label %175
+
+124:                                              ; preds = %118
+  %125 = load i64, ptr %57, align 8
+  %126 = load i64, ptr %58, align 8
+  %127 = load i32, ptr %41, align 4, !tbaa !24
+  store i32 %127, ptr %63, align 4, !tbaa !24
+  %128 = load i64, ptr %63, align 8, !tbaa !20
+  %129 = load i32, ptr %42, align 4, !tbaa !24
+  store i32 %129, ptr %64, align 4, !tbaa !24
+  %130 = load i64, ptr %64, align 8, !tbaa !20
+  %131 = load i32, ptr %43, align 4, !tbaa !24
+  store i32 %131, ptr %65, align 4, !tbaa !24
+  %132 = load i64, ptr %65, align 8, !tbaa !20
+  %133 = load i32, ptr %44, align 4, !tbaa !24
+  store i32 %133, ptr %66, align 4, !tbaa !24
+  %134 = load i64, ptr %66, align 8, !tbaa !20
+  %135 = load ptr, ptr %45, align 8, !tbaa !16
+  %136 = load i64, ptr %46, align 8, !tbaa !20
+  store i64 %136, ptr %67, align 8, !tbaa !20
+  %137 = load i64, ptr %67, align 8, !tbaa !20
+  %138 = getelementptr inbounds [8 x ptr], ptr %68, i64 0, i64 0
+  %139 = inttoptr i64 %125 to ptr
+  store ptr %139, ptr %138, align 8, !tbaa !16
+  %140 = getelementptr inbounds [8 x ptr], ptr %68, i64 0, i64 1
+  %141 = inttoptr i64 %126 to ptr
+  store ptr %141, ptr %140, align 8, !tbaa !16
+  %142 = getelementptr inbounds [8 x ptr], ptr %68, i64 0, i64 2
+  %143 = inttoptr i64 %128 to ptr
+  store ptr %143, ptr %142, align 8, !tbaa !16
+  %144 = getelementptr inbounds [8 x ptr], ptr %68, i64 0, i64 3
+  %145 = inttoptr i64 %130 to ptr
+  store ptr %145, ptr %144, align 8, !tbaa !16
+  %146 = getelementptr inbounds [8 x ptr], ptr %68, i64 0, i64 4
+  %147 = inttoptr i64 %132 to ptr
+  store ptr %147, ptr %146, align 8, !tbaa !16
+  %148 = getelementptr inbounds [8 x ptr], ptr %68, i64 0, i64 5
+  %149 = inttoptr i64 %134 to ptr
+  store ptr %149, ptr %148, align 8, !tbaa !16
+  %150 = getelementptr inbounds [8 x ptr], ptr %68, i64 0, i64 6
+  store ptr %135, ptr %150, align 8, !tbaa !16
+  %151 = getelementptr inbounds [8 x ptr], ptr %68, i64 0, i64 7
+  %152 = inttoptr i64 %137 to ptr
+  store ptr %152, ptr %151, align 8, !tbaa !16
+  %153 = load ptr, ptr %39, align 8
+  %154 = load i32, ptr %153, align 4, !tbaa !24
+  call void @__kmpc_parallel_51(ptr addrspacecast (ptr addrspace(1) @1 to ptr), i32 %154, i32 1, i32 -1, i32 -1, ptr @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42_omp_outlined_omp_outlined, ptr null, ptr %68, i64 8)
+  br label %155
+
+155:                                              ; preds = %124
+  %156 = load i64, ptr %47, align 8, !tbaa !20
+  %157 = load i64, ptr %59, align 8, !tbaa !20
+  %158 = add nsw i64 %156, %157
+  store i64 %158, ptr %47, align 8, !tbaa !20
+  %159 = load i64, ptr %57, align 8, !tbaa !20
+  %160 = load i64, ptr %59, align 8, !tbaa !20
+  %161 = add nsw i64 %159, %160
+  store i64 %161, ptr %57, align 8, !tbaa !20
+  %162 = load i64, ptr %58, align 8, !tbaa !20
+  %163 = load i64, ptr %59, align 8, !tbaa !20
+  %164 = add nsw i64 %162, %163
+  store i64 %164, ptr %58, align 8, !tbaa !20
+  %165 = load i64, ptr %58, align 8, !tbaa !20
+  %166 = load i64, ptr %54, align 8, !tbaa !20
+  %167 = icmp sgt i64 %165, %166
+  br i1 %167, label %168, label %170
+
+168:                                              ; preds = %155
+  %169 = load i64, ptr %54, align 8, !tbaa !20
+  br label %172
+
+170:                                              ; preds = %155
+  %171 = load i64, ptr %58, align 8, !tbaa !20
+  br label %172
+
+172:                                              ; preds = %170, %168
+  %173 = phi i64 [ %169, %168 ], [ %171, %170 ]
+  store i64 %173, ptr %58, align 8, !tbaa !20
+  %174 = load i64, ptr %57, align 8, !tbaa !20
+  store i64 %174, ptr %47, align 8, !tbaa !20
+  br label %118
+
+175:                                              ; preds = %123
+  br label %176
+
+176:                                              ; preds = %175
+  %177 = load ptr, ptr %39, align 8
+  %178 = load i32, ptr %177, align 4, !tbaa !24
+  call void @__kmpc_distribute_static_fini(ptr addrspacecast (ptr addrspace(1) @2 to ptr), i32 %178)
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %32) #3
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %31) #3
+  br label %179
+
+179:                                              ; preds = %176, %98, %8
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %30) #3
+  call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %29) #3
+  call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %28) #3
+  call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %27) #3
+  call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %24) #3
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %23) #3
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %22) #3
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %21) #3
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %20) #3
+  call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %17) #3
+  ret void
+}
+
+; Function Attrs: alwaysinline convergent norecurse nounwind
+define internal void @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42_omp_outlined_omp_outlined(ptr noalias noundef %0, ptr noalias noundef %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, i64 noundef %5, i64 noundef %6, i64 noundef %7, ptr noundef %8, i64 noundef %9) #1 {
+  %11 = alloca ptr, align 8, addrspace(5)
+  %12 = alloca ptr, align 8, addrspace(5)
+  %13 = alloca i64, align 8, addrspace(5)
+  %14 = alloca i64, align 8, addrspace(5)
+  %15 = alloca i64, align 8, addrspace(5)
+  %16 = alloca i64, align 8, addrspace(5)
+  %17 = alloca i64, align 8, addrspace(5)
+  %18 = alloca i64, align 8, addrspace(5)
+  %19 = alloca ptr, align 8, addrspace(5)
+  %20 = alloca i64, align 8, addrspace(5)
+  %21 = alloca i64, align 8, addrspace(5)
+  %22 = alloca i32, align 4, addrspace(5)
+  %23 = alloca i32, align 4, addrspace(5)
+  %24 = alloca i32, align 4, addrspace(5)
+  %25 = alloca i32, align 4, addrspace(5)
+  %26 = alloca i32, align 4, addrspace(5)
+  %27 = alloca i32, align 4, addrspace(5)
+  %28 = alloca i64, align 8, addrspace(5)
+  %29 = alloca i32, align 4, addrspace(5)
+  %30 = alloca i32, align 4, addrspace(5)
+  %31 = alloca i64, align 8, addrspace(5)
+  %32 = alloca i64, align 8, addrspace(5)
+  %33 = alloca i64, align 8, addrspace(5)
+  %34 = alloca i32, align 4, addrspace(5)
+  %35 = alloca i32, align 4, addrspace(5)
+  %36 = alloca i32, align 4, addrspace(5)
+  %37 = addrspacecast ptr addrspace(5) %11 to ptr
+  %38 = addrspacecast ptr addrspace(5) %12 to ptr
+  %39 = addrspacecast ptr addrspace(5) %13 to ptr
+  %40 = addrspacecast ptr addrspace(5) %14 to ptr
+  %41 = addrspacecast ptr addrspace(5) %15 to ptr
+  %42 = addrspacecast ptr addrspace(5) %16 to ptr
+  %43 = addrspacecast ptr addrspace(5) %17 to ptr
+  %44 = addrspacecast ptr addrspace(5) %18 to ptr
+  %45 = addrspacecast ptr addrspace(5) %19 to ptr
+  %46 = addrspacecast ptr addrspace(5) %20 to ptr
+  %47 = addrspacecast ptr addrspace(5) %21 to ptr
+  %48 = addrspacecast ptr addrspace(5) %22 to ptr
+  %49 = addrspacecast ptr addrspace(5) %23 to ptr
+  %50 = addrspacecast ptr addrspace(5) %24 to ptr
+  %51 = addrspacecast ptr addrspace(5) %25 to ptr
+  %52 = addrspacecast ptr addrspace(5) %26 to ptr
+  %53 = addrspacecast ptr addrspace(5) %27 to ptr
+  %54 = addrspacecast ptr addrspace(5) %28 to ptr
+  %55 = addrspacecast ptr addrspace(5) %29 to ptr
+  %56 = addrspacecast ptr addrspace(5) %30 to ptr
+  %57 = addrspacecast ptr addrspace(5) %31 to ptr
+  %58 = addrspacecast ptr addrspace(5) %32 to ptr
+  %59 = addrspacecast ptr addrspace(5) %33 to ptr
+  %60 = addrspacecast ptr addrspace(5) %34 to ptr
+  %61 = addrspacecast ptr addrspace(5) %35 to ptr
+  %62 = addrspacecast ptr addrspace(5) %36 to ptr
+  store ptr %0, ptr %37, align 8, !tbaa !16
+  store ptr %1, ptr %38, align 8, !tbaa !16
+  store i64 %2, ptr %39, align 8, !tbaa !20
+  store i64 %3, ptr %40, align 8, !tbaa !20
+  store i64 %4, ptr %41, align 8, !tbaa !20
+  store i64 %5, ptr %42, align 8, !tbaa !20
+  store i64 %6, ptr %43, align 8, !tbaa !20
+  store i64 %7, ptr %44, align 8, !tbaa !20
+  store ptr %8, ptr %45, align 8, !tbaa !16
+  store i64 %9, ptr %46, align 8, !tbaa !20
+  call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %21) #3
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %24) #3
+  %63 = load i32, ptr %42, align 4, !tbaa !24
+  %64 = add nsw i32 %63, 1
+  store i32 %64, ptr %50, align 4, !tbaa !24
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %25) #3
+  %65 = load i32, ptr %41, align 4, !tbaa !24
+  %66 = add nsw i32 %65, 2
+  store i32 %66, ptr %51, align 4, !tbaa !24
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %26) #3
+  %67 = load i32, ptr %44, align 4, !tbaa !24
+  %68 = add nsw i32 %67, 1
+  store i32 %68, ptr %52, align 4, !tbaa !24
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %27) #3
+  %69 = load i32, ptr %43, align 4, !tbaa !24
+  %70 = add nsw i32 %69, 2
+  store i32 %70, ptr %53, align 4, !tbaa !24
+  call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %28) #3
+  %71 = load i32, ptr %51, align 4, !tbaa !24
+  %72 = load i32, ptr %50, align 4, !tbaa !24
+  %73 = sub i32 %71, %72
+  %74 = sub i32 %73, 1
+  %75 = add i32 %74, 1
+  %76 = udiv i32 %75, 1
+  %77 = zext i32 %76 to i64
+  %78 = load i32, ptr %53, align 4, !tbaa !24
+  %79 = load i32, ptr %52, align 4, !tbaa !24
+  %80 = sub i32 %78, %79
+  %81 = sub i32 %80, 1
+  %82 = add i32 %81, 1
+  %83 = udiv i32 %82, 1
+  %84 = zext i32 %83 to i64
+  %85 = mul nsw i64 %77, %84
+  %86 = sub nsw i64 %85, 1
+  store i64 %86, ptr %54, align 8, !tbaa !20
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %29) #3
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %30) #3
+  %87 = load i32, ptr %50, align 4, !tbaa !24
+  store i32 %87, ptr %55, align 4, !tbaa !24
+  %88 = load i32, ptr %52, align 4, !tbaa !24
+  store i32 %88, ptr %56, align 4, !tbaa !24
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %30) #3
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %29) #3
+  %89 = load i32, ptr %50, align 4, !tbaa !24
+  %90 = load i32, ptr %51, align 4, !tbaa !24
+  %91 = icmp slt i32 %89, %90
+  br i1 %91, label %92, label %173
+
+92:                                               ; preds = %10
+  %93 = load i32, ptr %52, align 4, !tbaa !24
+  %94 = load i32, ptr %53, align 4, !tbaa !24
+  %95 = icmp slt i32 %93, %94
+  br i1 %95, label %96, label %173
+
+96:                                               ; preds = %92
+  call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %31) #3
+  store i64 0, ptr %57, align 8, !tbaa !20
+  call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %32) #3
+  %97 = load i64, ptr %54, align 8, !tbaa !20
+  store i64 %97, ptr %58, align 8, !tbaa !20
+  %98 = load i64, ptr %39, align 8, !tbaa !20
+  %99 = load i64, ptr %40, align 8, !tbaa !20
+  store i64 %98, ptr %57, align 8, !tbaa !20
+  store i64 %99, ptr %58, align 8, !tbaa !20
+  call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %33) #3
+  store i64 1, ptr %59, align 8, !tbaa !20
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %34) #3
+  store i32 0, ptr %60, align 4, !tbaa !24
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %35) #3
+  call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %36) #3
+  %100 = load ptr, ptr %37, align 8
+  %101 = load i32, ptr %100, align 4, !tbaa !24
+  call void @__kmpc_for_static_init_8(ptr addrspacecast (ptr addrspace(1) @3 to ptr), i32 %101, i32 33, ptr %60, ptr %57, ptr %58, ptr %59, i64 1, i64 1)
+  %102 = load i64, ptr %57, align 8, !tbaa !20
+  store i64 %102, ptr %47, align 8, !tbaa !20
+  br label %103
+
+103:                                              ; preds = %165, %96
+  %104 = load i64, ptr %47, align 8, !tbaa !20
+  %105 = load i64, ptr %40, align 8, !tbaa !20
+  %106 = icmp ule i64 %104, %105
+  br i1 %106, label %108, label %107
+
+107:                                              ; preds = %103
+  br label %169
+
+108:                                              ; preds = %103
+  %109 = load i32, ptr %50, align 4, !tbaa !24
+  %110 = sext i32 %109 to i64
+  %111 = load i64, ptr %47, align 8, !tbaa !20
+  %112 = load i32, ptr %53, align 4, !tbaa !24
+  %113 = load i32, ptr %52, align 4, !tbaa !24
+  %114 = sub i32 %112, %113
+  %115 = sub i32 %114, 1
+  %116 = add i32 %115, 1
+  %117 = udiv i32 %116, 1
+  %118 = mul i32 1, %117
+  %119 = zext i32 %118 to i64
+  %120 = sdiv i64 %111, %119
+  %121 = mul nsw i64 %120, 1
+  %122 = add nsw i64 %110, %121
+  %123 = trunc i64 %122 to i32
+  store i32 %123, ptr %61, align 4, !tbaa !24
+  %124 = load i32, ptr %52, align 4, !tbaa !24
+  %125 = sext i32 %124 to i64
+  %126 = load i64, ptr %47, align 8, !tbaa !20
+  %127 = load i64, ptr %47, align 8, !tbaa !20
+  %128 = load i32, ptr %53, align 4, !tbaa !24
+  %129 = load i32, ptr %52, align 4, !tbaa !24
+  %130 = sub i32 %128, %129
+  %131 = sub i32 %130, 1
+  %132 = add i32 %131, 1
+  %133 = udiv i32 %132, 1
+  %134 = mul i32 1, %133
+  %135 = zext i32 %134 to i64
+  %136 = sdiv i64 %127, %135
+  %137 = load i32, ptr %53, align 4, !tbaa !24
+  %138 = load i32, ptr %52, align 4, !tbaa !24
+  %139 = sub i32 %137, %138
+  %140 = sub i32 %139, 1
+  %141 = add i32 %140, 1
+  %142 = udiv i32 %141, 1
+  %143 = mul i32 1, %142
+  %144 = zext i32 %143 to i64
+  %145 = mul nsw i64 %136, %144
+  %146 = sub nsw i64 %126, %145
+  %147 = mul nsw i64 %146, 1
+  %148 = add nsw i64 %125, %147
+  %149 = trunc i64 %148 to i32
+  store i32 %149, ptr %62, align 4, !tbaa !24
+  %150 = load i32, ptr %62, align 4, !tbaa !24
+  %151 = load i32, ptr %61, align 4, !tbaa !24
+  %152 = add nsw i32 %150, %151
+  %153 = sext i32 %152 to i64
+  %154 = call noundef float @_ZL4wavefl(float noundef 3.000000e+00, i64 noundef %153) #15
+  %155 = load ptr, ptr %45, align 8, !tbaa !16
+  %156 = load i32, ptr %62, align 4, !tbaa !24
+  %157 = sext i32 %156 to i64
+  %158 = load i32, ptr %61, align 4, !tbaa !24
+  %159 = sext i32 %158 to i64
+  %160 = load i64, ptr %46, align 8, !tbaa !20
+  %161 = mul i64 %159, %160
+  %162 = add i64 %157, %161
+  %163 = getelementptr inbounds float, ptr %155, i64 %162
+  store float %154, ptr %163, align 4, !tbaa !22
+  br label %164
+
+164:                                              ; preds = %108
+  br label %165
+
+165:                                              ; preds = %164
+  %166 = load i64, ptr %47, align 8, !tbaa !20
+  %167 = load i64, ptr %59, align 8, !tbaa !20
+  %168 = add nsw i64 %166, %167
+  store i64 %168, ptr %47, align 8, !tbaa !20
+  br label %103
+
+169:                                              ; preds = %107
+  br label %170
+
+170:                                              ; preds = %169
+  %171 = load ptr, ptr %37, align 8
+  %172 = load i32, ptr %171, align 4, !tbaa !24
+  call void @__kmpc_for_static_fini(ptr addrspacecast (ptr addrspace(1) @3 to ptr), i32 %172)
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %36) #3
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %35) #3
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %34) #3
+  call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %33) #3
+  call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %32) #3
+  call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %31) #3
+  br label %173
+
+173:                                              ; preds = %170, %92, %10
+  call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %28) #3
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %27) #3
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %26) #3
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %25) #3
+  call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %24) #3
+  call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %21) #3
+  ret void
+}
+
 ; Function Attrs: convergent mustprogress nounwind
 define internal noundef ptr @ompx__peer_addr(i32 noundef %0, ptr noundef %1) #6 {
   %3 = alloca ptr, align 8, addrspace(5)
@@ -1020,11 +1634,11 @@ define internal noundef ptr @ompx__peer_addr(i32 noundef %0, ptr noundef %1) #6 
   %6 = addrspacecast ptr addrspace(5) %3 to ptr
   %7 = addrspacecast ptr addrspace(5) %4 to ptr
   %8 = addrspacecast ptr addrspace(5) %5 to ptr
-  store i32 %0, ptr %7, align 4, !tbaa !22
-  store ptr %1, ptr %8, align 8, !tbaa !14
+  store i32 %0, ptr %7, align 4, !tbaa !24
+  store ptr %1, ptr %8, align 8, !tbaa !16
   %9 = call noundef ptr @_ZL18ompx__pipeline_ctxv() #15
-  %10 = load i32, ptr %7, align 4, !tbaa !22
-  %11 = load ptr, ptr %8, align 8, !tbaa !14
+  %10 = load i32, ptr %7, align 4, !tbaa !24
+  %11 = load ptr, ptr %8, align 8, !tbaa !16
   %12 = call noundef ptr @_ZL15ompx__peer_basePN4gicc9DeviceCtxEiPv(ptr noundef %9, i32 noundef %10, ptr noundef %11) #15
   ret ptr %12
 }
@@ -1043,17 +1657,17 @@ define internal noundef ptr @_ZL15ompx__peer_basePN4gicc9DeviceCtxEiPv(ptr nound
   %13 = addrspacecast ptr addrspace(5) %7 to ptr
   %14 = addrspacecast ptr addrspace(5) %8 to ptr
   %15 = addrspacecast ptr addrspace(5) %9 to ptr
-  store ptr %0, ptr %11, align 8, !tbaa !14
-  store i32 %1, ptr %12, align 4, !tbaa !22
-  store ptr %2, ptr %13, align 8, !tbaa !14
-  %16 = load i32, ptr %12, align 4, !tbaa !22
+  store ptr %0, ptr %11, align 8, !tbaa !16
+  store i32 %1, ptr %12, align 4, !tbaa !24
+  store ptr %2, ptr %13, align 8, !tbaa !16
+  %16 = load i32, ptr %12, align 4, !tbaa !24
   %17 = icmp slt i32 %16, 0
   br i1 %17, label %23, label %18
 
 18:                                               ; preds = %3
-  %19 = load ptr, ptr %11, align 8, !tbaa !14
+  %19 = load ptr, ptr %11, align 8, !tbaa !16
   %20 = getelementptr inbounds %"struct.gicc::DeviceCtx", ptr %19, i32 0, i32 5
-  %21 = load ptr, ptr %20, align 8, !tbaa !24
+  %21 = load ptr, ptr %20, align 8, !tbaa !26
   %22 = icmp eq ptr %21, null
   br i1 %22, label %23, label %24
 
@@ -1063,23 +1677,23 @@ define internal noundef ptr @_ZL15ompx__peer_basePN4gicc9DeviceCtxEiPv(ptr nound
 
 24:                                               ; preds = %18
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %8) #3
-  %25 = load ptr, ptr %11, align 8, !tbaa !14
+  %25 = load ptr, ptr %11, align 8, !tbaa !16
   %26 = getelementptr inbounds %"struct.gicc::DeviceCtx", ptr %25, i32 0, i32 5
-  %27 = load ptr, ptr %26, align 8, !tbaa !24
-  %28 = load i32, ptr %12, align 4, !tbaa !22
-  %29 = load ptr, ptr %11, align 8, !tbaa !14
+  %27 = load ptr, ptr %26, align 8, !tbaa !26
+  %28 = load i32, ptr %12, align 4, !tbaa !24
+  %29 = load ptr, ptr %11, align 8, !tbaa !16
   %30 = getelementptr inbounds %"struct.gicc::DeviceCtx", ptr %29, i32 0, i32 6
-  %31 = load i32, ptr %30, align 8, !tbaa !26
+  %31 = load i32, ptr %30, align 8, !tbaa !28
   %32 = mul nsw i32 %28, %31
-  %33 = load ptr, ptr %11, align 8, !tbaa !14
+  %33 = load ptr, ptr %11, align 8, !tbaa !16
   %34 = getelementptr inbounds %"struct.gicc::DeviceCtx", ptr %33, i32 0, i32 8
-  %35 = load i32, ptr %34, align 8, !tbaa !27
+  %35 = load i32, ptr %34, align 8, !tbaa !29
   %36 = add nsw i32 %32, %35
   %37 = sext i32 %36 to i64
   %38 = getelementptr inbounds ptr, ptr %27, i64 %37
-  %39 = load ptr, ptr %38, align 8, !tbaa !14
-  store ptr %39, ptr %14, align 8, !tbaa !14
-  %40 = load ptr, ptr %14, align 8, !tbaa !14
+  %39 = load ptr, ptr %38, align 8, !tbaa !16
+  store ptr %39, ptr %14, align 8, !tbaa !16
+  %40 = load ptr, ptr %14, align 8, !tbaa !16
   %41 = icmp eq ptr %40, null
   br i1 %41, label %42, label %43
 
@@ -1089,11 +1703,11 @@ define internal noundef ptr @_ZL15ompx__peer_basePN4gicc9DeviceCtxEiPv(ptr nound
   br label %53
 
 43:                                               ; preds = %24
-  %44 = load ptr, ptr %14, align 8, !tbaa !14
-  %45 = load ptr, ptr %13, align 8, !tbaa !14
-  %46 = load ptr, ptr %11, align 8, !tbaa !14
+  %44 = load ptr, ptr %14, align 8, !tbaa !16
+  %45 = load ptr, ptr %13, align 8, !tbaa !16
+  %46 = load ptr, ptr %11, align 8, !tbaa !16
   %47 = getelementptr inbounds %"struct.gicc::DeviceCtx", ptr %46, i32 0, i32 7
-  %48 = load ptr, ptr %47, align 8, !tbaa !28
+  %48 = load ptr, ptr %47, align 8, !tbaa !30
   %49 = ptrtoint ptr %45 to i64
   %50 = ptrtoint ptr %48 to i64
   %51 = sub i64 %49, %50
@@ -1119,9 +1733,9 @@ define internal noundef ptr @_ZL18ompx__pipeline_ctxv() #7 {
   %4 = addrspacecast ptr addrspace(5) %1 to ptr
   %5 = addrspacecast ptr addrspace(5) %2 to ptr
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %2) #3
-  %6 = load ptr, ptr addrspacecast (ptr addrspace(1) @_ZL9ompx__ctx to ptr), align 8, !tbaa !14
-  store ptr %6, ptr %5, align 8, !tbaa !14
-  %7 = load ptr, ptr %5, align 8, !tbaa !14
+  %6 = load ptr, ptr addrspacecast (ptr addrspace(1) @_ZL9ompx__ctx to ptr), align 8, !tbaa !16
+  store ptr %6, ptr %5, align 8, !tbaa !16
+  %7 = load ptr, ptr %5, align 8, !tbaa !16
   %8 = icmp eq ptr %7, null
   br i1 %8, label %9, label %19
 
@@ -1144,7 +1758,7 @@ define internal noundef ptr @_ZL18ompx__pipeline_ctxv() #7 {
   br label %19
 
 19:                                               ; preds = %9, %0
-  %20 = load ptr, ptr %5, align 8, !tbaa !14
+  %20 = load ptr, ptr %5, align 8, !tbaa !16
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %2) #3
   ret ptr %20
 }
@@ -1169,11 +1783,11 @@ define internal void @ompx__block_put_one(i32 noundef %0, ptr noundef %1, ptr no
   %10 = addrspacecast ptr addrspace(5) %6 to ptr
   %11 = addrspacecast ptr addrspace(5) %7 to ptr
   %12 = addrspacecast ptr addrspace(5) %8 to ptr
-  store i32 %0, ptr %9, align 4, !tbaa !22
-  store ptr %1, ptr %10, align 8, !tbaa !14
-  store ptr %2, ptr %11, align 8, !tbaa !14
-  store i64 %3, ptr %12, align 8, !tbaa !18
-  %13 = load i32, ptr %9, align 4, !tbaa !22
+  store i32 %0, ptr %9, align 4, !tbaa !24
+  store ptr %1, ptr %10, align 8, !tbaa !16
+  store ptr %2, ptr %11, align 8, !tbaa !16
+  store i64 %3, ptr %12, align 8, !tbaa !20
+  %13 = load i32, ptr %9, align 4, !tbaa !24
   %14 = icmp sge i32 %13, 0
   br i1 %14, label %15, label %23
 
@@ -1183,10 +1797,10 @@ define internal void @ompx__block_put_one(i32 noundef %0, ptr noundef %1, ptr no
 
 17:                                               ; preds = %15
   %18 = call noundef ptr @_ZL18ompx__pipeline_ctxv() #15
-  %19 = load i32, ptr %9, align 4, !tbaa !22
-  %20 = load ptr, ptr %10, align 8, !tbaa !14
-  %21 = load ptr, ptr %11, align 8, !tbaa !14
-  %22 = load i64, ptr %12, align 8, !tbaa !18
+  %19 = load i32, ptr %9, align 4, !tbaa !24
+  %20 = load ptr, ptr %10, align 8, !tbaa !16
+  %21 = load ptr, ptr %11, align 8, !tbaa !16
+  %22 = load i64, ptr %12, align 8, !tbaa !20
   call void @_ZL15ompx__proxy_putPN4gicc9DeviceCtxEiPvPKvm(ptr noundef %18, i32 noundef %19, ptr noundef %20, ptr noundef %21, i64 noundef %22) #15
   br label %23
 
@@ -1238,31 +1852,31 @@ define internal void @_ZL15ompx__proxy_putPN4gicc9DeviceCtxEiPvPKvm(ptr noundef 
   %13 = addrspacecast ptr addrspace(5) %8 to ptr
   %14 = addrspacecast ptr addrspace(5) %9 to ptr
   %15 = addrspacecast ptr addrspace(5) %10 to ptr
-  store ptr %0, ptr %11, align 8, !tbaa !14
-  store i32 %1, ptr %12, align 4, !tbaa !22
-  store ptr %2, ptr %13, align 8, !tbaa !14
-  store ptr %3, ptr %14, align 8, !tbaa !14
-  store i64 %4, ptr %15, align 8, !tbaa !18
-  %16 = load ptr, ptr %11, align 8, !tbaa !14
+  store ptr %0, ptr %11, align 8, !tbaa !16
+  store i32 %1, ptr %12, align 4, !tbaa !24
+  store ptr %2, ptr %13, align 8, !tbaa !16
+  store ptr %3, ptr %14, align 8, !tbaa !16
+  store i64 %4, ptr %15, align 8, !tbaa !20
+  %16 = load ptr, ptr %11, align 8, !tbaa !16
   %17 = call noundef ptr @_ZN4gicc3omp6detail12lane_to_ringEPNS_9DeviceCtxEi(ptr noundef %16, i32 noundef 0) #15
   %18 = icmp eq ptr %17, null
   br i1 %18, label %19, label %32
 
 19:                                               ; preds = %5
-  %20 = load i32, ptr %12, align 4, !tbaa !22
+  %20 = load i32, ptr %12, align 4, !tbaa !24
   %21 = call ptr @printf_allocate(i32 125)
   %22 = addrspacecast ptr %21 to ptr addrspace(1)
-  %23 = getelementptr inbounds %varfn_args_store.1, ptr addrspace(1) %22, i32 0, i32 0
+  %23 = getelementptr inbounds %varfn_args_store.2, ptr addrspace(1) %22, i32 0, i32 0
   store i32 24, ptr addrspace(1) %23, align 4
-  %24 = getelementptr inbounds %varfn_args_store.1, ptr addrspace(1) %22, i32 0, i32 1
+  %24 = getelementptr inbounds %varfn_args_store.2, ptr addrspace(1) %22, i32 0, i32 1
   store i32 2, ptr addrspace(1) %24, align 4
-  %25 = getelementptr inbounds %varfn_args_store.1, ptr addrspace(1) %22, i32 0, i32 2
+  %25 = getelementptr inbounds %varfn_args_store.2, ptr addrspace(1) %22, i32 0, i32 2
   store i32 983041, ptr addrspace(1) %25, align 4
-  %26 = getelementptr inbounds %varfn_args_store.1, ptr addrspace(1) %22, i32 0, i32 3
+  %26 = getelementptr inbounds %varfn_args_store.2, ptr addrspace(1) %22, i32 0, i32 3
   store i32 852000, ptr addrspace(1) %26, align 4
-  %27 = getelementptr inbounds %varfn_args_store.1, ptr addrspace(1) %22, i32 0, i32 4
+  %27 = getelementptr inbounds %varfn_args_store.2, ptr addrspace(1) %22, i32 0, i32 4
   store i32 101, ptr addrspace(1) %27, align 4
-  %28 = getelementptr inbounds %varfn_args_store.1, ptr addrspace(1) %22, i32 0, i32 5
+  %28 = getelementptr inbounds %varfn_args_store.2, ptr addrspace(1) %22, i32 0, i32 5
   store i32 %20, ptr addrspace(1) %28, align 4
   %29 = getelementptr inbounds i8, ptr addrspace(1) %22, i64 24
   call void @llvm.memcpy.p1.p0.i64(ptr addrspace(1) align 1 %29, ptr align 1 addrspacecast (ptr addrspace(4) @.str.1 to ptr), i64 101, i1 false)
@@ -1272,10 +1886,10 @@ define internal void @_ZL15ompx__proxy_putPN4gicc9DeviceCtxEiPvPKvm(ptr noundef 
   br label %32
 
 32:                                               ; preds = %19, %5
-  %33 = load i32, ptr %12, align 4, !tbaa !22
-  %34 = load ptr, ptr %13, align 8, !tbaa !14
-  %35 = load ptr, ptr %14, align 8, !tbaa !14
-  %36 = load i64, ptr %15, align 8, !tbaa !18
+  %33 = load i32, ptr %12, align 4, !tbaa !24
+  %34 = load ptr, ptr %13, align 8, !tbaa !16
+  %35 = load ptr, ptr %14, align 8, !tbaa !16
+  %36 = load i64, ptr %15, align 8, !tbaa !20
   call void @_Z8ompx_putiPvPKvmi(i32 noundef %33, ptr noundef %34, ptr noundef %35, i64 noundef %36, i32 noundef 0) #15
   ret void
 }
@@ -1325,31 +1939,31 @@ define linkonce_odr hidden noundef ptr @_ZN4gicc3omp6detail12lane_to_ringEPNS_9D
   %13 = addrspacecast ptr addrspace(5) %6 to ptr
   %14 = addrspacecast ptr addrspace(5) %7 to ptr
   %15 = addrspacecast ptr addrspace(5) %8 to ptr
-  store ptr %0, ptr %11, align 8, !tbaa !14
-  store i32 %1, ptr %12, align 4, !tbaa !22
+  store ptr %0, ptr %11, align 8, !tbaa !16
+  store i32 %1, ptr %12, align 4, !tbaa !24
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %6) #3
-  store ptr null, ptr %13, align 8, !tbaa !14
-  %16 = load ptr, ptr %11, align 8, !tbaa !14
+  store ptr null, ptr %13, align 8, !tbaa !16
+  %16 = load ptr, ptr %11, align 8, !tbaa !16
   %17 = getelementptr inbounds %"struct.gicc::DeviceCtx", ptr %16, i32 0, i32 3
-  %18 = load ptr, ptr %17, align 8, !tbaa !29
+  %18 = load ptr, ptr %17, align 8, !tbaa !31
   %19 = icmp ne ptr %18, null
   br i1 %19, label %20, label %45
 
 20:                                               ; preds = %2
-  %21 = load ptr, ptr %11, align 8, !tbaa !14
+  %21 = load ptr, ptr %11, align 8, !tbaa !16
   %22 = getelementptr inbounds %"struct.gicc::DeviceCtx", ptr %21, i32 0, i32 4
-  %23 = load i32, ptr %22, align 8, !tbaa !30
+  %23 = load i32, ptr %22, align 8, !tbaa !32
   %24 = icmp sgt i32 %23, 0
   br i1 %24, label %25, label %45
 
 25:                                               ; preds = %20
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %7) #3
-  %26 = load ptr, ptr %11, align 8, !tbaa !14
+  %26 = load ptr, ptr %11, align 8, !tbaa !16
   %27 = getelementptr inbounds %"struct.gicc::DeviceCtx", ptr %26, i32 0, i32 4
-  %28 = load i32, ptr %27, align 8, !tbaa !30
-  store i32 %28, ptr %14, align 4, !tbaa !22
+  %28 = load i32, ptr %27, align 8, !tbaa !32
+  store i32 %28, ptr %14, align 4, !tbaa !24
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %8) #3
-  %29 = load i32, ptr %12, align 4, !tbaa !22
+  %29 = load i32, ptr %12, align 4, !tbaa !24
   %30 = icmp slt i32 %29, 0
   br i1 %30, label %31, label %32
 
@@ -1357,35 +1971,35 @@ define linkonce_odr hidden noundef ptr @_ZN4gicc3omp6detail12lane_to_ringEPNS_9D
   br label %36
 
 32:                                               ; preds = %25
-  %33 = load i32, ptr %12, align 4, !tbaa !22
-  %34 = load i32, ptr %14, align 4, !tbaa !22
+  %33 = load i32, ptr %12, align 4, !tbaa !24
+  %34 = load i32, ptr %14, align 4, !tbaa !24
   %35 = srem i32 %33, %34
   br label %36
 
 36:                                               ; preds = %32, %31
   %37 = phi i32 [ 0, %31 ], [ %35, %32 ]
-  store i32 %37, ptr %15, align 4, !tbaa !22
-  %38 = load ptr, ptr %11, align 8, !tbaa !14
+  store i32 %37, ptr %15, align 4, !tbaa !24
+  %38 = load ptr, ptr %11, align 8, !tbaa !16
   %39 = getelementptr inbounds %"struct.gicc::DeviceCtx", ptr %38, i32 0, i32 3
-  %40 = load ptr, ptr %39, align 8, !tbaa !29
-  %41 = load i32, ptr %15, align 4, !tbaa !22
+  %40 = load ptr, ptr %39, align 8, !tbaa !31
+  %41 = load i32, ptr %15, align 4, !tbaa !24
   %42 = sext i32 %41 to i64
   %43 = getelementptr inbounds ptr, ptr %40, i64 %42
-  %44 = load ptr, ptr %43, align 8, !tbaa !14
-  store ptr %44, ptr %13, align 8, !tbaa !14
+  %44 = load ptr, ptr %43, align 8, !tbaa !16
+  store ptr %44, ptr %13, align 8, !tbaa !16
   call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %8) #3
   call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %7) #3
   br label %49
 
 45:                                               ; preds = %20, %2
-  %46 = load ptr, ptr %11, align 8, !tbaa !14
+  %46 = load ptr, ptr %11, align 8, !tbaa !16
   %47 = getelementptr inbounds %"struct.gicc::DeviceCtx", ptr %46, i32 0, i32 2
-  %48 = load ptr, ptr %47, align 8, !tbaa !31
-  store ptr %48, ptr %13, align 8, !tbaa !14
+  %48 = load ptr, ptr %47, align 8, !tbaa !33
+  store ptr %48, ptr %13, align 8, !tbaa !16
   br label %49
 
 49:                                               ; preds = %45, %36
-  %50 = load ptr, ptr %13, align 8, !tbaa !14
+  %50 = load ptr, ptr %13, align 8, !tbaa !16
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %6) #3
   ret ptr %50
 }
@@ -1404,30 +2018,30 @@ define linkonce_odr hidden void @_Z8ompx_putiPvPKvmi(i32 noundef %0, ptr noundef
   %15 = addrspacecast ptr addrspace(5) %9 to ptr
   %16 = addrspacecast ptr addrspace(5) %10 to ptr
   %17 = addrspacecast ptr addrspace(5) %11 to ptr
-  store i32 %0, ptr %12, align 4, !tbaa !22
-  store ptr %1, ptr %13, align 8, !tbaa !14
-  store ptr %2, ptr %14, align 8, !tbaa !14
-  store i64 %3, ptr %15, align 8, !tbaa !18
-  store i32 %4, ptr %16, align 4, !tbaa !22
+  store i32 %0, ptr %12, align 4, !tbaa !24
+  store ptr %1, ptr %13, align 8, !tbaa !16
+  store ptr %2, ptr %14, align 8, !tbaa !16
+  store i64 %3, ptr %15, align 8, !tbaa !20
+  store i32 %4, ptr %16, align 4, !tbaa !24
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %11) #3
-  %18 = load ptr, ptr addrspacecast (ptr addrspace(1) @_ZL9ompx__ctx to ptr), align 8, !tbaa !14
-  store ptr %18, ptr %17, align 8, !tbaa !14
-  %19 = load ptr, ptr %17, align 8, !tbaa !14
-  %20 = load i32, ptr %12, align 4, !tbaa !22
-  %21 = load ptr, ptr %17, align 8, !tbaa !14
+  %18 = load ptr, ptr addrspacecast (ptr addrspace(1) @_ZL9ompx__ctx to ptr), align 8, !tbaa !16
+  store ptr %18, ptr %17, align 8, !tbaa !16
+  %19 = load ptr, ptr %17, align 8, !tbaa !16
+  %20 = load i32, ptr %12, align 4, !tbaa !24
+  %21 = load ptr, ptr %17, align 8, !tbaa !16
   %22 = getelementptr inbounds %"struct.gicc::DeviceCtx", ptr %21, i32 0, i32 8
-  %23 = load i32, ptr %22, align 8, !tbaa !27
-  %24 = load ptr, ptr %17, align 8, !tbaa !14
-  %25 = load ptr, ptr %13, align 8, !tbaa !14
+  %23 = load i32, ptr %22, align 8, !tbaa !29
+  %24 = load ptr, ptr %17, align 8, !tbaa !16
+  %25 = load ptr, ptr %13, align 8, !tbaa !16
   %26 = call noundef i64 @_ZL9ompx__offPN4gicc9DeviceCtxEPKv(ptr noundef %24, ptr noundef %25) #15
-  %27 = load ptr, ptr %17, align 8, !tbaa !14
+  %27 = load ptr, ptr %17, align 8, !tbaa !16
   %28 = getelementptr inbounds %"struct.gicc::DeviceCtx", ptr %27, i32 0, i32 8
-  %29 = load i32, ptr %28, align 8, !tbaa !27
-  %30 = load ptr, ptr %17, align 8, !tbaa !14
-  %31 = load ptr, ptr %14, align 8, !tbaa !14
+  %29 = load i32, ptr %28, align 8, !tbaa !29
+  %30 = load ptr, ptr %17, align 8, !tbaa !16
+  %31 = load ptr, ptr %14, align 8, !tbaa !16
   %32 = call noundef i64 @_ZL9ompx__offPN4gicc9DeviceCtxEPKv(ptr noundef %30, ptr noundef %31) #15
-  %33 = load i64, ptr %15, align 8, !tbaa !18
-  %34 = load i32, ptr %16, align 4, !tbaa !22
+  %33 = load i64, ptr %15, align 8, !tbaa !20
+  %34 = load i32, ptr %16, align 4, !tbaa !24
   call void @_ZN4gicc3omp3putEPNS_9DeviceCtxEiimimmi(ptr noundef %19, i32 noundef %20, i32 noundef %23, i64 noundef %26, i32 noundef %29, i64 noundef %32, i64 noundef %33, i32 noundef %34) #15
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %11) #3
   ret void
@@ -1456,15 +2070,15 @@ define linkonce_odr hidden void @_ZN4gicc3omp3putEPNS_9DeviceCtxEiimimmi(ptr nou
   %27 = addrspacecast ptr addrspace(5) %17 to ptr
   %28 = addrspacecast ptr addrspace(5) %18 to ptr
   %29 = call align 16 ptr @__kmpc_alloc_shared(i64 24)
-  store ptr %0, ptr %19, align 8, !tbaa !14
-  store i32 %1, ptr %20, align 4, !tbaa !22
-  store i32 %2, ptr %21, align 4, !tbaa !22
-  store i64 %3, ptr %22, align 8, !tbaa !18
-  store i32 %4, ptr %23, align 4, !tbaa !22
-  store i64 %5, ptr %24, align 8, !tbaa !18
-  store i64 %6, ptr %25, align 8, !tbaa !18
-  store i32 %7, ptr %26, align 4, !tbaa !22
-  %30 = load ptr, ptr %19, align 8, !tbaa !14
+  store ptr %0, ptr %19, align 8, !tbaa !16
+  store i32 %1, ptr %20, align 4, !tbaa !24
+  store i32 %2, ptr %21, align 4, !tbaa !24
+  store i64 %3, ptr %22, align 8, !tbaa !20
+  store i32 %4, ptr %23, align 4, !tbaa !24
+  store i64 %5, ptr %24, align 8, !tbaa !20
+  store i64 %6, ptr %25, align 8, !tbaa !20
+  store i32 %7, ptr %26, align 4, !tbaa !24
+  %30 = load ptr, ptr %19, align 8, !tbaa !16
   %31 = icmp ne ptr %30, null
   br i1 %31, label %33, label %32
 
@@ -1474,11 +2088,11 @@ define linkonce_odr hidden void @_ZN4gicc3omp3putEPNS_9DeviceCtxEiimimmi(ptr nou
 
 33:                                               ; preds = %8
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %18) #3
-  %34 = load ptr, ptr %19, align 8, !tbaa !14
-  %35 = load i32, ptr %26, align 4, !tbaa !22
+  %34 = load ptr, ptr %19, align 8, !tbaa !16
+  %35 = load i32, ptr %26, align 4, !tbaa !24
   %36 = call noundef ptr @_ZN4gicc3omp6detail12lane_to_ringEPNS_9DeviceCtxEi(ptr noundef %34, i32 noundef %35) #15
-  store ptr %36, ptr %28, align 8, !tbaa !14
-  %37 = load ptr, ptr %28, align 8, !tbaa !14
+  store ptr %36, ptr %28, align 8, !tbaa !16
+  %37 = load ptr, ptr %28, align 8, !tbaa !16
   %38 = icmp ne ptr %37, null
   br i1 %38, label %40, label %39
 
@@ -1488,30 +2102,30 @@ define linkonce_odr hidden void @_ZN4gicc3omp3putEPNS_9DeviceCtxEiimimmi(ptr nou
 
 40:                                               ; preds = %33
   %41 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %29, i32 0, i32 0
-  store i8 1, ptr %41, align 1, !tbaa !32
-  %42 = load i32, ptr %20, align 4, !tbaa !22
+  store i8 1, ptr %41, align 1, !tbaa !34
+  %42 = load i32, ptr %20, align 4, !tbaa !24
   %43 = trunc i32 %42 to i8
   %44 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %29, i32 0, i32 1
-  store i8 %43, ptr %44, align 1, !tbaa !35
-  %45 = load i32, ptr %23, align 4, !tbaa !22
+  store i8 %43, ptr %44, align 1, !tbaa !37
+  %45 = load i32, ptr %23, align 4, !tbaa !24
   %46 = trunc i32 %45 to i8
   %47 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %29, i32 0, i32 2
-  store i8 %46, ptr %47, align 1, !tbaa !36
-  %48 = load i32, ptr %21, align 4, !tbaa !22
+  store i8 %46, ptr %47, align 1, !tbaa !38
+  %48 = load i32, ptr %21, align 4, !tbaa !24
   %49 = trunc i32 %48 to i8
   %50 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %29, i32 0, i32 3
-  store i8 %49, ptr %50, align 1, !tbaa !37
-  %51 = load i64, ptr %25, align 8, !tbaa !18
+  store i8 %49, ptr %50, align 1, !tbaa !39
+  %51 = load i64, ptr %25, align 8, !tbaa !20
   %52 = trunc i64 %51 to i32
   %53 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %29, i32 0, i32 4
-  store i32 %52, ptr %53, align 1, !tbaa !38
-  %54 = load i64, ptr %24, align 8, !tbaa !18
+  store i32 %52, ptr %53, align 1, !tbaa !40
+  %54 = load i64, ptr %24, align 8, !tbaa !20
   %55 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %29, i32 0, i32 5
-  store i64 %54, ptr %55, align 1, !tbaa !39
-  %56 = load i64, ptr %22, align 8, !tbaa !18
+  store i64 %54, ptr %55, align 1, !tbaa !41
+  %56 = load i64, ptr %22, align 8, !tbaa !20
   %57 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %29, i32 0, i32 6
-  store i64 %56, ptr %57, align 1, !tbaa !40
-  %58 = load ptr, ptr %28, align 8, !tbaa !14
+  store i64 %56, ptr %57, align 1, !tbaa !42
+  %58 = load ptr, ptr %28, align 8, !tbaa !16
   %59 = call noundef i64 @_ZN4gicc3omp6detail11atomic_pushEPNS_5proxy7D2HRingILj4096EEERKNS2_11TransferCmdE(ptr noundef %58, ptr noundef nonnull align 1 dereferenceable(24) %29) #15
   store i32 0, ptr %27, align 4
   br label %60
@@ -1543,12 +2157,12 @@ define internal noundef i64 @_ZL9ompx__offPN4gicc9DeviceCtxEPKv(ptr noundef %0, 
   %6 = addrspacecast ptr addrspace(5) %3 to ptr
   %7 = addrspacecast ptr addrspace(5) %4 to ptr
   %8 = addrspacecast ptr addrspace(5) %5 to ptr
-  store ptr %0, ptr %7, align 8, !tbaa !14
-  store ptr %1, ptr %8, align 8, !tbaa !14
-  %9 = load ptr, ptr %8, align 8, !tbaa !14
-  %10 = load ptr, ptr %7, align 8, !tbaa !14
+  store ptr %0, ptr %7, align 8, !tbaa !16
+  store ptr %1, ptr %8, align 8, !tbaa !16
+  %9 = load ptr, ptr %8, align 8, !tbaa !16
+  %10 = load ptr, ptr %7, align 8, !tbaa !16
   %11 = getelementptr inbounds %"struct.gicc::DeviceCtx", ptr %10, i32 0, i32 7
-  %12 = load ptr, ptr %11, align 8, !tbaa !28
+  %12 = load ptr, ptr %11, align 8, !tbaa !30
   %13 = ptrtoint ptr %9 to i64
   %14 = ptrtoint ptr %12 to i64
   %15 = sub i64 %13, %14
@@ -1591,58 +2205,58 @@ define linkonce_odr hidden noundef i64 @_ZN4gicc3omp6detail11atomic_pushEPNS_5pr
   %31 = addrspacecast ptr addrspace(5) %16 to ptr
   %32 = call align 16 ptr @__kmpc_alloc_shared(i64 8)
   %33 = call align 16 ptr @__kmpc_alloc_shared(i64 8)
-  store ptr %0, ptr %32, align 8, !tbaa !14
-  store ptr %1, ptr %19, align 8, !tbaa !14
+  store ptr %0, ptr %32, align 8, !tbaa !16
+  store ptr %1, ptr %19, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %5) #3
-  store i32 4095, ptr %20, align 4, !tbaa !22
+  store i32 4095, ptr %20, align 4, !tbaa !24
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %6) #3
-  store i64 4096, ptr %21, align 8, !tbaa !18
+  store i64 4096, ptr %21, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %7) #3
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %8) #3
   br label %34
 
 34:                                               ; preds = %78, %2
-  %35 = load ptr, ptr %32, align 8, !tbaa !14
+  %35 = load ptr, ptr %32, align 8, !tbaa !16
   %36 = getelementptr inbounds %"struct.gicc::proxy::D2HRing", ptr %35, i32 0, i32 0
   %37 = load atomic i64, ptr %36 monotonic, align 128
   store i64 %37, ptr %24, align 8
-  %38 = load i64, ptr %24, align 8, !tbaa !18
-  store i64 %38, ptr %22, align 8, !tbaa !18
+  %38 = load i64, ptr %24, align 8, !tbaa !20
+  store i64 %38, ptr %22, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %10) #3
-  %39 = load ptr, ptr %32, align 8, !tbaa !14
+  %39 = load ptr, ptr %32, align 8, !tbaa !16
   %40 = getelementptr inbounds %"struct.gicc::proxy::D2HRing", ptr %39, i32 0, i32 1
   %41 = load atomic i64, ptr %40 monotonic, align 8
   store i64 %41, ptr %26, align 8
-  %42 = load i64, ptr %26, align 8, !tbaa !18
-  store i64 %42, ptr %25, align 8, !tbaa !18
+  %42 = load i64, ptr %26, align 8, !tbaa !20
+  store i64 %42, ptr %25, align 8, !tbaa !20
   br label %43
 
 43:                                               ; preds = %48, %34
-  %44 = load i64, ptr %22, align 8, !tbaa !18
-  %45 = load i64, ptr %25, align 8, !tbaa !18
+  %44 = load i64, ptr %22, align 8, !tbaa !20
+  %45 = load i64, ptr %25, align 8, !tbaa !20
   %46 = sub i64 %44, %45
   %47 = icmp eq i64 %46, 4096
   br i1 %47, label %48, label %53
 
 48:                                               ; preds = %43
   call void @llvm.amdgcn.s.sleep(i32 1)
-  %49 = load ptr, ptr %32, align 8, !tbaa !14
+  %49 = load ptr, ptr %32, align 8, !tbaa !16
   %50 = getelementptr inbounds %"struct.gicc::proxy::D2HRing", ptr %49, i32 0, i32 1
   %51 = load atomic i64, ptr %50 monotonic, align 8
   store i64 %51, ptr %27, align 8
-  %52 = load i64, ptr %27, align 8, !tbaa !18
-  store i64 %52, ptr %25, align 8, !tbaa !18
-  br label %43, !llvm.loop !41
+  %52 = load i64, ptr %27, align 8, !tbaa !20
+  store i64 %52, ptr %25, align 8, !tbaa !20
+  br label %43, !llvm.loop !43
 
 53:                                               ; preds = %43
-  %54 = load i64, ptr %22, align 8, !tbaa !18
-  store i64 %54, ptr %33, align 8, !tbaa !18
+  %54 = load i64, ptr %22, align 8, !tbaa !20
+  store i64 %54, ptr %33, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 1, ptr addrspace(5) %13) #3
-  %55 = load ptr, ptr %32, align 8, !tbaa !14
+  %55 = load ptr, ptr %32, align 8, !tbaa !16
   %56 = getelementptr inbounds %"struct.gicc::proxy::D2HRing", ptr %55, i32 0, i32 0
-  %57 = load i64, ptr %22, align 8, !tbaa !18
+  %57 = load i64, ptr %22, align 8, !tbaa !20
   %58 = add i64 %57, 1
-  store i64 %58, ptr %29, align 8, !tbaa !18
+  store i64 %58, ptr %29, align 8, !tbaa !20
   %59 = load i64, ptr %33, align 8
   %60 = load i64, ptr %29, align 8
   %61 = cmpxchg ptr %56, i64 %59, i64 %60 monotonic monotonic, align 128
@@ -1656,114 +2270,114 @@ define linkonce_odr hidden noundef i64 @_ZN4gicc3omp6detail11atomic_pushEPNS_5pr
 
 65:                                               ; preds = %64, %53
   %66 = zext i1 %63 to i8
-  store i8 %66, ptr %30, align 1, !tbaa !43
-  %67 = load i8, ptr %30, align 1, !tbaa !43, !range !45, !noundef !46
+  store i8 %66, ptr %30, align 1, !tbaa !45
+  %67 = load i8, ptr %30, align 1, !tbaa !45, !range !47, !noundef !48
   %68 = trunc i8 %67 to i1
   %69 = zext i1 %68 to i8
-  store i8 %69, ptr %28, align 1, !tbaa !43
-  %70 = load i8, ptr %28, align 1, !tbaa !43, !range !45, !noundef !46
+  store i8 %69, ptr %28, align 1, !tbaa !45
+  %70 = load i8, ptr %28, align 1, !tbaa !45, !range !47, !noundef !48
   %71 = trunc i8 %70 to i1
   br i1 %71, label %72, label %74
 
 72:                                               ; preds = %65
-  %73 = load i64, ptr %22, align 8, !tbaa !18
+  %73 = load i64, ptr %22, align 8, !tbaa !20
   br label %76
 
 74:                                               ; preds = %65
-  %75 = load i64, ptr %33, align 8, !tbaa !18
+  %75 = load i64, ptr %33, align 8, !tbaa !20
   br label %76
 
 76:                                               ; preds = %74, %72
   %77 = phi i64 [ %73, %72 ], [ %75, %74 ]
-  store i64 %77, ptr %23, align 8, !tbaa !18
+  store i64 %77, ptr %23, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 1, ptr addrspace(5) %13) #3
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %10) #3
   br label %78
 
 78:                                               ; preds = %76
-  %79 = load i64, ptr %23, align 8, !tbaa !18
-  %80 = load i64, ptr %22, align 8, !tbaa !18
+  %79 = load i64, ptr %23, align 8, !tbaa !20
+  %80 = load i64, ptr %22, align 8, !tbaa !20
   %81 = icmp ne i64 %79, %80
-  br i1 %81, label %34, label %82, !llvm.loop !47
+  br i1 %81, label %34, label %82, !llvm.loop !49
 
 82:                                               ; preds = %78
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %16) #3
-  %83 = load i64, ptr %22, align 8, !tbaa !18
+  %83 = load i64, ptr %22, align 8, !tbaa !20
   %84 = trunc i64 %83 to i32
   %85 = and i32 %84, 4095
-  store i32 %85, ptr %31, align 4, !tbaa !22
-  %86 = load ptr, ptr %19, align 8, !tbaa !14
+  store i32 %85, ptr %31, align 4, !tbaa !24
+  %86 = load ptr, ptr %19, align 8, !tbaa !16
   %87 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %86, i32 0, i32 1
-  %88 = load i8, ptr %87, align 1, !tbaa !35
-  %89 = load ptr, ptr %32, align 8, !tbaa !14
+  %88 = load i8, ptr %87, align 1, !tbaa !37
+  %89 = load ptr, ptr %32, align 8, !tbaa !16
   %90 = getelementptr inbounds %"struct.gicc::proxy::D2HRing", ptr %89, i32 0, i32 2
-  %91 = load i32, ptr %31, align 4, !tbaa !22
+  %91 = load i32, ptr %31, align 4, !tbaa !24
   %92 = zext i32 %91 to i64
   %93 = getelementptr inbounds [4096 x %"struct.gicc::proxy::TransferCmd"], ptr %90, i64 0, i64 %92
   %94 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %93, i32 0, i32 1
-  store i8 %88, ptr %94, align 1, !tbaa !35
-  %95 = load ptr, ptr %19, align 8, !tbaa !14
+  store i8 %88, ptr %94, align 1, !tbaa !37
+  %95 = load ptr, ptr %19, align 8, !tbaa !16
   %96 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %95, i32 0, i32 2
-  %97 = load i8, ptr %96, align 1, !tbaa !36
-  %98 = load ptr, ptr %32, align 8, !tbaa !14
+  %97 = load i8, ptr %96, align 1, !tbaa !38
+  %98 = load ptr, ptr %32, align 8, !tbaa !16
   %99 = getelementptr inbounds %"struct.gicc::proxy::D2HRing", ptr %98, i32 0, i32 2
-  %100 = load i32, ptr %31, align 4, !tbaa !22
+  %100 = load i32, ptr %31, align 4, !tbaa !24
   %101 = zext i32 %100 to i64
   %102 = getelementptr inbounds [4096 x %"struct.gicc::proxy::TransferCmd"], ptr %99, i64 0, i64 %101
   %103 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %102, i32 0, i32 2
-  store i8 %97, ptr %103, align 2, !tbaa !36
-  %104 = load ptr, ptr %19, align 8, !tbaa !14
+  store i8 %97, ptr %103, align 2, !tbaa !38
+  %104 = load ptr, ptr %19, align 8, !tbaa !16
   %105 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %104, i32 0, i32 3
-  %106 = load i8, ptr %105, align 1, !tbaa !37
-  %107 = load ptr, ptr %32, align 8, !tbaa !14
+  %106 = load i8, ptr %105, align 1, !tbaa !39
+  %107 = load ptr, ptr %32, align 8, !tbaa !16
   %108 = getelementptr inbounds %"struct.gicc::proxy::D2HRing", ptr %107, i32 0, i32 2
-  %109 = load i32, ptr %31, align 4, !tbaa !22
+  %109 = load i32, ptr %31, align 4, !tbaa !24
   %110 = zext i32 %109 to i64
   %111 = getelementptr inbounds [4096 x %"struct.gicc::proxy::TransferCmd"], ptr %108, i64 0, i64 %110
   %112 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %111, i32 0, i32 3
-  store i8 %106, ptr %112, align 1, !tbaa !37
-  %113 = load ptr, ptr %19, align 8, !tbaa !14
+  store i8 %106, ptr %112, align 1, !tbaa !39
+  %113 = load ptr, ptr %19, align 8, !tbaa !16
   %114 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %113, i32 0, i32 4
-  %115 = load i32, ptr %114, align 1, !tbaa !38
-  %116 = load ptr, ptr %32, align 8, !tbaa !14
+  %115 = load i32, ptr %114, align 1, !tbaa !40
+  %116 = load ptr, ptr %32, align 8, !tbaa !16
   %117 = getelementptr inbounds %"struct.gicc::proxy::D2HRing", ptr %116, i32 0, i32 2
-  %118 = load i32, ptr %31, align 4, !tbaa !22
+  %118 = load i32, ptr %31, align 4, !tbaa !24
   %119 = zext i32 %118 to i64
   %120 = getelementptr inbounds [4096 x %"struct.gicc::proxy::TransferCmd"], ptr %117, i64 0, i64 %119
   %121 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %120, i32 0, i32 4
-  store i32 %115, ptr %121, align 4, !tbaa !38
-  %122 = load ptr, ptr %19, align 8, !tbaa !14
+  store i32 %115, ptr %121, align 4, !tbaa !40
+  %122 = load ptr, ptr %19, align 8, !tbaa !16
   %123 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %122, i32 0, i32 5
-  %124 = load i64, ptr %123, align 1, !tbaa !39
-  %125 = load ptr, ptr %32, align 8, !tbaa !14
+  %124 = load i64, ptr %123, align 1, !tbaa !41
+  %125 = load ptr, ptr %32, align 8, !tbaa !16
   %126 = getelementptr inbounds %"struct.gicc::proxy::D2HRing", ptr %125, i32 0, i32 2
-  %127 = load i32, ptr %31, align 4, !tbaa !22
+  %127 = load i32, ptr %31, align 4, !tbaa !24
   %128 = zext i32 %127 to i64
   %129 = getelementptr inbounds [4096 x %"struct.gicc::proxy::TransferCmd"], ptr %126, i64 0, i64 %128
   %130 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %129, i32 0, i32 5
-  store i64 %124, ptr %130, align 8, !tbaa !39
-  %131 = load ptr, ptr %19, align 8, !tbaa !14
+  store i64 %124, ptr %130, align 8, !tbaa !41
+  %131 = load ptr, ptr %19, align 8, !tbaa !16
   %132 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %131, i32 0, i32 6
-  %133 = load i64, ptr %132, align 1, !tbaa !40
-  %134 = load ptr, ptr %32, align 8, !tbaa !14
+  %133 = load i64, ptr %132, align 1, !tbaa !42
+  %134 = load ptr, ptr %32, align 8, !tbaa !16
   %135 = getelementptr inbounds %"struct.gicc::proxy::D2HRing", ptr %134, i32 0, i32 2
-  %136 = load i32, ptr %31, align 4, !tbaa !22
+  %136 = load i32, ptr %31, align 4, !tbaa !24
   %137 = zext i32 %136 to i64
   %138 = getelementptr inbounds [4096 x %"struct.gicc::proxy::TransferCmd"], ptr %135, i64 0, i64 %137
   %139 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %138, i32 0, i32 6
-  store i64 %133, ptr %139, align 8, !tbaa !40
+  store i64 %133, ptr %139, align 8, !tbaa !42
   call void @_ZN4gicc3omp6detail12fence_systemEv() #15
-  %140 = load ptr, ptr %19, align 8, !tbaa !14
+  %140 = load ptr, ptr %19, align 8, !tbaa !16
   %141 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %140, i32 0, i32 0
-  %142 = load i8, ptr %141, align 1, !tbaa !32
-  %143 = load ptr, ptr %32, align 8, !tbaa !14
+  %142 = load i8, ptr %141, align 1, !tbaa !34
+  %143 = load ptr, ptr %32, align 8, !tbaa !16
   %144 = getelementptr inbounds %"struct.gicc::proxy::D2HRing", ptr %143, i32 0, i32 2
-  %145 = load i32, ptr %31, align 4, !tbaa !22
+  %145 = load i32, ptr %31, align 4, !tbaa !24
   %146 = zext i32 %145 to i64
   %147 = getelementptr inbounds [4096 x %"struct.gicc::proxy::TransferCmd"], ptr %144, i64 0, i64 %146
   %148 = getelementptr inbounds %"struct.gicc::proxy::TransferCmd", ptr %147, i32 0, i32 0
-  store i8 %142, ptr %148, align 8, !tbaa !32
-  %149 = load i64, ptr %22, align 8, !tbaa !18
+  store i8 %142, ptr %148, align 8, !tbaa !34
+  %149 = load i64, ptr %22, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %16) #3
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %8) #3
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %7) #3
@@ -1821,11 +2435,11 @@ define internal void @ompx__block_put(i32 noundef %0, ptr noundef %1, ptr nounde
   %35 = addrspacecast ptr addrspace(5) %18 to ptr
   %36 = addrspacecast ptr addrspace(5) %19 to ptr
   %37 = addrspacecast ptr addrspace(5) %20 to ptr
-  store i32 %0, ptr %22, align 4, !tbaa !22
-  store ptr %1, ptr %23, align 8, !tbaa !14
-  store ptr %2, ptr %24, align 8, !tbaa !14
-  store i64 %3, ptr %25, align 8, !tbaa !18
-  %38 = load i32, ptr %22, align 4, !tbaa !22
+  store i32 %0, ptr %22, align 4, !tbaa !24
+  store ptr %1, ptr %23, align 8, !tbaa !16
+  store ptr %2, ptr %24, align 8, !tbaa !16
+  store i64 %3, ptr %25, align 8, !tbaa !20
+  %38 = load i32, ptr %22, align 4, !tbaa !24
   %39 = icmp slt i32 %38, 0
   br i1 %39, label %40, label %41
 
@@ -1835,14 +2449,14 @@ define internal void @ompx__block_put(i32 noundef %0, ptr noundef %1, ptr nounde
 41:                                               ; preds = %4
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %9) #3
   %42 = call noundef ptr @_ZL18ompx__pipeline_ctxv() #15
-  store ptr %42, ptr %26, align 8, !tbaa !14
+  store ptr %42, ptr %26, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %10) #3
-  %43 = load ptr, ptr %26, align 8, !tbaa !14
-  %44 = load i32, ptr %22, align 4, !tbaa !22
-  %45 = load ptr, ptr %23, align 8, !tbaa !14
+  %43 = load ptr, ptr %26, align 8, !tbaa !16
+  %44 = load i32, ptr %22, align 4, !tbaa !24
+  %45 = load ptr, ptr %23, align 8, !tbaa !16
   %46 = call noundef ptr @_ZL15ompx__peer_basePN4gicc9DeviceCtxEiPv(ptr noundef %43, i32 noundef %44, ptr noundef %45) #15
-  store ptr %46, ptr %27, align 8, !tbaa !14
-  %47 = load ptr, ptr %27, align 8, !tbaa !14
+  store ptr %46, ptr %27, align 8, !tbaa !16
+  %47 = load ptr, ptr %27, align 8, !tbaa !16
   %48 = icmp eq ptr %47, null
   br i1 %48, label %49, label %58
 
@@ -1851,11 +2465,11 @@ define internal void @ompx__block_put(i32 noundef %0, ptr noundef %1, ptr nounde
   br i1 %50, label %51, label %57
 
 51:                                               ; preds = %49
-  %52 = load ptr, ptr %26, align 8, !tbaa !14
-  %53 = load i32, ptr %22, align 4, !tbaa !22
-  %54 = load ptr, ptr %23, align 8, !tbaa !14
-  %55 = load ptr, ptr %24, align 8, !tbaa !14
-  %56 = load i64, ptr %25, align 8, !tbaa !18
+  %52 = load ptr, ptr %26, align 8, !tbaa !16
+  %53 = load i32, ptr %22, align 4, !tbaa !24
+  %54 = load ptr, ptr %23, align 8, !tbaa !16
+  %55 = load ptr, ptr %24, align 8, !tbaa !16
+  %56 = load i64, ptr %25, align 8, !tbaa !20
   call void @_ZL15ompx__proxy_putPN4gicc9DeviceCtxEiPvPKvm(ptr noundef %52, i32 noundef %53, ptr noundef %54, ptr noundef %55, i64 noundef %56) #15
   br label %57
 
@@ -1865,11 +2479,11 @@ define internal void @ompx__block_put(i32 noundef %0, ptr noundef %1, ptr nounde
 
 58:                                               ; preds = %41
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %12) #3
-  %59 = load ptr, ptr %24, align 8, !tbaa !14
-  store ptr %59, ptr %29, align 8, !tbaa !14
-  %60 = load ptr, ptr %27, align 8, !tbaa !14
+  %59 = load ptr, ptr %24, align 8, !tbaa !16
+  store ptr %59, ptr %29, align 8, !tbaa !16
+  %60 = load ptr, ptr %27, align 8, !tbaa !16
   %61 = ptrtoint ptr %60 to i64
-  %62 = load ptr, ptr %29, align 8, !tbaa !14
+  %62 = load ptr, ptr %29, align 8, !tbaa !16
   %63 = ptrtoint ptr %62 to i64
   %64 = or i64 %61, %63
   %65 = and i64 %64, 3
@@ -1878,41 +2492,41 @@ define internal void @ompx__block_put(i32 noundef %0, ptr noundef %1, ptr nounde
 
 67:                                               ; preds = %58
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %13) #3
-  %68 = load ptr, ptr %27, align 8, !tbaa !14
-  store ptr %68, ptr %30, align 8, !tbaa !14
+  %68 = load ptr, ptr %27, align 8, !tbaa !16
+  store ptr %68, ptr %30, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %14) #3
-  %69 = load ptr, ptr %29, align 8, !tbaa !14
-  store ptr %69, ptr %31, align 8, !tbaa !14
+  %69 = load ptr, ptr %29, align 8, !tbaa !16
+  store ptr %69, ptr %31, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %15) #3
-  %70 = load i64, ptr %25, align 8, !tbaa !18
+  %70 = load i64, ptr %25, align 8, !tbaa !20
   %71 = udiv i64 %70, 4
-  store i64 %71, ptr %32, align 8, !tbaa !18
-  %72 = load i64, ptr %32, align 8, !tbaa !18
-  store i64 %72, ptr %33, align 8, !tbaa !18
-  %73 = load i64, ptr %33, align 8, !tbaa !18
-  %74 = load ptr, ptr %30, align 8, !tbaa !14
-  %75 = load ptr, ptr %31, align 8, !tbaa !14
+  store i64 %71, ptr %32, align 8, !tbaa !20
+  %72 = load i64, ptr %32, align 8, !tbaa !20
+  store i64 %72, ptr %33, align 8, !tbaa !20
+  %73 = load i64, ptr %33, align 8, !tbaa !20
+  %74 = load ptr, ptr %30, align 8, !tbaa !16
+  %75 = load ptr, ptr %31, align 8, !tbaa !16
   %76 = getelementptr inbounds [3 x ptr], ptr %34, i64 0, i64 0
   %77 = inttoptr i64 %73 to ptr
-  store ptr %77, ptr %76, align 8, !tbaa !14
+  store ptr %77, ptr %76, align 8, !tbaa !16
   %78 = getelementptr inbounds [3 x ptr], ptr %34, i64 0, i64 1
-  store ptr %74, ptr %78, align 8, !tbaa !14
+  store ptr %74, ptr %78, align 8, !tbaa !16
   %79 = getelementptr inbounds [3 x ptr], ptr %34, i64 0, i64 2
-  store ptr %75, ptr %79, align 8, !tbaa !14
+  store ptr %75, ptr %79, align 8, !tbaa !16
   call void @__kmpc_parallel_51(ptr addrspacecast (ptr addrspace(1) @1 to ptr), i32 %21, i32 1, i32 -1, i32 -1, ptr @ompx__block_put_omp_outlined, ptr @ompx__block_put_omp_outlined_wrapper, ptr %34, i64 3)
   %80 = call noundef zeroext i1 @_ZL23ompx__sequential_threadv() #15
   br i1 %80, label %81, label %101
 
 81:                                               ; preds = %67
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %18) #3
-  %82 = load i64, ptr %32, align 8, !tbaa !18
+  %82 = load i64, ptr %32, align 8, !tbaa !20
   %83 = mul i64 %82, 4
-  store i64 %83, ptr %35, align 8, !tbaa !18
+  store i64 %83, ptr %35, align 8, !tbaa !20
   br label %84
 
 84:                                               ; preds = %97, %81
-  %85 = load i64, ptr %35, align 8, !tbaa !18
-  %86 = load i64, ptr %25, align 8, !tbaa !18
+  %85 = load i64, ptr %35, align 8, !tbaa !20
+  %86 = load i64, ptr %25, align 8, !tbaa !20
   %87 = icmp ult i64 %85, %86
   br i1 %87, label %89, label %88
 
@@ -1922,21 +2536,21 @@ define internal void @ompx__block_put(i32 noundef %0, ptr noundef %1, ptr nounde
   br label %100
 
 89:                                               ; preds = %84
-  %90 = load ptr, ptr %29, align 8, !tbaa !14
-  %91 = load i64, ptr %35, align 8, !tbaa !18
+  %90 = load ptr, ptr %29, align 8, !tbaa !16
+  %91 = load i64, ptr %35, align 8, !tbaa !20
   %92 = getelementptr inbounds i8, ptr %90, i64 %91
-  %93 = load i8, ptr %92, align 1, !tbaa !48
-  %94 = load ptr, ptr %27, align 8, !tbaa !14
-  %95 = load i64, ptr %35, align 8, !tbaa !18
+  %93 = load i8, ptr %92, align 1, !tbaa !50
+  %94 = load ptr, ptr %27, align 8, !tbaa !16
+  %95 = load i64, ptr %35, align 8, !tbaa !20
   %96 = getelementptr inbounds i8, ptr %94, i64 %95
-  store i8 %93, ptr %96, align 1, !tbaa !48
+  store i8 %93, ptr %96, align 1, !tbaa !50
   br label %97
 
 97:                                               ; preds = %89
-  %98 = load i64, ptr %35, align 8, !tbaa !18
+  %98 = load i64, ptr %35, align 8, !tbaa !20
   %99 = add i64 %98, 1
-  store i64 %99, ptr %35, align 8, !tbaa !18
-  br label %84, !llvm.loop !49
+  store i64 %99, ptr %35, align 8, !tbaa !20
+  br label %84, !llvm.loop !51
 
 100:                                              ; preds = %88
   br label %101
@@ -1948,18 +2562,18 @@ define internal void @ompx__block_put(i32 noundef %0, ptr noundef %1, ptr nounde
   br label %111
 
 102:                                              ; preds = %58
-  %103 = load i64, ptr %25, align 8, !tbaa !18
-  store i64 %103, ptr %36, align 8, !tbaa !18
-  %104 = load i64, ptr %36, align 8, !tbaa !18
-  %105 = load ptr, ptr %27, align 8, !tbaa !14
-  %106 = load ptr, ptr %29, align 8, !tbaa !14
+  %103 = load i64, ptr %25, align 8, !tbaa !20
+  store i64 %103, ptr %36, align 8, !tbaa !20
+  %104 = load i64, ptr %36, align 8, !tbaa !20
+  %105 = load ptr, ptr %27, align 8, !tbaa !16
+  %106 = load ptr, ptr %29, align 8, !tbaa !16
   %107 = getelementptr inbounds [3 x ptr], ptr %37, i64 0, i64 0
   %108 = inttoptr i64 %104 to ptr
-  store ptr %108, ptr %107, align 8, !tbaa !14
+  store ptr %108, ptr %107, align 8, !tbaa !16
   %109 = getelementptr inbounds [3 x ptr], ptr %37, i64 0, i64 1
-  store ptr %105, ptr %109, align 8, !tbaa !14
+  store ptr %105, ptr %109, align 8, !tbaa !16
   %110 = getelementptr inbounds [3 x ptr], ptr %37, i64 0, i64 2
-  store ptr %106, ptr %110, align 8, !tbaa !14
+  store ptr %106, ptr %110, align 8, !tbaa !16
   call void @__kmpc_parallel_51(ptr addrspacecast (ptr addrspace(1) @1 to ptr), i32 %21, i32 1, i32 -1, i32 -1, ptr @ompx__block_put_omp_outlined.2, ptr @ompx__block_put_omp_outlined.2_wrapper, ptr %37, i64 3)
   br label %111
 
@@ -2016,65 +2630,65 @@ define internal void @ompx__block_put_omp_outlined(ptr noalias noundef %0, ptr n
   %33 = addrspacecast ptr addrspace(5) %18 to ptr
   %34 = addrspacecast ptr addrspace(5) %19 to ptr
   %35 = addrspacecast ptr addrspace(5) %20 to ptr
-  store ptr %0, ptr %21, align 8, !tbaa !14
-  store ptr %1, ptr %22, align 8, !tbaa !14
-  store i64 %2, ptr %23, align 8, !tbaa !18
-  store ptr %3, ptr %24, align 8, !tbaa !14
-  store ptr %4, ptr %25, align 8, !tbaa !14
+  store ptr %0, ptr %21, align 8, !tbaa !16
+  store ptr %1, ptr %22, align 8, !tbaa !16
+  store i64 %2, ptr %23, align 8, !tbaa !20
+  store ptr %3, ptr %24, align 8, !tbaa !16
+  store ptr %4, ptr %25, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %11) #3
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %13) #3
-  %36 = load i64, ptr %23, align 8, !tbaa !18
-  store i64 %36, ptr %28, align 8, !tbaa !18
+  %36 = load i64, ptr %23, align 8, !tbaa !20
+  store i64 %36, ptr %28, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %14) #3
-  %37 = load i64, ptr %28, align 8, !tbaa !18
+  %37 = load i64, ptr %28, align 8, !tbaa !20
   %38 = sub i64 %37, 0
   %39 = udiv i64 %38, 1
   %40 = sub i64 %39, 1
-  store i64 %40, ptr %29, align 8, !tbaa !18
+  store i64 %40, ptr %29, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %15) #3
-  store i64 0, ptr %30, align 8, !tbaa !18
+  store i64 0, ptr %30, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %15) #3
-  %41 = load i64, ptr %28, align 8, !tbaa !18
+  %41 = load i64, ptr %28, align 8, !tbaa !20
   %42 = icmp ult i64 0, %41
   br i1 %42, label %43, label %96
 
 43:                                               ; preds = %5
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %16) #3
-  store i64 0, ptr %31, align 8, !tbaa !18
+  store i64 0, ptr %31, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %17) #3
-  %44 = load i64, ptr %29, align 8, !tbaa !18
-  store i64 %44, ptr %32, align 8, !tbaa !18
+  %44 = load i64, ptr %29, align 8, !tbaa !20
+  store i64 %44, ptr %32, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %18) #3
-  store i64 1, ptr %33, align 8, !tbaa !18
+  store i64 1, ptr %33, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %19) #3
-  store i32 0, ptr %34, align 4, !tbaa !22
+  store i32 0, ptr %34, align 4, !tbaa !24
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %20) #3
   %45 = load ptr, ptr %21, align 8
-  %46 = load i32, ptr %45, align 4, !tbaa !22
+  %46 = load i32, ptr %45, align 4, !tbaa !24
   call void @__kmpc_for_static_init_8u(ptr addrspacecast (ptr addrspace(1) @3 to ptr), i32 %46, i32 33, ptr %34, ptr %31, ptr %32, ptr %33, i64 1, i64 1)
   br label %47
 
 47:                                               ; preds = %86, %43
-  %48 = load i64, ptr %32, align 8, !tbaa !18
-  %49 = load i64, ptr %29, align 8, !tbaa !18
+  %48 = load i64, ptr %32, align 8, !tbaa !20
+  %49 = load i64, ptr %29, align 8, !tbaa !20
   %50 = icmp ugt i64 %48, %49
   br i1 %50, label %51, label %53
 
 51:                                               ; preds = %47
-  %52 = load i64, ptr %29, align 8, !tbaa !18
+  %52 = load i64, ptr %29, align 8, !tbaa !20
   br label %55
 
 53:                                               ; preds = %47
-  %54 = load i64, ptr %32, align 8, !tbaa !18
+  %54 = load i64, ptr %32, align 8, !tbaa !20
   br label %55
 
 55:                                               ; preds = %53, %51
   %56 = phi i64 [ %52, %51 ], [ %54, %53 ]
-  store i64 %56, ptr %32, align 8, !tbaa !18
-  %57 = load i64, ptr %31, align 8, !tbaa !18
-  store i64 %57, ptr %26, align 8, !tbaa !18
-  %58 = load i64, ptr %26, align 8, !tbaa !18
-  %59 = load i64, ptr %32, align 8, !tbaa !18
+  store i64 %56, ptr %32, align 8, !tbaa !20
+  %57 = load i64, ptr %31, align 8, !tbaa !20
+  store i64 %57, ptr %26, align 8, !tbaa !20
+  %58 = load i64, ptr %26, align 8, !tbaa !20
+  %59 = load i64, ptr %32, align 8, !tbaa !20
   %60 = add i64 %59, 1
   %61 = icmp ult i64 %58, %60
   br i1 %61, label %63, label %62
@@ -2086,8 +2700,8 @@ define internal void @ompx__block_put_omp_outlined(ptr noalias noundef %0, ptr n
   br label %64
 
 64:                                               ; preds = %82, %63
-  %65 = load i64, ptr %26, align 8, !tbaa !18
-  %66 = load i64, ptr %32, align 8, !tbaa !18
+  %65 = load i64, ptr %26, align 8, !tbaa !20
+  %66 = load i64, ptr %32, align 8, !tbaa !20
   %67 = add i64 %66, 1
   %68 = icmp ult i64 %65, %67
   br i1 %68, label %70, label %69
@@ -2096,46 +2710,46 @@ define internal void @ompx__block_put_omp_outlined(ptr noalias noundef %0, ptr n
   br label %85
 
 70:                                               ; preds = %64
-  %71 = load i64, ptr %26, align 8, !tbaa !18
+  %71 = load i64, ptr %26, align 8, !tbaa !20
   %72 = mul i64 %71, 1
   %73 = add i64 0, %72
-  store i64 %73, ptr %35, align 8, !tbaa !18
-  %74 = load ptr, ptr %25, align 8, !tbaa !14
-  %75 = load i64, ptr %35, align 8, !tbaa !18
+  store i64 %73, ptr %35, align 8, !tbaa !20
+  %74 = load ptr, ptr %25, align 8, !tbaa !16
+  %75 = load i64, ptr %35, align 8, !tbaa !20
   %76 = getelementptr inbounds i32, ptr %74, i64 %75
-  %77 = load i32, ptr %76, align 4, !tbaa !22
-  %78 = load ptr, ptr %24, align 8, !tbaa !14
-  %79 = load i64, ptr %35, align 8, !tbaa !18
+  %77 = load i32, ptr %76, align 4, !tbaa !24
+  %78 = load ptr, ptr %24, align 8, !tbaa !16
+  %79 = load i64, ptr %35, align 8, !tbaa !20
   %80 = getelementptr inbounds i32, ptr %78, i64 %79
-  store i32 %77, ptr %80, align 4, !tbaa !22
+  store i32 %77, ptr %80, align 4, !tbaa !24
   br label %81
 
 81:                                               ; preds = %70
   br label %82
 
 82:                                               ; preds = %81
-  %83 = load i64, ptr %26, align 8, !tbaa !18
+  %83 = load i64, ptr %26, align 8, !tbaa !20
   %84 = add i64 %83, 1
-  store i64 %84, ptr %26, align 8, !tbaa !18
+  store i64 %84, ptr %26, align 8, !tbaa !20
   br label %64
 
 85:                                               ; preds = %69
   br label %86
 
 86:                                               ; preds = %85
-  %87 = load i64, ptr %31, align 8, !tbaa !18
-  %88 = load i64, ptr %33, align 8, !tbaa !18
+  %87 = load i64, ptr %31, align 8, !tbaa !20
+  %88 = load i64, ptr %33, align 8, !tbaa !20
   %89 = add i64 %87, %88
-  store i64 %89, ptr %31, align 8, !tbaa !18
-  %90 = load i64, ptr %32, align 8, !tbaa !18
-  %91 = load i64, ptr %33, align 8, !tbaa !18
+  store i64 %89, ptr %31, align 8, !tbaa !20
+  %90 = load i64, ptr %32, align 8, !tbaa !20
+  %91 = load i64, ptr %33, align 8, !tbaa !20
   %92 = add i64 %90, %91
-  store i64 %92, ptr %32, align 8, !tbaa !18
+  store i64 %92, ptr %32, align 8, !tbaa !20
   br label %47
 
 93:                                               ; preds = %62
   %94 = load ptr, ptr %21, align 8
-  %95 = load i32, ptr %94, align 4, !tbaa !22
+  %95 = load i32, ptr %94, align 4, !tbaa !24
   call void @__kmpc_for_static_fini(ptr addrspacecast (ptr addrspace(1) @3 to ptr), i32 %95)
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %20) #3
   call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %19) #3
@@ -2164,17 +2778,17 @@ define internal void @ompx__block_put_omp_outlined_wrapper(i16 noundef zeroext %
   %8 = addrspacecast ptr addrspace(5) %4 to ptr
   %9 = addrspacecast ptr addrspace(5) %5 to ptr
   %10 = addrspacecast ptr addrspace(5) %6 to ptr
-  store i16 %0, ptr %7, align 2, !tbaa !50
-  store i32 %1, ptr %8, align 4, !tbaa !22
+  store i16 %0, ptr %7, align 2, !tbaa !52
+  store i32 %1, ptr %8, align 4, !tbaa !24
   store i32 0, ptr %9, align 4
   call void @__kmpc_get_shared_variables(ptr %10)
   %11 = load ptr, ptr %10, align 8
   %12 = getelementptr inbounds ptr, ptr %11, i64 0
-  %13 = load i64, ptr %12, align 8, !tbaa !14
+  %13 = load i64, ptr %12, align 8, !tbaa !16
   %14 = getelementptr inbounds ptr, ptr %11, i64 1
-  %15 = load ptr, ptr %14, align 8, !tbaa !14
+  %15 = load ptr, ptr %14, align 8, !tbaa !16
   %16 = getelementptr inbounds ptr, ptr %11, i64 2
-  %17 = load ptr, ptr %16, align 8, !tbaa !14
+  %17 = load ptr, ptr %16, align 8, !tbaa !16
   call void @ompx__block_put_omp_outlined(ptr %8, ptr %9, i64 %13, ptr %15, ptr %17) #3
   ret void
 }
@@ -2213,65 +2827,65 @@ define internal void @ompx__block_put_omp_outlined.2(ptr noalias noundef %0, ptr
   %33 = addrspacecast ptr addrspace(5) %18 to ptr
   %34 = addrspacecast ptr addrspace(5) %19 to ptr
   %35 = addrspacecast ptr addrspace(5) %20 to ptr
-  store ptr %0, ptr %21, align 8, !tbaa !14
-  store ptr %1, ptr %22, align 8, !tbaa !14
-  store i64 %2, ptr %23, align 8, !tbaa !18
-  store ptr %3, ptr %24, align 8, !tbaa !14
-  store ptr %4, ptr %25, align 8, !tbaa !14
+  store ptr %0, ptr %21, align 8, !tbaa !16
+  store ptr %1, ptr %22, align 8, !tbaa !16
+  store i64 %2, ptr %23, align 8, !tbaa !20
+  store ptr %3, ptr %24, align 8, !tbaa !16
+  store ptr %4, ptr %25, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %11) #3
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %13) #3
-  %36 = load i64, ptr %23, align 8, !tbaa !18
-  store i64 %36, ptr %28, align 8, !tbaa !18
+  %36 = load i64, ptr %23, align 8, !tbaa !20
+  store i64 %36, ptr %28, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %14) #3
-  %37 = load i64, ptr %28, align 8, !tbaa !18
+  %37 = load i64, ptr %28, align 8, !tbaa !20
   %38 = sub i64 %37, 0
   %39 = udiv i64 %38, 1
   %40 = sub i64 %39, 1
-  store i64 %40, ptr %29, align 8, !tbaa !18
+  store i64 %40, ptr %29, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %15) #3
-  store i64 0, ptr %30, align 8, !tbaa !18
+  store i64 0, ptr %30, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %15) #3
-  %41 = load i64, ptr %28, align 8, !tbaa !18
+  %41 = load i64, ptr %28, align 8, !tbaa !20
   %42 = icmp ult i64 0, %41
   br i1 %42, label %43, label %96
 
 43:                                               ; preds = %5
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %16) #3
-  store i64 0, ptr %31, align 8, !tbaa !18
+  store i64 0, ptr %31, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %17) #3
-  %44 = load i64, ptr %29, align 8, !tbaa !18
-  store i64 %44, ptr %32, align 8, !tbaa !18
+  %44 = load i64, ptr %29, align 8, !tbaa !20
+  store i64 %44, ptr %32, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %18) #3
-  store i64 1, ptr %33, align 8, !tbaa !18
+  store i64 1, ptr %33, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %19) #3
-  store i32 0, ptr %34, align 4, !tbaa !22
+  store i32 0, ptr %34, align 4, !tbaa !24
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %20) #3
   %45 = load ptr, ptr %21, align 8
-  %46 = load i32, ptr %45, align 4, !tbaa !22
+  %46 = load i32, ptr %45, align 4, !tbaa !24
   call void @__kmpc_for_static_init_8u(ptr addrspacecast (ptr addrspace(1) @3 to ptr), i32 %46, i32 33, ptr %34, ptr %31, ptr %32, ptr %33, i64 1, i64 1)
   br label %47
 
 47:                                               ; preds = %86, %43
-  %48 = load i64, ptr %32, align 8, !tbaa !18
-  %49 = load i64, ptr %29, align 8, !tbaa !18
+  %48 = load i64, ptr %32, align 8, !tbaa !20
+  %49 = load i64, ptr %29, align 8, !tbaa !20
   %50 = icmp ugt i64 %48, %49
   br i1 %50, label %51, label %53
 
 51:                                               ; preds = %47
-  %52 = load i64, ptr %29, align 8, !tbaa !18
+  %52 = load i64, ptr %29, align 8, !tbaa !20
   br label %55
 
 53:                                               ; preds = %47
-  %54 = load i64, ptr %32, align 8, !tbaa !18
+  %54 = load i64, ptr %32, align 8, !tbaa !20
   br label %55
 
 55:                                               ; preds = %53, %51
   %56 = phi i64 [ %52, %51 ], [ %54, %53 ]
-  store i64 %56, ptr %32, align 8, !tbaa !18
-  %57 = load i64, ptr %31, align 8, !tbaa !18
-  store i64 %57, ptr %26, align 8, !tbaa !18
-  %58 = load i64, ptr %26, align 8, !tbaa !18
-  %59 = load i64, ptr %32, align 8, !tbaa !18
+  store i64 %56, ptr %32, align 8, !tbaa !20
+  %57 = load i64, ptr %31, align 8, !tbaa !20
+  store i64 %57, ptr %26, align 8, !tbaa !20
+  %58 = load i64, ptr %26, align 8, !tbaa !20
+  %59 = load i64, ptr %32, align 8, !tbaa !20
   %60 = add i64 %59, 1
   %61 = icmp ult i64 %58, %60
   br i1 %61, label %63, label %62
@@ -2283,8 +2897,8 @@ define internal void @ompx__block_put_omp_outlined.2(ptr noalias noundef %0, ptr
   br label %64
 
 64:                                               ; preds = %82, %63
-  %65 = load i64, ptr %26, align 8, !tbaa !18
-  %66 = load i64, ptr %32, align 8, !tbaa !18
+  %65 = load i64, ptr %26, align 8, !tbaa !20
+  %66 = load i64, ptr %32, align 8, !tbaa !20
   %67 = add i64 %66, 1
   %68 = icmp ult i64 %65, %67
   br i1 %68, label %70, label %69
@@ -2293,46 +2907,46 @@ define internal void @ompx__block_put_omp_outlined.2(ptr noalias noundef %0, ptr
   br label %85
 
 70:                                               ; preds = %64
-  %71 = load i64, ptr %26, align 8, !tbaa !18
+  %71 = load i64, ptr %26, align 8, !tbaa !20
   %72 = mul i64 %71, 1
   %73 = add i64 0, %72
-  store i64 %73, ptr %35, align 8, !tbaa !18
-  %74 = load ptr, ptr %25, align 8, !tbaa !14
-  %75 = load i64, ptr %35, align 8, !tbaa !18
+  store i64 %73, ptr %35, align 8, !tbaa !20
+  %74 = load ptr, ptr %25, align 8, !tbaa !16
+  %75 = load i64, ptr %35, align 8, !tbaa !20
   %76 = getelementptr inbounds i8, ptr %74, i64 %75
-  %77 = load i8, ptr %76, align 1, !tbaa !48
-  %78 = load ptr, ptr %24, align 8, !tbaa !14
-  %79 = load i64, ptr %35, align 8, !tbaa !18
+  %77 = load i8, ptr %76, align 1, !tbaa !50
+  %78 = load ptr, ptr %24, align 8, !tbaa !16
+  %79 = load i64, ptr %35, align 8, !tbaa !20
   %80 = getelementptr inbounds i8, ptr %78, i64 %79
-  store i8 %77, ptr %80, align 1, !tbaa !48
+  store i8 %77, ptr %80, align 1, !tbaa !50
   br label %81
 
 81:                                               ; preds = %70
   br label %82
 
 82:                                               ; preds = %81
-  %83 = load i64, ptr %26, align 8, !tbaa !18
+  %83 = load i64, ptr %26, align 8, !tbaa !20
   %84 = add i64 %83, 1
-  store i64 %84, ptr %26, align 8, !tbaa !18
+  store i64 %84, ptr %26, align 8, !tbaa !20
   br label %64
 
 85:                                               ; preds = %69
   br label %86
 
 86:                                               ; preds = %85
-  %87 = load i64, ptr %31, align 8, !tbaa !18
-  %88 = load i64, ptr %33, align 8, !tbaa !18
+  %87 = load i64, ptr %31, align 8, !tbaa !20
+  %88 = load i64, ptr %33, align 8, !tbaa !20
   %89 = add i64 %87, %88
-  store i64 %89, ptr %31, align 8, !tbaa !18
-  %90 = load i64, ptr %32, align 8, !tbaa !18
-  %91 = load i64, ptr %33, align 8, !tbaa !18
+  store i64 %89, ptr %31, align 8, !tbaa !20
+  %90 = load i64, ptr %32, align 8, !tbaa !20
+  %91 = load i64, ptr %33, align 8, !tbaa !20
   %92 = add i64 %90, %91
-  store i64 %92, ptr %32, align 8, !tbaa !18
+  store i64 %92, ptr %32, align 8, !tbaa !20
   br label %47
 
 93:                                               ; preds = %62
   %94 = load ptr, ptr %21, align 8
-  %95 = load i32, ptr %94, align 4, !tbaa !22
+  %95 = load i32, ptr %94, align 4, !tbaa !24
   call void @__kmpc_for_static_fini(ptr addrspacecast (ptr addrspace(1) @3 to ptr), i32 %95)
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %20) #3
   call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %19) #3
@@ -2358,17 +2972,17 @@ define internal void @ompx__block_put_omp_outlined.2_wrapper(i16 noundef zeroext
   %8 = addrspacecast ptr addrspace(5) %4 to ptr
   %9 = addrspacecast ptr addrspace(5) %5 to ptr
   %10 = addrspacecast ptr addrspace(5) %6 to ptr
-  store i16 %0, ptr %7, align 2, !tbaa !50
-  store i32 %1, ptr %8, align 4, !tbaa !22
+  store i16 %0, ptr %7, align 2, !tbaa !52
+  store i32 %1, ptr %8, align 4, !tbaa !24
   store i32 0, ptr %9, align 4
   call void @__kmpc_get_shared_variables(ptr %10)
   %11 = load ptr, ptr %10, align 8
   %12 = getelementptr inbounds ptr, ptr %11, i64 0
-  %13 = load i64, ptr %12, align 8, !tbaa !14
+  %13 = load i64, ptr %12, align 8, !tbaa !16
   %14 = getelementptr inbounds ptr, ptr %11, i64 1
-  %15 = load ptr, ptr %14, align 8, !tbaa !14
+  %15 = load ptr, ptr %14, align 8, !tbaa !16
   %16 = getelementptr inbounds ptr, ptr %11, i64 2
-  %17 = load ptr, ptr %16, align 8, !tbaa !14
+  %17 = load ptr, ptr %16, align 8, !tbaa !16
   call void @ompx__block_put_omp_outlined.2(ptr %8, ptr %9, i64 %13, ptr %15, ptr %17) #3
   ret void
 }
@@ -2460,22 +3074,22 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
   %93 = call align 16 ptr @__kmpc_alloc_shared(i64 64)
   %94 = call align 16 ptr @__kmpc_alloc_shared(i64 64)
   %95 = call align 16 ptr @__kmpc_alloc_shared(i64 64)
-  store ptr %0, ptr %52, align 8, !tbaa !14
-  store ptr %1, ptr %53, align 8, !tbaa !14
-  store i64 %2, ptr %54, align 8, !tbaa !18
-  store ptr %3, ptr %55, align 8, !tbaa !14
-  store i32 %4, ptr %56, align 4, !tbaa !22
-  store ptr %5, ptr %57, align 8, !tbaa !14
-  store ptr %6, ptr %58, align 8, !tbaa !14
-  store i64 %7, ptr %59, align 8, !tbaa !18
-  store i32 %8, ptr %60, align 4, !tbaa !22
-  store i32 %9, ptr %61, align 4, !tbaa !22
-  %96 = load ptr, ptr %52, align 8, !tbaa !14
+  store ptr %0, ptr %52, align 8, !tbaa !16
+  store ptr %1, ptr %53, align 8, !tbaa !16
+  store i64 %2, ptr %54, align 8, !tbaa !20
+  store ptr %3, ptr %55, align 8, !tbaa !16
+  store i32 %4, ptr %56, align 4, !tbaa !24
+  store ptr %5, ptr %57, align 8, !tbaa !16
+  store ptr %6, ptr %58, align 8, !tbaa !16
+  store i64 %7, ptr %59, align 8, !tbaa !20
+  store i32 %8, ptr %60, align 4, !tbaa !24
+  store i32 %9, ptr %61, align 4, !tbaa !24
+  %96 = load ptr, ptr %52, align 8, !tbaa !16
   %97 = icmp eq ptr %96, null
   br i1 %97, label %101, label %98
 
 98:                                               ; preds = %10
-  %99 = load i64, ptr %54, align 8, !tbaa !18
+  %99 = load i64, ptr %54, align 8, !tbaa !20
   %100 = icmp eq i64 %99, 0
   br i1 %100, label %101, label %102
 
@@ -2485,10 +3099,10 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
 
 102:                                              ; preds = %98
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %22) #3
-  store i64 0, ptr %63, align 8, !tbaa !18
+  store i64 0, ptr %63, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %23) #3
-  store i64 1, ptr %64, align 8, !tbaa !18
-  %103 = load i32, ptr %61, align 4, !tbaa !22
+  store i64 1, ptr %64, align 8, !tbaa !20
+  %103 = load i32, ptr %61, align 4, !tbaa !24
   %104 = icmp ne i32 %103, 0
   br i1 %104, label %105, label %131
 
@@ -2501,31 +3115,31 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %24) #3
   %109 = call noundef i32 @_ZL16ompx_block_dim_xv() #15
   %110 = sext i32 %109 to i64
-  store i64 %110, ptr %65, align 8, !tbaa !18
+  store i64 %110, ptr %65, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %25) #3
   %111 = call noundef i32 @_ZL16ompx_block_dim_yv() #15
   %112 = sext i32 %111 to i64
-  store i64 %112, ptr %66, align 8, !tbaa !18
+  store i64 %112, ptr %66, align 8, !tbaa !20
   %113 = call noundef i32 @_ZL16ompx_thread_id_xv() #15
   %114 = sext i32 %113 to i64
-  %115 = load i64, ptr %65, align 8, !tbaa !18
+  %115 = load i64, ptr %65, align 8, !tbaa !20
   %116 = call noundef i32 @_ZL16ompx_thread_id_yv() #15
   %117 = sext i32 %116 to i64
-  %118 = load i64, ptr %66, align 8, !tbaa !18
+  %118 = load i64, ptr %66, align 8, !tbaa !20
   %119 = call noundef i32 @_ZL16ompx_thread_id_zv() #15
   %120 = sext i32 %119 to i64
   %121 = mul nsw i64 %118, %120
   %122 = add nsw i64 %117, %121
   %123 = mul nsw i64 %115, %122
   %124 = add nsw i64 %114, %123
-  store i64 %124, ptr %63, align 8, !tbaa !18
-  %125 = load i64, ptr %65, align 8, !tbaa !18
-  %126 = load i64, ptr %66, align 8, !tbaa !18
+  store i64 %124, ptr %63, align 8, !tbaa !20
+  %125 = load i64, ptr %65, align 8, !tbaa !20
+  %126 = load i64, ptr %66, align 8, !tbaa !20
   %127 = mul nsw i64 %125, %126
   %128 = call noundef i32 @_ZL16ompx_block_dim_zv() #15
   %129 = sext i32 %128 to i64
   %130 = mul nsw i64 %127, %129
-  store i64 %130, ptr %64, align 8, !tbaa !18
+  store i64 %130, ptr %64, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %25) #3
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %24) #3
   br label %135
@@ -2543,35 +3157,35 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
 
 135:                                              ; preds = %134, %108
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %26) #3
-  store i32 8, ptr %67, align 4, !tbaa !22
-  %136 = load i32, ptr %56, align 4, !tbaa !22
+  store i32 8, ptr %67, align 4, !tbaa !24
+  %136 = load i32, ptr %56, align 4, !tbaa !24
   %137 = icmp sgt i32 %136, 8
   br i1 %137, label %138, label %157
 
 138:                                              ; preds = %135
-  %139 = load i64, ptr %63, align 8, !tbaa !18
+  %139 = load i64, ptr %63, align 8, !tbaa !20
   %140 = icmp eq i64 %139, 0
   br i1 %140, label %141, label %156
 
 141:                                              ; preds = %138
-  %142 = load i32, ptr %56, align 4, !tbaa !22
+  %142 = load i32, ptr %56, align 4, !tbaa !24
   %143 = call ptr @printf_allocate(i32 96)
   %144 = addrspacecast ptr %143 to ptr addrspace(1)
-  %145 = getelementptr inbounds %varfn_args_store.2, ptr addrspace(1) %144, i32 0, i32 0
+  %145 = getelementptr inbounds %varfn_args_store.3, ptr addrspace(1) %144, i32 0, i32 0
   store i32 32, ptr addrspace(1) %145, align 4
-  %146 = getelementptr inbounds %varfn_args_store.2, ptr addrspace(1) %144, i32 0, i32 1
+  %146 = getelementptr inbounds %varfn_args_store.3, ptr addrspace(1) %144, i32 0, i32 1
   store i32 3, ptr addrspace(1) %146, align 4
-  %147 = getelementptr inbounds %varfn_args_store.2, ptr addrspace(1) %144, i32 0, i32 2
+  %147 = getelementptr inbounds %varfn_args_store.3, ptr addrspace(1) %144, i32 0, i32 2
   store i32 983041, ptr addrspace(1) %147, align 4
-  %148 = getelementptr inbounds %varfn_args_store.2, ptr addrspace(1) %144, i32 0, i32 3
+  %148 = getelementptr inbounds %varfn_args_store.3, ptr addrspace(1) %144, i32 0, i32 3
   store i32 852000, ptr addrspace(1) %148, align 4
-  %149 = getelementptr inbounds %varfn_args_store.2, ptr addrspace(1) %144, i32 0, i32 4
+  %149 = getelementptr inbounds %varfn_args_store.3, ptr addrspace(1) %144, i32 0, i32 4
   store i32 852000, ptr addrspace(1) %149, align 4
-  %150 = getelementptr inbounds %varfn_args_store.2, ptr addrspace(1) %144, i32 0, i32 5
+  %150 = getelementptr inbounds %varfn_args_store.3, ptr addrspace(1) %144, i32 0, i32 5
   store i32 64, ptr addrspace(1) %150, align 4
-  %151 = getelementptr inbounds %varfn_args_store.2, ptr addrspace(1) %144, i32 0, i32 6
+  %151 = getelementptr inbounds %varfn_args_store.3, ptr addrspace(1) %144, i32 0, i32 6
   store i32 %142, ptr addrspace(1) %151, align 4
-  %152 = getelementptr inbounds %varfn_args_store.2, ptr addrspace(1) %144, i32 0, i32 7
+  %152 = getelementptr inbounds %varfn_args_store.3, ptr addrspace(1) %144, i32 0, i32 7
   store i32 8, ptr addrspace(1) %152, align 4
   %153 = getelementptr inbounds i8, ptr addrspace(1) %144, i64 32
   call void @llvm.memcpy.p1.p0.i64(ptr addrspace(1) align 1 %153, ptr align 1 addrspacecast (ptr addrspace(4) @.str.3 to ptr), i64 64, i1 false)
@@ -2585,28 +3199,28 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
 
 157:                                              ; preds = %156, %135
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %27) #3
-  %158 = load ptr, ptr %53, align 8, !tbaa !14
-  store ptr %158, ptr %68, align 8, !tbaa !14
+  %158 = load ptr, ptr %53, align 8, !tbaa !16
+  store ptr %158, ptr %68, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %28) #3
-  %159 = load ptr, ptr %52, align 8, !tbaa !14
-  store ptr %159, ptr %69, align 8, !tbaa !14
+  %159 = load ptr, ptr %52, align 8, !tbaa !16
+  store ptr %159, ptr %69, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %29) #3
-  %160 = load ptr, ptr %55, align 8, !tbaa !14
-  store ptr %160, ptr %70, align 8, !tbaa !14
+  %160 = load ptr, ptr %55, align 8, !tbaa !16
+  store ptr %160, ptr %70, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 1, ptr addrspace(5) %30) #3
-  %161 = load ptr, ptr %68, align 8, !tbaa !14
-  %162 = load ptr, ptr %70, align 8, !tbaa !14
+  %161 = load ptr, ptr %68, align 8, !tbaa !16
+  %162 = load ptr, ptr %70, align 8, !tbaa !16
   %163 = ptrtoint ptr %161 to i64
   %164 = ptrtoint ptr %162 to i64
   %165 = sub i64 %163, %164
-  %166 = load i64, ptr %59, align 8, !tbaa !18
+  %166 = load i64, ptr %59, align 8, !tbaa !20
   %167 = srem i64 %165, %166
   %168 = icmp eq i64 %167, 0
   br i1 %168, label %169, label %174
 
 169:                                              ; preds = %157
-  %170 = load i64, ptr %54, align 8, !tbaa !18
-  %171 = load i64, ptr %59, align 8, !tbaa !18
+  %170 = load i64, ptr %54, align 8, !tbaa !20
+  %171 = load i64, ptr %59, align 8, !tbaa !20
   %172 = srem i64 %170, %171
   %173 = icmp eq i64 %172, 0
   br label %174
@@ -2614,14 +3228,14 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
 174:                                              ; preds = %169, %157
   %175 = phi i1 [ false, %157 ], [ %173, %169 ]
   %176 = zext i1 %175 to i8
-  store i8 %176, ptr %71, align 1, !tbaa !43
+  store i8 %176, ptr %71, align 1, !tbaa !45
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %31) #3
-  store i32 0, ptr %72, align 4, !tbaa !22
+  store i32 0, ptr %72, align 4, !tbaa !24
   br label %177
 
 177:                                              ; preds = %197, %174
-  %178 = load i32, ptr %72, align 4, !tbaa !22
-  %179 = load i32, ptr %56, align 4, !tbaa !22
+  %178 = load i32, ptr %72, align 4, !tbaa !24
+  %179 = load i32, ptr %56, align 4, !tbaa !24
   %180 = icmp slt i32 %178, %179
   br i1 %180, label %182, label %181
 
@@ -2631,17 +3245,17 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
   br label %200
 
 182:                                              ; preds = %177
-  %183 = load i8, ptr %71, align 1, !tbaa !43, !range !45, !noundef !46
+  %183 = load i8, ptr %71, align 1, !tbaa !45, !range !47, !noundef !48
   %184 = trunc i8 %183 to i1
   br i1 %184, label %185, label %194
 
 185:                                              ; preds = %182
-  %186 = load ptr, ptr %57, align 8, !tbaa !14
-  %187 = load i32, ptr %72, align 4, !tbaa !22
+  %186 = load ptr, ptr %57, align 8, !tbaa !16
+  %187 = load i32, ptr %72, align 4, !tbaa !24
   %188 = sext i32 %187 to i64
   %189 = getelementptr inbounds i64, ptr %186, i64 %188
-  %190 = load i64, ptr %189, align 8, !tbaa !18
-  %191 = load i64, ptr %59, align 8, !tbaa !18
+  %190 = load i64, ptr %189, align 8, !tbaa !20
+  %191 = load i64, ptr %59, align 8, !tbaa !20
   %192 = srem i64 %190, %191
   %193 = icmp eq i64 %192, 0
   br label %194
@@ -2649,40 +3263,40 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
 194:                                              ; preds = %185, %182
   %195 = phi i1 [ false, %182 ], [ %193, %185 ]
   %196 = zext i1 %195 to i8
-  store i8 %196, ptr %71, align 1, !tbaa !43
+  store i8 %196, ptr %71, align 1, !tbaa !45
   br label %197
 
 197:                                              ; preds = %194
-  %198 = load i32, ptr %72, align 4, !tbaa !22
+  %198 = load i32, ptr %72, align 4, !tbaa !24
   %199 = add nsw i32 %198, 1
-  store i32 %199, ptr %72, align 4, !tbaa !22
-  br label %177, !llvm.loop !52
+  store i32 %199, ptr %72, align 4, !tbaa !24
+  br label %177, !llvm.loop !54
 
 200:                                              ; preds = %181
-  %201 = load i8, ptr %71, align 1, !tbaa !43, !range !45, !noundef !46
+  %201 = load i8, ptr %71, align 1, !tbaa !45, !range !47, !noundef !48
   %202 = trunc i8 %201 to i1
   br i1 %202, label %220, label %203
 
 203:                                              ; preds = %200
-  %204 = load i64, ptr %63, align 8, !tbaa !18
+  %204 = load i64, ptr %63, align 8, !tbaa !20
   %205 = icmp eq i64 %204, 0
   br i1 %205, label %206, label %219
 
 206:                                              ; preds = %203
-  %207 = load i64, ptr %59, align 8, !tbaa !18
+  %207 = load i64, ptr %59, align 8, !tbaa !20
   %208 = call ptr @printf_allocate(i32 127)
   %209 = addrspacecast ptr %208 to ptr addrspace(1)
-  %210 = getelementptr inbounds %varfn_args_store.3, ptr addrspace(1) %209, i32 0, i32 0
+  %210 = getelementptr inbounds %varfn_args_store.4, ptr addrspace(1) %209, i32 0, i32 0
   store i32 32, ptr addrspace(1) %210, align 4
-  %211 = getelementptr inbounds %varfn_args_store.3, ptr addrspace(1) %209, i32 0, i32 1
+  %211 = getelementptr inbounds %varfn_args_store.4, ptr addrspace(1) %209, i32 0, i32 1
   store i32 2, ptr addrspace(1) %211, align 4
-  %212 = getelementptr inbounds %varfn_args_store.3, ptr addrspace(1) %209, i32 0, i32 2
+  %212 = getelementptr inbounds %varfn_args_store.4, ptr addrspace(1) %209, i32 0, i32 2
   store i32 983041, ptr addrspace(1) %212, align 4
-  %213 = getelementptr inbounds %varfn_args_store.3, ptr addrspace(1) %209, i32 0, i32 3
+  %213 = getelementptr inbounds %varfn_args_store.4, ptr addrspace(1) %209, i32 0, i32 3
   store i32 852032, ptr addrspace(1) %213, align 4
-  %214 = getelementptr inbounds %varfn_args_store.3, ptr addrspace(1) %209, i32 0, i32 4
+  %214 = getelementptr inbounds %varfn_args_store.4, ptr addrspace(1) %209, i32 0, i32 4
   store i32 95, ptr addrspace(1) %214, align 4
-  %215 = getelementptr inbounds %varfn_args_store.3, ptr addrspace(1) %209, i32 0, i32 6
+  %215 = getelementptr inbounds %varfn_args_store.4, ptr addrspace(1) %209, i32 0, i32 6
   store i64 %207, ptr addrspace(1) %215, align 8
   %216 = getelementptr inbounds i8, ptr addrspace(1) %209, i64 32
   call void @llvm.memcpy.p1.p0.i64(ptr addrspace(1) align 1 %216, ptr align 1 addrspacecast (ptr addrspace(4) @.str.4 to ptr), i64 95, i1 false)
@@ -2696,43 +3310,43 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
 
 220:                                              ; preds = %219, %200
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %32) #3
-  %221 = load i64, ptr %54, align 8, !tbaa !18
-  %222 = load i64, ptr %59, align 8, !tbaa !18
+  %221 = load i64, ptr %54, align 8, !tbaa !20
+  %222 = load i64, ptr %59, align 8, !tbaa !20
   %223 = sdiv i64 %221, %222
-  store i64 %223, ptr %73, align 8, !tbaa !18
+  store i64 %223, ptr %73, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %33) #3
   %224 = call i32 @omp_get_num_teams() #15
   %225 = sext i32 %224 to i64
-  store i64 %225, ptr %74, align 8, !tbaa !18
+  store i64 %225, ptr %74, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %34) #3
   %226 = call i32 @omp_get_team_num() #15
   %227 = sext i32 %226 to i64
-  store i64 %227, ptr %75, align 8, !tbaa !18
+  store i64 %227, ptr %75, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %35) #3
-  %228 = load ptr, ptr %68, align 8, !tbaa !14
-  %229 = load i64, ptr %73, align 8, !tbaa !18
-  %230 = load i64, ptr %75, align 8, !tbaa !18
+  %228 = load ptr, ptr %68, align 8, !tbaa !16
+  %229 = load i64, ptr %73, align 8, !tbaa !20
+  %230 = load i64, ptr %75, align 8, !tbaa !20
   %231 = mul nsw i64 %229, %230
-  %232 = load i64, ptr %74, align 8, !tbaa !18
+  %232 = load i64, ptr %74, align 8, !tbaa !20
   %233 = sdiv i64 %231, %232
-  %234 = load i64, ptr %59, align 8, !tbaa !18
+  %234 = load i64, ptr %59, align 8, !tbaa !20
   %235 = mul nsw i64 %233, %234
   %236 = getelementptr inbounds i8, ptr %228, i64 %235
-  store ptr %236, ptr %76, align 8, !tbaa !14
+  store ptr %236, ptr %76, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %36) #3
-  %237 = load ptr, ptr %68, align 8, !tbaa !14
-  %238 = load i64, ptr %73, align 8, !tbaa !18
-  %239 = load i64, ptr %75, align 8, !tbaa !18
+  %237 = load ptr, ptr %68, align 8, !tbaa !16
+  %238 = load i64, ptr %73, align 8, !tbaa !20
+  %239 = load i64, ptr %75, align 8, !tbaa !20
   %240 = add nsw i64 %239, 1
   %241 = mul nsw i64 %238, %240
-  %242 = load i64, ptr %74, align 8, !tbaa !18
+  %242 = load i64, ptr %74, align 8, !tbaa !20
   %243 = sdiv i64 %241, %242
-  %244 = load i64, ptr %59, align 8, !tbaa !18
+  %244 = load i64, ptr %59, align 8, !tbaa !20
   %245 = mul nsw i64 %243, %244
   %246 = getelementptr inbounds i8, ptr %237, i64 %245
-  store ptr %246, ptr %77, align 8, !tbaa !14
-  %247 = load ptr, ptr %76, align 8, !tbaa !14
-  %248 = load ptr, ptr %77, align 8, !tbaa !14
+  store ptr %246, ptr %77, align 8, !tbaa !16
+  %247 = load ptr, ptr %76, align 8, !tbaa !16
+  %248 = load ptr, ptr %77, align 8, !tbaa !16
   %249 = icmp uge ptr %247, %248
   br i1 %249, label %250, label %251
 
@@ -2742,19 +3356,19 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
 
 251:                                              ; preds = %220
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %37) #3
-  store i32 0, ptr %78, align 4, !tbaa !22
+  store i32 0, ptr %78, align 4, !tbaa !24
   call void @llvm.lifetime.start.p5(i64 1, ptr addrspace(5) %38) #3
-  %252 = load i32, ptr %60, align 4, !tbaa !22
+  %252 = load i32, ptr %60, align 4, !tbaa !24
   %253 = icmp eq i32 %252, 0
   %254 = zext i1 %253 to i8
-  store i8 %254, ptr %79, align 1, !tbaa !43
+  store i8 %254, ptr %79, align 1, !tbaa !45
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %39) #3
-  store i32 0, ptr %80, align 4, !tbaa !22
+  store i32 0, ptr %80, align 4, !tbaa !24
   br label %255
 
 255:                                              ; preds = %346, %251
-  %256 = load i32, ptr %80, align 4, !tbaa !22
-  %257 = load i32, ptr %56, align 4, !tbaa !22
+  %256 = load i32, ptr %80, align 4, !tbaa !24
+  %257 = load i32, ptr %56, align 4, !tbaa !24
   %258 = icmp slt i32 %256, %257
   br i1 %258, label %260, label %259
 
@@ -2764,24 +3378,24 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
   br label %349
 
 260:                                              ; preds = %255
-  %261 = load ptr, ptr %58, align 8, !tbaa !14
-  %262 = load i32, ptr %80, align 4, !tbaa !22
+  %261 = load ptr, ptr %58, align 8, !tbaa !16
+  %262 = load i32, ptr %80, align 4, !tbaa !24
   %263 = sext i32 %262 to i64
   %264 = getelementptr inbounds i64, ptr %261, i64 %263
-  %265 = load i64, ptr %264, align 8, !tbaa !18
+  %265 = load i64, ptr %264, align 8, !tbaa !20
   %266 = icmp sle i64 %265, 0
   br i1 %266, label %267, label %268
 
 267:                                              ; preds = %260
-  store i8 1, ptr %79, align 1, !tbaa !43
+  store i8 1, ptr %79, align 1, !tbaa !45
   br label %268
 
 268:                                              ; preds = %267, %260
-  %269 = load ptr, ptr %58, align 8, !tbaa !14
-  %270 = load i32, ptr %80, align 4, !tbaa !22
+  %269 = load ptr, ptr %58, align 8, !tbaa !16
+  %270 = load i32, ptr %80, align 4, !tbaa !24
   %271 = sext i32 %270 to i64
   %272 = getelementptr inbounds i64, ptr %269, i64 %271
-  %273 = load i64, ptr %272, align 8, !tbaa !18
+  %273 = load i64, ptr %272, align 8, !tbaa !20
   %274 = icmp sle i64 %273, 1
   br i1 %274, label %275, label %276
 
@@ -2790,53 +3404,53 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
 
 276:                                              ; preds = %268
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %40) #3
-  %277 = load ptr, ptr %57, align 8, !tbaa !14
-  %278 = load i32, ptr %80, align 4, !tbaa !22
+  %277 = load ptr, ptr %57, align 8, !tbaa !16
+  %278 = load i32, ptr %80, align 4, !tbaa !24
   %279 = sext i32 %278 to i64
   %280 = getelementptr inbounds i64, ptr %277, i64 %279
-  %281 = load i64, ptr %280, align 8, !tbaa !18
-  store i64 %281, ptr %81, align 8, !tbaa !18
-  %282 = load i64, ptr %81, align 8, !tbaa !18
+  %281 = load i64, ptr %280, align 8, !tbaa !20
+  store i64 %281, ptr %81, align 8, !tbaa !20
+  %282 = load i64, ptr %81, align 8, !tbaa !20
   %283 = icmp slt i64 %282, 0
   br i1 %283, label %284, label %297
 
 284:                                              ; preds = %276
-  %285 = load ptr, ptr %58, align 8, !tbaa !14
-  %286 = load i32, ptr %80, align 4, !tbaa !22
+  %285 = load ptr, ptr %58, align 8, !tbaa !16
+  %286 = load i32, ptr %80, align 4, !tbaa !24
   %287 = sext i32 %286 to i64
   %288 = getelementptr inbounds i64, ptr %285, i64 %287
-  %289 = load i64, ptr %288, align 8, !tbaa !18
+  %289 = load i64, ptr %288, align 8, !tbaa !20
   %290 = sub nsw i64 %289, 1
-  %291 = load i64, ptr %81, align 8, !tbaa !18
+  %291 = load i64, ptr %81, align 8, !tbaa !20
   %292 = mul nsw i64 %290, %291
-  %293 = load ptr, ptr %70, align 8, !tbaa !14
+  %293 = load ptr, ptr %70, align 8, !tbaa !16
   %294 = getelementptr inbounds i8, ptr %293, i64 %292
-  store ptr %294, ptr %70, align 8, !tbaa !14
-  %295 = load i64, ptr %81, align 8, !tbaa !18
+  store ptr %294, ptr %70, align 8, !tbaa !16
+  %295 = load i64, ptr %81, align 8, !tbaa !20
   %296 = sub nsw i64 0, %295
-  store i64 %296, ptr %81, align 8, !tbaa !18
+  store i64 %296, ptr %81, align 8, !tbaa !20
   br label %297
 
 297:                                              ; preds = %284, %276
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %41) #3
-  %298 = load i32, ptr %78, align 4, !tbaa !22
+  %298 = load i32, ptr %78, align 4, !tbaa !24
   %299 = add nsw i32 %298, 1
-  store i32 %299, ptr %78, align 4, !tbaa !22
-  store i32 %298, ptr %82, align 4, !tbaa !22
+  store i32 %299, ptr %78, align 4, !tbaa !24
+  store i32 %298, ptr %82, align 4, !tbaa !24
   br label %300
 
 300:                                              ; preds = %330, %297
-  %301 = load i32, ptr %82, align 4, !tbaa !22
+  %301 = load i32, ptr %82, align 4, !tbaa !24
   %302 = icmp sgt i32 %301, 0
   br i1 %302, label %303, label %311
 
 303:                                              ; preds = %300
-  %304 = load i32, ptr %82, align 4, !tbaa !22
+  %304 = load i32, ptr %82, align 4, !tbaa !24
   %305 = sub nsw i32 %304, 1
   %306 = sext i32 %305 to i64
   %307 = getelementptr inbounds [8 x i64], ptr %93, i64 0, i64 %306
-  %308 = load i64, ptr %307, align 8, !tbaa !18
-  %309 = load i64, ptr %81, align 8, !tbaa !18
+  %308 = load i64, ptr %307, align 8, !tbaa !20
+  %309 = load i64, ptr %81, align 8, !tbaa !20
   %310 = icmp slt i64 %308, %309
   br label %311
 
@@ -2845,115 +3459,115 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
   br i1 %312, label %313, label %333
 
 313:                                              ; preds = %311
-  %314 = load i32, ptr %82, align 4, !tbaa !22
+  %314 = load i32, ptr %82, align 4, !tbaa !24
   %315 = sub nsw i32 %314, 1
   %316 = sext i32 %315 to i64
   %317 = getelementptr inbounds [8 x i64], ptr %93, i64 0, i64 %316
-  %318 = load i64, ptr %317, align 8, !tbaa !18
-  %319 = load i32, ptr %82, align 4, !tbaa !22
+  %318 = load i64, ptr %317, align 8, !tbaa !20
+  %319 = load i32, ptr %82, align 4, !tbaa !24
   %320 = sext i32 %319 to i64
   %321 = getelementptr inbounds [8 x i64], ptr %93, i64 0, i64 %320
-  store i64 %318, ptr %321, align 8, !tbaa !18
-  %322 = load i32, ptr %82, align 4, !tbaa !22
+  store i64 %318, ptr %321, align 8, !tbaa !20
+  %322 = load i32, ptr %82, align 4, !tbaa !24
   %323 = sub nsw i32 %322, 1
   %324 = sext i32 %323 to i64
   %325 = getelementptr inbounds [8 x i64], ptr %94, i64 0, i64 %324
-  %326 = load i64, ptr %325, align 8, !tbaa !18
-  %327 = load i32, ptr %82, align 4, !tbaa !22
+  %326 = load i64, ptr %325, align 8, !tbaa !20
+  %327 = load i32, ptr %82, align 4, !tbaa !24
   %328 = sext i32 %327 to i64
   %329 = getelementptr inbounds [8 x i64], ptr %94, i64 0, i64 %328
-  store i64 %326, ptr %329, align 8, !tbaa !18
+  store i64 %326, ptr %329, align 8, !tbaa !20
   br label %330
 
 330:                                              ; preds = %313
-  %331 = load i32, ptr %82, align 4, !tbaa !22
+  %331 = load i32, ptr %82, align 4, !tbaa !24
   %332 = add nsw i32 %331, -1
-  store i32 %332, ptr %82, align 4, !tbaa !22
-  br label %300, !llvm.loop !53
+  store i32 %332, ptr %82, align 4, !tbaa !24
+  br label %300, !llvm.loop !55
 
 333:                                              ; preds = %311
-  %334 = load i64, ptr %81, align 8, !tbaa !18
-  %335 = load i32, ptr %82, align 4, !tbaa !22
+  %334 = load i64, ptr %81, align 8, !tbaa !20
+  %335 = load i32, ptr %82, align 4, !tbaa !24
   %336 = sext i32 %335 to i64
   %337 = getelementptr inbounds [8 x i64], ptr %93, i64 0, i64 %336
-  store i64 %334, ptr %337, align 8, !tbaa !18
-  %338 = load ptr, ptr %58, align 8, !tbaa !14
-  %339 = load i32, ptr %80, align 4, !tbaa !22
+  store i64 %334, ptr %337, align 8, !tbaa !20
+  %338 = load ptr, ptr %58, align 8, !tbaa !16
+  %339 = load i32, ptr %80, align 4, !tbaa !24
   %340 = sext i32 %339 to i64
   %341 = getelementptr inbounds i64, ptr %338, i64 %340
-  %342 = load i64, ptr %341, align 8, !tbaa !18
-  %343 = load i32, ptr %82, align 4, !tbaa !22
+  %342 = load i64, ptr %341, align 8, !tbaa !20
+  %343 = load i32, ptr %82, align 4, !tbaa !24
   %344 = sext i32 %343 to i64
   %345 = getelementptr inbounds [8 x i64], ptr %94, i64 0, i64 %344
-  store i64 %342, ptr %345, align 8, !tbaa !18
+  store i64 %342, ptr %345, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %41) #3
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %40) #3
   br label %346
 
 346:                                              ; preds = %333, %275
-  %347 = load i32, ptr %80, align 4, !tbaa !22
+  %347 = load i32, ptr %80, align 4, !tbaa !24
   %348 = add nsw i32 %347, 1
-  store i32 %348, ptr %80, align 4, !tbaa !22
-  br label %255, !llvm.loop !54
+  store i32 %348, ptr %80, align 4, !tbaa !24
+  br label %255, !llvm.loop !56
 
 349:                                              ; preds = %259
-  %350 = load i8, ptr %79, align 1, !tbaa !43, !range !45, !noundef !46
+  %350 = load i8, ptr %79, align 1, !tbaa !45, !range !47, !noundef !48
   %351 = trunc i8 %350 to i1
   br i1 %351, label %352, label %359
 
 352:                                              ; preds = %349
-  %353 = load ptr, ptr %69, align 8, !tbaa !14
-  %354 = load ptr, ptr %68, align 8, !tbaa !14
-  %355 = load ptr, ptr %76, align 8, !tbaa !14
-  %356 = load ptr, ptr %77, align 8, !tbaa !14
-  %357 = load i64, ptr %63, align 8, !tbaa !18
-  %358 = load i64, ptr %64, align 8, !tbaa !18
+  %353 = load ptr, ptr %69, align 8, !tbaa !16
+  %354 = load ptr, ptr %68, align 8, !tbaa !16
+  %355 = load ptr, ptr %76, align 8, !tbaa !16
+  %356 = load ptr, ptr %77, align 8, !tbaa !16
+  %357 = load i64, ptr %63, align 8, !tbaa !20
+  %358 = load i64, ptr %64, align 8, !tbaa !20
   call void @_ZL16ompx__copy_rangePcPKcS1_S1_ll(ptr noundef %353, ptr noundef %354, ptr noundef %355, ptr noundef %356, i64 noundef %357, i64 noundef %358) #15
   store i32 1, ptr %62, align 4
   br label %577
 
 359:                                              ; preds = %349
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %42) #3
-  %360 = load i64, ptr %59, align 8, !tbaa !18
-  store i64 %360, ptr %83, align 8, !tbaa !18
-  %361 = load i32, ptr %78, align 4, !tbaa !22
+  %360 = load i64, ptr %59, align 8, !tbaa !20
+  store i64 %360, ptr %83, align 8, !tbaa !20
+  %361 = load i32, ptr %78, align 4, !tbaa !24
   %362 = icmp sgt i32 %361, 0
   br i1 %362, label %363, label %379
 
 363:                                              ; preds = %359
-  %364 = load i32, ptr %78, align 4, !tbaa !22
+  %364 = load i32, ptr %78, align 4, !tbaa !24
   %365 = sub nsw i32 %364, 1
   %366 = sext i32 %365 to i64
   %367 = getelementptr inbounds [8 x i64], ptr %93, i64 0, i64 %366
-  %368 = load i64, ptr %367, align 8, !tbaa !18
-  %369 = load i64, ptr %59, align 8, !tbaa !18
+  %368 = load i64, ptr %367, align 8, !tbaa !20
+  %369 = load i64, ptr %59, align 8, !tbaa !20
   %370 = icmp eq i64 %368, %369
   br i1 %370, label %371, label %379
 
 371:                                              ; preds = %363
-  %372 = load i32, ptr %78, align 4, !tbaa !22
+  %372 = load i32, ptr %78, align 4, !tbaa !24
   %373 = add nsw i32 %372, -1
-  store i32 %373, ptr %78, align 4, !tbaa !22
+  store i32 %373, ptr %78, align 4, !tbaa !24
   %374 = sext i32 %373 to i64
   %375 = getelementptr inbounds [8 x i64], ptr %94, i64 0, i64 %374
-  %376 = load i64, ptr %375, align 8, !tbaa !18
-  %377 = load i64, ptr %59, align 8, !tbaa !18
+  %376 = load i64, ptr %375, align 8, !tbaa !20
+  %377 = load i64, ptr %59, align 8, !tbaa !20
   %378 = mul nsw i64 %376, %377
-  store i64 %378, ptr %83, align 8, !tbaa !18
+  store i64 %378, ptr %83, align 8, !tbaa !20
   br label %379
 
 379:                                              ; preds = %371, %363, %359
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %43) #3
-  %380 = load i64, ptr %83, align 8, !tbaa !18
-  store i64 %380, ptr %84, align 8, !tbaa !18
+  %380 = load i64, ptr %83, align 8, !tbaa !20
+  store i64 %380, ptr %84, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %44) #3
-  %381 = load i32, ptr %78, align 4, !tbaa !22
+  %381 = load i32, ptr %78, align 4, !tbaa !24
   %382 = sub nsw i32 %381, 1
-  store i32 %382, ptr %85, align 4, !tbaa !22
+  store i32 %382, ptr %85, align 4, !tbaa !24
   br label %383
 
 383:                                              ; preds = %421, %379
-  %384 = load i32, ptr %85, align 4, !tbaa !22
+  %384 = load i32, ptr %85, align 4, !tbaa !24
   %385 = icmp sge i32 %384, 0
   br i1 %385, label %387, label %386
 
@@ -2963,29 +3577,29 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
   br label %424
 
 387:                                              ; preds = %383
-  %388 = load i32, ptr %85, align 4, !tbaa !22
+  %388 = load i32, ptr %85, align 4, !tbaa !24
   %389 = sext i32 %388 to i64
   %390 = getelementptr inbounds [8 x i64], ptr %93, i64 0, i64 %389
-  %391 = load i64, ptr %390, align 8, !tbaa !18
-  %392 = load i64, ptr %84, align 8, !tbaa !18
+  %391 = load i64, ptr %390, align 8, !tbaa !20
+  %392 = load i64, ptr %84, align 8, !tbaa !20
   %393 = icmp slt i64 %391, %392
   br i1 %393, label %394, label %408
 
 394:                                              ; preds = %387
-  %395 = load i64, ptr %63, align 8, !tbaa !18
+  %395 = load i64, ptr %63, align 8, !tbaa !20
   %396 = icmp eq i64 %395, 0
   br i1 %396, label %397, label %407
 
 397:                                              ; preds = %394
   %398 = call ptr @printf_allocate(i32 127)
   %399 = addrspacecast ptr %398 to ptr addrspace(1)
-  %400 = getelementptr inbounds %varfn_args_store.4, ptr addrspace(1) %399, i32 0, i32 0
+  %400 = getelementptr inbounds %varfn_args_store.5, ptr addrspace(1) %399, i32 0, i32 0
   store i32 16, ptr addrspace(1) %400, align 4
-  %401 = getelementptr inbounds %varfn_args_store.4, ptr addrspace(1) %399, i32 0, i32 1
+  %401 = getelementptr inbounds %varfn_args_store.5, ptr addrspace(1) %399, i32 0, i32 1
   store i32 1, ptr addrspace(1) %401, align 4
-  %402 = getelementptr inbounds %varfn_args_store.4, ptr addrspace(1) %399, i32 0, i32 2
+  %402 = getelementptr inbounds %varfn_args_store.5, ptr addrspace(1) %399, i32 0, i32 2
   store i32 983041, ptr addrspace(1) %402, align 4
-  %403 = getelementptr inbounds %varfn_args_store.4, ptr addrspace(1) %399, i32 0, i32 3
+  %403 = getelementptr inbounds %varfn_args_store.5, ptr addrspace(1) %399, i32 0, i32 3
   store i32 111, ptr addrspace(1) %403, align 4
   %404 = getelementptr inbounds i8, ptr addrspace(1) %399, i64 16
   call void @llvm.memcpy.p1.p0.i64(ptr addrspace(1) align 1 %404, ptr align 1 addrspacecast (ptr addrspace(4) @.str.5 to ptr), i64 111, i1 false)
@@ -2998,42 +3612,42 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
   br label %408
 
 408:                                              ; preds = %407, %387
-  %409 = load i32, ptr %85, align 4, !tbaa !22
+  %409 = load i32, ptr %85, align 4, !tbaa !24
   %410 = sext i32 %409 to i64
   %411 = getelementptr inbounds [8 x i64], ptr %94, i64 0, i64 %410
-  %412 = load i64, ptr %411, align 8, !tbaa !18
+  %412 = load i64, ptr %411, align 8, !tbaa !20
   %413 = sub nsw i64 %412, 1
-  %414 = load i32, ptr %85, align 4, !tbaa !22
+  %414 = load i32, ptr %85, align 4, !tbaa !24
   %415 = sext i32 %414 to i64
   %416 = getelementptr inbounds [8 x i64], ptr %93, i64 0, i64 %415
-  %417 = load i64, ptr %416, align 8, !tbaa !18
+  %417 = load i64, ptr %416, align 8, !tbaa !20
   %418 = mul nsw i64 %413, %417
-  %419 = load i64, ptr %84, align 8, !tbaa !18
+  %419 = load i64, ptr %84, align 8, !tbaa !20
   %420 = add nsw i64 %419, %418
-  store i64 %420, ptr %84, align 8, !tbaa !18
+  store i64 %420, ptr %84, align 8, !tbaa !20
   br label %421
 
 421:                                              ; preds = %408
-  %422 = load i32, ptr %85, align 4, !tbaa !22
+  %422 = load i32, ptr %85, align 4, !tbaa !24
   %423 = add nsw i32 %422, -1
-  store i32 %423, ptr %85, align 4, !tbaa !22
-  br label %383, !llvm.loop !55
+  store i32 %423, ptr %85, align 4, !tbaa !24
+  br label %383, !llvm.loop !57
 
 424:                                              ; preds = %386
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %45) #3
-  %425 = load ptr, ptr %76, align 8, !tbaa !14
-  %426 = load ptr, ptr %70, align 8, !tbaa !14
+  %425 = load ptr, ptr %76, align 8, !tbaa !16
+  %426 = load ptr, ptr %70, align 8, !tbaa !16
   %427 = ptrtoint ptr %425 to i64
   %428 = ptrtoint ptr %426 to i64
   %429 = sub i64 %427, %428
-  store i64 %429, ptr %86, align 8, !tbaa !18
+  store i64 %429, ptr %86, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %46) #3
-  store i32 0, ptr %87, align 4, !tbaa !22
+  store i32 0, ptr %87, align 4, !tbaa !24
   br label %430
 
 430:                                              ; preds = %473, %424
-  %431 = load i32, ptr %87, align 4, !tbaa !22
-  %432 = load i32, ptr %78, align 4, !tbaa !22
+  %431 = load i32, ptr %87, align 4, !tbaa !24
+  %432 = load i32, ptr %78, align 4, !tbaa !24
   %433 = icmp slt i32 %431, %432
   br i1 %433, label %435, label %434
 
@@ -3044,16 +3658,16 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
 
 435:                                              ; preds = %430
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %47) #3
-  %436 = load i64, ptr %86, align 8, !tbaa !18
+  %436 = load i64, ptr %86, align 8, !tbaa !20
   %437 = icmp sgt i64 %436, 0
   br i1 %437, label %438, label %445
 
 438:                                              ; preds = %435
-  %439 = load i64, ptr %86, align 8, !tbaa !18
-  %440 = load i32, ptr %87, align 4, !tbaa !22
+  %439 = load i64, ptr %86, align 8, !tbaa !20
+  %440 = load i32, ptr %87, align 4, !tbaa !24
   %441 = sext i32 %440 to i64
   %442 = getelementptr inbounds [8 x i64], ptr %93, i64 0, i64 %441
-  %443 = load i64, ptr %442, align 8, !tbaa !18
+  %443 = load i64, ptr %442, align 8, !tbaa !20
   %444 = sdiv i64 %439, %443
   br label %446
 
@@ -3062,65 +3676,65 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
 
 446:                                              ; preds = %445, %438
   %447 = phi i64 [ %444, %438 ], [ 0, %445 ]
-  store i64 %447, ptr %88, align 8, !tbaa !18
-  %448 = load i64, ptr %88, align 8, !tbaa !18
-  %449 = load i32, ptr %87, align 4, !tbaa !22
+  store i64 %447, ptr %88, align 8, !tbaa !20
+  %448 = load i64, ptr %88, align 8, !tbaa !20
+  %449 = load i32, ptr %87, align 4, !tbaa !24
   %450 = sext i32 %449 to i64
   %451 = getelementptr inbounds [8 x i64], ptr %94, i64 0, i64 %450
-  %452 = load i64, ptr %451, align 8, !tbaa !18
+  %452 = load i64, ptr %451, align 8, !tbaa !20
   %453 = icmp sge i64 %448, %452
   br i1 %453, label %454, label %460
 
 454:                                              ; preds = %446
-  %455 = load i32, ptr %87, align 4, !tbaa !22
+  %455 = load i32, ptr %87, align 4, !tbaa !24
   %456 = sext i32 %455 to i64
   %457 = getelementptr inbounds [8 x i64], ptr %94, i64 0, i64 %456
-  %458 = load i64, ptr %457, align 8, !tbaa !18
+  %458 = load i64, ptr %457, align 8, !tbaa !20
   %459 = sub nsw i64 %458, 1
-  store i64 %459, ptr %88, align 8, !tbaa !18
+  store i64 %459, ptr %88, align 8, !tbaa !20
   br label %460
 
 460:                                              ; preds = %454, %446
-  %461 = load i64, ptr %88, align 8, !tbaa !18
-  %462 = load i32, ptr %87, align 4, !tbaa !22
+  %461 = load i64, ptr %88, align 8, !tbaa !20
+  %462 = load i32, ptr %87, align 4, !tbaa !24
   %463 = sext i32 %462 to i64
   %464 = getelementptr inbounds [8 x i64], ptr %95, i64 0, i64 %463
-  store i64 %461, ptr %464, align 8, !tbaa !18
-  %465 = load i64, ptr %88, align 8, !tbaa !18
-  %466 = load i32, ptr %87, align 4, !tbaa !22
+  store i64 %461, ptr %464, align 8, !tbaa !20
+  %465 = load i64, ptr %88, align 8, !tbaa !20
+  %466 = load i32, ptr %87, align 4, !tbaa !24
   %467 = sext i32 %466 to i64
   %468 = getelementptr inbounds [8 x i64], ptr %93, i64 0, i64 %467
-  %469 = load i64, ptr %468, align 8, !tbaa !18
+  %469 = load i64, ptr %468, align 8, !tbaa !20
   %470 = mul nsw i64 %465, %469
-  %471 = load i64, ptr %86, align 8, !tbaa !18
+  %471 = load i64, ptr %86, align 8, !tbaa !20
   %472 = sub nsw i64 %471, %470
-  store i64 %472, ptr %86, align 8, !tbaa !18
+  store i64 %472, ptr %86, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %47) #3
   br label %473
 
 473:                                              ; preds = %460
-  %474 = load i32, ptr %87, align 4, !tbaa !22
+  %474 = load i32, ptr %87, align 4, !tbaa !24
   %475 = add nsw i32 %474, 1
-  store i32 %475, ptr %87, align 4, !tbaa !22
-  br label %430, !llvm.loop !56
+  store i32 %475, ptr %87, align 4, !tbaa !24
+  br label %430, !llvm.loop !58
 
 476:                                              ; preds = %434
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %48) #3
-  %477 = load ptr, ptr %76, align 8, !tbaa !14
-  store ptr %477, ptr %89, align 8, !tbaa !14
+  %477 = load ptr, ptr %76, align 8, !tbaa !16
+  store ptr %477, ptr %89, align 8, !tbaa !16
   br label %478
 
 478:                                              ; preds = %564, %476
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %49) #3
-  %479 = load ptr, ptr %70, align 8, !tbaa !14
-  store ptr %479, ptr %90, align 8, !tbaa !14
+  %479 = load ptr, ptr %70, align 8, !tbaa !16
+  store ptr %479, ptr %90, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %50) #3
-  store i32 0, ptr %91, align 4, !tbaa !22
+  store i32 0, ptr %91, align 4, !tbaa !24
   br label %480
 
 480:                                              ; preds = %497, %478
-  %481 = load i32, ptr %91, align 4, !tbaa !22
-  %482 = load i32, ptr %78, align 4, !tbaa !22
+  %481 = load i32, ptr %91, align 4, !tbaa !24
+  %482 = load i32, ptr %78, align 4, !tbaa !24
   %483 = icmp slt i32 %481, %482
   br i1 %483, label %485, label %484
 
@@ -3130,29 +3744,29 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
   br label %500
 
 485:                                              ; preds = %480
-  %486 = load i32, ptr %91, align 4, !tbaa !22
+  %486 = load i32, ptr %91, align 4, !tbaa !24
   %487 = sext i32 %486 to i64
   %488 = getelementptr inbounds [8 x i64], ptr %95, i64 0, i64 %487
-  %489 = load i64, ptr %488, align 8, !tbaa !18
-  %490 = load i32, ptr %91, align 4, !tbaa !22
+  %489 = load i64, ptr %488, align 8, !tbaa !20
+  %490 = load i32, ptr %91, align 4, !tbaa !24
   %491 = sext i32 %490 to i64
   %492 = getelementptr inbounds [8 x i64], ptr %93, i64 0, i64 %491
-  %493 = load i64, ptr %492, align 8, !tbaa !18
+  %493 = load i64, ptr %492, align 8, !tbaa !20
   %494 = mul nsw i64 %489, %493
-  %495 = load ptr, ptr %90, align 8, !tbaa !14
+  %495 = load ptr, ptr %90, align 8, !tbaa !16
   %496 = getelementptr inbounds i8, ptr %495, i64 %494
-  store ptr %496, ptr %90, align 8, !tbaa !14
+  store ptr %496, ptr %90, align 8, !tbaa !16
   br label %497
 
 497:                                              ; preds = %485
-  %498 = load i32, ptr %91, align 4, !tbaa !22
+  %498 = load i32, ptr %91, align 4, !tbaa !24
   %499 = add nsw i32 %498, 1
-  store i32 %499, ptr %91, align 4, !tbaa !22
-  br label %480, !llvm.loop !57
+  store i32 %499, ptr %91, align 4, !tbaa !24
+  br label %480, !llvm.loop !59
 
 500:                                              ; preds = %484
-  %501 = load ptr, ptr %90, align 8, !tbaa !14
-  %502 = load ptr, ptr %77, align 8, !tbaa !14
+  %501 = load ptr, ptr %90, align 8, !tbaa !16
+  %502 = load ptr, ptr %77, align 8, !tbaa !16
   %503 = icmp uge ptr %501, %502
   br i1 %503, label %504, label %505
 
@@ -3161,39 +3775,39 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
   br label %562
 
 505:                                              ; preds = %500
-  %506 = load ptr, ptr %90, align 8, !tbaa !14
-  %507 = load ptr, ptr %89, align 8, !tbaa !14
+  %506 = load ptr, ptr %90, align 8, !tbaa !16
+  %507 = load ptr, ptr %89, align 8, !tbaa !16
   %508 = icmp ugt ptr %506, %507
   br i1 %508, label %509, label %516
 
 509:                                              ; preds = %505
-  %510 = load ptr, ptr %69, align 8, !tbaa !14
-  %511 = load ptr, ptr %68, align 8, !tbaa !14
-  %512 = load ptr, ptr %89, align 8, !tbaa !14
-  %513 = load ptr, ptr %90, align 8, !tbaa !14
-  %514 = load i64, ptr %63, align 8, !tbaa !18
-  %515 = load i64, ptr %64, align 8, !tbaa !18
+  %510 = load ptr, ptr %69, align 8, !tbaa !16
+  %511 = load ptr, ptr %68, align 8, !tbaa !16
+  %512 = load ptr, ptr %89, align 8, !tbaa !16
+  %513 = load ptr, ptr %90, align 8, !tbaa !16
+  %514 = load i64, ptr %63, align 8, !tbaa !20
+  %515 = load i64, ptr %64, align 8, !tbaa !20
   call void @_ZL16ompx__copy_rangePcPKcS1_S1_ll(ptr noundef %510, ptr noundef %511, ptr noundef %512, ptr noundef %513, i64 noundef %514, i64 noundef %515) #15
   br label %516
 
 516:                                              ; preds = %509, %505
-  %517 = load ptr, ptr %90, align 8, !tbaa !14
-  %518 = load i64, ptr %83, align 8, !tbaa !18
+  %517 = load ptr, ptr %90, align 8, !tbaa !16
+  %518 = load i64, ptr %83, align 8, !tbaa !20
   %519 = getelementptr inbounds i8, ptr %517, i64 %518
-  %520 = load ptr, ptr %89, align 8, !tbaa !14
+  %520 = load ptr, ptr %89, align 8, !tbaa !16
   %521 = icmp ugt ptr %519, %520
   br i1 %521, label %522, label %526
 
 522:                                              ; preds = %516
-  %523 = load ptr, ptr %90, align 8, !tbaa !14
-  %524 = load i64, ptr %83, align 8, !tbaa !18
+  %523 = load ptr, ptr %90, align 8, !tbaa !16
+  %524 = load i64, ptr %83, align 8, !tbaa !20
   %525 = getelementptr inbounds i8, ptr %523, i64 %524
-  store ptr %525, ptr %89, align 8, !tbaa !14
+  store ptr %525, ptr %89, align 8, !tbaa !16
   br label %526
 
 526:                                              ; preds = %522, %516
-  %527 = load ptr, ptr %89, align 8, !tbaa !14
-  %528 = load ptr, ptr %77, align 8, !tbaa !14
+  %527 = load ptr, ptr %89, align 8, !tbaa !16
+  %528 = load ptr, ptr %77, align 8, !tbaa !16
   %529 = icmp uge ptr %527, %528
   br i1 %529, label %530, label %531
 
@@ -3203,27 +3817,27 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
 
 531:                                              ; preds = %526
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %51) #3
-  %532 = load i32, ptr %78, align 4, !tbaa !22
+  %532 = load i32, ptr %78, align 4, !tbaa !24
   %533 = sub nsw i32 %532, 1
-  store i32 %533, ptr %92, align 4, !tbaa !22
+  store i32 %533, ptr %92, align 4, !tbaa !24
   br label %534
 
 534:                                              ; preds = %553, %531
-  %535 = load i32, ptr %92, align 4, !tbaa !22
+  %535 = load i32, ptr %92, align 4, !tbaa !24
   %536 = icmp sge i32 %535, 0
   br i1 %536, label %537, label %556
 
 537:                                              ; preds = %534
-  %538 = load i32, ptr %92, align 4, !tbaa !22
+  %538 = load i32, ptr %92, align 4, !tbaa !24
   %539 = sext i32 %538 to i64
   %540 = getelementptr inbounds [8 x i64], ptr %95, i64 0, i64 %539
-  %541 = load i64, ptr %540, align 8, !tbaa !18
+  %541 = load i64, ptr %540, align 8, !tbaa !20
   %542 = add nsw i64 %541, 1
-  store i64 %542, ptr %540, align 8, !tbaa !18
-  %543 = load i32, ptr %92, align 4, !tbaa !22
+  store i64 %542, ptr %540, align 8, !tbaa !20
+  %543 = load i32, ptr %92, align 4, !tbaa !24
   %544 = sext i32 %543 to i64
   %545 = getelementptr inbounds [8 x i64], ptr %94, i64 0, i64 %544
-  %546 = load i64, ptr %545, align 8, !tbaa !18
+  %546 = load i64, ptr %545, align 8, !tbaa !20
   %547 = icmp slt i64 %542, %546
   br i1 %547, label %548, label %549
 
@@ -3231,20 +3845,20 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
   br label %556
 
 549:                                              ; preds = %537
-  %550 = load i32, ptr %92, align 4, !tbaa !22
+  %550 = load i32, ptr %92, align 4, !tbaa !24
   %551 = sext i32 %550 to i64
   %552 = getelementptr inbounds [8 x i64], ptr %95, i64 0, i64 %551
-  store i64 0, ptr %552, align 8, !tbaa !18
+  store i64 0, ptr %552, align 8, !tbaa !20
   br label %553
 
 553:                                              ; preds = %549
-  %554 = load i32, ptr %92, align 4, !tbaa !22
+  %554 = load i32, ptr %92, align 4, !tbaa !24
   %555 = add nsw i32 %554, -1
-  store i32 %555, ptr %92, align 4, !tbaa !22
-  br label %534, !llvm.loop !58
+  store i32 %555, ptr %92, align 4, !tbaa !24
+  br label %534, !llvm.loop !60
 
 556:                                              ; preds = %548, %534
-  %557 = load i32, ptr %92, align 4, !tbaa !22
+  %557 = load i32, ptr %92, align 4, !tbaa !24
   %558 = icmp slt i32 %557, 0
   br i1 %558, label %559, label %560
 
@@ -3269,21 +3883,21 @@ define internal void @ompx__box_residual(ptr noundef %0, ptr noundef %1, i64 nou
   ]
 
 564:                                              ; preds = %562
-  br label %478, !llvm.loop !59
+  br label %478, !llvm.loop !61
 
 565:                                              ; preds = %562
-  %566 = load ptr, ptr %89, align 8, !tbaa !14
-  %567 = load ptr, ptr %77, align 8, !tbaa !14
+  %566 = load ptr, ptr %89, align 8, !tbaa !16
+  %567 = load ptr, ptr %77, align 8, !tbaa !16
   %568 = icmp ult ptr %566, %567
   br i1 %568, label %569, label %576
 
 569:                                              ; preds = %565
-  %570 = load ptr, ptr %69, align 8, !tbaa !14
-  %571 = load ptr, ptr %68, align 8, !tbaa !14
-  %572 = load ptr, ptr %89, align 8, !tbaa !14
-  %573 = load ptr, ptr %77, align 8, !tbaa !14
-  %574 = load i64, ptr %63, align 8, !tbaa !18
-  %575 = load i64, ptr %64, align 8, !tbaa !18
+  %570 = load ptr, ptr %69, align 8, !tbaa !16
+  %571 = load ptr, ptr %68, align 8, !tbaa !16
+  %572 = load ptr, ptr %89, align 8, !tbaa !16
+  %573 = load ptr, ptr %77, align 8, !tbaa !16
+  %574 = load i64, ptr %63, align 8, !tbaa !20
+  %575 = load i64, ptr %64, align 8, !tbaa !20
   call void @_ZL16ompx__copy_rangePcPKcS1_S1_ll(ptr noundef %570, ptr noundef %571, ptr noundef %572, ptr noundef %573, i64 noundef %574, i64 noundef %575) #15
   br label %576
 
@@ -3393,27 +4007,27 @@ define internal void @_ZL16ompx__copy_rangePcPKcS1_S1_ll(ptr noundef %0, ptr nou
   %30 = addrspacecast ptr addrspace(5) %16 to ptr
   %31 = addrspacecast ptr addrspace(5) %17 to ptr
   %32 = addrspacecast ptr addrspace(5) %19 to ptr
-  store ptr %0, ptr %21, align 8, !tbaa !14
-  store ptr %1, ptr %22, align 8, !tbaa !14
-  store ptr %2, ptr %23, align 8, !tbaa !14
-  store ptr %3, ptr %24, align 8, !tbaa !14
-  store i64 %4, ptr %25, align 8, !tbaa !18
-  store i64 %5, ptr %26, align 8, !tbaa !18
+  store ptr %0, ptr %21, align 8, !tbaa !16
+  store ptr %1, ptr %22, align 8, !tbaa !16
+  store ptr %2, ptr %23, align 8, !tbaa !16
+  store ptr %3, ptr %24, align 8, !tbaa !16
+  store i64 %4, ptr %25, align 8, !tbaa !20
+  store i64 %5, ptr %26, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %13) #3
-  %33 = load ptr, ptr %21, align 8, !tbaa !14
-  %34 = load ptr, ptr %23, align 8, !tbaa !14
-  %35 = load ptr, ptr %22, align 8, !tbaa !14
+  %33 = load ptr, ptr %21, align 8, !tbaa !16
+  %34 = load ptr, ptr %23, align 8, !tbaa !16
+  %35 = load ptr, ptr %22, align 8, !tbaa !16
   %36 = ptrtoint ptr %34 to i64
   %37 = ptrtoint ptr %35 to i64
   %38 = sub i64 %36, %37
   %39 = getelementptr inbounds i8, ptr %33, i64 %38
-  store ptr %39, ptr %27, align 8, !tbaa !14
-  %40 = load ptr, ptr %23, align 8, !tbaa !14
+  store ptr %39, ptr %27, align 8, !tbaa !16
+  %40 = load ptr, ptr %23, align 8, !tbaa !16
   %41 = ptrtoint ptr %40 to i64
-  %42 = load ptr, ptr %24, align 8, !tbaa !14
+  %42 = load ptr, ptr %24, align 8, !tbaa !16
   %43 = ptrtoint ptr %42 to i64
   %44 = or i64 %41, %43
-  %45 = load ptr, ptr %27, align 8, !tbaa !14
+  %45 = load ptr, ptr %27, align 8, !tbaa !16
   %46 = ptrtoint ptr %45 to i64
   %47 = or i64 %44, %46
   %48 = and i64 %47, 3
@@ -3422,27 +4036,27 @@ define internal void @_ZL16ompx__copy_rangePcPKcS1_S1_ll(ptr noundef %0, ptr nou
 
 50:                                               ; preds = %6
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %14) #3
-  %51 = load ptr, ptr %27, align 8, !tbaa !14
-  store ptr %51, ptr %28, align 8, !tbaa !14
+  %51 = load ptr, ptr %27, align 8, !tbaa !16
+  store ptr %51, ptr %28, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %15) #3
-  %52 = load ptr, ptr %23, align 8, !tbaa !14
-  store ptr %52, ptr %29, align 8, !tbaa !14
+  %52 = load ptr, ptr %23, align 8, !tbaa !16
+  store ptr %52, ptr %29, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %16) #3
-  %53 = load ptr, ptr %24, align 8, !tbaa !14
-  %54 = load ptr, ptr %23, align 8, !tbaa !14
+  %53 = load ptr, ptr %24, align 8, !tbaa !16
+  %54 = load ptr, ptr %23, align 8, !tbaa !16
   %55 = ptrtoint ptr %53 to i64
   %56 = ptrtoint ptr %54 to i64
   %57 = sub i64 %55, %56
   %58 = sdiv i64 %57, 4
-  store i64 %58, ptr %30, align 8, !tbaa !18
+  store i64 %58, ptr %30, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %17) #3
-  %59 = load i64, ptr %25, align 8, !tbaa !18
-  store i64 %59, ptr %31, align 8, !tbaa !18
+  %59 = load i64, ptr %25, align 8, !tbaa !20
+  store i64 %59, ptr %31, align 8, !tbaa !20
   br label %60
 
 60:                                               ; preds = %73, %50
-  %61 = load i64, ptr %31, align 8, !tbaa !18
-  %62 = load i64, ptr %30, align 8, !tbaa !18
+  %61 = load i64, ptr %31, align 8, !tbaa !20
+  %62 = load i64, ptr %30, align 8, !tbaa !20
   %63 = icmp slt i64 %61, %62
   br i1 %63, label %65, label %64
 
@@ -3451,22 +4065,22 @@ define internal void @_ZL16ompx__copy_rangePcPKcS1_S1_ll(ptr noundef %0, ptr nou
   br label %77
 
 65:                                               ; preds = %60
-  %66 = load ptr, ptr %29, align 8, !tbaa !14
-  %67 = load i64, ptr %31, align 8, !tbaa !18
+  %66 = load ptr, ptr %29, align 8, !tbaa !16
+  %67 = load i64, ptr %31, align 8, !tbaa !20
   %68 = getelementptr inbounds i32, ptr %66, i64 %67
-  %69 = load i32, ptr %68, align 4, !tbaa !22
-  %70 = load ptr, ptr %28, align 8, !tbaa !14
-  %71 = load i64, ptr %31, align 8, !tbaa !18
+  %69 = load i32, ptr %68, align 4, !tbaa !24
+  %70 = load ptr, ptr %28, align 8, !tbaa !16
+  %71 = load i64, ptr %31, align 8, !tbaa !20
   %72 = getelementptr inbounds i32, ptr %70, i64 %71
-  store i32 %69, ptr %72, align 4, !tbaa !22
+  store i32 %69, ptr %72, align 4, !tbaa !24
   br label %73
 
 73:                                               ; preds = %65
-  %74 = load i64, ptr %26, align 8, !tbaa !18
-  %75 = load i64, ptr %31, align 8, !tbaa !18
+  %74 = load i64, ptr %26, align 8, !tbaa !20
+  %75 = load i64, ptr %31, align 8, !tbaa !20
   %76 = add nsw i64 %75, %74
-  store i64 %76, ptr %31, align 8, !tbaa !18
-  br label %60, !llvm.loop !60
+  store i64 %76, ptr %31, align 8, !tbaa !20
+  br label %60, !llvm.loop !62
 
 77:                                               ; preds = %64
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %16) #3
@@ -3476,14 +4090,14 @@ define internal void @_ZL16ompx__copy_rangePcPKcS1_S1_ll(ptr noundef %0, ptr nou
 
 78:                                               ; preds = %6
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %19) #3
-  %79 = load i64, ptr %25, align 8, !tbaa !18
-  store i64 %79, ptr %32, align 8, !tbaa !18
+  %79 = load i64, ptr %25, align 8, !tbaa !20
+  store i64 %79, ptr %32, align 8, !tbaa !20
   br label %80
 
 80:                                               ; preds = %97, %78
-  %81 = load i64, ptr %32, align 8, !tbaa !18
-  %82 = load ptr, ptr %24, align 8, !tbaa !14
-  %83 = load ptr, ptr %23, align 8, !tbaa !14
+  %81 = load i64, ptr %32, align 8, !tbaa !20
+  %82 = load ptr, ptr %24, align 8, !tbaa !16
+  %83 = load ptr, ptr %23, align 8, !tbaa !16
   %84 = ptrtoint ptr %82 to i64
   %85 = ptrtoint ptr %83 to i64
   %86 = sub i64 %84, %85
@@ -3495,22 +4109,22 @@ define internal void @_ZL16ompx__copy_rangePcPKcS1_S1_ll(ptr noundef %0, ptr nou
   br label %101
 
 89:                                               ; preds = %80
-  %90 = load ptr, ptr %23, align 8, !tbaa !14
-  %91 = load i64, ptr %32, align 8, !tbaa !18
+  %90 = load ptr, ptr %23, align 8, !tbaa !16
+  %91 = load i64, ptr %32, align 8, !tbaa !20
   %92 = getelementptr inbounds i8, ptr %90, i64 %91
-  %93 = load i8, ptr %92, align 1, !tbaa !48
-  %94 = load ptr, ptr %27, align 8, !tbaa !14
-  %95 = load i64, ptr %32, align 8, !tbaa !18
+  %93 = load i8, ptr %92, align 1, !tbaa !50
+  %94 = load ptr, ptr %27, align 8, !tbaa !16
+  %95 = load i64, ptr %32, align 8, !tbaa !20
   %96 = getelementptr inbounds i8, ptr %94, i64 %95
-  store i8 %93, ptr %96, align 1, !tbaa !48
+  store i8 %93, ptr %96, align 1, !tbaa !50
   br label %97
 
 97:                                               ; preds = %89
-  %98 = load i64, ptr %26, align 8, !tbaa !18
-  %99 = load i64, ptr %32, align 8, !tbaa !18
+  %98 = load i64, ptr %26, align 8, !tbaa !20
+  %99 = load i64, ptr %32, align 8, !tbaa !20
   %100 = add nsw i64 %99, %98
-  store i64 %100, ptr %32, align 8, !tbaa !18
-  br label %80, !llvm.loop !61
+  store i64 %100, ptr %32, align 8, !tbaa !20
+  br label %80, !llvm.loop !63
 
 101:                                              ; preds = %88
   br label %102
@@ -3547,16 +4161,16 @@ define internal noundef ptr @ompx__box_peer(i32 noundef %0, ptr noundef %1, ptr 
   %27 = addrspacecast ptr addrspace(5) %16 to ptr
   %28 = addrspacecast ptr addrspace(5) %17 to ptr
   %29 = addrspacecast ptr addrspace(5) %18 to ptr
-  store i32 %0, ptr %20, align 4, !tbaa !22
-  store ptr %1, ptr %21, align 8, !tbaa !14
-  store ptr %2, ptr %22, align 8, !tbaa !14
-  store i64 %3, ptr %23, align 8, !tbaa !18
-  store i32 %4, ptr %24, align 4, !tbaa !22
-  store i32 %5, ptr %25, align 4, !tbaa !22
-  store ptr %6, ptr %26, align 8, !tbaa !14
-  %30 = load ptr, ptr %26, align 8, !tbaa !14
-  store i32 0, ptr %30, align 4, !tbaa !22
-  %31 = load i32, ptr %20, align 4, !tbaa !22
+  store i32 %0, ptr %20, align 4, !tbaa !24
+  store ptr %1, ptr %21, align 8, !tbaa !16
+  store ptr %2, ptr %22, align 8, !tbaa !16
+  store i64 %3, ptr %23, align 8, !tbaa !20
+  store i32 %4, ptr %24, align 4, !tbaa !24
+  store i32 %5, ptr %25, align 4, !tbaa !24
+  store ptr %6, ptr %26, align 8, !tbaa !16
+  %30 = load ptr, ptr %26, align 8, !tbaa !16
+  store i32 0, ptr %30, align 4, !tbaa !24
+  %31 = load i32, ptr %20, align 4, !tbaa !24
   %32 = icmp slt i32 %31, 0
   br i1 %32, label %33, label %34
 
@@ -3567,37 +4181,37 @@ define internal noundef ptr @ompx__box_peer(i32 noundef %0, ptr noundef %1, ptr 
 34:                                               ; preds = %7
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %16) #3
   %35 = call noundef ptr @_ZL18ompx__pipeline_ctxv() #15
-  store ptr %35, ptr %27, align 8, !tbaa !14
+  store ptr %35, ptr %27, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %17) #3
-  %36 = load ptr, ptr %27, align 8, !tbaa !14
-  %37 = load i32, ptr %20, align 4, !tbaa !22
-  %38 = load ptr, ptr %21, align 8, !tbaa !14
+  %36 = load ptr, ptr %27, align 8, !tbaa !16
+  %37 = load i32, ptr %20, align 4, !tbaa !24
+  %38 = load ptr, ptr %21, align 8, !tbaa !16
   %39 = call noundef ptr @_ZL15ompx__peer_basePN4gicc9DeviceCtxEiPv(ptr noundef %36, i32 noundef %37, ptr noundef %38) #15
-  store ptr %39, ptr %28, align 8, !tbaa !14
-  %40 = load ptr, ptr %28, align 8, !tbaa !14
+  store ptr %39, ptr %28, align 8, !tbaa !16
+  %40 = load ptr, ptr %28, align 8, !tbaa !16
   %41 = icmp ne ptr %40, null
   br i1 %41, label %42, label %44
 
 42:                                               ; preds = %34
-  %43 = load ptr, ptr %28, align 8, !tbaa !14
+  %43 = load ptr, ptr %28, align 8, !tbaa !16
   store ptr %43, ptr %19, align 8
   store i32 1, ptr %29, align 4
   br label %87
 
 44:                                               ; preds = %34
-  %45 = load ptr, ptr %27, align 8, !tbaa !14
+  %45 = load ptr, ptr %27, align 8, !tbaa !16
   %46 = call noundef ptr @_ZN4gicc3omp6detail12lane_to_ringEPNS_9DeviceCtxEi(ptr noundef %45, i32 noundef 0) #15
   %47 = icmp ne ptr %46, null
   br i1 %47, label %48, label %66
 
 48:                                               ; preds = %44
-  %49 = load i32, ptr %24, align 4, !tbaa !22
+  %49 = load i32, ptr %24, align 4, !tbaa !24
   %50 = icmp ne i32 %49, 0
   br i1 %50, label %51, label %53
 
 51:                                               ; preds = %48
-  %52 = load ptr, ptr %26, align 8, !tbaa !14
-  store i32 1, ptr %52, align 4, !tbaa !22
+  %52 = load ptr, ptr %26, align 8, !tbaa !16
+  store i32 1, ptr %52, align 4, !tbaa !24
   br label %65
 
 53:                                               ; preds = %48
@@ -3610,11 +4224,11 @@ define internal noundef ptr @ompx__box_peer(i32 noundef %0, ptr noundef %1, ptr 
   br i1 %57, label %58, label %64
 
 58:                                               ; preds = %56
-  %59 = load ptr, ptr %27, align 8, !tbaa !14
-  %60 = load i32, ptr %20, align 4, !tbaa !22
-  %61 = load ptr, ptr %21, align 8, !tbaa !14
-  %62 = load ptr, ptr %22, align 8, !tbaa !14
-  %63 = load i64, ptr %23, align 8, !tbaa !18
+  %59 = load ptr, ptr %27, align 8, !tbaa !16
+  %60 = load i32, ptr %20, align 4, !tbaa !24
+  %61 = load ptr, ptr %21, align 8, !tbaa !16
+  %62 = load ptr, ptr %22, align 8, !tbaa !16
+  %63 = load i64, ptr %23, align 8, !tbaa !20
   call void @_ZL16ompx__pipe_deferPN4gicc9DeviceCtxEiPvPKvm(ptr noundef %59, i32 noundef %60, ptr noundef %61, ptr noundef %62, i64 noundef %63) #15
   br label %64
 
@@ -3625,15 +4239,15 @@ define internal noundef ptr @ompx__box_peer(i32 noundef %0, ptr noundef %1, ptr 
   br label %86
 
 66:                                               ; preds = %44
-  %67 = load i32, ptr %25, align 4, !tbaa !22
+  %67 = load i32, ptr %25, align 4, !tbaa !24
   %68 = call noundef ptr @_ZL16ompx__after_belli(i32 noundef %67) #15
   %69 = icmp ne ptr %68, null
   br i1 %69, label %70, label %73
 
 70:                                               ; preds = %66
-  %71 = load i32, ptr %24, align 4, !tbaa !22
-  %72 = load ptr, ptr %26, align 8, !tbaa !14
-  store i32 %71, ptr %72, align 4, !tbaa !22
+  %71 = load i32, ptr %24, align 4, !tbaa !24
+  %72 = load ptr, ptr %26, align 8, !tbaa !16
+  store i32 %71, ptr %72, align 4, !tbaa !24
   br label %85
 
 73:                                               ; preds = %66
@@ -3646,11 +4260,11 @@ define internal noundef ptr @ompx__box_peer(i32 noundef %0, ptr noundef %1, ptr 
   br i1 %77, label %78, label %84
 
 78:                                               ; preds = %76
-  %79 = load ptr, ptr %27, align 8, !tbaa !14
-  %80 = load i32, ptr %20, align 4, !tbaa !22
-  %81 = load ptr, ptr %21, align 8, !tbaa !14
-  %82 = load ptr, ptr %22, align 8, !tbaa !14
-  %83 = load i64, ptr %23, align 8, !tbaa !18
+  %79 = load ptr, ptr %27, align 8, !tbaa !16
+  %80 = load i32, ptr %20, align 4, !tbaa !24
+  %81 = load ptr, ptr %21, align 8, !tbaa !16
+  %82 = load ptr, ptr %22, align 8, !tbaa !16
+  %83 = load i64, ptr %23, align 8, !tbaa !20
   call void @_ZL16ompx__pipe_deferPN4gicc9DeviceCtxEiPvPKvm(ptr noundef %79, i32 noundef %80, ptr noundef %81, ptr noundef %82, i64 noundef %83) #15
   br label %84
 
@@ -3694,27 +4308,27 @@ define internal void @_ZL16ompx__pipe_deferPN4gicc9DeviceCtxEiPvPKvm(ptr noundef
   %20 = addrspacecast ptr addrspace(5) %12 to ptr
   %21 = addrspacecast ptr addrspace(5) %13 to ptr
   %22 = call align 16 ptr @__kmpc_alloc_shared(i64 8)
-  store ptr %0, ptr %14, align 8, !tbaa !14
-  store i32 %1, ptr %15, align 4, !tbaa !22
-  store ptr %2, ptr %16, align 8, !tbaa !14
-  store ptr %3, ptr %17, align 8, !tbaa !14
-  store i64 %4, ptr %18, align 8, !tbaa !18
-  %23 = load ptr, ptr addrspacecast (ptr addrspace(1) @_ZL19ompx__pipe_deferred to ptr), align 8, !tbaa !14
-  store ptr %23, ptr %22, align 8, !tbaa !14
-  %24 = load ptr, ptr %22, align 8, !tbaa !14
+  store ptr %0, ptr %14, align 8, !tbaa !16
+  store i32 %1, ptr %15, align 4, !tbaa !24
+  store ptr %2, ptr %16, align 8, !tbaa !16
+  store ptr %3, ptr %17, align 8, !tbaa !16
+  store i64 %4, ptr %18, align 8, !tbaa !20
+  %23 = load ptr, ptr addrspacecast (ptr addrspace(1) @_ZL19ompx__pipe_deferred to ptr), align 8, !tbaa !16
+  store ptr %23, ptr %22, align 8, !tbaa !16
+  %24 = load ptr, ptr %22, align 8, !tbaa !16
   %25 = icmp eq ptr %24, null
   br i1 %25, label %26, label %36
 
 26:                                               ; preds = %5
   %27 = call ptr @printf_allocate(i32 122)
   %28 = addrspacecast ptr %27 to ptr addrspace(1)
-  %29 = getelementptr inbounds %varfn_args_store.5, ptr addrspace(1) %28, i32 0, i32 0
+  %29 = getelementptr inbounds %varfn_args_store.6, ptr addrspace(1) %28, i32 0, i32 0
   store i32 16, ptr addrspace(1) %29, align 4
-  %30 = getelementptr inbounds %varfn_args_store.5, ptr addrspace(1) %28, i32 0, i32 1
+  %30 = getelementptr inbounds %varfn_args_store.6, ptr addrspace(1) %28, i32 0, i32 1
   store i32 1, ptr addrspace(1) %30, align 4
-  %31 = getelementptr inbounds %varfn_args_store.5, ptr addrspace(1) %28, i32 0, i32 2
+  %31 = getelementptr inbounds %varfn_args_store.6, ptr addrspace(1) %28, i32 0, i32 2
   store i32 983041, ptr addrspace(1) %31, align 4
-  %32 = getelementptr inbounds %varfn_args_store.5, ptr addrspace(1) %28, i32 0, i32 3
+  %32 = getelementptr inbounds %varfn_args_store.6, ptr addrspace(1) %28, i32 0, i32 3
   store i32 106, ptr addrspace(1) %32, align 4
   %33 = getelementptr inbounds i8, ptr addrspace(1) %28, i64 16
   call void @llvm.memcpy.p1.p0.i64(ptr addrspace(1) align 1 %33, ptr align 1 addrspacecast (ptr addrspace(4) @.str.6 to ptr), i64 106, i1 false)
@@ -3725,32 +4339,32 @@ define internal void @_ZL16ompx__pipe_deferPN4gicc9DeviceCtxEiPvPKvm(ptr noundef
 
 36:                                               ; preds = %26, %5
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %11) #3
-  %37 = load ptr, ptr %22, align 8, !tbaa !14
+  %37 = load ptr, ptr %22, align 8, !tbaa !16
   %38 = getelementptr inbounds %struct.ompx_pipe_deferred, ptr %37, i32 0, i32 0
-  store i32 1, ptr %20, align 4, !tbaa !22
+  store i32 1, ptr %20, align 4, !tbaa !24
   %39 = load i32, ptr %20, align 4
   %40 = atomicrmw add ptr %38, i32 %39 monotonic, align 8
   store i32 %40, ptr %21, align 4
-  %41 = load i32, ptr %21, align 4, !tbaa !22
-  store i32 %41, ptr %19, align 4, !tbaa !22
-  %42 = load i32, ptr %19, align 4, !tbaa !22
+  %41 = load i32, ptr %21, align 4, !tbaa !24
+  store i32 %41, ptr %19, align 4, !tbaa !24
+  %42 = load i32, ptr %19, align 4, !tbaa !24
   %43 = icmp uge i32 %42, 64
   br i1 %43, label %44, label %56
 
 44:                                               ; preds = %36
   %45 = call ptr @printf_allocate(i32 82)
   %46 = addrspacecast ptr %45 to ptr addrspace(1)
-  %47 = getelementptr inbounds %varfn_args_store.6, ptr addrspace(1) %46, i32 0, i32 0
+  %47 = getelementptr inbounds %varfn_args_store.7, ptr addrspace(1) %46, i32 0, i32 0
   store i32 24, ptr addrspace(1) %47, align 4
-  %48 = getelementptr inbounds %varfn_args_store.6, ptr addrspace(1) %46, i32 0, i32 1
+  %48 = getelementptr inbounds %varfn_args_store.7, ptr addrspace(1) %46, i32 0, i32 1
   store i32 2, ptr addrspace(1) %48, align 4
-  %49 = getelementptr inbounds %varfn_args_store.6, ptr addrspace(1) %46, i32 0, i32 2
+  %49 = getelementptr inbounds %varfn_args_store.7, ptr addrspace(1) %46, i32 0, i32 2
   store i32 983041, ptr addrspace(1) %49, align 4
-  %50 = getelementptr inbounds %varfn_args_store.6, ptr addrspace(1) %46, i32 0, i32 3
+  %50 = getelementptr inbounds %varfn_args_store.7, ptr addrspace(1) %46, i32 0, i32 3
   store i32 852000, ptr addrspace(1) %50, align 4
-  %51 = getelementptr inbounds %varfn_args_store.6, ptr addrspace(1) %46, i32 0, i32 4
+  %51 = getelementptr inbounds %varfn_args_store.7, ptr addrspace(1) %46, i32 0, i32 4
   store i32 58, ptr addrspace(1) %51, align 4
-  %52 = getelementptr inbounds %varfn_args_store.6, ptr addrspace(1) %46, i32 0, i32 5
+  %52 = getelementptr inbounds %varfn_args_store.7, ptr addrspace(1) %46, i32 0, i32 5
   store i32 64, ptr addrspace(1) %52, align 4
   %53 = getelementptr inbounds i8, ptr addrspace(1) %46, i64 24
   call void @llvm.memcpy.p1.p0.i64(ptr addrspace(1) align 1 %53, ptr align 1 addrspacecast (ptr addrspace(4) @.str.7 to ptr), i64 58, i1 false)
@@ -3760,42 +4374,42 @@ define internal void @_ZL16ompx__pipe_deferPN4gicc9DeviceCtxEiPvPKvm(ptr noundef
   br label %56
 
 56:                                               ; preds = %44, %36
-  %57 = load i32, ptr %15, align 4, !tbaa !22
-  %58 = load ptr, ptr %22, align 8, !tbaa !14
+  %57 = load i32, ptr %15, align 4, !tbaa !24
+  %58 = load ptr, ptr %22, align 8, !tbaa !16
   %59 = getelementptr inbounds %struct.ompx_pipe_deferred, ptr %58, i32 0, i32 2
-  %60 = load i32, ptr %19, align 4, !tbaa !22
+  %60 = load i32, ptr %19, align 4, !tbaa !24
   %61 = zext i32 %60 to i64
   %62 = getelementptr inbounds [64 x %struct.ompx_pipe_deferred_put], ptr %59, i64 0, i64 %61
   %63 = getelementptr inbounds %struct.ompx_pipe_deferred_put, ptr %62, i32 0, i32 0
-  store i32 %57, ptr %63, align 8, !tbaa !62
-  %64 = load ptr, ptr %14, align 8, !tbaa !14
-  %65 = load ptr, ptr %16, align 8, !tbaa !14
+  store i32 %57, ptr %63, align 8, !tbaa !64
+  %64 = load ptr, ptr %14, align 8, !tbaa !16
+  %65 = load ptr, ptr %16, align 8, !tbaa !16
   %66 = call noundef i64 @_ZL9ompx__offPN4gicc9DeviceCtxEPKv(ptr noundef %64, ptr noundef %65) #15
-  %67 = load ptr, ptr %22, align 8, !tbaa !14
+  %67 = load ptr, ptr %22, align 8, !tbaa !16
   %68 = getelementptr inbounds %struct.ompx_pipe_deferred, ptr %67, i32 0, i32 2
-  %69 = load i32, ptr %19, align 4, !tbaa !22
+  %69 = load i32, ptr %19, align 4, !tbaa !24
   %70 = zext i32 %69 to i64
   %71 = getelementptr inbounds [64 x %struct.ompx_pipe_deferred_put], ptr %68, i64 0, i64 %70
   %72 = getelementptr inbounds %struct.ompx_pipe_deferred_put, ptr %71, i32 0, i32 2
-  store i64 %66, ptr %72, align 8, !tbaa !65
-  %73 = load ptr, ptr %14, align 8, !tbaa !14
-  %74 = load ptr, ptr %17, align 8, !tbaa !14
+  store i64 %66, ptr %72, align 8, !tbaa !67
+  %73 = load ptr, ptr %14, align 8, !tbaa !16
+  %74 = load ptr, ptr %17, align 8, !tbaa !16
   %75 = call noundef i64 @_ZL9ompx__offPN4gicc9DeviceCtxEPKv(ptr noundef %73, ptr noundef %74) #15
-  %76 = load ptr, ptr %22, align 8, !tbaa !14
+  %76 = load ptr, ptr %22, align 8, !tbaa !16
   %77 = getelementptr inbounds %struct.ompx_pipe_deferred, ptr %76, i32 0, i32 2
-  %78 = load i32, ptr %19, align 4, !tbaa !22
+  %78 = load i32, ptr %19, align 4, !tbaa !24
   %79 = zext i32 %78 to i64
   %80 = getelementptr inbounds [64 x %struct.ompx_pipe_deferred_put], ptr %77, i64 0, i64 %79
   %81 = getelementptr inbounds %struct.ompx_pipe_deferred_put, ptr %80, i32 0, i32 3
-  store i64 %75, ptr %81, align 8, !tbaa !66
-  %82 = load i64, ptr %18, align 8, !tbaa !18
-  %83 = load ptr, ptr %22, align 8, !tbaa !14
+  store i64 %75, ptr %81, align 8, !tbaa !68
+  %82 = load i64, ptr %18, align 8, !tbaa !20
+  %83 = load ptr, ptr %22, align 8, !tbaa !16
   %84 = getelementptr inbounds %struct.ompx_pipe_deferred, ptr %83, i32 0, i32 2
-  %85 = load i32, ptr %19, align 4, !tbaa !22
+  %85 = load i32, ptr %19, align 4, !tbaa !24
   %86 = zext i32 %85 to i64
   %87 = getelementptr inbounds [64 x %struct.ompx_pipe_deferred_put], ptr %84, i64 0, i64 %86
   %88 = getelementptr inbounds %struct.ompx_pipe_deferred_put, ptr %87, i32 0, i32 4
-  store i64 %82, ptr %88, align 8, !tbaa !67
+  store i64 %82, ptr %88, align 8, !tbaa !69
   call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %11) #3
   call void @__kmpc_free_shared(ptr %22, i64 8)
   ret void
@@ -3810,20 +4424,20 @@ define internal noundef ptr @_ZL16ompx__after_belli(i32 noundef %0) #7 {
   %6 = addrspacecast ptr addrspace(5) %3 to ptr
   %7 = addrspacecast ptr addrspace(5) %4 to ptr
   %8 = call align 16 ptr @__kmpc_alloc_shared(i64 8)
-  store i32 %0, ptr %6, align 4, !tbaa !22
-  %9 = load ptr, ptr addrspacecast (ptr addrspace(1) @_ZL19ompx__pipe_deferred to ptr), align 8, !tbaa !14
-  store ptr %9, ptr %8, align 8, !tbaa !14
-  %10 = load i32, ptr %6, align 4, !tbaa !22
+  store i32 %0, ptr %6, align 4, !tbaa !24
+  %9 = load ptr, ptr addrspacecast (ptr addrspace(1) @_ZL19ompx__pipe_deferred to ptr), align 8, !tbaa !16
+  store ptr %9, ptr %8, align 8, !tbaa !16
+  %10 = load i32, ptr %6, align 4, !tbaa !24
   %11 = icmp slt i32 %10, 0
   br i1 %11, label %18, label %12
 
 12:                                               ; preds = %1
-  %13 = load i32, ptr %6, align 4, !tbaa !22
+  %13 = load i32, ptr %6, align 4, !tbaa !24
   %14 = icmp sge i32 %13, 8
   br i1 %14, label %18, label %15
 
 15:                                               ; preds = %12
-  %16 = load ptr, ptr %8, align 8, !tbaa !14
+  %16 = load ptr, ptr %8, align 8, !tbaa !16
   %17 = icmp eq ptr %16, null
   br i1 %17, label %18, label %19
 
@@ -3833,14 +4447,14 @@ define internal noundef ptr @_ZL16ompx__after_belli(i32 noundef %0) #7 {
   br label %28
 
 19:                                               ; preds = %15
-  %20 = load ptr, ptr %8, align 8, !tbaa !14
+  %20 = load ptr, ptr %8, align 8, !tbaa !16
   %21 = getelementptr inbounds %struct.ompx_pipe_deferred, ptr %20, i32 0, i32 3
   %22 = getelementptr inbounds %struct.ompx_pipe_after, ptr %21, i32 0, i32 1
-  %23 = load i32, ptr %6, align 4, !tbaa !22
+  %23 = load i32, ptr %6, align 4, !tbaa !24
   %24 = sext i32 %23 to i64
   %25 = getelementptr inbounds [8 x %struct.ompx_pipe_after_put], ptr %22, i64 0, i64 %24
   %26 = getelementptr inbounds %struct.ompx_pipe_after_put, ptr %25, i32 0, i32 7
-  %27 = load ptr, ptr %26, align 8, !tbaa !68
+  %27 = load ptr, ptr %26, align 8, !tbaa !70
   store ptr %27, ptr %5, align 8
   store i32 1, ptr %7, align 4
   br label %28
@@ -3897,32 +4511,32 @@ define internal void @ompx__box_hull(ptr noundef %0, i64 noundef %1, ptr noundef
   %51 = addrspacecast ptr addrspace(5) %29 to ptr
   %52 = addrspacecast ptr addrspace(5) %30 to ptr
   %53 = addrspacecast ptr addrspace(5) %31 to ptr
-  store ptr %0, ptr %32, align 8, !tbaa !14
-  store i64 %1, ptr %33, align 8, !tbaa !18
-  store ptr %2, ptr %34, align 8, !tbaa !14
-  store i32 %3, ptr %35, align 4, !tbaa !22
-  store ptr %4, ptr %36, align 8, !tbaa !14
-  store ptr %5, ptr %37, align 8, !tbaa !14
-  store i64 %6, ptr %38, align 8, !tbaa !18
-  store ptr %7, ptr %39, align 8, !tbaa !14
-  store ptr %8, ptr %40, align 8, !tbaa !14
-  %54 = load ptr, ptr %39, align 8, !tbaa !14
-  store i64 0, ptr %54, align 8, !tbaa !18
-  %55 = load ptr, ptr %40, align 8, !tbaa !14
-  store i64 -1, ptr %55, align 8, !tbaa !18
-  %56 = load i32, ptr %35, align 4, !tbaa !22
+  store ptr %0, ptr %32, align 8, !tbaa !16
+  store i64 %1, ptr %33, align 8, !tbaa !20
+  store ptr %2, ptr %34, align 8, !tbaa !16
+  store i32 %3, ptr %35, align 4, !tbaa !24
+  store ptr %4, ptr %36, align 8, !tbaa !16
+  store ptr %5, ptr %37, align 8, !tbaa !16
+  store i64 %6, ptr %38, align 8, !tbaa !20
+  store ptr %7, ptr %39, align 8, !tbaa !16
+  store ptr %8, ptr %40, align 8, !tbaa !16
+  %54 = load ptr, ptr %39, align 8, !tbaa !16
+  store i64 0, ptr %54, align 8, !tbaa !20
+  %55 = load ptr, ptr %40, align 8, !tbaa !16
+  store i64 -1, ptr %55, align 8, !tbaa !20
+  %56 = load i32, ptr %35, align 4, !tbaa !24
   %57 = icmp sle i32 %56, 0
   br i1 %57, label %66, label %58
 
 58:                                               ; preds = %9
-  %59 = load i64, ptr %33, align 8, !tbaa !18
+  %59 = load i64, ptr %33, align 8, !tbaa !20
   %60 = icmp eq i64 %59, 0
   br i1 %60, label %66, label %61
 
 61:                                               ; preds = %58
-  %62 = load ptr, ptr %37, align 8, !tbaa !14
+  %62 = load ptr, ptr %37, align 8, !tbaa !16
   %63 = getelementptr inbounds i64, ptr %62, i64 0
-  %64 = load i64, ptr %63, align 8, !tbaa !18
+  %64 = load i64, ptr %63, align 8, !tbaa !20
   %65 = icmp sle i64 %64, 0
   br i1 %65, label %66, label %67
 
@@ -3931,18 +4545,18 @@ define internal void @ompx__box_hull(ptr noundef %0, i64 noundef %1, ptr noundef
 
 67:                                               ; preds = %61
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %19) #3
-  store i64 1, ptr %41, align 8, !tbaa !18
+  store i64 1, ptr %41, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %20) #3
-  store i64 0, ptr %42, align 8, !tbaa !18
+  store i64 0, ptr %42, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %21) #3
-  store i64 0, ptr %43, align 8, !tbaa !18
+  store i64 0, ptr %43, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %22) #3
-  store i32 1, ptr %44, align 4, !tbaa !22
+  store i32 1, ptr %44, align 4, !tbaa !24
   br label %68
 
 68:                                               ; preds = %110, %67
-  %69 = load i32, ptr %44, align 4, !tbaa !22
-  %70 = load i32, ptr %35, align 4, !tbaa !22
+  %69 = load i32, ptr %44, align 4, !tbaa !24
+  %70 = load i32, ptr %35, align 4, !tbaa !24
   %71 = icmp slt i32 %69, %70
   br i1 %71, label %73, label %72
 
@@ -3951,11 +4565,11 @@ define internal void @ompx__box_hull(ptr noundef %0, i64 noundef %1, ptr noundef
   br label %113
 
 73:                                               ; preds = %68
-  %74 = load ptr, ptr %37, align 8, !tbaa !14
-  %75 = load i32, ptr %44, align 4, !tbaa !22
+  %74 = load ptr, ptr %37, align 8, !tbaa !16
+  %75 = load i32, ptr %44, align 4, !tbaa !24
   %76 = sext i32 %75 to i64
   %77 = getelementptr inbounds i64, ptr %74, i64 %76
-  %78 = load i64, ptr %77, align 8, !tbaa !18
+  %78 = load i64, ptr %77, align 8, !tbaa !20
   %79 = icmp sle i64 %78, 0
   br i1 %79, label %80, label %81
 
@@ -3964,30 +4578,30 @@ define internal void @ompx__box_hull(ptr noundef %0, i64 noundef %1, ptr noundef
   br label %113
 
 81:                                               ; preds = %73
-  %82 = load ptr, ptr %37, align 8, !tbaa !14
-  %83 = load i32, ptr %44, align 4, !tbaa !22
+  %82 = load ptr, ptr %37, align 8, !tbaa !16
+  %83 = load i32, ptr %44, align 4, !tbaa !24
   %84 = sext i32 %83 to i64
   %85 = getelementptr inbounds i64, ptr %82, i64 %84
-  %86 = load i64, ptr %85, align 8, !tbaa !18
-  %87 = load i64, ptr %41, align 8, !tbaa !18
+  %86 = load i64, ptr %85, align 8, !tbaa !20
+  %87 = load i64, ptr %41, align 8, !tbaa !20
   %88 = mul nsw i64 %87, %86
-  store i64 %88, ptr %41, align 8, !tbaa !18
+  store i64 %88, ptr %41, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %24) #3
-  %89 = load ptr, ptr %36, align 8, !tbaa !14
-  %90 = load i32, ptr %44, align 4, !tbaa !22
+  %89 = load ptr, ptr %36, align 8, !tbaa !16
+  %90 = load i32, ptr %44, align 4, !tbaa !24
   %91 = sext i32 %90 to i64
   %92 = getelementptr inbounds i64, ptr %89, i64 %91
-  %93 = load i64, ptr %92, align 8, !tbaa !18
-  %94 = load ptr, ptr %37, align 8, !tbaa !14
-  %95 = load i32, ptr %44, align 4, !tbaa !22
+  %93 = load i64, ptr %92, align 8, !tbaa !20
+  %94 = load ptr, ptr %37, align 8, !tbaa !16
+  %95 = load i32, ptr %44, align 4, !tbaa !24
   %96 = sext i32 %95 to i64
   %97 = getelementptr inbounds i64, ptr %94, i64 %96
-  %98 = load i64, ptr %97, align 8, !tbaa !18
+  %98 = load i64, ptr %97, align 8, !tbaa !20
   %99 = sub nsw i64 %98, 1
   %100 = mul nsw i64 %93, %99
-  store i64 %100, ptr %46, align 8, !tbaa !18
-  %101 = load i64, ptr %46, align 8, !tbaa !18
-  %102 = load i64, ptr %46, align 8, !tbaa !18
+  store i64 %100, ptr %46, align 8, !tbaa !20
+  %101 = load i64, ptr %46, align 8, !tbaa !20
+  %102 = load i64, ptr %46, align 8, !tbaa !20
   %103 = icmp slt i64 %102, 0
   br i1 %103, label %104, label %105
 
@@ -3999,17 +4613,17 @@ define internal void @ompx__box_hull(ptr noundef %0, i64 noundef %1, ptr noundef
 
 106:                                              ; preds = %105, %104
   %107 = phi ptr [ %42, %104 ], [ %43, %105 ]
-  %108 = load i64, ptr %107, align 8, !tbaa !18
+  %108 = load i64, ptr %107, align 8, !tbaa !20
   %109 = add nsw i64 %108, %101
-  store i64 %109, ptr %107, align 8, !tbaa !18
+  store i64 %109, ptr %107, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %24) #3
   br label %110
 
 110:                                              ; preds = %106
-  %111 = load i32, ptr %44, align 4, !tbaa !22
+  %111 = load i32, ptr %44, align 4, !tbaa !24
   %112 = add nsw i32 %111, 1
-  store i32 %112, ptr %44, align 4, !tbaa !22
-  br label %68, !llvm.loop !70
+  store i32 %112, ptr %44, align 4, !tbaa !24
+  br label %68, !llvm.loop !72
 
 113:                                              ; preds = %80, %72
   call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %22) #3
@@ -4020,82 +4634,82 @@ define internal void @ompx__box_hull(ptr noundef %0, i64 noundef %1, ptr noundef
 
 115:                                              ; preds = %113
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %25) #3
-  %116 = load ptr, ptr %32, align 8, !tbaa !14
-  %117 = load ptr, ptr %34, align 8, !tbaa !14
+  %116 = load ptr, ptr %32, align 8, !tbaa !16
+  %117 = load ptr, ptr %34, align 8, !tbaa !16
   %118 = ptrtoint ptr %116 to i64
   %119 = ptrtoint ptr %117 to i64
   %120 = sub i64 %118, %119
-  store i64 %120, ptr %47, align 8, !tbaa !18
+  store i64 %120, ptr %47, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %26) #3
-  %121 = load i64, ptr %47, align 8, !tbaa !18
-  %122 = load i64, ptr %33, align 8, !tbaa !18
+  %121 = load i64, ptr %47, align 8, !tbaa !20
+  %122 = load i64, ptr %33, align 8, !tbaa !20
   %123 = add nsw i64 %121, %122
-  store i64 %123, ptr %48, align 8, !tbaa !18
+  store i64 %123, ptr %48, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %27) #3
-  %124 = load i64, ptr %47, align 8, !tbaa !18
-  %125 = load i64, ptr %38, align 8, !tbaa !18
+  %124 = load i64, ptr %47, align 8, !tbaa !20
+  %125 = load i64, ptr %38, align 8, !tbaa !20
   %126 = sub nsw i64 %124, %125
-  %127 = load i64, ptr %43, align 8, !tbaa !18
+  %127 = load i64, ptr %43, align 8, !tbaa !20
   %128 = sub nsw i64 %126, %127
   %129 = add nsw i64 %128, 1
-  store i64 %129, ptr %49, align 8, !tbaa !18
+  store i64 %129, ptr %49, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %28) #3
-  %130 = load i64, ptr %48, align 8, !tbaa !18
-  %131 = load i64, ptr %42, align 8, !tbaa !18
+  %130 = load i64, ptr %48, align 8, !tbaa !20
+  %131 = load i64, ptr %42, align 8, !tbaa !20
   %132 = sub nsw i64 %130, %131
   %133 = sub nsw i64 %132, 1
-  store i64 %133, ptr %50, align 8, !tbaa !18
+  store i64 %133, ptr %50, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %29) #3
-  %134 = load ptr, ptr %36, align 8, !tbaa !14
+  %134 = load ptr, ptr %36, align 8, !tbaa !16
   %135 = getelementptr inbounds i64, ptr %134, i64 0
-  %136 = load i64, ptr %135, align 8, !tbaa !18
-  store i64 %136, ptr %51, align 8, !tbaa !18
+  %136 = load i64, ptr %135, align 8, !tbaa !20
+  store i64 %136, ptr %51, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %30) #3
-  store i64 0, ptr %52, align 8, !tbaa !18
+  store i64 0, ptr %52, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %31) #3
-  %137 = load ptr, ptr %37, align 8, !tbaa !14
+  %137 = load ptr, ptr %37, align 8, !tbaa !16
   %138 = getelementptr inbounds i64, ptr %137, i64 0
-  %139 = load i64, ptr %138, align 8, !tbaa !18
+  %139 = load i64, ptr %138, align 8, !tbaa !20
   %140 = sub nsw i64 %139, 1
-  store i64 %140, ptr %53, align 8, !tbaa !18
-  %141 = load i64, ptr %51, align 8, !tbaa !18
+  store i64 %140, ptr %53, align 8, !tbaa !20
+  %141 = load i64, ptr %51, align 8, !tbaa !20
   %142 = icmp sgt i64 %141, 0
   br i1 %142, label %143, label %150
 
 143:                                              ; preds = %115
-  %144 = load i64, ptr %49, align 8, !tbaa !18
-  %145 = load i64, ptr %51, align 8, !tbaa !18
+  %144 = load i64, ptr %49, align 8, !tbaa !20
+  %145 = load i64, ptr %51, align 8, !tbaa !20
   %146 = call noundef i64 @_ZL14ompx__ceil_divll(i64 noundef %144, i64 noundef %145) #15
-  store i64 %146, ptr %52, align 8, !tbaa !18
-  %147 = load i64, ptr %50, align 8, !tbaa !18
-  %148 = load i64, ptr %51, align 8, !tbaa !18
+  store i64 %146, ptr %52, align 8, !tbaa !20
+  %147 = load i64, ptr %50, align 8, !tbaa !20
+  %148 = load i64, ptr %51, align 8, !tbaa !20
   %149 = call noundef i64 @_ZL15ompx__floor_divll(i64 noundef %147, i64 noundef %148) #15
-  store i64 %149, ptr %53, align 8, !tbaa !18
+  store i64 %149, ptr %53, align 8, !tbaa !20
   br label %169
 
 150:                                              ; preds = %115
-  %151 = load i64, ptr %51, align 8, !tbaa !18
+  %151 = load i64, ptr %51, align 8, !tbaa !20
   %152 = icmp slt i64 %151, 0
   br i1 %152, label %153, label %160
 
 153:                                              ; preds = %150
-  %154 = load i64, ptr %50, align 8, !tbaa !18
-  %155 = load i64, ptr %51, align 8, !tbaa !18
+  %154 = load i64, ptr %50, align 8, !tbaa !20
+  %155 = load i64, ptr %51, align 8, !tbaa !20
   %156 = call noundef i64 @_ZL14ompx__ceil_divll(i64 noundef %154, i64 noundef %155) #15
-  store i64 %156, ptr %52, align 8, !tbaa !18
-  %157 = load i64, ptr %49, align 8, !tbaa !18
-  %158 = load i64, ptr %51, align 8, !tbaa !18
+  store i64 %156, ptr %52, align 8, !tbaa !20
+  %157 = load i64, ptr %49, align 8, !tbaa !20
+  %158 = load i64, ptr %51, align 8, !tbaa !20
   %159 = call noundef i64 @_ZL15ompx__floor_divll(i64 noundef %157, i64 noundef %158) #15
-  store i64 %159, ptr %53, align 8, !tbaa !18
+  store i64 %159, ptr %53, align 8, !tbaa !20
   br label %168
 
 160:                                              ; preds = %150
-  %161 = load i64, ptr %49, align 8, !tbaa !18
+  %161 = load i64, ptr %49, align 8, !tbaa !20
   %162 = icmp sgt i64 %161, 0
   br i1 %162, label %166, label %163
 
 163:                                              ; preds = %160
-  %164 = load i64, ptr %50, align 8, !tbaa !18
+  %164 = load i64, ptr %50, align 8, !tbaa !20
   %165 = icmp slt i64 %164, 0
   br i1 %165, label %166, label %167
 
@@ -4110,34 +4724,34 @@ define internal void @ompx__box_hull(ptr noundef %0, i64 noundef %1, ptr noundef
   br label %169
 
 169:                                              ; preds = %168, %143
-  %170 = load i64, ptr %52, align 8, !tbaa !18
+  %170 = load i64, ptr %52, align 8, !tbaa !20
   %171 = icmp slt i64 %170, 0
   br i1 %171, label %172, label %173
 
 172:                                              ; preds = %169
-  store i64 0, ptr %52, align 8, !tbaa !18
+  store i64 0, ptr %52, align 8, !tbaa !20
   br label %173
 
 173:                                              ; preds = %172, %169
-  %174 = load i64, ptr %53, align 8, !tbaa !18
-  %175 = load ptr, ptr %37, align 8, !tbaa !14
+  %174 = load i64, ptr %53, align 8, !tbaa !20
+  %175 = load ptr, ptr %37, align 8, !tbaa !16
   %176 = getelementptr inbounds i64, ptr %175, i64 0
-  %177 = load i64, ptr %176, align 8, !tbaa !18
+  %177 = load i64, ptr %176, align 8, !tbaa !20
   %178 = sub nsw i64 %177, 1
   %179 = icmp sgt i64 %174, %178
   br i1 %179, label %180, label %185
 
 180:                                              ; preds = %173
-  %181 = load ptr, ptr %37, align 8, !tbaa !14
+  %181 = load ptr, ptr %37, align 8, !tbaa !16
   %182 = getelementptr inbounds i64, ptr %181, i64 0
-  %183 = load i64, ptr %182, align 8, !tbaa !18
+  %183 = load i64, ptr %182, align 8, !tbaa !20
   %184 = sub nsw i64 %183, 1
-  store i64 %184, ptr %53, align 8, !tbaa !18
+  store i64 %184, ptr %53, align 8, !tbaa !20
   br label %185
 
 185:                                              ; preds = %180, %173
-  %186 = load i64, ptr %52, align 8, !tbaa !18
-  %187 = load i64, ptr %53, align 8, !tbaa !18
+  %186 = load i64, ptr %52, align 8, !tbaa !20
+  %187 = load i64, ptr %53, align 8, !tbaa !20
   %188 = icmp sgt i64 %186, %187
   br i1 %188, label %189, label %190
 
@@ -4146,18 +4760,18 @@ define internal void @ompx__box_hull(ptr noundef %0, i64 noundef %1, ptr noundef
   br label %201
 
 190:                                              ; preds = %185
-  %191 = load i64, ptr %52, align 8, !tbaa !18
-  %192 = load i64, ptr %41, align 8, !tbaa !18
+  %191 = load i64, ptr %52, align 8, !tbaa !20
+  %192 = load i64, ptr %41, align 8, !tbaa !20
   %193 = mul nsw i64 %191, %192
-  %194 = load ptr, ptr %39, align 8, !tbaa !14
-  store i64 %193, ptr %194, align 8, !tbaa !18
-  %195 = load i64, ptr %53, align 8, !tbaa !18
+  %194 = load ptr, ptr %39, align 8, !tbaa !16
+  store i64 %193, ptr %194, align 8, !tbaa !20
+  %195 = load i64, ptr %53, align 8, !tbaa !20
   %196 = add nsw i64 %195, 1
-  %197 = load i64, ptr %41, align 8, !tbaa !18
+  %197 = load i64, ptr %41, align 8, !tbaa !20
   %198 = mul nsw i64 %196, %197
   %199 = sub nsw i64 %198, 1
-  %200 = load ptr, ptr %40, align 8, !tbaa !14
-  store i64 %199, ptr %200, align 8, !tbaa !18
+  %200 = load ptr, ptr %40, align 8, !tbaa !16
+  store i64 %199, ptr %200, align 8, !tbaa !20
   store i32 0, ptr %45, align 4
   br label %201
 
@@ -4199,36 +4813,36 @@ define internal noundef i64 @_ZL14ompx__ceil_divll(i64 noundef %0, i64 noundef %
   %9 = addrspacecast ptr addrspace(5) %4 to ptr
   %10 = addrspacecast ptr addrspace(5) %5 to ptr
   %11 = addrspacecast ptr addrspace(5) %6 to ptr
-  store i64 %0, ptr %9, align 8, !tbaa !18
-  store i64 %1, ptr %10, align 8, !tbaa !18
+  store i64 %0, ptr %9, align 8, !tbaa !20
+  store i64 %1, ptr %10, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %6) #3
-  %12 = load i64, ptr %9, align 8, !tbaa !18
-  %13 = load i64, ptr %10, align 8, !tbaa !18
+  %12 = load i64, ptr %9, align 8, !tbaa !20
+  %13 = load i64, ptr %10, align 8, !tbaa !20
   %14 = sdiv i64 %12, %13
-  store i64 %14, ptr %11, align 8, !tbaa !18
-  %15 = load i64, ptr %9, align 8, !tbaa !18
-  %16 = load i64, ptr %10, align 8, !tbaa !18
+  store i64 %14, ptr %11, align 8, !tbaa !20
+  %15 = load i64, ptr %9, align 8, !tbaa !20
+  %16 = load i64, ptr %10, align 8, !tbaa !20
   %17 = srem i64 %15, %16
   %18 = icmp ne i64 %17, 0
   br i1 %18, label %19, label %30
 
 19:                                               ; preds = %2
-  %20 = load i64, ptr %9, align 8, !tbaa !18
+  %20 = load i64, ptr %9, align 8, !tbaa !20
   %21 = icmp slt i64 %20, 0
   %22 = zext i1 %21 to i32
-  %23 = load i64, ptr %10, align 8, !tbaa !18
+  %23 = load i64, ptr %10, align 8, !tbaa !20
   %24 = icmp slt i64 %23, 0
   %25 = zext i1 %24 to i32
   %26 = icmp eq i32 %22, %25
   br i1 %26, label %27, label %30
 
 27:                                               ; preds = %19
-  %28 = load i64, ptr %11, align 8, !tbaa !18
+  %28 = load i64, ptr %11, align 8, !tbaa !20
   %29 = add nsw i64 %28, 1
   br label %32
 
 30:                                               ; preds = %19, %2
-  %31 = load i64, ptr %11, align 8, !tbaa !18
+  %31 = load i64, ptr %11, align 8, !tbaa !20
   br label %32
 
 32:                                               ; preds = %30, %27
@@ -4248,36 +4862,36 @@ define internal noundef i64 @_ZL15ompx__floor_divll(i64 noundef %0, i64 noundef 
   %9 = addrspacecast ptr addrspace(5) %4 to ptr
   %10 = addrspacecast ptr addrspace(5) %5 to ptr
   %11 = addrspacecast ptr addrspace(5) %6 to ptr
-  store i64 %0, ptr %9, align 8, !tbaa !18
-  store i64 %1, ptr %10, align 8, !tbaa !18
+  store i64 %0, ptr %9, align 8, !tbaa !20
+  store i64 %1, ptr %10, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %6) #3
-  %12 = load i64, ptr %9, align 8, !tbaa !18
-  %13 = load i64, ptr %10, align 8, !tbaa !18
+  %12 = load i64, ptr %9, align 8, !tbaa !20
+  %13 = load i64, ptr %10, align 8, !tbaa !20
   %14 = sdiv i64 %12, %13
-  store i64 %14, ptr %11, align 8, !tbaa !18
-  %15 = load i64, ptr %9, align 8, !tbaa !18
-  %16 = load i64, ptr %10, align 8, !tbaa !18
+  store i64 %14, ptr %11, align 8, !tbaa !20
+  %15 = load i64, ptr %9, align 8, !tbaa !20
+  %16 = load i64, ptr %10, align 8, !tbaa !20
   %17 = srem i64 %15, %16
   %18 = icmp ne i64 %17, 0
   br i1 %18, label %19, label %30
 
 19:                                               ; preds = %2
-  %20 = load i64, ptr %9, align 8, !tbaa !18
+  %20 = load i64, ptr %9, align 8, !tbaa !20
   %21 = icmp slt i64 %20, 0
   %22 = zext i1 %21 to i32
-  %23 = load i64, ptr %10, align 8, !tbaa !18
+  %23 = load i64, ptr %10, align 8, !tbaa !20
   %24 = icmp slt i64 %23, 0
   %25 = zext i1 %24 to i32
   %26 = icmp ne i32 %22, %25
   br i1 %26, label %27, label %30
 
 27:                                               ; preds = %19
-  %28 = load i64, ptr %11, align 8, !tbaa !18
+  %28 = load i64, ptr %11, align 8, !tbaa !20
   %29 = sub nsw i64 %28, 1
   br label %32
 
 30:                                               ; preds = %19, %2
-  %31 = load i64, ptr %11, align 8, !tbaa !18
+  %31 = load i64, ptr %11, align 8, !tbaa !20
   br label %32
 
 32:                                               ; preds = %30, %27
@@ -4338,39 +4952,39 @@ define internal void @ompx__box_plan(i32 noundef %0, ptr noundef %1, ptr noundef
   %57 = addrspacecast ptr addrspace(5) %35 to ptr
   %58 = call align 16 ptr @__kmpc_alloc_shared(i64 64)
   %59 = call align 16 ptr @__kmpc_alloc_shared(i64 64)
-  store i32 %0, ptr %36, align 4, !tbaa !22
-  store ptr %1, ptr %37, align 8, !tbaa !14
-  store ptr %2, ptr %38, align 8, !tbaa !14
-  store ptr %3, ptr %39, align 8, !tbaa !14
-  store i64 %4, ptr %40, align 8, !tbaa !18
-  store i64 %5, ptr %41, align 8, !tbaa !18
-  store i64 %6, ptr %42, align 8, !tbaa !18
-  store ptr %7, ptr %43, align 8, !tbaa !14
-  store ptr %8, ptr %44, align 8, !tbaa !14
+  store i32 %0, ptr %36, align 4, !tbaa !24
+  store ptr %1, ptr %37, align 8, !tbaa !16
+  store ptr %2, ptr %38, align 8, !tbaa !16
+  store ptr %3, ptr %39, align 8, !tbaa !16
+  store i64 %4, ptr %40, align 8, !tbaa !20
+  store i64 %5, ptr %41, align 8, !tbaa !20
+  store i64 %6, ptr %42, align 8, !tbaa !20
+  store ptr %7, ptr %43, align 8, !tbaa !16
+  store ptr %8, ptr %44, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %19) #3
-  store i32 8, ptr %45, align 4, !tbaa !22
+  store i32 8, ptr %45, align 4, !tbaa !24
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %20) #3
-  %60 = load i64, ptr %41, align 8, !tbaa !18
-  %61 = load i64, ptr %42, align 8, !tbaa !18
+  %60 = load i64, ptr %41, align 8, !tbaa !20
+  %61 = load i64, ptr %42, align 8, !tbaa !20
   %62 = add nsw i64 %60, %61
   %63 = sub nsw i64 %62, 1
-  %64 = load i64, ptr %42, align 8, !tbaa !18
+  %64 = load i64, ptr %42, align 8, !tbaa !20
   %65 = sdiv i64 %63, %64
-  store i64 %65, ptr %46, align 8, !tbaa !18
+  store i64 %65, ptr %46, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %21) #3
-  store i32 0, ptr %47, align 4, !tbaa !22
+  store i32 0, ptr %47, align 4, !tbaa !24
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %22) #3
-  store i32 0, ptr %48, align 4, !tbaa !22
+  store i32 0, ptr %48, align 4, !tbaa !24
   br label %66
 
 66:                                               ; preds = %159, %9
-  %67 = load i32, ptr %48, align 4, !tbaa !22
-  %68 = load i32, ptr %36, align 4, !tbaa !22
+  %67 = load i32, ptr %48, align 4, !tbaa !24
+  %68 = load i32, ptr %36, align 4, !tbaa !24
   %69 = icmp slt i32 %67, %68
   br i1 %69, label %70, label %73
 
 70:                                               ; preds = %66
-  %71 = load i32, ptr %48, align 4, !tbaa !22
+  %71 = load i32, ptr %48, align 4, !tbaa !24
   %72 = icmp slt i32 %71, 8
   br label %73
 
@@ -4383,25 +4997,25 @@ define internal void @ompx__box_plan(i32 noundef %0, ptr noundef %1, ptr noundef
   br label %162
 
 76:                                               ; preds = %73
-  %77 = load ptr, ptr %37, align 8, !tbaa !14
-  %78 = load i32, ptr %48, align 4, !tbaa !22
+  %77 = load ptr, ptr %37, align 8, !tbaa !16
+  %78 = load i32, ptr %48, align 4, !tbaa !24
   %79 = sext i32 %78 to i64
   %80 = getelementptr inbounds i32, ptr %77, i64 %79
-  %81 = load i32, ptr %80, align 4, !tbaa !22
+  %81 = load i32, ptr %80, align 4, !tbaa !24
   %82 = icmp ne i32 %81, 0
   br i1 %82, label %83, label %95
 
 83:                                               ; preds = %76
-  %84 = load ptr, ptr %38, align 8, !tbaa !14
-  %85 = load i32, ptr %48, align 4, !tbaa !22
+  %84 = load ptr, ptr %38, align 8, !tbaa !16
+  %85 = load i32, ptr %48, align 4, !tbaa !24
   %86 = sext i32 %85 to i64
   %87 = getelementptr inbounds i64, ptr %84, i64 %86
-  %88 = load i64, ptr %87, align 8, !tbaa !18
-  %89 = load ptr, ptr %39, align 8, !tbaa !14
-  %90 = load i32, ptr %48, align 4, !tbaa !22
+  %88 = load i64, ptr %87, align 8, !tbaa !20
+  %89 = load ptr, ptr %39, align 8, !tbaa !16
+  %90 = load i32, ptr %48, align 4, !tbaa !24
   %91 = sext i32 %90 to i64
   %92 = getelementptr inbounds i64, ptr %89, i64 %91
-  %93 = load i64, ptr %92, align 8, !tbaa !18
+  %93 = load i64, ptr %92, align 8, !tbaa !20
   %94 = icmp sgt i64 %88, %93
   br i1 %94, label %95, label %96
 
@@ -4410,29 +5024,29 @@ define internal void @ompx__box_plan(i32 noundef %0, ptr noundef %1, ptr noundef
 
 96:                                               ; preds = %83
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %24) #3
-  %97 = load i32, ptr %47, align 4, !tbaa !22
+  %97 = load i32, ptr %47, align 4, !tbaa !24
   %98 = add nsw i32 %97, 1
-  store i32 %98, ptr %47, align 4, !tbaa !22
-  store i32 %97, ptr %49, align 4, !tbaa !22
+  store i32 %98, ptr %47, align 4, !tbaa !24
+  store i32 %97, ptr %49, align 4, !tbaa !24
   br label %99
 
 99:                                               ; preds = %135, %96
-  %100 = load i32, ptr %49, align 4, !tbaa !22
+  %100 = load i32, ptr %49, align 4, !tbaa !24
   %101 = icmp sgt i32 %100, 0
   br i1 %101, label %102, label %116
 
 102:                                              ; preds = %99
-  %103 = load i32, ptr %49, align 4, !tbaa !22
+  %103 = load i32, ptr %49, align 4, !tbaa !24
   %104 = sub nsw i32 %103, 1
   %105 = sext i32 %104 to i64
   %106 = getelementptr inbounds [8 x i64], ptr %58, i64 0, i64 %105
-  %107 = load i64, ptr %106, align 8, !tbaa !18
-  %108 = load ptr, ptr %38, align 8, !tbaa !14
-  %109 = load i32, ptr %48, align 4, !tbaa !22
+  %107 = load i64, ptr %106, align 8, !tbaa !20
+  %108 = load ptr, ptr %38, align 8, !tbaa !16
+  %109 = load i32, ptr %48, align 4, !tbaa !24
   %110 = sext i32 %109 to i64
   %111 = getelementptr inbounds i64, ptr %108, i64 %110
-  %112 = load i64, ptr %111, align 8, !tbaa !18
-  %113 = load i64, ptr %42, align 8, !tbaa !18
+  %112 = load i64, ptr %111, align 8, !tbaa !20
+  %113 = load i64, ptr %42, align 8, !tbaa !20
   %114 = sdiv i64 %112, %113
   %115 = icmp sgt i64 %107, %114
   br label %116
@@ -4442,74 +5056,74 @@ define internal void @ompx__box_plan(i32 noundef %0, ptr noundef %1, ptr noundef
   br i1 %117, label %118, label %138
 
 118:                                              ; preds = %116
-  %119 = load i32, ptr %49, align 4, !tbaa !22
+  %119 = load i32, ptr %49, align 4, !tbaa !24
   %120 = sub nsw i32 %119, 1
   %121 = sext i32 %120 to i64
   %122 = getelementptr inbounds [8 x i64], ptr %58, i64 0, i64 %121
-  %123 = load i64, ptr %122, align 8, !tbaa !18
-  %124 = load i32, ptr %49, align 4, !tbaa !22
+  %123 = load i64, ptr %122, align 8, !tbaa !20
+  %124 = load i32, ptr %49, align 4, !tbaa !24
   %125 = sext i32 %124 to i64
   %126 = getelementptr inbounds [8 x i64], ptr %58, i64 0, i64 %125
-  store i64 %123, ptr %126, align 8, !tbaa !18
-  %127 = load i32, ptr %49, align 4, !tbaa !22
+  store i64 %123, ptr %126, align 8, !tbaa !20
+  %127 = load i32, ptr %49, align 4, !tbaa !24
   %128 = sub nsw i32 %127, 1
   %129 = sext i32 %128 to i64
   %130 = getelementptr inbounds [8 x i64], ptr %59, i64 0, i64 %129
-  %131 = load i64, ptr %130, align 8, !tbaa !18
-  %132 = load i32, ptr %49, align 4, !tbaa !22
+  %131 = load i64, ptr %130, align 8, !tbaa !20
+  %132 = load i32, ptr %49, align 4, !tbaa !24
   %133 = sext i32 %132 to i64
   %134 = getelementptr inbounds [8 x i64], ptr %59, i64 0, i64 %133
-  store i64 %131, ptr %134, align 8, !tbaa !18
+  store i64 %131, ptr %134, align 8, !tbaa !20
   br label %135
 
 135:                                              ; preds = %118
-  %136 = load i32, ptr %49, align 4, !tbaa !22
+  %136 = load i32, ptr %49, align 4, !tbaa !24
   %137 = add nsw i32 %136, -1
-  store i32 %137, ptr %49, align 4, !tbaa !22
-  br label %99, !llvm.loop !71
+  store i32 %137, ptr %49, align 4, !tbaa !24
+  br label %99, !llvm.loop !73
 
 138:                                              ; preds = %116
-  %139 = load ptr, ptr %38, align 8, !tbaa !14
-  %140 = load i32, ptr %48, align 4, !tbaa !22
+  %139 = load ptr, ptr %38, align 8, !tbaa !16
+  %140 = load i32, ptr %48, align 4, !tbaa !24
   %141 = sext i32 %140 to i64
   %142 = getelementptr inbounds i64, ptr %139, i64 %141
-  %143 = load i64, ptr %142, align 8, !tbaa !18
-  %144 = load i64, ptr %42, align 8, !tbaa !18
+  %143 = load i64, ptr %142, align 8, !tbaa !20
+  %144 = load i64, ptr %42, align 8, !tbaa !20
   %145 = sdiv i64 %143, %144
-  %146 = load i32, ptr %49, align 4, !tbaa !22
+  %146 = load i32, ptr %49, align 4, !tbaa !24
   %147 = sext i32 %146 to i64
   %148 = getelementptr inbounds [8 x i64], ptr %58, i64 0, i64 %147
-  store i64 %145, ptr %148, align 8, !tbaa !18
-  %149 = load ptr, ptr %39, align 8, !tbaa !14
-  %150 = load i32, ptr %48, align 4, !tbaa !22
+  store i64 %145, ptr %148, align 8, !tbaa !20
+  %149 = load ptr, ptr %39, align 8, !tbaa !16
+  %150 = load i32, ptr %48, align 4, !tbaa !24
   %151 = sext i32 %150 to i64
   %152 = getelementptr inbounds i64, ptr %149, i64 %151
-  %153 = load i64, ptr %152, align 8, !tbaa !18
-  %154 = load i64, ptr %42, align 8, !tbaa !18
+  %153 = load i64, ptr %152, align 8, !tbaa !20
+  %154 = load i64, ptr %42, align 8, !tbaa !20
   %155 = sdiv i64 %153, %154
-  %156 = load i32, ptr %49, align 4, !tbaa !22
+  %156 = load i32, ptr %49, align 4, !tbaa !24
   %157 = sext i32 %156 to i64
   %158 = getelementptr inbounds [8 x i64], ptr %59, i64 0, i64 %157
-  store i64 %155, ptr %158, align 8, !tbaa !18
+  store i64 %155, ptr %158, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 4, ptr addrspace(5) %24) #3
   br label %159
 
 159:                                              ; preds = %138, %95
-  %160 = load i32, ptr %48, align 4, !tbaa !22
+  %160 = load i32, ptr %48, align 4, !tbaa !24
   %161 = add nsw i32 %160, 1
-  store i32 %161, ptr %48, align 4, !tbaa !22
-  br label %66, !llvm.loop !72
+  store i32 %161, ptr %48, align 4, !tbaa !24
+  br label %66, !llvm.loop !74
 
 162:                                              ; preds = %75
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %25) #3
-  store i32 0, ptr %50, align 4, !tbaa !22
+  store i32 0, ptr %50, align 4, !tbaa !24
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %26) #3
-  store i32 0, ptr %51, align 4, !tbaa !22
+  store i32 0, ptr %51, align 4, !tbaa !24
   br label %163
 
 163:                                              ; preds = %222, %162
-  %164 = load i32, ptr %51, align 4, !tbaa !22
-  %165 = load i32, ptr %47, align 4, !tbaa !22
+  %164 = load i32, ptr %51, align 4, !tbaa !24
+  %165 = load i32, ptr %47, align 4, !tbaa !24
   %166 = icmp slt i32 %164, %165
   br i1 %166, label %168, label %167
 
@@ -4518,95 +5132,95 @@ define internal void @ompx__box_plan(i32 noundef %0, ptr noundef %1, ptr noundef
   br label %225
 
 168:                                              ; preds = %163
-  %169 = load i32, ptr %50, align 4, !tbaa !22
+  %169 = load i32, ptr %50, align 4, !tbaa !24
   %170 = icmp sgt i32 %169, 0
   br i1 %170, label %171, label %204
 
 171:                                              ; preds = %168
-  %172 = load i32, ptr %51, align 4, !tbaa !22
+  %172 = load i32, ptr %51, align 4, !tbaa !24
   %173 = sext i32 %172 to i64
   %174 = getelementptr inbounds [8 x i64], ptr %58, i64 0, i64 %173
-  %175 = load i64, ptr %174, align 8, !tbaa !18
-  %176 = load i32, ptr %50, align 4, !tbaa !22
+  %175 = load i64, ptr %174, align 8, !tbaa !20
+  %176 = load i32, ptr %50, align 4, !tbaa !24
   %177 = sub nsw i32 %176, 1
   %178 = sext i32 %177 to i64
   %179 = getelementptr inbounds [8 x i64], ptr %59, i64 0, i64 %178
-  %180 = load i64, ptr %179, align 8, !tbaa !18
+  %180 = load i64, ptr %179, align 8, !tbaa !20
   %181 = add nsw i64 %180, 1
   %182 = icmp sle i64 %175, %181
   br i1 %182, label %183, label %204
 
 183:                                              ; preds = %171
-  %184 = load i32, ptr %51, align 4, !tbaa !22
+  %184 = load i32, ptr %51, align 4, !tbaa !24
   %185 = sext i32 %184 to i64
   %186 = getelementptr inbounds [8 x i64], ptr %59, i64 0, i64 %185
-  %187 = load i64, ptr %186, align 8, !tbaa !18
-  %188 = load i32, ptr %50, align 4, !tbaa !22
+  %187 = load i64, ptr %186, align 8, !tbaa !20
+  %188 = load i32, ptr %50, align 4, !tbaa !24
   %189 = sub nsw i32 %188, 1
   %190 = sext i32 %189 to i64
   %191 = getelementptr inbounds [8 x i64], ptr %59, i64 0, i64 %190
-  %192 = load i64, ptr %191, align 8, !tbaa !18
+  %192 = load i64, ptr %191, align 8, !tbaa !20
   %193 = icmp sgt i64 %187, %192
   br i1 %193, label %194, label %203
 
 194:                                              ; preds = %183
-  %195 = load i32, ptr %51, align 4, !tbaa !22
+  %195 = load i32, ptr %51, align 4, !tbaa !24
   %196 = sext i32 %195 to i64
   %197 = getelementptr inbounds [8 x i64], ptr %59, i64 0, i64 %196
-  %198 = load i64, ptr %197, align 8, !tbaa !18
-  %199 = load i32, ptr %50, align 4, !tbaa !22
+  %198 = load i64, ptr %197, align 8, !tbaa !20
+  %199 = load i32, ptr %50, align 4, !tbaa !24
   %200 = sub nsw i32 %199, 1
   %201 = sext i32 %200 to i64
   %202 = getelementptr inbounds [8 x i64], ptr %59, i64 0, i64 %201
-  store i64 %198, ptr %202, align 8, !tbaa !18
+  store i64 %198, ptr %202, align 8, !tbaa !20
   br label %203
 
 203:                                              ; preds = %194, %183
   br label %221
 
 204:                                              ; preds = %171, %168
-  %205 = load i32, ptr %51, align 4, !tbaa !22
+  %205 = load i32, ptr %51, align 4, !tbaa !24
   %206 = sext i32 %205 to i64
   %207 = getelementptr inbounds [8 x i64], ptr %58, i64 0, i64 %206
-  %208 = load i64, ptr %207, align 8, !tbaa !18
-  %209 = load i32, ptr %50, align 4, !tbaa !22
+  %208 = load i64, ptr %207, align 8, !tbaa !20
+  %209 = load i32, ptr %50, align 4, !tbaa !24
   %210 = sext i32 %209 to i64
   %211 = getelementptr inbounds [8 x i64], ptr %58, i64 0, i64 %210
-  store i64 %208, ptr %211, align 8, !tbaa !18
-  %212 = load i32, ptr %51, align 4, !tbaa !22
+  store i64 %208, ptr %211, align 8, !tbaa !20
+  %212 = load i32, ptr %51, align 4, !tbaa !24
   %213 = sext i32 %212 to i64
   %214 = getelementptr inbounds [8 x i64], ptr %59, i64 0, i64 %213
-  %215 = load i64, ptr %214, align 8, !tbaa !18
-  %216 = load i32, ptr %50, align 4, !tbaa !22
+  %215 = load i64, ptr %214, align 8, !tbaa !20
+  %216 = load i32, ptr %50, align 4, !tbaa !24
   %217 = sext i32 %216 to i64
   %218 = getelementptr inbounds [8 x i64], ptr %59, i64 0, i64 %217
-  store i64 %215, ptr %218, align 8, !tbaa !18
-  %219 = load i32, ptr %50, align 4, !tbaa !22
+  store i64 %215, ptr %218, align 8, !tbaa !20
+  %219 = load i32, ptr %50, align 4, !tbaa !24
   %220 = add nsw i32 %219, 1
-  store i32 %220, ptr %50, align 4, !tbaa !22
+  store i32 %220, ptr %50, align 4, !tbaa !24
   br label %221
 
 221:                                              ; preds = %204, %203
   br label %222
 
 222:                                              ; preds = %221
-  %223 = load i32, ptr %51, align 4, !tbaa !22
+  %223 = load i32, ptr %51, align 4, !tbaa !24
   %224 = add nsw i32 %223, 1
-  store i32 %224, ptr %51, align 4, !tbaa !22
-  br label %163, !llvm.loop !73
+  store i32 %224, ptr %51, align 4, !tbaa !24
+  br label %163, !llvm.loop !75
 
 225:                                              ; preds = %167
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %28) #3
-  store i64 0, ptr %52, align 8, !tbaa !18
+  store i64 0, ptr %52, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %29) #3
-  store i64 -1, ptr %53, align 8, !tbaa !18
+  store i64 -1, ptr %53, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %30) #3
-  store i32 0, ptr %54, align 4, !tbaa !22
+  store i32 0, ptr %54, align 4, !tbaa !24
   br label %226
 
 226:                                              ; preds = %270, %225
-  %227 = load i32, ptr %54, align 4, !tbaa !22
-  %228 = load i32, ptr %50, align 4, !tbaa !22
+  %227 = load i32, ptr %54, align 4, !tbaa !24
+  %228 = load i32, ptr %50, align 4, !tbaa !24
   %229 = icmp slt i32 %227, %228
   br i1 %229, label %231, label %230
 
@@ -4616,54 +5230,54 @@ define internal void @ompx__box_plan(i32 noundef %0, ptr noundef %1, ptr noundef
 
 231:                                              ; preds = %226
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %32) #3
-  %232 = load i32, ptr %54, align 4, !tbaa !22
+  %232 = load i32, ptr %54, align 4, !tbaa !24
   %233 = add nsw i32 %232, 1
-  %234 = load i32, ptr %50, align 4, !tbaa !22
+  %234 = load i32, ptr %50, align 4, !tbaa !24
   %235 = icmp slt i32 %233, %234
   br i1 %235, label %236, label %242
 
 236:                                              ; preds = %231
-  %237 = load i32, ptr %54, align 4, !tbaa !22
+  %237 = load i32, ptr %54, align 4, !tbaa !24
   %238 = add nsw i32 %237, 1
   %239 = sext i32 %238 to i64
   %240 = getelementptr inbounds [8 x i64], ptr %58, i64 0, i64 %239
-  %241 = load i64, ptr %240, align 8, !tbaa !18
+  %241 = load i64, ptr %240, align 8, !tbaa !20
   br label %247
 
 242:                                              ; preds = %231
   %243 = getelementptr inbounds [8 x i64], ptr %58, i64 0, i64 0
-  %244 = load i64, ptr %243, align 8, !tbaa !18
-  %245 = load i64, ptr %46, align 8, !tbaa !18
+  %244 = load i64, ptr %243, align 8, !tbaa !20
+  %245 = load i64, ptr %46, align 8, !tbaa !20
   %246 = add nsw i64 %244, %245
   br label %247
 
 247:                                              ; preds = %242, %236
   %248 = phi i64 [ %241, %236 ], [ %246, %242 ]
-  store i64 %248, ptr %55, align 8, !tbaa !18
-  %249 = load i64, ptr %55, align 8, !tbaa !18
-  %250 = load i32, ptr %54, align 4, !tbaa !22
+  store i64 %248, ptr %55, align 8, !tbaa !20
+  %249 = load i64, ptr %55, align 8, !tbaa !20
+  %250 = load i32, ptr %54, align 4, !tbaa !24
   %251 = sext i32 %250 to i64
   %252 = getelementptr inbounds [8 x i64], ptr %59, i64 0, i64 %251
-  %253 = load i64, ptr %252, align 8, !tbaa !18
+  %253 = load i64, ptr %252, align 8, !tbaa !20
   %254 = sub nsw i64 %249, %253
   %255 = sub nsw i64 %254, 1
-  %256 = load i64, ptr %53, align 8, !tbaa !18
+  %256 = load i64, ptr %53, align 8, !tbaa !20
   %257 = icmp sgt i64 %255, %256
   br i1 %257, label %258, label %269
 
 258:                                              ; preds = %247
-  %259 = load i64, ptr %55, align 8, !tbaa !18
-  %260 = load i32, ptr %54, align 4, !tbaa !22
+  %259 = load i64, ptr %55, align 8, !tbaa !20
+  %260 = load i32, ptr %54, align 4, !tbaa !24
   %261 = sext i32 %260 to i64
   %262 = getelementptr inbounds [8 x i64], ptr %59, i64 0, i64 %261
-  %263 = load i64, ptr %262, align 8, !tbaa !18
+  %263 = load i64, ptr %262, align 8, !tbaa !20
   %264 = sub nsw i64 %259, %263
   %265 = sub nsw i64 %264, 1
-  store i64 %265, ptr %53, align 8, !tbaa !18
-  %266 = load i64, ptr %55, align 8, !tbaa !18
-  %267 = load i64, ptr %46, align 8, !tbaa !18
+  store i64 %265, ptr %53, align 8, !tbaa !20
+  %266 = load i64, ptr %55, align 8, !tbaa !20
+  %267 = load i64, ptr %46, align 8, !tbaa !20
   %268 = srem i64 %266, %267
-  store i64 %268, ptr %52, align 8, !tbaa !18
+  store i64 %268, ptr %52, align 8, !tbaa !20
   br label %269
 
 269:                                              ; preds = %258, %247
@@ -4671,24 +5285,24 @@ define internal void @ompx__box_plan(i32 noundef %0, ptr noundef %1, ptr noundef
   br label %270
 
 270:                                              ; preds = %269
-  %271 = load i32, ptr %54, align 4, !tbaa !22
+  %271 = load i32, ptr %54, align 4, !tbaa !24
   %272 = add nsw i32 %271, 1
-  store i32 %272, ptr %54, align 4, !tbaa !22
-  br label %226, !llvm.loop !74
+  store i32 %272, ptr %54, align 4, !tbaa !24
+  br label %226, !llvm.loop !76
 
 273:                                              ; preds = %230
-  %274 = load i64, ptr %52, align 8, !tbaa !18
-  %275 = load i64, ptr %42, align 8, !tbaa !18
+  %274 = load i64, ptr %52, align 8, !tbaa !20
+  %275 = load i64, ptr %42, align 8, !tbaa !20
   %276 = mul nsw i64 %274, %275
-  %277 = load ptr, ptr %43, align 8, !tbaa !14
-  store i64 %276, ptr %277, align 8, !tbaa !18
+  %277 = load ptr, ptr %43, align 8, !tbaa !16
+  store i64 %276, ptr %277, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %33) #3
-  store i32 0, ptr %56, align 4, !tbaa !22
+  store i32 0, ptr %56, align 4, !tbaa !24
   br label %278
 
 278:                                              ; preds = %341, %273
-  %279 = load i32, ptr %56, align 4, !tbaa !22
-  %280 = load i32, ptr %36, align 4, !tbaa !22
+  %279 = load i32, ptr %56, align 4, !tbaa !24
+  %280 = load i32, ptr %36, align 4, !tbaa !24
   %281 = icmp slt i32 %279, %280
   br i1 %281, label %283, label %282
 
@@ -4697,74 +5311,74 @@ define internal void @ompx__box_plan(i32 noundef %0, ptr noundef %1, ptr noundef
   br label %344
 
 283:                                              ; preds = %278
-  %284 = load ptr, ptr %37, align 8, !tbaa !14
-  %285 = load i32, ptr %56, align 4, !tbaa !22
+  %284 = load ptr, ptr %37, align 8, !tbaa !16
+  %285 = load i32, ptr %56, align 4, !tbaa !24
   %286 = sext i32 %285 to i64
   %287 = getelementptr inbounds i32, ptr %284, i64 %286
-  %288 = load i32, ptr %287, align 4, !tbaa !22
+  %288 = load i32, ptr %287, align 4, !tbaa !24
   %289 = icmp ne i32 %288, 0
   br i1 %289, label %295, label %290
 
 290:                                              ; preds = %283
-  %291 = load ptr, ptr %44, align 8, !tbaa !14
-  %292 = load i32, ptr %56, align 4, !tbaa !22
+  %291 = load ptr, ptr %44, align 8, !tbaa !16
+  %292 = load i32, ptr %56, align 4, !tbaa !24
   %293 = sext i32 %292 to i64
   %294 = getelementptr inbounds i64, ptr %291, i64 %293
-  store i64 9223372036854775807, ptr %294, align 8, !tbaa !18
+  store i64 9223372036854775807, ptr %294, align 8, !tbaa !20
   br label %340
 
 295:                                              ; preds = %283
-  %296 = load ptr, ptr %38, align 8, !tbaa !14
-  %297 = load i32, ptr %56, align 4, !tbaa !22
+  %296 = load ptr, ptr %38, align 8, !tbaa !16
+  %297 = load i32, ptr %56, align 4, !tbaa !24
   %298 = sext i32 %297 to i64
   %299 = getelementptr inbounds i64, ptr %296, i64 %298
-  %300 = load i64, ptr %299, align 8, !tbaa !18
-  %301 = load ptr, ptr %39, align 8, !tbaa !14
-  %302 = load i32, ptr %56, align 4, !tbaa !22
+  %300 = load i64, ptr %299, align 8, !tbaa !20
+  %301 = load ptr, ptr %39, align 8, !tbaa !16
+  %302 = load i32, ptr %56, align 4, !tbaa !24
   %303 = sext i32 %302 to i64
   %304 = getelementptr inbounds i64, ptr %301, i64 %303
-  %305 = load i64, ptr %304, align 8, !tbaa !18
+  %305 = load i64, ptr %304, align 8, !tbaa !20
   %306 = icmp sgt i64 %300, %305
   br i1 %306, label %307, label %313
 
 307:                                              ; preds = %295
-  %308 = load i64, ptr %40, align 8, !tbaa !18
-  %309 = load ptr, ptr %44, align 8, !tbaa !14
-  %310 = load i32, ptr %56, align 4, !tbaa !22
+  %308 = load i64, ptr %40, align 8, !tbaa !20
+  %309 = load ptr, ptr %44, align 8, !tbaa !16
+  %310 = load i32, ptr %56, align 4, !tbaa !24
   %311 = sext i32 %310 to i64
   %312 = getelementptr inbounds i64, ptr %309, i64 %311
-  store i64 %308, ptr %312, align 8, !tbaa !18
+  store i64 %308, ptr %312, align 8, !tbaa !20
   br label %339
 
 313:                                              ; preds = %295
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %35) #3
-  %314 = load ptr, ptr %39, align 8, !tbaa !14
-  %315 = load i32, ptr %56, align 4, !tbaa !22
+  %314 = load ptr, ptr %39, align 8, !tbaa !16
+  %315 = load i32, ptr %56, align 4, !tbaa !24
   %316 = sext i32 %315 to i64
   %317 = getelementptr inbounds i64, ptr %314, i64 %316
-  %318 = load i64, ptr %317, align 8, !tbaa !18
-  %319 = load i64, ptr %42, align 8, !tbaa !18
+  %318 = load i64, ptr %317, align 8, !tbaa !20
+  %319 = load i64, ptr %42, align 8, !tbaa !20
   %320 = sdiv i64 %318, %319
-  %321 = load i64, ptr %52, align 8, !tbaa !18
+  %321 = load i64, ptr %52, align 8, !tbaa !20
   %322 = sub nsw i64 %320, %321
-  %323 = load i64, ptr %46, align 8, !tbaa !18
+  %323 = load i64, ptr %46, align 8, !tbaa !20
   %324 = srem i64 %322, %323
-  %325 = load i64, ptr %46, align 8, !tbaa !18
+  %325 = load i64, ptr %46, align 8, !tbaa !20
   %326 = add nsw i64 %324, %325
-  %327 = load i64, ptr %46, align 8, !tbaa !18
+  %327 = load i64, ptr %46, align 8, !tbaa !20
   %328 = srem i64 %326, %327
-  store i64 %328, ptr %57, align 8, !tbaa !18
-  %329 = load i64, ptr %40, align 8, !tbaa !18
-  %330 = load i64, ptr %57, align 8, !tbaa !18
+  store i64 %328, ptr %57, align 8, !tbaa !20
+  %329 = load i64, ptr %40, align 8, !tbaa !20
+  %330 = load i64, ptr %57, align 8, !tbaa !20
   %331 = add nsw i64 %330, 1
-  %332 = load i64, ptr %42, align 8, !tbaa !18
+  %332 = load i64, ptr %42, align 8, !tbaa !20
   %333 = mul nsw i64 %331, %332
   %334 = add nsw i64 %329, %333
-  %335 = load ptr, ptr %44, align 8, !tbaa !14
-  %336 = load i32, ptr %56, align 4, !tbaa !22
+  %335 = load ptr, ptr %44, align 8, !tbaa !16
+  %336 = load i32, ptr %56, align 4, !tbaa !24
   %337 = sext i32 %336 to i64
   %338 = getelementptr inbounds i64, ptr %335, i64 %337
-  store i64 %334, ptr %338, align 8, !tbaa !18
+  store i64 %334, ptr %338, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %35) #3
   br label %339
 
@@ -4775,10 +5389,10 @@ define internal void @ompx__box_plan(i32 noundef %0, ptr noundef %1, ptr noundef
   br label %341
 
 341:                                              ; preds = %340
-  %342 = load i32, ptr %56, align 4, !tbaa !22
+  %342 = load i32, ptr %56, align 4, !tbaa !24
   %343 = add nsw i32 %342, 1
-  store i32 %343, ptr %56, align 4, !tbaa !22
-  br label %278, !llvm.loop !75
+  store i32 %343, ptr %56, align 4, !tbaa !24
+  br label %278, !llvm.loop !77
 
 344:                                              ; preds = %282
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %29) #3
@@ -4821,12 +5435,12 @@ define internal void @_ZL15ompx__box_countPjiPvPKvmi(ptr noundef %0, i32 noundef
   %31 = addrspacecast ptr addrspace(5) %18 to ptr
   %32 = addrspacecast ptr addrspace(5) %19 to ptr
   %33 = call align 16 ptr @__kmpc_alloc_shared(i64 4)
-  store ptr %0, ptr %20, align 8, !tbaa !14
-  store i32 %1, ptr %21, align 4, !tbaa !22
-  store ptr %2, ptr %22, align 8, !tbaa !14
-  store ptr %3, ptr %23, align 8, !tbaa !14
-  store i64 %4, ptr %24, align 8, !tbaa !18
-  store i32 %5, ptr %33, align 4, !tbaa !22
+  store ptr %0, ptr %20, align 8, !tbaa !16
+  store i32 %1, ptr %21, align 4, !tbaa !24
+  store ptr %2, ptr %22, align 8, !tbaa !16
+  store ptr %3, ptr %23, align 8, !tbaa !16
+  store i64 %4, ptr %24, align 8, !tbaa !20
+  store i32 %5, ptr %33, align 4, !tbaa !24
   fence syncscope("agent") release
   call void @ompx_sync_block_acq_rel() #15
   %34 = call noundef i32 @_ZL16ompx_thread_id_xv() #15
@@ -4850,14 +5464,14 @@ define internal void @_ZL15ompx__box_countPjiPvPKvmi(ptr noundef %0, i32 noundef
 43:                                               ; preds = %39
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %13) #3
   %44 = call i32 @omp_get_num_teams() #15
-  store i32 %44, ptr %26, align 4, !tbaa !22
-  %45 = load ptr, ptr %20, align 8, !tbaa !14
-  store i32 1, ptr %27, align 4, !tbaa !22
+  store i32 %44, ptr %26, align 4, !tbaa !24
+  %45 = load ptr, ptr %20, align 8, !tbaa !16
+  store i32 1, ptr %27, align 4, !tbaa !24
   %46 = load i32, ptr %27, align 4
   %47 = atomicrmw add ptr %45, i32 %46 syncscope("agent-one-as") acq_rel, align 4
   store i32 %47, ptr %28, align 4
-  %48 = load i32, ptr %28, align 4, !tbaa !22
-  %49 = load i32, ptr %26, align 4, !tbaa !22
+  %48 = load i32, ptr %28, align 4, !tbaa !24
+  %49 = load i32, ptr %26, align 4, !tbaa !24
   %50 = sub i32 %49, 1
   %51 = icmp ne i32 %48, %50
   br i1 %51, label %52, label %53
@@ -4867,57 +5481,57 @@ define internal void @_ZL15ompx__box_countPjiPvPKvmi(ptr noundef %0, i32 noundef
   br label %88
 
 53:                                               ; preds = %43
-  %54 = load ptr, ptr %20, align 8, !tbaa !14
-  store i32 0, ptr %29, align 4, !tbaa !22
+  %54 = load ptr, ptr %20, align 8, !tbaa !16
+  store i32 0, ptr %29, align 4, !tbaa !24
   %55 = load i32, ptr %29, align 4
   store atomic i32 %55, ptr %54 syncscope("agent-one-as") monotonic, align 4
   fence seq_cst
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %17) #3
   %56 = call noundef ptr @_ZL18ompx__pipeline_ctxv() #15
-  store ptr %56, ptr %30, align 8, !tbaa !14
+  store ptr %56, ptr %30, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %18) #3
-  %57 = load ptr, ptr %30, align 8, !tbaa !14
+  %57 = load ptr, ptr %30, align 8, !tbaa !16
   %58 = call noundef ptr @_ZN4gicc3omp6detail12lane_to_ringEPNS_9DeviceCtxEi(ptr noundef %57, i32 noundef 0) #15
   %59 = icmp ne ptr %58, null
   br i1 %59, label %60, label %66
 
 60:                                               ; preds = %53
-  %61 = load ptr, ptr %30, align 8, !tbaa !14
-  %62 = load i32, ptr %21, align 4, !tbaa !22
-  %63 = load ptr, ptr %22, align 8, !tbaa !14
-  %64 = load ptr, ptr %23, align 8, !tbaa !14
-  %65 = load i64, ptr %24, align 8, !tbaa !18
+  %61 = load ptr, ptr %30, align 8, !tbaa !16
+  %62 = load i32, ptr %21, align 4, !tbaa !24
+  %63 = load ptr, ptr %22, align 8, !tbaa !16
+  %64 = load ptr, ptr %23, align 8, !tbaa !16
+  %65 = load i64, ptr %24, align 8, !tbaa !20
   call void @_ZL15ompx__proxy_putPN4gicc9DeviceCtxEiPvPKvm(ptr noundef %61, i32 noundef %62, ptr noundef %63, ptr noundef %64, i64 noundef %65) #15
   br label %87
 
 66:                                               ; preds = %53
-  %67 = load i32, ptr %33, align 4, !tbaa !22
+  %67 = load i32, ptr %33, align 4, !tbaa !24
   %68 = call noundef ptr @_ZL16ompx__after_belli(i32 noundef %67) #15
-  store ptr %68, ptr %31, align 8, !tbaa !14
+  store ptr %68, ptr %31, align 8, !tbaa !16
   %69 = icmp ne ptr %68, null
   br i1 %69, label %70, label %80
 
 70:                                               ; preds = %66
-  %71 = load ptr, ptr %31, align 8, !tbaa !14
-  store volatile i64 1, ptr %71, align 8, !tbaa !76
-  %72 = load ptr, ptr addrspacecast (ptr addrspace(1) @_ZL19ompx__pipe_deferred to ptr), align 8, !tbaa !14
+  %71 = load ptr, ptr %31, align 8, !tbaa !16
+  store volatile i64 1, ptr %71, align 8, !tbaa !78
+  %72 = load ptr, ptr addrspacecast (ptr addrspace(1) @_ZL19ompx__pipe_deferred to ptr), align 8, !tbaa !16
   %73 = getelementptr inbounds %struct.ompx_pipe_deferred, ptr %72, i32 0, i32 3
   %74 = getelementptr inbounds %struct.ompx_pipe_after, ptr %73, i32 0, i32 1
-  %75 = load i32, ptr %33, align 4, !tbaa !22
+  %75 = load i32, ptr %33, align 4, !tbaa !24
   %76 = sext i32 %75 to i64
   %77 = getelementptr inbounds [8 x %struct.ompx_pipe_after_put], ptr %74, i64 0, i64 %76
   %78 = getelementptr inbounds %struct.ompx_pipe_after_put, ptr %77, i32 0, i32 8
-  store i32 1, ptr %32, align 4, !tbaa !22
+  store i32 1, ptr %32, align 4, !tbaa !24
   %79 = load i32, ptr %32, align 4
   store atomic i32 %79, ptr %78 monotonic, align 8
   br label %86
 
 80:                                               ; preds = %66
-  %81 = load ptr, ptr %30, align 8, !tbaa !14
-  %82 = load i32, ptr %21, align 4, !tbaa !22
-  %83 = load ptr, ptr %22, align 8, !tbaa !14
-  %84 = load ptr, ptr %23, align 8, !tbaa !14
-  %85 = load i64, ptr %24, align 8, !tbaa !18
+  %81 = load ptr, ptr %30, align 8, !tbaa !16
+  %82 = load i32, ptr %21, align 4, !tbaa !24
+  %83 = load ptr, ptr %22, align 8, !tbaa !16
+  %84 = load ptr, ptr %23, align 8, !tbaa !16
+  %85 = load i64, ptr %24, align 8, !tbaa !20
   call void @_ZL16ompx__pipe_deferPN4gicc9DeviceCtxEiPvPKvm(ptr noundef %81, i32 noundef %82, ptr noundef %83, ptr noundef %84, i64 noundef %85) #15
   br label %86
 
@@ -4980,24 +5594,24 @@ define internal noundef i64 @ompx__box_due(i32 noundef %0, i64 noundef %1, ptr n
   %33 = addrspacecast ptr addrspace(5) %19 to ptr
   %34 = addrspacecast ptr addrspace(5) %20 to ptr
   %35 = addrspacecast ptr addrspace(5) %21 to ptr
-  store i32 %0, ptr %25, align 4, !tbaa !22
-  store i64 %1, ptr %26, align 8, !tbaa !18
-  store ptr %2, ptr %27, align 8, !tbaa !14
-  store ptr %3, ptr %28, align 8, !tbaa !14
-  store ptr %4, ptr %29, align 8, !tbaa !14
-  store ptr %5, ptr %30, align 8, !tbaa !14
-  store ptr %6, ptr %31, align 8, !tbaa !14
-  store ptr %7, ptr %32, align 8, !tbaa !14
-  store ptr %8, ptr %33, align 8, !tbaa !14
+  store i32 %0, ptr %25, align 4, !tbaa !24
+  store i64 %1, ptr %26, align 8, !tbaa !20
+  store ptr %2, ptr %27, align 8, !tbaa !16
+  store ptr %3, ptr %28, align 8, !tbaa !16
+  store ptr %4, ptr %29, align 8, !tbaa !16
+  store ptr %5, ptr %30, align 8, !tbaa !16
+  store ptr %6, ptr %31, align 8, !tbaa !16
+  store ptr %7, ptr %32, align 8, !tbaa !16
+  store ptr %8, ptr %33, align 8, !tbaa !16
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %20) #3
-  store i64 9223372036854775807, ptr %34, align 8, !tbaa !18
+  store i64 9223372036854775807, ptr %34, align 8, !tbaa !20
   call void @llvm.lifetime.start.p5(i64 4, ptr addrspace(5) %21) #3
-  store i32 0, ptr %35, align 4, !tbaa !22
+  store i32 0, ptr %35, align 4, !tbaa !24
   br label %36
 
 36:                                               ; preds = %99, %9
-  %37 = load i32, ptr %35, align 4, !tbaa !22
-  %38 = load i32, ptr %25, align 4, !tbaa !22
+  %37 = load i32, ptr %35, align 4, !tbaa !24
+  %38 = load i32, ptr %25, align 4, !tbaa !24
   %39 = icmp slt i32 %37, %38
   br i1 %39, label %41, label %40
 
@@ -5006,84 +5620,84 @@ define internal noundef i64 @ompx__box_due(i32 noundef %0, i64 noundef %1, ptr n
   br label %102
 
 41:                                               ; preds = %36
-  %42 = load ptr, ptr %27, align 8, !tbaa !14
-  %43 = load i32, ptr %35, align 4, !tbaa !22
+  %42 = load ptr, ptr %27, align 8, !tbaa !16
+  %43 = load i32, ptr %35, align 4, !tbaa !24
   %44 = sext i32 %43 to i64
   %45 = getelementptr inbounds i64, ptr %42, i64 %44
-  %46 = load i64, ptr %45, align 8, !tbaa !18
-  %47 = load i64, ptr %26, align 8, !tbaa !18
+  %46 = load i64, ptr %45, align 8, !tbaa !20
+  %47 = load i64, ptr %26, align 8, !tbaa !20
   %48 = icmp sle i64 %46, %47
   br i1 %48, label %49, label %84
 
 49:                                               ; preds = %41
-  %50 = load ptr, ptr %32, align 8, !tbaa !14
-  %51 = load i32, ptr %35, align 4, !tbaa !22
+  %50 = load ptr, ptr %32, align 8, !tbaa !16
+  %51 = load i32, ptr %35, align 4, !tbaa !24
   %52 = sext i32 %51 to i64
   %53 = getelementptr inbounds ptr, ptr %50, i64 %52
-  %54 = load ptr, ptr %53, align 8, !tbaa !14
-  %55 = load ptr, ptr %28, align 8, !tbaa !14
-  %56 = load i32, ptr %35, align 4, !tbaa !22
+  %54 = load ptr, ptr %53, align 8, !tbaa !16
+  %55 = load ptr, ptr %28, align 8, !tbaa !16
+  %56 = load i32, ptr %35, align 4, !tbaa !24
   %57 = sext i32 %56 to i64
   %58 = getelementptr inbounds i32, ptr %55, i64 %57
-  %59 = load i32, ptr %58, align 4, !tbaa !22
-  %60 = load ptr, ptr %29, align 8, !tbaa !14
-  %61 = load i32, ptr %35, align 4, !tbaa !22
+  %59 = load i32, ptr %58, align 4, !tbaa !24
+  %60 = load ptr, ptr %29, align 8, !tbaa !16
+  %61 = load i32, ptr %35, align 4, !tbaa !24
   %62 = sext i32 %61 to i64
   %63 = getelementptr inbounds ptr, ptr %60, i64 %62
-  %64 = load ptr, ptr %63, align 8, !tbaa !14
-  %65 = load ptr, ptr %30, align 8, !tbaa !14
-  %66 = load i32, ptr %35, align 4, !tbaa !22
+  %64 = load ptr, ptr %63, align 8, !tbaa !16
+  %65 = load ptr, ptr %30, align 8, !tbaa !16
+  %66 = load i32, ptr %35, align 4, !tbaa !24
   %67 = sext i32 %66 to i64
   %68 = getelementptr inbounds ptr, ptr %65, i64 %67
-  %69 = load ptr, ptr %68, align 8, !tbaa !14
-  %70 = load ptr, ptr %31, align 8, !tbaa !14
-  %71 = load i32, ptr %35, align 4, !tbaa !22
+  %69 = load ptr, ptr %68, align 8, !tbaa !16
+  %70 = load ptr, ptr %31, align 8, !tbaa !16
+  %71 = load i32, ptr %35, align 4, !tbaa !24
   %72 = sext i32 %71 to i64
   %73 = getelementptr inbounds i64, ptr %70, i64 %72
-  %74 = load i64, ptr %73, align 8, !tbaa !18
-  %75 = load ptr, ptr %33, align 8, !tbaa !14
-  %76 = load i32, ptr %35, align 4, !tbaa !22
+  %74 = load i64, ptr %73, align 8, !tbaa !20
+  %75 = load ptr, ptr %33, align 8, !tbaa !16
+  %76 = load i32, ptr %35, align 4, !tbaa !24
   %77 = sext i32 %76 to i64
   %78 = getelementptr inbounds i32, ptr %75, i64 %77
-  %79 = load i32, ptr %78, align 4, !tbaa !22
+  %79 = load i32, ptr %78, align 4, !tbaa !24
   call void @_ZL15ompx__box_countPjiPvPKvmi(ptr noundef %54, i32 noundef %59, ptr noundef %64, ptr noundef %69, i64 noundef %74, i32 noundef %79) #15
-  %80 = load ptr, ptr %27, align 8, !tbaa !14
-  %81 = load i32, ptr %35, align 4, !tbaa !22
+  %80 = load ptr, ptr %27, align 8, !tbaa !16
+  %81 = load i32, ptr %35, align 4, !tbaa !24
   %82 = sext i32 %81 to i64
   %83 = getelementptr inbounds i64, ptr %80, i64 %82
-  store i64 9223372036854775807, ptr %83, align 8, !tbaa !18
+  store i64 9223372036854775807, ptr %83, align 8, !tbaa !20
   br label %84
 
 84:                                               ; preds = %49, %41
-  %85 = load ptr, ptr %27, align 8, !tbaa !14
-  %86 = load i32, ptr %35, align 4, !tbaa !22
+  %85 = load ptr, ptr %27, align 8, !tbaa !16
+  %86 = load i32, ptr %35, align 4, !tbaa !24
   %87 = sext i32 %86 to i64
   %88 = getelementptr inbounds i64, ptr %85, i64 %87
-  %89 = load i64, ptr %88, align 8, !tbaa !18
-  %90 = load i64, ptr %34, align 8, !tbaa !18
+  %89 = load i64, ptr %88, align 8, !tbaa !20
+  %90 = load i64, ptr %34, align 8, !tbaa !20
   %91 = icmp slt i64 %89, %90
   br i1 %91, label %92, label %98
 
 92:                                               ; preds = %84
-  %93 = load ptr, ptr %27, align 8, !tbaa !14
-  %94 = load i32, ptr %35, align 4, !tbaa !22
+  %93 = load ptr, ptr %27, align 8, !tbaa !16
+  %94 = load i32, ptr %35, align 4, !tbaa !24
   %95 = sext i32 %94 to i64
   %96 = getelementptr inbounds i64, ptr %93, i64 %95
-  %97 = load i64, ptr %96, align 8, !tbaa !18
-  store i64 %97, ptr %34, align 8, !tbaa !18
+  %97 = load i64, ptr %96, align 8, !tbaa !20
+  store i64 %97, ptr %34, align 8, !tbaa !20
   br label %98
 
 98:                                               ; preds = %92, %84
   br label %99
 
 99:                                               ; preds = %98
-  %100 = load i32, ptr %35, align 4, !tbaa !22
+  %100 = load i32, ptr %35, align 4, !tbaa !24
   %101 = add nsw i32 %100, 1
-  store i32 %101, ptr %35, align 4, !tbaa !22
-  br label %36, !llvm.loop !77
+  store i32 %101, ptr %35, align 4, !tbaa !24
+  br label %36, !llvm.loop !79
 
 102:                                              ; preds = %40
-  %103 = load i64, ptr %34, align 8, !tbaa !18
+  %103 = load i64, ptr %34, align 8, !tbaa !20
   call void @llvm.lifetime.end.p5(i64 8, ptr addrspace(5) %20) #3
   ret i64 %103
 }
@@ -5110,43 +5724,43 @@ define internal void @ompx__after_put(i64 noundef %0, i32 noundef %1, i32 nounde
   %25 = addrspacecast ptr addrspace(5) %16 to ptr
   %26 = call align 16 ptr @__kmpc_alloc_shared(i64 8)
   %27 = call align 16 ptr @__kmpc_alloc_shared(i64 4)
-  store i64 %0, ptr %17, align 8, !tbaa !76
-  store i32 %1, ptr %27, align 4, !tbaa !22
-  store i32 %2, ptr %18, align 4, !tbaa !22
-  store ptr %3, ptr %19, align 8, !tbaa !14
-  store ptr %4, ptr %20, align 8, !tbaa !14
-  store ptr %5, ptr %21, align 8, !tbaa !14
-  store ptr %6, ptr %22, align 8, !tbaa !14
-  %28 = load ptr, ptr %19, align 8, !tbaa !14
-  store i32 -1, ptr %28, align 4, !tbaa !22
-  %29 = load ptr, ptr %20, align 8, !tbaa !14
-  store ptr null, ptr %29, align 8, !tbaa !14
-  %30 = load ptr, ptr %21, align 8, !tbaa !14
-  store i64 0, ptr %30, align 8, !tbaa !18
-  %31 = load ptr, ptr %22, align 8, !tbaa !14
-  store i64 0, ptr %31, align 8, !tbaa !18
-  %32 = load ptr, ptr addrspacecast (ptr addrspace(1) @_ZL19ompx__pipe_deferred to ptr), align 8, !tbaa !14
-  store ptr %32, ptr %26, align 8, !tbaa !14
-  %33 = load ptr, ptr %26, align 8, !tbaa !14
+  store i64 %0, ptr %17, align 8, !tbaa !78
+  store i32 %1, ptr %27, align 4, !tbaa !24
+  store i32 %2, ptr %18, align 4, !tbaa !24
+  store ptr %3, ptr %19, align 8, !tbaa !16
+  store ptr %4, ptr %20, align 8, !tbaa !16
+  store ptr %5, ptr %21, align 8, !tbaa !16
+  store ptr %6, ptr %22, align 8, !tbaa !16
+  %28 = load ptr, ptr %19, align 8, !tbaa !16
+  store i32 -1, ptr %28, align 4, !tbaa !24
+  %29 = load ptr, ptr %20, align 8, !tbaa !16
+  store ptr null, ptr %29, align 8, !tbaa !16
+  %30 = load ptr, ptr %21, align 8, !tbaa !16
+  store i64 0, ptr %30, align 8, !tbaa !20
+  %31 = load ptr, ptr %22, align 8, !tbaa !16
+  store i64 0, ptr %31, align 8, !tbaa !20
+  %32 = load ptr, ptr addrspacecast (ptr addrspace(1) @_ZL19ompx__pipe_deferred to ptr), align 8, !tbaa !16
+  store ptr %32, ptr %26, align 8, !tbaa !16
+  %33 = load ptr, ptr %26, align 8, !tbaa !16
   %34 = icmp eq ptr %33, null
   br i1 %34, label %48, label %35
 
 35:                                               ; preds = %7
-  %36 = load i32, ptr %27, align 4, !tbaa !22
+  %36 = load i32, ptr %27, align 4, !tbaa !24
   %37 = icmp slt i32 %36, 0
   br i1 %37, label %48, label %38
 
 38:                                               ; preds = %35
-  %39 = load i32, ptr %27, align 4, !tbaa !22
+  %39 = load i32, ptr %27, align 4, !tbaa !24
   %40 = icmp sge i32 %39, 8
   br i1 %40, label %48, label %41
 
 41:                                               ; preds = %38
-  %42 = load ptr, ptr %26, align 8, !tbaa !14
+  %42 = load ptr, ptr %26, align 8, !tbaa !16
   %43 = getelementptr inbounds %struct.ompx_pipe_deferred, ptr %42, i32 0, i32 3
   %44 = getelementptr inbounds %struct.ompx_pipe_after, ptr %43, i32 0, i32 0
-  %45 = load i64, ptr %44, align 8, !tbaa !78
-  %46 = load i64, ptr %17, align 8, !tbaa !76
+  %45 = load i64, ptr %44, align 8, !tbaa !80
+  %46 = load i64, ptr %17, align 8, !tbaa !78
   %47 = icmp ne i64 %45, %46
   br i1 %47, label %48, label %49
 
@@ -5156,24 +5770,24 @@ define internal void @ompx__after_put(i64 noundef %0, i32 noundef %1, i32 nounde
 
 49:                                               ; preds = %41
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %15) #3
-  %50 = load ptr, ptr %26, align 8, !tbaa !14
+  %50 = load ptr, ptr %26, align 8, !tbaa !16
   %51 = getelementptr inbounds %struct.ompx_pipe_deferred, ptr %50, i32 0, i32 3
   %52 = getelementptr inbounds %struct.ompx_pipe_after, ptr %51, i32 0, i32 1
-  %53 = load i32, ptr %27, align 4, !tbaa !22
+  %53 = load i32, ptr %27, align 4, !tbaa !24
   %54 = sext i32 %53 to i64
   %55 = getelementptr inbounds [8 x %struct.ompx_pipe_after_put], ptr %52, i64 0, i64 %54
-  store ptr %55, ptr %24, align 8, !tbaa !14
-  %56 = load ptr, ptr %24, align 8, !tbaa !14
+  store ptr %55, ptr %24, align 8, !tbaa !16
+  %56 = load ptr, ptr %24, align 8, !tbaa !16
   %57 = getelementptr inbounds %struct.ompx_pipe_after_put, ptr %56, i32 0, i32 0
-  %58 = load i32, ptr %57, align 8, !tbaa !81
+  %58 = load i32, ptr %57, align 8, !tbaa !83
   %59 = icmp ne i32 %58, 0
   br i1 %59, label %60, label %66
 
 60:                                               ; preds = %49
-  %61 = load ptr, ptr %24, align 8, !tbaa !14
+  %61 = load ptr, ptr %24, align 8, !tbaa !16
   %62 = getelementptr inbounds %struct.ompx_pipe_after_put, ptr %61, i32 0, i32 3
-  %63 = load i32, ptr %62, align 4, !tbaa !82
-  %64 = load i32, ptr %18, align 4, !tbaa !22
+  %63 = load i32, ptr %62, align 4, !tbaa !84
+  %64 = load i32, ptr %18, align 4, !tbaa !24
   %65 = icmp ne i32 %63, %64
   br i1 %65, label %66, label %67
 
@@ -5184,31 +5798,31 @@ define internal void @ompx__after_put(i64 noundef %0, i32 noundef %1, i32 nounde
 67:                                               ; preds = %60
   call void @llvm.lifetime.start.p5(i64 8, ptr addrspace(5) %16) #3
   %68 = call noundef ptr @_ZL18ompx__pipeline_ctxv() #15
-  store ptr %68, ptr %25, align 8, !tbaa !14
-  %69 = load ptr, ptr %24, align 8, !tbaa !14
+  store ptr %68, ptr %25, align 8, !tbaa !16
+  %69 = load ptr, ptr %24, align 8, !tbaa !16
   %70 = getelementptr inbounds %struct.ompx_pipe_after_put, ptr %69, i32 0, i32 2
-  %71 = load i32, ptr %70, align 8, !tbaa !83
-  %72 = load ptr, ptr %19, align 8, !tbaa !14
-  store i32 %71, ptr %72, align 4, !tbaa !22
-  %73 = load ptr, ptr %25, align 8, !tbaa !14
+  %71 = load i32, ptr %70, align 8, !tbaa !85
+  %72 = load ptr, ptr %19, align 8, !tbaa !16
+  store i32 %71, ptr %72, align 4, !tbaa !24
+  %73 = load ptr, ptr %25, align 8, !tbaa !16
   %74 = getelementptr inbounds %"struct.gicc::DeviceCtx", ptr %73, i32 0, i32 7
-  %75 = load ptr, ptr %74, align 8, !tbaa !28
-  %76 = load ptr, ptr %24, align 8, !tbaa !14
+  %75 = load ptr, ptr %74, align 8, !tbaa !30
+  %76 = load ptr, ptr %24, align 8, !tbaa !16
   %77 = getelementptr inbounds %struct.ompx_pipe_after_put, ptr %76, i32 0, i32 4
-  %78 = load i64, ptr %77, align 8, !tbaa !84
+  %78 = load i64, ptr %77, align 8, !tbaa !86
   %79 = getelementptr inbounds i8, ptr %75, i64 %78
-  %80 = load ptr, ptr %20, align 8, !tbaa !14
-  store ptr %79, ptr %80, align 8, !tbaa !14
-  %81 = load ptr, ptr %24, align 8, !tbaa !14
+  %80 = load ptr, ptr %20, align 8, !tbaa !16
+  store ptr %79, ptr %80, align 8, !tbaa !16
+  %81 = load ptr, ptr %24, align 8, !tbaa !16
   %82 = getelementptr inbounds %struct.ompx_pipe_after_put, ptr %81, i32 0, i32 5
-  %83 = load i64, ptr %82, align 8, !tbaa !85
-  %84 = load ptr, ptr %21, align 8, !tbaa !14
-  store i64 %83, ptr %84, align 8, !tbaa !18
-  %85 = load ptr, ptr %24, align 8, !tbaa !14
+  %83 = load i64, ptr %82, align 8, !tbaa !87
+  %84 = load ptr, ptr %21, align 8, !tbaa !16
+  store i64 %83, ptr %84, align 8, !tbaa !20
+  %85 = load ptr, ptr %24, align 8, !tbaa !16
   %86 = getelementptr inbounds %struct.ompx_pipe_after_put, ptr %85, i32 0, i32 6
-  %87 = load i64, ptr %86, align 8, !tbaa !86
-  %88 = load ptr, ptr %22, align 8, !tbaa !14
-  store i64 %87, ptr %88, align 8, !tbaa !18
+  %87 = load i64, ptr %86, align 8, !tbaa !88
+  %88 = load ptr, ptr %22, align 8, !tbaa !16
+  store i64 %87, ptr %88, align 8, !tbaa !20
   %89 = call i32 @omp_get_team_num() #15
   %90 = icmp eq i32 %89, 0
   br i1 %90, label %91, label %96
@@ -5218,9 +5832,9 @@ define internal void @ompx__after_put(i64 noundef %0, i32 noundef %1, i32 nounde
   br i1 %92, label %93, label %96
 
 93:                                               ; preds = %91
-  %94 = load ptr, ptr %24, align 8, !tbaa !14
+  %94 = load ptr, ptr %24, align 8, !tbaa !16
   %95 = getelementptr inbounds %struct.ompx_pipe_after_put, ptr %94, i32 0, i32 1
-  store i32 1, ptr %95, align 4, !tbaa !87
+  store i32 1, ptr %95, align 4, !tbaa !89
   br label %96
 
 96:                                               ; preds = %93, %91, %67
@@ -5265,97 +5879,99 @@ attributes #13 = { nocallback nofree nosync nounwind willreturn }
 attributes #14 = { convergent norecurse nounwind "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="gfx90a" "target-features"="+16-bit-insts,+atomic-buffer-global-pk-add-f16-insts,+atomic-fadd-rtn-insts,+ci-insts,+dl-insts,+dot1-insts,+dot10-insts,+dot2-insts,+dot3-insts,+dot4-insts,+dot5-insts,+dot6-insts,+dot7-insts,+dpp,+gfx8-insts,+gfx9-insts,+gfx90a-insts,+mai-insts,+s-memrealtime,+s-memtime-inst,+wavefrontsize64" }
 attributes #15 = { convergent }
 
-!omp_offload.info = !{!0, !1, !2, !3, !4}
-!nvvm.annotations = !{!5, !6}
-!llvm.module.flags = !{!7, !8, !9, !10, !11}
-!llvm.ident = !{!12, !12, !12, !12, !12, !12, !12, !12, !12}
-!opencl.ocl.version = !{!13, !13, !13, !13, !13, !13, !13, !13}
+!omp_offload.info = !{!0, !1, !2, !3, !4, !5}
+!nvvm.annotations = !{!6, !7, !8}
+!llvm.module.flags = !{!9, !10, !11, !12, !13}
+!llvm.ident = !{!14, !14, !14, !14, !14, !14, !14, !14, !14}
+!opencl.ocl.version = !{!15, !15, !15, !15, !15, !15, !15, !15}
 
 !0 = !{i32 0, i32 1549388176, i32 -1962934268, !"_Z4stepPflliif", i32 16, i32 0, i32 3}
-!1 = !{i32 0, i32 1549388176, i32 -1962934268, !"_Z6fencedPfli", i32 29, i32 0, i32 4}
-!2 = !{i32 1, !"_ZL19ompx__pipe_deferred", i32 0, i32 1}
-!3 = !{i32 1, !"_ZL9ompx__ctx", i32 0, i32 0}
-!4 = !{i32 1, !"ompx__nodb", i32 0, i32 2}
-!5 = !{ptr @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16, !"kernel", i32 1}
-!6 = !{ptr @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29, !"kernel", i32 1}
-!7 = !{i32 1, !"amdhsa_code_object_version", i32 600}
-!8 = !{i32 1, !"wchar_size", i32 4}
-!9 = !{i32 7, !"openmp", i32 51}
-!10 = !{i32 7, !"openmp-device", i32 51}
-!11 = !{i32 8, !"PIC Level", i32 2}
-!12 = !{!"AMD clang version 19.0.0git (https://github.com/RadeonOpenCompute/llvm-project roc-6.4.0 25133 c7fe45cf4b819c5991fe208aaa96edf142730f1d)"}
-!13 = !{i32 2, i32 0}
-!14 = !{!15, !15, i64 0}
-!15 = !{!"any pointer", !16, i64 0}
-!16 = !{!"omnipotent char", !17, i64 0}
-!17 = !{!"Simple C++ TBAA"}
-!18 = !{!19, !19, i64 0}
-!19 = !{!"long", !16, i64 0}
+!1 = !{i32 0, i32 1549388176, i32 -1962934268, !"_Z5gatedPfiiiiib", i32 42, i32 0, i32 5}
+!2 = !{i32 0, i32 1549388176, i32 -1962934268, !"_Z6fencedPfli", i32 29, i32 0, i32 4}
+!3 = !{i32 1, !"_ZL19ompx__pipe_deferred", i32 0, i32 1}
+!4 = !{i32 1, !"_ZL9ompx__ctx", i32 0, i32 0}
+!5 = !{i32 1, !"ompx__nodb", i32 0, i32 2}
+!6 = !{ptr @__omp_offloading_5c59c990_8b000004__Z4stepPflliif_l16, !"kernel", i32 1}
+!7 = !{ptr @__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29, !"kernel", i32 1}
+!8 = !{ptr @__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42, !"kernel", i32 1}
+!9 = !{i32 1, !"amdhsa_code_object_version", i32 600}
+!10 = !{i32 1, !"wchar_size", i32 4}
+!11 = !{i32 7, !"openmp", i32 51}
+!12 = !{i32 7, !"openmp-device", i32 51}
+!13 = !{i32 8, !"PIC Level", i32 2}
+!14 = !{!"AMD clang version 19.0.0git (https://github.com/RadeonOpenCompute/llvm-project roc-6.4.0 25133 c7fe45cf4b819c5991fe208aaa96edf142730f1d)"}
+!15 = !{i32 2, i32 0}
+!16 = !{!17, !17, i64 0}
+!17 = !{!"any pointer", !18, i64 0}
+!18 = !{!"omnipotent char", !19, i64 0}
+!19 = !{!"Simple C++ TBAA"}
 !20 = !{!21, !21, i64 0}
-!21 = !{!"float", !16, i64 0}
+!21 = !{!"long", !18, i64 0}
 !22 = !{!23, !23, i64 0}
-!23 = !{!"int", !16, i64 0}
-!24 = !{!25, !15, i64 40}
-!25 = !{!"_ZTSN4gicc9DeviceCtxE", !15, i64 0, !19, i64 8, !15, i64 16, !15, i64 24, !23, i64 32, !15, i64 40, !23, i64 48, !15, i64 56, !23, i64 64, !15, i64 72, !23, i64 80, !15, i64 88}
-!26 = !{!25, !23, i64 48}
-!27 = !{!25, !23, i64 64}
-!28 = !{!25, !15, i64 56}
-!29 = !{!25, !15, i64 24}
-!30 = !{!25, !23, i64 32}
-!31 = !{!25, !15, i64 16}
-!32 = !{!33, !34, i64 0}
-!33 = !{!"_ZTSN4gicc5proxy11TransferCmdE", !34, i64 0, !16, i64 1, !16, i64 2, !16, i64 3, !23, i64 4, !19, i64 8, !19, i64 16}
-!34 = !{!"_ZTSN4gicc5proxy7CmdTypeE", !16, i64 0}
-!35 = !{!33, !16, i64 1}
-!36 = !{!33, !16, i64 2}
-!37 = !{!33, !16, i64 3}
-!38 = !{!33, !23, i64 4}
-!39 = !{!33, !19, i64 8}
-!40 = !{!33, !19, i64 16}
-!41 = distinct !{!41, !42}
-!42 = !{!"llvm.loop.mustprogress"}
-!43 = !{!44, !44, i64 0}
-!44 = !{!"bool", !16, i64 0}
-!45 = !{i8 0, i8 2}
-!46 = !{}
-!47 = distinct !{!47, !42}
-!48 = !{!16, !16, i64 0}
-!49 = distinct !{!49, !42}
-!50 = !{!51, !51, i64 0}
-!51 = !{!"short", !16, i64 0}
-!52 = distinct !{!52, !42}
-!53 = distinct !{!53, !42}
-!54 = distinct !{!54, !42}
-!55 = distinct !{!55, !42}
-!56 = distinct !{!56, !42}
-!57 = distinct !{!57, !42}
-!58 = distinct !{!58, !42}
-!59 = distinct !{!59, !42}
-!60 = distinct !{!60, !42}
-!61 = distinct !{!61, !42}
-!62 = !{!63, !23, i64 0}
-!63 = !{!"_ZTS22ompx_pipe_deferred_put", !23, i64 0, !23, i64 4, !64, i64 8, !64, i64 16, !64, i64 24}
-!64 = !{!"long long", !16, i64 0}
-!65 = !{!63, !64, i64 8}
-!66 = !{!63, !64, i64 16}
-!67 = !{!63, !64, i64 24}
-!68 = !{!69, !15, i64 40}
-!69 = !{!"_ZTS19ompx_pipe_after_put", !23, i64 0, !23, i64 4, !23, i64 8, !23, i64 12, !64, i64 16, !64, i64 24, !64, i64 32, !15, i64 40, !23, i64 48, !23, i64 52}
-!70 = distinct !{!70, !42}
-!71 = distinct !{!71, !42}
-!72 = distinct !{!72, !42}
-!73 = distinct !{!73, !42}
-!74 = distinct !{!74, !42}
-!75 = distinct !{!75, !42}
-!76 = !{!64, !64, i64 0}
-!77 = distinct !{!77, !42}
-!78 = !{!79, !64, i64 2056}
-!79 = !{!"_ZTS18ompx_pipe_deferred", !23, i64 0, !23, i64 4, !16, i64 8, !80, i64 2056}
-!80 = !{!"_ZTS15ompx_pipe_after", !64, i64 0, !16, i64 8}
-!81 = !{!69, !23, i64 0}
-!82 = !{!69, !23, i64 12}
-!83 = !{!69, !23, i64 8}
-!84 = !{!69, !64, i64 16}
-!85 = !{!69, !64, i64 24}
-!86 = !{!69, !64, i64 32}
-!87 = !{!69, !23, i64 4}
+!23 = !{!"float", !18, i64 0}
+!24 = !{!25, !25, i64 0}
+!25 = !{!"int", !18, i64 0}
+!26 = !{!27, !17, i64 40}
+!27 = !{!"_ZTSN4gicc9DeviceCtxE", !17, i64 0, !21, i64 8, !17, i64 16, !17, i64 24, !25, i64 32, !17, i64 40, !25, i64 48, !17, i64 56, !25, i64 64, !17, i64 72, !25, i64 80, !17, i64 88}
+!28 = !{!27, !25, i64 48}
+!29 = !{!27, !25, i64 64}
+!30 = !{!27, !17, i64 56}
+!31 = !{!27, !17, i64 24}
+!32 = !{!27, !25, i64 32}
+!33 = !{!27, !17, i64 16}
+!34 = !{!35, !36, i64 0}
+!35 = !{!"_ZTSN4gicc5proxy11TransferCmdE", !36, i64 0, !18, i64 1, !18, i64 2, !18, i64 3, !25, i64 4, !21, i64 8, !21, i64 16}
+!36 = !{!"_ZTSN4gicc5proxy7CmdTypeE", !18, i64 0}
+!37 = !{!35, !18, i64 1}
+!38 = !{!35, !18, i64 2}
+!39 = !{!35, !18, i64 3}
+!40 = !{!35, !25, i64 4}
+!41 = !{!35, !21, i64 8}
+!42 = !{!35, !21, i64 16}
+!43 = distinct !{!43, !44}
+!44 = !{!"llvm.loop.mustprogress"}
+!45 = !{!46, !46, i64 0}
+!46 = !{!"bool", !18, i64 0}
+!47 = !{i8 0, i8 2}
+!48 = !{}
+!49 = distinct !{!49, !44}
+!50 = !{!18, !18, i64 0}
+!51 = distinct !{!51, !44}
+!52 = !{!53, !53, i64 0}
+!53 = !{!"short", !18, i64 0}
+!54 = distinct !{!54, !44}
+!55 = distinct !{!55, !44}
+!56 = distinct !{!56, !44}
+!57 = distinct !{!57, !44}
+!58 = distinct !{!58, !44}
+!59 = distinct !{!59, !44}
+!60 = distinct !{!60, !44}
+!61 = distinct !{!61, !44}
+!62 = distinct !{!62, !44}
+!63 = distinct !{!63, !44}
+!64 = !{!65, !25, i64 0}
+!65 = !{!"_ZTS22ompx_pipe_deferred_put", !25, i64 0, !25, i64 4, !66, i64 8, !66, i64 16, !66, i64 24}
+!66 = !{!"long long", !18, i64 0}
+!67 = !{!65, !66, i64 8}
+!68 = !{!65, !66, i64 16}
+!69 = !{!65, !66, i64 24}
+!70 = !{!71, !17, i64 40}
+!71 = !{!"_ZTS19ompx_pipe_after_put", !25, i64 0, !25, i64 4, !25, i64 8, !25, i64 12, !66, i64 16, !66, i64 24, !66, i64 32, !17, i64 40, !25, i64 48, !25, i64 52}
+!72 = distinct !{!72, !44}
+!73 = distinct !{!73, !44}
+!74 = distinct !{!74, !44}
+!75 = distinct !{!75, !44}
+!76 = distinct !{!76, !44}
+!77 = distinct !{!77, !44}
+!78 = !{!66, !66, i64 0}
+!79 = distinct !{!79, !44}
+!80 = !{!81, !66, i64 2056}
+!81 = !{!"_ZTS18ompx_pipe_deferred", !25, i64 0, !25, i64 4, !18, i64 8, !82, i64 2056}
+!82 = !{!"_ZTS15ompx_pipe_after", !66, i64 0, !18, i64 8}
+!83 = !{!71, !25, i64 0}
+!84 = !{!71, !25, i64 12}
+!85 = !{!71, !25, i64 8}
+!86 = !{!71, !66, i64 16}
+!87 = !{!71, !66, i64 24}
+!88 = !{!71, !66, i64 32}
+!89 = !{!71, !25, i64 4}

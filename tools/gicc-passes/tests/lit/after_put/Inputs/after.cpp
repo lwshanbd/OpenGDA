@@ -32,3 +32,16 @@ void fenced(float* v, int64_t n, int peer) {
     ompx_barrier();
     ompx_put(peer, v, v, n * sizeof(float));
 }
+
+// A region that may run on the host (an if clause), over int loop
+// variables: the launch no longer dominates the put, yet every path to it
+// runs the region first; the inner index is lb + digit narrowed to int with
+// no flags. The last row's interior can go from the kernel.
+void gated(float* v, int x_min, int x_max, int y_min, int y_max, int peer, bool on) {
+    const size_t sx = x_max + 4;
+    #pragma omp target teams distribute parallel for collapse(2) is_device_ptr(v) if(target: on)
+    for (int j = y_min + 1; j < y_max + 2; ++j)
+        for (int i = x_min + 1; i < x_max + 2; ++i)
+            v[i + j * sx] = wave(3.f, i + j);
+    if (peer >= 0) ompx_put(peer, v + (y_max + 1) * sx + 2, v + (y_max + 1) * sx + 2, x_max * sizeof(float));
+}
