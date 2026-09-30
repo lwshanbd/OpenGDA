@@ -50,6 +50,8 @@ using GpuIpcMemHandle_t = hipIpcMemHandle_t;
 #define gpuHostFree              hipHostFree
 #define gpuHostMallocMapped      hipHostMallocMapped
 #define gpuHostMallocDefault     hipHostMallocDefault
+// Cached by the GPU: coherent with the host only at kernel boundaries.
+#define gpuHostMallocNonCoherent hipHostMallocNonCoherent
 #define gpuHostGetDevicePointer  hipHostGetDevicePointer
 #define gpuHostRegister          hipHostRegister
 #define gpuHostUnregister        hipHostUnregister
@@ -133,6 +135,8 @@ using GpuIpcMemHandle_t = cudaIpcMemHandle_t;
 #define gpuHostFree              cudaFreeHost
 #define gpuHostMallocMapped      cudaHostAllocMapped
 #define gpuHostMallocDefault     cudaHostAllocDefault
+// CUDA has no cached kind of pinned memory.
+#define gpuHostMallocNonCoherent 0
 #define gpuHostGetDevicePointer  cudaHostGetDevicePointer
 #define gpuHostRegister          cudaHostRegister
 #define gpuHostUnregister        cudaHostUnregister
