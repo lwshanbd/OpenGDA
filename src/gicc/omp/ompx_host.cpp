@@ -75,8 +75,8 @@ ompx_pipe_deferred* g_pipe_deferred_dev  = nullptr;
 char**              g_pipe_peer_heap_host = nullptr;   // ompx_pipe_deferred::peer_heap
 char**              g_pipe_peer_heap_dev  = nullptr;
 // Put i after a launch, queued under DWQ on slot kSigSlots + i when it was
-// posted; set until its bell has rung.
-bool g_after_queued[OMPX_PIPE_AFTER_MAX] = {};
+// posted, in this many groups (0: not queued); set until every group has rung.
+int g_after_queued[OMPX_PIPE_AFTER_MAX] = {};
 
 // ---- symmetric heap ---------------------------------------------------------
 gicc::Buffer g_heap{};              // the heap as an address-book entry
@@ -930,15 +930,17 @@ static bool peer_ipc_mapped(int peer) {
            g_runtime->peer_mapped(peer, g_heap.index) != nullptr;
 }
 
-// Rings put i's bell unless the kernel has. Every group queued on a slot
-// must ring exactly once: the n-th ring releases the n-th group, and the
-// quiet waits for all of them.
+// Rings the groups of put i the kernel did not. Every group queued on a
+// slot must ring exactly once: the n-th ring releases the n-th group, and
+// the quiet waits for all of them.
 static void release_after(int i) {
-    if (!g_after_queued[i]) return;
-    g_after_queued[i] = false;
+    const int groups = g_after_queued[i];
+    if (groups == 0) return;
+    g_after_queued[i] = 0;
     const ompx_pipe_after_put& e = g_pipe_deferred_host->after.e[i];
-    if (!__atomic_load_n(&e.fired, __ATOMIC_ACQUIRE))
-        g_runtime->signal_slot_fire(kSigSlots + i);
+    const int fired = __atomic_load_n(&e.fired, __ATOMIC_ACQUIRE);
+    if (fired < 0 || fired > groups) die("a kernel rang more groups than were queued");
+    for (int g = fired; g < groups; ++g) g_runtime->signal_slot_fire(kSigSlots + i);
 }
 
 void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, int peer,
@@ -951,6 +953,8 @@ void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, 
     e.handled = 0;
     e.bell = nullptr;
     e.fired = 0;
+    e.pieces = 0;
+    e.piece = 0;
     if (armed) {
         e.peer    = peer;
         e.src_arg = src_arg;
@@ -958,13 +962,23 @@ void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, 
         e.src_rel = src_rel;
         e.bytes   = bytes;
         if (g_dwq_enabled && peer >= 0 && bytes > 0 && !peer_ipc_mapped(peer)) {
+            // In pieces, one group each, so the kernel can release each
+            // piece as it is written.
             const int slot = kSigSlots + i;
-            g_runtime->signal_slot_write(slot, g_runtime->signal_slot_next(slot), g_heap, peer,
-                                         g_heap.index, bytes, offset_of(src, "ompx_put src"),
-                                         e.dst_off);
+            const size_t src_off = offset_of(src, "ompx_put src");
+            const size_t piece = ompx__pipe_piece(bytes, OMPX_PIPE_PIECES_MAX);
+            int groups = 0;
+            for (size_t off = 0; off < bytes; off += piece, ++groups) {
+                const size_t len = bytes - off < piece ? bytes - off : piece;
+                g_runtime->signal_slot_write(slot, g_runtime->signal_slot_next(slot), g_heap,
+                                             peer, g_heap.index, len, src_off + off,
+                                             e.dst_off + off);
+            }
             e.bell = reinterpret_cast<volatile unsigned long long*>(
                 g_runtime->signal_slot_doorbell(slot));
-            g_after_queued[i] = true;
+            e.pieces = groups;
+            e.piece  = piece;
+            g_after_queued[i] = groups;
         }
         e.armed   = 1;
     }
