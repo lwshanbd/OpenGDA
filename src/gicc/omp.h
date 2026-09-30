@@ -209,11 +209,29 @@ typedef struct ompx_pipe_after {
     ompx_pipe_after_put e[OMPX_PIPE_AFTER_MAX];
 } ompx_pipe_after;
 
+// What a pipelined put the device could not make reports, for the host to
+// print at the next quiet (ompx_pipe_deferred::fail). A device printf would
+// give every kernel with such a put a dynamic stack.
+#define OMPX_PIPE_FAIL_NO_PROXY 1   // peer not IPC-mapped, no CPU proxy (arg: peer)
+#define OMPX_PIPE_FAIL_DIMS     2   // a box with too many dims (arg: dims)
+#define OMPX_PIPE_FAIL_ALIGN    3   // range and box not aligned to the stores (arg: bytes)
+#define OMPX_PIPE_FAIL_OVERLAP  4   // the box's rows overlap
+
 typedef struct ompx_pipe_deferred {
     unsigned               n;
     unsigned               reserved;
     ompx_pipe_deferred_put e[OMPX_PIPE_DEFERRED_MAX];
     ompx_pipe_after        after;   // the one launch posted at a time
+    // What a kernel's pipelined puts look up, copied here by ompx_prepare:
+    // this struct is cached by the GPU and the device context is not, and
+    // every wave of such a kernel reads them.
+    char*                  heap_base;   // this rank's symmetric heap
+    char* const*           peer_heap;   // [rank]: its heap as mapped here, or null
+    int                    n_ranks;
+    int                    proxy_on;    // the CPU proxy takes device puts
+    int                    fail;        // OMPX_PIPE_FAIL_*, 0 if none
+    int                    fail_reserved;
+    long long              fail_arg;
 } ompx_pipe_deferred;
 ompx_pipe_deferred* ompx__pipe_deferred_list(void);   // its device address
 void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, int peer,
