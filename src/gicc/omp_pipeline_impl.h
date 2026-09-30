@@ -43,7 +43,7 @@ ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count
                int32_t* counted)
     __asm__("ompx__box_peer");
 [[omp::assume("ompx_spmd_amenable")]] static int64_t
-ompx__box_piece(size_t bytes, int32_t counted, int pieces_max)
+ompx__box_piece(size_t bytes, int32_t counted, int pieces_max, int after)
     __asm__("ompx__box_piece");
 [[omp::assume("ompx_spmd_amenable")]] static void
 ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, const int64_t* stride,
@@ -67,7 +67,7 @@ ompx__box_grab_done(unsigned long long* next, unsigned* done)
 [[omp::assume("ompx_spmd_amenable")]] static int64_t
 ompx__box_due(int n, int64_t lb, int64_t* due, const int32_t* peer, void* const* dst,
               const void* const* src, const int64_t* bytes, unsigned* const* counter,
-              const int32_t* after)
+              const int32_t* after, int pieces)
     __asm__("ompx__box_due");
 
 #if defined(__NVPTX__) || defined(__AMDGCN__)
@@ -508,27 +508,29 @@ static inline int64_t ompx__ceil_div(int64_t a, int64_t b) {
 // A counted put goes out in pieces, each sent once every team is past it
 // (ompx__box_count): sent whole, a put over most of the loop would leave
 // only when the loop ends, with nothing left to hide it behind. Returns the
-// size of the pieces of a put of `bytes`: at least kOmpxPieceMin, 4 KB
-// aligned, no more than pieces_max (a power of two) of them; the pass makes
-// piece k [k * size, (k + 1) * size) of the range, clipped to it. One piece,
-// the whole put, when the put is not counted or the CPU proxy is off: under
-// DWQ a counted put is the one descriptor the host queued. No division:
-// every thread of every team of a counting launch calls this for every put.
-constexpr int kOmpxPieceMinLog2 = 22;   // 4 MB
-
+// size of the pieces of a put of `bytes` (ompx__pipe_piece in gicc/omp.h),
+// no more than pieces_max (a power of two) of them; the pass makes piece k
+// [k * size, (k + 1) * size) of the range, clipped to it. Under DWQ a
+// counted put is one the host queued when it posted it (`after`), in the
+// pieces it chose: those, if the kernel has room to count them all, else
+// the whole put, whose last team then rings every piece. One piece when the
+// put is not counted. No division: every thread of every team of a counting
+// launch calls this for every put.
 static __attribute__((used)) int64_t
-ompx__box_piece(size_t bytes, int32_t counted, int pieces_max) {
+ompx__box_piece(size_t bytes, int32_t counted, int pieces_max, int after) {
     uint64_t piece = bytes;
 #if defined(__NVPTX__) || defined(__AMDGCN__)
-    const uint64_t want = static_cast<uint64_t>(bytes) >> kOmpxPieceMinLog2;
-    if (counted && want > 1 && pieces_max > 1 && ompx__pipe_list()->proxy_on) {
-        const uint64_t most = static_cast<uint64_t>(pieces_max);
-        const uint64_t pieces = want >= most ? most : uint64_t(1) << (63 - __builtin_clzll(want));
-        const int lg = __builtin_ctzll(pieces);
-        piece = (((static_cast<uint64_t>(bytes) + pieces - 1) >> lg) + 4095) & ~uint64_t(4095);
+    if (counted) {
+        ompx_pipe_deferred* q = ompx__pipe_list();
+        if (q->proxy_on) {
+            piece = ompx__pipe_piece(bytes, pieces_max);
+        } else if (ompx__after_bell(after) != nullptr) {
+            const ompx_pipe_after_put& e = q->after.e[after];
+            if (e.pieces > 1 && e.pieces <= pieces_max) piece = e.piece;
+        }
     }
 #else
-    (void)counted; (void)pieces_max;
+    (void)counted; (void)pieces_max; (void)after;
 #endif
     return static_cast<int64_t>(piece);
 }
@@ -688,14 +690,53 @@ ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* 
 #endif
 }
 
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+// Under DWQ the host queued put `after` as e.pieces groups behind one bell,
+// and the n-th ring of a bell releases the n-th group, whichever piece it
+// was meant for. So a piece that is written only says so, and the groups
+// ring in order: whoever finds the next group's piece written rings it, and
+// every one after it that is written too. A piece's writes reached memory
+// (system-scope fence) before it said so, so they have before its ring.
+// What rang is published and cleared by ompx__box_grab_done.
+static unsigned ompx__after_ready[OMPX_PIPE_AFTER_MAX][OMPX_PIPE_PIECES_MAX];
+static unsigned ompx__after_rung[OMPX_PIPE_AFTER_MAX];
+
+static inline void ompx__after_release(ompx_pipe_deferred* q, int after, int piece,
+                                       int pieces_max, volatile unsigned long long* bell) {
+    const int groups = q->after.e[after].pieces;
+    int first = piece, last = piece + 1;
+    if (groups > pieces_max) {   // counted whole (ompx__box_piece): every group
+        first = 0;
+        last = groups;
+    }
+    for (int g = first; g < last && g < OMPX_PIPE_PIECES_MAX; ++g)
+        __scoped_atomic_store_n(&ompx__after_ready[after][g], 1u, __ATOMIC_SEQ_CST,
+                                __MEMORY_SCOPE_DEVICE);
+    unsigned r =
+        __scoped_atomic_load_n(&ompx__after_rung[after], __ATOMIC_SEQ_CST, __MEMORY_SCOPE_DEVICE);
+    while (r < static_cast<unsigned>(groups) && r < OMPX_PIPE_PIECES_MAX &&
+           __scoped_atomic_load_n(&ompx__after_ready[after][r], __ATOMIC_SEQ_CST,
+                                  __MEMORY_SCOPE_DEVICE)) {
+        // On failure r is what another ringer left, and the test repeats.
+        if (__scoped_atomic_compare_exchange_n(&ompx__after_rung[after], &r, r + 1, false,
+                                               __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST,
+                                               __MEMORY_SCOPE_DEVICE)) {
+            *bell = 1;
+            ++r;
+        }
+    }
+}
+#endif
+
 // Called by every thread of a team, once the team has stored the last word
-// it stores into [src, src + bytes). The team to call it last sends the
-// range: every other team's part of it has reached the device's L2 by
-// then, and a system-scope fence writes it back for the NIC. The counter
-// is left at zero for the next launch.
+// it stores into [src, src + bytes), piece `piece` of a put the pass laid
+// out in pieces_max. The team to call it last sends the range: every other
+// team's part of it has reached the device's L2 by then, and a system-scope
+// fence writes it back for the NIC. The counter is left at zero for the
+// next launch.
 static __attribute__((used)) void
 ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t bytes,
-                int after) {
+                int after, int piece, int pieces_max) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
 #if defined(__AMDGCN__)
     __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
@@ -715,13 +756,13 @@ ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t 
     if (q->proxy_on) {
         ompx__proxy_put(q, peer, dst, src, bytes);
     } else if ((bell = ompx__after_bell(after)) != nullptr) {
-        *bell = 1;
-        __atomic_store_n(&ompx__pipe_deferred->after.e[after].fired, 1, __ATOMIC_RELAXED);
+        ompx__after_release(q, after, piece, pieces_max, bell);
     } else {
         ompx__pipe_defer(q, peer, dst, src, bytes);
     }
 #else
-    (void)counter; (void)peer; (void)dst; (void)src; (void)bytes; (void)after;
+    (void)counter; (void)peer; (void)dst; (void)src; (void)bytes; (void)after; (void)piece;
+    (void)pieces_max;
 #endif
 }
 
@@ -754,7 +795,9 @@ ompx__box_grab(unsigned long long* next, int64_t* slot) {
 
 // Called by every thread of a team of a counting launch once its loop is
 // done: the last team to get here leaves the chunk counter at zero for the
-// next launch.
+// next launch, and tells the host how many groups of each queued put the
+// kernel rang (every team has counted all its pieces by now) before
+// clearing that for the next launch too.
 static __attribute__((used)) void
 ompx__box_grab_done(unsigned long long* next, unsigned* done) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
@@ -764,6 +807,18 @@ ompx__box_grab_done(unsigned long long* next, unsigned* done) {
         teams - 1) {
         __scoped_atomic_store_n(next, 0ull, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
         __scoped_atomic_store_n(done, 0u, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+        for (int a = 0; a < OMPX_PIPE_AFTER_MAX; ++a) {
+            const unsigned rung = __scoped_atomic_load_n(&ompx__after_rung[a], __ATOMIC_ACQUIRE,
+                                                         __MEMORY_SCOPE_DEVICE);
+            if (rung == 0) continue;
+            __atomic_store_n(&ompx__pipe_list()->after.e[a].fired, static_cast<int>(rung),
+                             __ATOMIC_RELAXED);
+            for (int g = 0; g < OMPX_PIPE_PIECES_MAX; ++g)
+                __scoped_atomic_store_n(&ompx__after_ready[a][g], 0u, __ATOMIC_RELAXED,
+                                        __MEMORY_SCOPE_DEVICE);
+            __scoped_atomic_store_n(&ompx__after_rung[a], 0u, __ATOMIC_RELAXED,
+                                    __MEMORY_SCOPE_DEVICE);
+        }
     }
 #else
     (void)next; (void)done;
@@ -773,27 +828,28 @@ ompx__box_grab_done(unsigned long long* next, unsigned* done) {
 // Called by every thread of a team before the chunk at lb (lb near INT64_MAX
 // once the loop is done) when some counted put may be due: counts the team
 // past every put whose due[p] <= lb, marks those INT64_MAX, and returns the
-// smallest due[] left. Not kept out of line: a kernel is given the vector
-// registers of the hungriest function it calls, and this one, compiled on
-// its own, needed 85 where the minimod stencil needs 78 -- a wave per SIMD
-// less. Inlined into its rare branch it costs the loop none.
+// smallest due[] left. Entry p is piece p % pieces of its put. Not kept out
+// of line: a kernel is given the vector registers of the hungriest function
+// it calls, and this one, compiled on its own, needed 85 where the minimod
+// stencil needs 78 -- a wave per SIMD less. Inlined into its rare branch it
+// costs the loop none.
 static __attribute__((used)) int64_t
 ompx__box_due(int n, int64_t lb, int64_t* due, const int32_t* peer, void* const* dst,
               const void* const* src, const int64_t* bytes, unsigned* const* counter,
-              const int32_t* after) {
+              const int32_t* after, int pieces) {
     int64_t next = INT64_MAX;
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     for (int p = 0; p < n; ++p) {
         if (due[p] <= lb) {
             ompx__box_count(counter[p], peer[p], dst[p], src[p], static_cast<size_t>(bytes[p]),
-                            after[p]);
+                            after[p], p & (pieces - 1), pieces);
             due[p] = INT64_MAX;
         }
         if (due[p] < next) next = due[p];
     }
 #else
     (void)n; (void)lb; (void)due; (void)peer; (void)dst; (void)src; (void)bytes; (void)counter;
-    (void)after;
+    (void)after; (void)pieces;
 #endif
     return next;
 }
