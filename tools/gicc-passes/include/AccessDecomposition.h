@@ -25,6 +25,8 @@
 //     in the source being undefined behaviour. This is a trusted
 //     assumption -- a source that deliberately wraps a 64-bit index into
 //     an int would break it -- reported through AccessDecomp::trustedTrunc.
+//     The same holds for the narrow add instcombine makes of a trunc of
+//     one: trunc(A) + trunc(q), with no flags.
 //   - i64 arithmetic without flags is taken modulo 2^64, which is exact
 //     for an address; a division's dividend must instead be recognised as
 //     X minus earlier digits, whose value is in range by construction.

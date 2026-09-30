@@ -303,6 +303,15 @@ std::optional<AccessDecomposer::Lin> AccessDecomposer::build(Value *v, std::stri
         Lin r = combine(*a, *b, I->getOpcode() == Instruction::Sub);
         r.sx = a->sx && b->sx && nsw();
         r.ux = a->ux && b->ux && nuw();
+        // trunc(A + q) as instcombine narrows it, trunc(A) + trunc(q) with
+        // no flags (a collapsed int loop's lb + digit): the same single
+        // rebuilt loop index the trunc rule trusts to fit its type.
+        auto *Tr0 = dyn_cast<TruncInst>(BO->getOperand(0)), *Tr1 = dyn_cast<TruncInst>(BO->getOperand(1));
+        if (!r.sx && I->getType()->getIntegerBitWidth() < 64 && (Tr0 || Tr1) &&
+            (a->t.empty() || b->t.empty()) && !r.t.empty() && singleIndex(r)) {
+            usedTrunc = true;
+            r.sx = true;
+        }
         return done(r);
     }
     case Instruction::Mul: {
