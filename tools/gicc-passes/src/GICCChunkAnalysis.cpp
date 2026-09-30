@@ -372,6 +372,17 @@ public:
     }
 
 private:
+    // A slot or array the code before a kernel's loop fills, shared by the
+    // team like clang's globalized captures: in an SPMD kernel every thread
+    // stores the same value to it. Unlike a stack slot it gives the kernel no
+    // private segment, which the runtime allocates for every wave at each
+    // launch (hundreds of microseconds when the kernels around it have none).
+    GlobalVariable *teamSlot(Type *T, const char *name) {
+        return new GlobalVariable(M, T, false, GlobalValue::InternalLinkage, PoisonValue::get(T),
+                                  name, nullptr, GlobalValue::NotThreadLocal,
+                                  kmpc::SharedAddrSpace);
+    }
+
     // A put the host makes after the kernel, stated in it (stateAfterPuts).
     struct AfterPut {
         CallInst *read;                         // ompx__after_put
@@ -407,9 +418,7 @@ private:
         FunctionCallee marker =
             M.getOrInsertFunction(kPipelinedPut, Type::getVoidTy(Ctx), I32, Ptr, Ptr, I64);
         MDNode *tag = MDNode::get(Ctx, {});
-        const unsigned AS = KI->DL.getAllocaAddrSpace();
         const bool amdgpu = Triple(M.getTargetTriple()).isAMDGPU();
-        IRBuilder<> EB(&*F.getEntryBlock().getFirstInsertionPt());
         for (unsigned i = 0; i < site.srcArgs.size(); ++i) {
             const unsigned j = site.srcArgs[i];
             if (j + 1 >= F.arg_size() || !F.getArg(j + 1)->getType()->isPointerTy()) {
@@ -417,21 +426,21 @@ private:
                      "argument " + std::to_string(j));
                 continue;
             }
-            AllocaInst *aPeer  = EB.CreateAlloca(I32, AS, nullptr, "gicc.after.peer");
-            AllocaInst *aDst   = EB.CreateAlloca(Ptr, AS, nullptr, "gicc.after.dst");
-            AllocaInst *aRel   = EB.CreateAlloca(I64, AS, nullptr, "gicc.after.rel");
-            AllocaInst *aBytes = EB.CreateAlloca(I64, AS, nullptr, "gicc.after.bytes");
+            GlobalVariable *aPeer  = teamSlot(I32, "gicc.after.peer");
+            GlobalVariable *aDst   = teamSlot(Ptr, "gicc.after.dst");
+            GlobalVariable *aRel   = teamSlot(I64, "gicc.after.rel");
+            GlobalVariable *aBytes = teamSlot(I64, "gicc.after.bytes");
             IRBuilder<> B(KI->distInit);
-            auto flat = [&](AllocaInst *A) { return B.CreateAddrSpaceCast(A, Ptr); };
+            auto flat = [&](GlobalVariable *A) { return B.CreateAddrSpaceCast(A, Ptr); };
             AfterPut P;
             P.read = B.CreateCall(read->getFunctionType(), read,
                                   {ConstantInt::get(I64, afterPutHash(F.getName())),
                                    ConstantInt::get(I32, i), ConstantInt::get(I32, j),
                                    flat(aPeer), flat(aDst), flat(aRel), flat(aBytes)});
             // The post is the same in every thread: said so on AMDGPU, where
-            // a value loaded from private memory would otherwise take a vector
+            // a value loaded from team memory would otherwise take a vector
             // register (and enough of them a wave per SIMD).
-            auto load = [&](Type *T, AllocaInst *A, const char *name) -> Value * {
+            auto load = [&](Type *T, GlobalVariable *A, const char *name) -> Value * {
                 Instruction *V = B.CreateLoad(T, A, name);
                 P.values.push_back(V);
                 if (amdgpu) {
@@ -1045,9 +1054,7 @@ private:
             facts.push_back(X.expandCodeFor(f.x, f.x->getType(), pre));
 
         IRBuilder<> B(KI.distInit);
-        IRBuilder<> EB(&*KI.K.getEntryBlock().getFirstInsertionPt());
-        AllocaInst *countedSlot =
-            EB.CreateAlloca(I32, KI.DL.getAllocaAddrSpace(), nullptr, "gicc.box.counted");
+        GlobalVariable *countedSlot = teamSlot(I32, "gicc.box.counted");
         // The peer's copy of the range when it is IPC-mapped; otherwise the
         // kernel sends by count (canCount) or the host does.
         const int after = afterIndex(P.put);
@@ -1066,12 +1073,11 @@ private:
             runs = B.CreateAnd(runs, P.runs[i].nonzeroOnly ? B.CreateICmpNE(facts[i], z)
                                                            : B.CreateICmpSGT(facts[i], z));
         }
-        // The dims go by reference, in stack arrays of the kernel.
+        // The dims go by reference, in team arrays.
         const unsigned D = P.boxStride.size();
         auto array = [&](ArrayRef<Value *> vals, const char *name) {
-            IRBuilder<> EB(&*KI.K.getEntryBlock().getFirstInsertionPt());
             auto *AT = ArrayType::get(I64, D);
-            AllocaInst *A = EB.CreateAlloca(AT, KI.DL.getAllocaAddrSpace(), nullptr, name);
+            GlobalVariable *A = teamSlot(AT, name);
             for (unsigned d = 0; d < D; ++d)
                 B.CreateStore(vals[d], B.CreateConstInBoundsGEP2_32(AT, A, 0, d));
             return B.CreateAddrSpaceCast(A, Ptr);
@@ -1171,23 +1177,25 @@ private:
         const unsigned AS = KI.DL.getAllocaAddrSpace();
         auto [lbSlot, ubSlot] = *slotStores(KI);
         IRBuilder<> EB(&*KI.K.getEntryBlock().getFirstInsertionPt());
+        // Team memory: box_plan fills due and shift from the team's thread 0,
+        // and box_due reads and marks due the same way in every thread.
         auto array = [&](Type *T, const char *name) {
-            return EB.CreateAlloca(ArrayType::get(T, n), AS, nullptr, name);
+            return teamSlot(ArrayType::get(T, n), name);
         };
-        AllocaInst *countedArr = array(I32, "gicc.box.counted.all");
-        AllocaInst *loArr = array(I64, "gicc.box.lo"), *hiArr = array(I64, "gicc.box.hi");
-        AllocaInst *dueArr = array(I64, "gicc.box.due");
-        AllocaInst *peerArr = array(I32, "gicc.box.peer");
-        AllocaInst *dstArr = array(Ptr, "gicc.box.dst"), *srcArr = array(Ptr, "gicc.box.src");
-        AllocaInst *bytesArr = array(I64, "gicc.box.bytes");
-        AllocaInst *counterArr = array(Ptr, "gicc.box.counter");
-        AllocaInst *afterArr = array(I32, "gicc.box.after");
-        AllocaInst *shiftSlot = EB.CreateAlloca(I64, AS, nullptr, "gicc.box.shift");
+        GlobalVariable *countedArr = array(I32, "gicc.box.counted.all");
+        GlobalVariable *loArr = array(I64, "gicc.box.lo"), *hiArr = array(I64, "gicc.box.hi");
+        GlobalVariable *dueArr = array(I64, "gicc.box.due");
+        GlobalVariable *peerArr = array(I32, "gicc.box.peer");
+        GlobalVariable *dstArr = array(Ptr, "gicc.box.dst"), *srcArr = array(Ptr, "gicc.box.src");
+        GlobalVariable *bytesArr = array(I64, "gicc.box.bytes");
+        GlobalVariable *counterArr = array(Ptr, "gicc.box.counter");
+        GlobalVariable *afterArr = array(I32, "gicc.box.after");
+        GlobalVariable *shiftSlot = teamSlot(I64, "gicc.box.shift");
         AllocaInst *nextSlot = EB.CreateAlloca(I64, AS, nullptr, "gicc.box.next");
-        auto at = [&](IRBuilder<> &B, AllocaInst *A, unsigned i) {
-            return B.CreateConstInBoundsGEP2_32(A->getAllocatedType(), A, 0, i);
+        auto at = [&](IRBuilder<> &B, GlobalVariable *A, unsigned i) {
+            return B.CreateConstInBoundsGEP2_32(A->getValueType(), A, 0, i);
         };
-        // A value the same in every thread, read back from private memory:
+        // A value the same in every thread, read back from team memory:
         // said so on AMDGPU, where it would otherwise take a vector register
         // in the loop -- enough of them cost the kernel a wave per SIMD.
         const bool amdgpu = Triple(M.getTargetTriple()).isAMDGPU();
@@ -1195,13 +1203,44 @@ private:
             return amdgpu ? B.CreateIntrinsic(Intrinsic::amdgcn_readfirstlane, {V->getType()}, {V})
                           : V;
         };
-        auto flat = [&](IRBuilder<> &B, AllocaInst *A) {
+        auto flat = [&](IRBuilder<> &B, GlobalVariable *A) {
             return B.CreateAddrSpaceCast(at(B, A, 0), Ptr);
         };
 
         // Before the loop: what each put needs, its hull, the rotation, and
-        // when each counted put is due.
-        IRBuilder<> B(KI.distInit);
+        // when each counted put is due -- only when some put is counted,
+        // which on most ranks none is (every peer IPC-mapped); every thread
+        // of the team computes it, and the hulls divide. Otherwise no
+        // rotation, and nothing is ever due.
+        Value *anyCounted = nullptr;
+        Value *lb0 = lbSt->getValueOperand(), *ub0 = ubSt->getValueOperand();
+        Value *chunk = KI.distInit->getArgOperand(kmpc::InitChunk);
+        Value *one = ConstantInt::get(I64, 1);
+        // The loop's iterations, and its chunks' span: computed where they
+        // are used, both rarely -- the span's is a 64-bit division.
+        auto itersAt = [&](IRBuilder<> &B) { return B.CreateAdd(B.CreateSub(ub0, lb0), one); };
+        auto spanAt = [&](IRBuilder<> &B) {
+            return B.CreateMul(
+                B.CreateUDiv(B.CreateAdd(itersAt(B), B.CreateSub(chunk, one)), chunk), chunk);
+        };
+        {
+            IRBuilder<> CB(KI.distInit);
+            for (const BoxSend &S : sends)
+                anyCounted = anyCounted ? CB.CreateOr(anyCounted, S.counted) : S.counted;
+        }
+        // Planned, box_plan fills due and shift from thread 0; otherwise every
+        // thread stores the same defaults. Never both: a default stored late
+        // would overwrite the plan.
+        Instruction *planned, *unplanned;
+        SplitBlockAndInsertIfThenElse(anyCounted, KI.distInit->getIterator(), &planned, &unplanned,
+                                      MDBuilder(M.getContext()).createBranchWeights(1, 1000));
+        {
+            IRBuilder<> DB(unplanned);
+            DB.CreateStore(ConstantInt::get(I64, 0), shiftSlot);
+            for (unsigned p = 0; p < n; ++p)
+                DB.CreateStore(ConstantInt::get(I64, INT64_MAX), at(DB, dueArr, p));
+        }
+        IRBuilder<> B(planned);
         FunctionCallee hullFn = M.getOrInsertFunction(
             "ompx__box_hull", Type::getVoidTy(Ctx), Ptr, I64, Ptr, I32, Ptr, Ptr, I64, Ptr, Ptr);
         for (unsigned p = 0; p < n; ++p) {
@@ -1221,17 +1260,12 @@ private:
                                   B.CreateAddrSpaceCast(at(B, loArr, p), Ptr),
                                   B.CreateAddrSpaceCast(at(B, hiArr, p), Ptr)});
         }
-        Value *lb0 = lbSt->getValueOperand(), *ub0 = ubSt->getValueOperand();
-        Value *chunk = KI.distInit->getArgOperand(kmpc::InitChunk);
-        Value *one = ConstantInt::get(I64, 1);
-        Value *iters = B.CreateAdd(B.CreateSub(ub0, lb0), one);
-        Value *span = B.CreateMul(B.CreateUDiv(B.CreateAdd(iters, B.CreateSub(chunk, one)), chunk),
-                                  chunk);
         FunctionCallee planFn = M.getOrInsertFunction(
             "ompx__box_plan", Type::getVoidTy(Ctx), I32, Ptr, Ptr, Ptr, I64, I64, I64, Ptr, Ptr);
         B.CreateCall(planFn, {ConstantInt::get(I32, n), flat(B, countedArr), flat(B, loArr),
-                              flat(B, hiArr), lb0, iters, chunk,
+                              flat(B, hiArr), lb0, itersAt(B), chunk,
                               B.CreateAddrSpaceCast(shiftSlot, Ptr), flat(B, dueArr)});
+        B.SetInsertPoint(KI.distInit);
         Value *shift = uniform(B, B.CreateLoad(I64, shiftSlot, "gicc.box.shift"));
         Value *next = B.CreateLoad(I64, at(B, dueArr, 0));
         for (unsigned p = 1; p < n; ++p)
@@ -1252,6 +1286,7 @@ private:
             SplitBlockAndInsertIfThen(active, KI.parallel->getIterator(), false, rarely);
         IRBuilder<> RB(counting);
         Value *lbR = RB.CreateAdd(lb, shift);
+        Value *span = spanAt(RB);
         lbR = RB.CreateSelect(RB.CreateICmpUGE(RB.CreateSub(lbR, lb0), span),
                               RB.CreateSub(lbR, span), lbR);
         Value *ubR = RB.CreateBinaryIntrinsic(

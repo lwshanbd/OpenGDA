@@ -10,7 +10,7 @@
 ; The kernel is SPMD, so it can send to a peer that is not IPC-mapped
 ; itself, by counting the teams past the range. The source states the put
 ; (after index -1).
-; CHECK: call ptr @ompx__box_peer({{.*}}, i32 1, i32 -1, ptr {{%.*}})
+; CHECK: call ptr @ompx__box_peer({{.*}}, i32 1, i32 -1, ptr addrspacecast (ptr addrspace(3) @gicc.box.counted to ptr))
 ; The team shares the residual copy.
 ; CHECK: call void @ompx__box_residual({{.*}}, i32 1)
 ; CHECK: call void @ompx__box_hull(
