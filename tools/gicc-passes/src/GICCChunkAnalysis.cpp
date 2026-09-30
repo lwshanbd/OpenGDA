@@ -84,6 +84,7 @@
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
@@ -1173,7 +1174,14 @@ private:
         LLVMContext &Ctx = M.getContext();
         Type *I64 = Type::getInt64Ty(Ctx), *I32 = Type::getInt32Ty(Ctx);
         auto *Ptr = PointerType::get(Ctx, 0);
-        const unsigned n = sends.size();
+        // Each put is counted in K pieces (ompx__box_piece picks how many of
+        // them carry bytes at run time), entry p * K + k of the arrays below;
+        // K a power of two, and no more than 64 entries in all (the plan's
+        // capacity, kOmpxPlanPutsMax): about 4 KB of team memory.
+        const unsigned nPuts = sends.size();
+        unsigned K = 64;
+        while (K > 1 && nPuts * K > 64) K /= 2;
+        const unsigned n = nPuts * K;
         const unsigned AS = KI.DL.getAllocaAddrSpace();
         auto [lbSlot, ubSlot] = *slotStores(KI);
         IRBuilder<> EB(&*KI.K.getEntryBlock().getFirstInsertionPt());
@@ -1191,6 +1199,7 @@ private:
         GlobalVariable *counterArr = array(Ptr, "gicc.box.counter");
         GlobalVariable *afterArr = array(I32, "gicc.box.after");
         GlobalVariable *shiftSlot = teamSlot(I64, "gicc.box.shift");
+        GlobalVariable *firstSlot = teamSlot(I64, "gicc.box.first");
         AllocaInst *nextSlot = EB.CreateAlloca(I64, AS, nullptr, "gicc.box.next");
         auto at = [&](IRBuilder<> &B, GlobalVariable *A, unsigned i) {
             return B.CreateConstInBoundsGEP2_32(A->getValueType(), A, 0, i);
@@ -1234,43 +1243,75 @@ private:
         Instruction *planned, *unplanned;
         SplitBlockAndInsertIfThenElse(anyCounted, KI.distInit->getIterator(), &planned, &unplanned,
                                       MDBuilder(M.getContext()).createBranchWeights(1, 1000));
+        // Nothing is ever due then, so due[] is never read.
         {
             IRBuilder<> DB(unplanned);
             DB.CreateStore(ConstantInt::get(I64, 0), shiftSlot);
-            for (unsigned p = 0; p < n; ++p)
-                DB.CreateStore(ConstantInt::get(I64, INT64_MAX), at(DB, dueArr, p));
+            DB.CreateStore(ConstantInt::get(I64, INT64_MAX), firstSlot);
         }
         IRBuilder<> B(planned);
         FunctionCallee hullFn = M.getOrInsertFunction(
             "ompx__box_hull", Type::getVoidTy(Ctx), Ptr, I64, Ptr, I32, Ptr, Ptr, I64, Ptr, Ptr);
-        for (unsigned p = 0; p < n; ++p) {
+        FunctionCallee pieceFn =
+            M.getOrInsertFunction("ompx__box_piece", I64, I64, I32, I32);
+        Type *I8 = Type::getInt8Ty(Ctx);
+        for (unsigned p = 0; p < nPuts; ++p) {
             const BoxSend &S = sends[p];
-            auto *counter = new GlobalVariable(
-                M, I32, false, GlobalValue::InternalLinkage, ConstantInt::get(I32, 0),
+            auto *CT = ArrayType::get(I32, K);
+            auto *counters = new GlobalVariable(
+                M, CT, false, GlobalValue::InternalLinkage, ConstantAggregateZero::get(CT),
                 "gicc.box.count", nullptr, GlobalValue::NotThreadLocal, kmpc::GlobalAddrSpace);
-            B.CreateStore(B.CreateZExt(S.counted, I32), at(B, countedArr, p));
-            B.CreateStore(S.peer, at(B, peerArr, p));
-            B.CreateStore(S.dst, at(B, dstArr, p));
-            B.CreateStore(S.src, at(B, srcArr, p));
-            B.CreateStore(S.len, at(B, bytesArr, p));
-            B.CreateStore(ConstantExpr::getAddrSpaceCast(counter, Ptr), at(B, counterArr, p));
-            B.CreateStore(ConstantInt::get(I32, S.after), at(B, afterArr, p));
-            B.CreateCall(hullFn, {S.src, S.len, S.box, ConstantInt::get(I32, S.dims), S.stride,
+            Value *counted = B.CreateZExt(S.counted, I32);
+            Value *piece = B.CreateCall(pieceFn, {S.len, counted, ConstantInt::get(I32, K)});
+            // Piece k: [k * piece, (k + 1) * piece) of the range, clipped to
+            // it. The first is always there, the whole put when it is one
+            // piece; one that clips to nothing is not counted. A loop, not K
+            // copies: unrolled, the copies' values stayed live together and
+            // took the kernel from 41 vector registers to 109.
+#if LLVM_VERSION_MAJOR >= 20
+            auto [body, kv] = SplitBlockAndInsertSimpleForLoop(ConstantInt::get(I64, K),
+                                                               planned->getIterator());
+#else
+            auto [body, kv] = SplitBlockAndInsertSimpleForLoop(ConstantInt::get(I64, K), planned);
+#endif
+            IRBuilder<> L(body);
+            Value *e = L.CreateAdd(kv, ConstantInt::get(I64, uint64_t(p) * K));
+            auto slot = [&](GlobalVariable *A) {
+                return L.CreateInBoundsGEP(A->getValueType(), A, {ConstantInt::get(I64, 0), e});
+            };
+            Value *off = L.CreateBinaryIntrinsic(Intrinsic::umin, L.CreateMul(piece, kv), S.len);
+            Value *len = L.CreateBinaryIntrinsic(Intrinsic::umin, piece, L.CreateSub(S.len, off));
+            Value *has = L.CreateSelect(
+                L.CreateICmpEQ(kv, ConstantInt::get(I64, 0)), counted,
+                L.CreateAnd(counted,
+                            L.CreateZExt(L.CreateICmpNE(len, ConstantInt::get(I64, 0)), I32)));
+            Value *src = L.CreateGEP(I8, S.src, off);
+            Value *dst = L.CreateGEP(I8, S.dst, off);
+            Value *counter = L.CreateAddrSpaceCast(
+                L.CreateInBoundsGEP(CT, counters, {ConstantInt::get(I64, 0), kv}), Ptr);
+            L.CreateStore(has, slot(countedArr));
+            L.CreateStore(S.peer, slot(peerArr));
+            L.CreateStore(dst, slot(dstArr));
+            L.CreateStore(src, slot(srcArr));
+            L.CreateStore(len, slot(bytesArr));
+            L.CreateStore(counter, slot(counterArr));
+            L.CreateStore(ConstantInt::get(I32, S.after), slot(afterArr));
+            L.CreateCall(hullFn, {src, len, S.box, ConstantInt::get(I32, S.dims), S.stride,
                                   S.extent, ConstantInt::get(I64, S.elem),
-                                  B.CreateAddrSpaceCast(at(B, loArr, p), Ptr),
-                                  B.CreateAddrSpaceCast(at(B, hiArr, p), Ptr)});
+                                  L.CreateAddrSpaceCast(slot(loArr), Ptr),
+                                  L.CreateAddrSpaceCast(slot(hiArr), Ptr)});
+            B.SetInsertPoint(planned);
         }
-        FunctionCallee planFn = M.getOrInsertFunction(
-            "ompx__box_plan", Type::getVoidTy(Ctx), I32, Ptr, Ptr, Ptr, I64, I64, I64, Ptr, Ptr);
+        FunctionCallee planFn =
+            M.getOrInsertFunction("ompx__box_plan", Type::getVoidTy(Ctx), I32, Ptr, Ptr, Ptr, I64,
+                                  I64, I64, Ptr, Ptr, Ptr);
         B.CreateCall(planFn, {ConstantInt::get(I32, n), flat(B, countedArr), flat(B, loArr),
                               flat(B, hiArr), lb0, itersAt(B), chunk,
-                              B.CreateAddrSpaceCast(shiftSlot, Ptr), flat(B, dueArr)});
+                              B.CreateAddrSpaceCast(shiftSlot, Ptr), flat(B, dueArr),
+                              B.CreateAddrSpaceCast(firstSlot, Ptr)});
         B.SetInsertPoint(KI.distInit);
         Value *shift = uniform(B, B.CreateLoad(I64, shiftSlot, "gicc.box.shift"));
-        Value *next = B.CreateLoad(I64, at(B, dueArr, 0));
-        for (unsigned p = 1; p < n; ++p)
-            next = B.CreateBinaryIntrinsic(Intrinsic::smin, next, B.CreateLoad(I64, at(B, dueArr, p)));
-        next = uniform(B, next);
+        Value *next = uniform(B, B.CreateLoad(I64, firstSlot, "gicc.box.first"));
         B.CreateStore(next, nextSlot);
 
         // Whether this launch counts anything at all: on most ranks (every
@@ -1280,12 +1321,27 @@ private:
 
         // Each chunk of a counting launch: the bounds of the chunk it now
         // stands for, stored over the loop's own, and the counts now due.
-        Value *lb = IRBuilder<>(KI.parallel)
-                        .CreatePtrToInt(lbSlot->getValueOperand(), I64, "gicc.box.lb");
         Instruction *counting =
             SplitBlockAndInsertIfThen(active, KI.parallel->getIterator(), false, rarely);
         IRBuilder<> RB(counting);
-        Value *lbR = RB.CreateAdd(lb, shift);
+        // The chunk comes from a counter the teams share (ompx__box_grab),
+        // in order, not from the team's round-robin share; pos is where it
+        // stands in that order, which is what due[] counts in. The loop's
+        // own bounds only count the team's chunks.
+        auto global = [&](Type *T, const char *name) {
+            return new GlobalVariable(M, T, false, GlobalValue::InternalLinkage,
+                                      ConstantInt::get(T, 0), name, nullptr,
+                                      GlobalValue::NotThreadLocal, kmpc::GlobalAddrSpace);
+        };
+        GlobalVariable *grabNext = global(I64, "gicc.box.grab");
+        GlobalVariable *grabDone = global(I32, "gicc.box.grab.done");
+        GlobalVariable *grabSlot = teamSlot(I64, "gicc.box.grab.slot");
+        FunctionCallee grabFn = M.getOrInsertFunction("ompx__box_grab", I64, Ptr, Ptr);
+        Value *g = uniform(RB, RB.CreateCall(grabFn,
+                                             {ConstantExpr::getAddrSpaceCast(grabNext, Ptr),
+                                              RB.CreateAddrSpaceCast(grabSlot, Ptr)}));
+        Value *pos = RB.CreateAdd(lb0, RB.CreateMul(g, chunk), "gicc.box.pos");
+        Value *lbR = RB.CreateAdd(pos, shift);
         Value *span = spanAt(RB);
         lbR = RB.CreateSelect(RB.CreateICmpUGE(RB.CreateSub(lbR, lb0), span),
                               RB.CreateSub(lbR, span), lbR);
@@ -1306,13 +1362,20 @@ private:
                                                flat(T, afterArr)});
             T.CreateStore(uniform(T, left), nextSlot);
         };
-        dueCall(counting, lb, RB.CreateICmpSGE(lb, RB.CreateLoad(I64, nextSlot)));
-        // Past the loop: every counted put not yet counted.
+        dueCall(counting, pos, RB.CreateICmpSGE(pos, RB.CreateLoad(I64, nextSlot)));
+        // Past the loop: every counted put not yet counted, and, the last
+        // team there, the chunk counter reset for the next launch.
         {
             IRBuilder<> FB(KI.distFini);
             Value *left = FB.CreateICmpNE(FB.CreateLoad(I64, nextSlot),
                                           ConstantInt::get(I64, INT64_MAX));
             dueCall(KI.distFini, ConstantInt::get(I64, INT64_MAX - 1), left);
+            Instruction *fin =
+                SplitBlockAndInsertIfThen(active, KI.distFini->getIterator(), false, rarely);
+            FunctionCallee doneFn =
+                M.getOrInsertFunction("ompx__box_grab_done", Type::getVoidTy(Ctx), Ptr, Ptr);
+            IRBuilder<>(fin).CreateCall(doneFn, {ConstantExpr::getAddrSpaceCast(grabNext, Ptr),
+                                                 ConstantExpr::getAddrSpaceCast(grabDone, Ptr)});
         }
 
         DominatorTree DT(KI.K);

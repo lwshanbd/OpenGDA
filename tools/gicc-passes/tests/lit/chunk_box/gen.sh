@@ -69,16 +69,25 @@ done
 ; CHECK: call ptr @ompx__box_peer({{.*}}, i32 1, i32 -1, ptr addrspacecast (ptr addrspace(3) @gicc.box.counted to ptr))
 ; The team shares the residual copy.
 ; CHECK: call void @ompx__box_residual({{.*}}, i32 1)
+; A counted put goes out in pieces, each counted on its own: 64 entries
+; for the one put, filled by a loop, the first the whole range when it is
+; one piece.
+; CHECK: call i64 @ompx__box_piece(i64 {{.*}}, i32 64)
+; CHECK: %iv = phi i64 [ 0,
+; CHECK: getelementptr inbounds [64 x i64], ptr addrspace(3) @gicc.box.lo, i64 0, i64
 ; CHECK: call void @ompx__box_hull(
-; CHECK: call void @ompx__box_plan(i32 1,
+; CHECK: call void @ompx__box_plan(i32 64,
 ; CHECK: call void @__kmpc_distribute_static_init
-; Before each chunk: the rotated chunk's bounds, then, once a counted put
-; may be due, the count of a team past its range.
+; Before each chunk: the next chunk from the counter the teams share, its
+; rotated bounds, then, once a counted put may be due, the count of a team
+; past its range.
+; CHECK: call i64 @ompx__box_grab(
 ; CHECK: [[UB:%.*]] = call i64 @llvm.umin.i64(
-; CHECK: call i64 @ompx__box_due(i32 1, i64
+; CHECK: call i64 @ompx__box_due(i32 64, i64 %gicc.box.pos,
 ; CHECK: call void @__kmpc_parallel_51(
-; And once past the loop.
-; CHECK: call i64 @ompx__box_due(i32 1, i64 9223372036854775806,
+; And once past the loop, then the counter reset by the last team.
+; CHECK: call i64 @ompx__box_due(i32 64, i64 9223372036854775806,
+; CHECK: call void @ompx__box_grab_done(
 ; CHECK: call void @__kmpc_distribute_static_fini(
 ; CHECK-LABEL: define internal void @__omp_offloading_{{.*}}_omp_outlined_omp_outlined(
 ; CHECK: %gicc.box.in = and i1
