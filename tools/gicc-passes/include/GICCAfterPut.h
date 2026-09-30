@@ -19,7 +19,10 @@
 //                                   its loop would, when that can be proven.
 //
 // The two sides meet at run time only, through the post, so a kernel the
-// device side could not rewrite simply leaves the put to the host. Under
+// device side could not rewrite simply leaves the put to the host. So does a
+// region with an if clause that runs on the host: that path posts nothing,
+// and the put counts as after the kernel when every path to it runs the
+// region first, on either side. Under
 // DWQ the post also queues a put to a peer that is not IPC-mapped, on a
 // trigger of its own that the kernel rings once the source is written; a
 // kernel that does not leaves the host to ring it after the launch. One it

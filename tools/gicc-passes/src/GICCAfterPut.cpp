@@ -103,6 +103,66 @@ std::string launchedKernel(CallInst *L) {
     return n.str();
 }
 
+// Whether call C runs region `kernel` on the host: it calls the region's host
+// function, directly or as the microtask of __kmpc_fork_teams / _call.
+bool runsRegionOnHost(const CallBase &C, StringRef kernel) {
+    auto names = [&](const Value *V) {
+        auto *F = dyn_cast<Function>(V->stripPointerCasts());
+        if (!F) return false;
+        StringRef n = F->getName();
+        return n.consume_front(kernel) && (n.empty() || n.starts_with("."));
+    };
+    return names(C.getCalledOperand()) ||
+           any_of(C.args(), [&](const Use &U) { return names(U.get()); });
+}
+
+// The blocks that run L's region on the host because its if clause was
+// false. Clang branches on the clause, at D, to the launch or to that run,
+// which may be one block with the launch's own fallback (the run on the host
+// when the launch fails, which lies under L).
+SmallVector<BasicBlock *, 2> hostRuns(CallInst *L, StringRef kernel, DominatorTree &DT) {
+    SmallVector<BasicBlock *, 2> runs;
+    BasicBlock *LB = L->getParent();
+    for (BasicBlock &B : *L->getFunction()) {
+        if (DT.dominates(LB, &B)) continue;
+        if (none_of(B, [&](Instruction &I) {
+                auto *C = dyn_cast<CallBase>(&I);
+                return C && runsRegionOnHost(*C, kernel);
+            }))
+            continue;
+        BasicBlock *D = DT.findNearestCommonDominator(LB, &B);
+        auto *Br = D ? dyn_cast<BranchInst>(D->getTerminator()) : nullptr;
+        if (!Br || !Br->isConditional() || Br->getSuccessor(0) == Br->getSuccessor(1)) continue;
+        for (unsigned k = 0; k < 2; ++k) {
+            BasicBlockEdge toL(D, Br->getSuccessor(k)), other(D, Br->getSuccessor(1 - k));
+            if (!DT.dominates(toL, LB)) continue;
+            // Every way into B is the other arm or the launch's fallback.
+            if (all_of(predecessors(&B), [&](BasicBlock *P) {
+                    return DT.dominates(LB, P) || DT.dominates(other, P) ||
+                           (P == D && other.getEnd() == &B);
+                }))
+                runs.push_back(&B);
+        }
+    }
+    return runs;
+}
+
+// Whether every path from the entry to I runs L's region first: on the
+// device through L, or on the host through one of `hosts`.
+bool afterRegion(CallInst *L, ArrayRef<BasicBlock *> hosts, Instruction *I) {
+    BasicBlock *LB = L->getParent(), *IB = I->getParent();
+    if (IB == LB) return L->comesBefore(I);
+    SmallPtrSet<BasicBlock *, 16> seen;
+    SmallVector<BasicBlock *, 16> work{&IB->getParent()->getEntryBlock()};
+    while (!work.empty()) {
+        BasicBlock *B = work.pop_back_val();
+        if (B == IB) return false;
+        if (B == LB || is_contained(hosts, B) || !seen.insert(B).second) continue;
+        append_range(work, successors(B));
+    }
+    return true;
+}
+
 // The one store to `base` + `off` that dominates `at`, or null.
 StoreInst *storeTo(Function &F, const Value *base, int64_t off, Instruction *at,
                    DominatorTree &DT, const DataLayout &DL) {
@@ -200,21 +260,24 @@ bool benign(Instruction &I) {
 }
 
 // Checks one put after launch L; fills P when it can be posted.
-bool checkPut(CallInst *L, CallInst *put, ArrayRef<Value *> args, DominatorTree &DT,
-              PostDominatorTree &PDT, LoopInfo &LI, FoundPut &P, std::string &why) {
+bool checkPut(CallInst *L, ArrayRef<BasicBlock *> hosts, CallInst *put, ArrayRef<Value *> args,
+              DominatorTree &DT, PostDominatorTree &PDT, LoopInfo &LI, FoundPut &P,
+              std::string &why) {
     BasicBlock *LB = L->getParent(), *PB = put->getParent();
     if (LI.getLoopFor(PB) != LI.getLoopFor(LB)) {
         why = "the put is in a loop the launch is not";
         return false;
     }
-    // Every block on a path from the launch to the put.
+    // Every block on a path from the region to the put: from the launch, or
+    // from the region run on the host.
     SmallPtrSet<BasicBlock *, 8> region{PB};
     SmallVector<BasicBlock *, 8> work{PB};
     while (!work.empty()) {
         BasicBlock *B = work.pop_back_val();
-        if (B == LB) continue;
+        if (B == LB || is_contained(hosts, B)) continue;
         for (BasicBlock *pred : predecessors(B)) {
-            if (!DT.dominates(LB, pred) || LI.getLoopFor(pred) != LI.getLoopFor(LB)) {
+            bool after = is_contained(hosts, pred) || afterRegion(L, hosts, pred->getTerminator());
+            if (!after || LI.getLoopFor(pred) != LI.getLoopFor(LB)) {
                 why = "a path reaches the put without the launch";
                 return false;
             }
@@ -229,8 +292,11 @@ bool checkPut(CallInst *L, CallInst *put, ArrayRef<Value *> args, DominatorTree 
         if (auto *Cmp = dyn_cast<ICmpInst>(Br->getCondition()); Cmp && Cmp->getOperand(0) == L)
             if (auto *Z = dyn_cast<ConstantInt>(Cmp->getOperand(1)); Z && Z->isZero())
                 fallback = Br->getSuccessor(Cmp->getPredicate() == ICmpInst::ICMP_NE ? 0 : 1);
+    // So is a run on the host when the if clause is false, which posts
+    // nothing: after_done finds no post and the host puts.
     for (BasicBlock *B : region) {
         if (fallback && B != PB && DT.dominates(fallback, B)) continue;
+        if (B != PB && any_of(hosts, [&](BasicBlock *H) { return DT.dominates(H, B); })) continue;
         for (Instruction &I : *B) {
             if (B == LB && (&I == L || !L->comesBefore(&I))) continue;
             if (B == PB && (&I == put || !I.comesBefore(put))) continue;
@@ -288,20 +354,22 @@ bool findSite(CallInst *L, DominatorTree &DT, PostDominatorTree &PDT, LoopInfo &
     SmallVector<Value *, 16> args = launchArgs(L, DT, DL);
     if (args.empty()) return false;
     Function &F = *L->getFunction();
+    SmallVector<BasicBlock *, 2> hosts = hostRuns(L, S.kernel, DT);
     for (Instruction &I : instructions(F)) {
         auto *put = dyn_cast<CallInst>(&I);
-        if (!put || calleeName(*put) != kHostPut || !DT.dominates(L, put)) continue;
+        if (!put || calleeName(*put) != kHostPut || !afterRegion(L, hosts, put)) continue;
         // The launch nearest before the put only.
         bool nearer = false;
         for (Instruction &J : instructions(F))
             if (auto *L2 = dyn_cast<CallInst>(&J); L2 && L2 != L && calleeName(*L2) == kLaunch &&
-                                                   DT.dominates(L, L2) && DT.dominates(L2, put))
+                                                   afterRegion(L, hosts, L2) &&
+                                                   afterRegion(L2, hostRuns(L2, launchedKernel(L2), DT), put))
                 nearer = true;
         if (nearer) continue;
         if (S.puts.size() == 8) break;   // OMPX_PIPE_AFTER_MAX
         FoundPut P;
         std::string why;
-        if (checkPut(L, put, args, DT, PDT, LI, P, why)) {
+        if (checkPut(L, hosts, put, args, DT, PDT, LI, P, why)) {
             S.puts.push_back(std::move(P));
         } else {
             out() << "[gicc-after] " << S.kernel << ": a put stays after the kernel: " << why
