@@ -1,5 +1,5 @@
 // pipeline_intranode.cpp - does splitting "compute, then send" into blocks pay
-// off inside one node, and does it stay bit-exact?
+// off, inside one node and across nodes, and does it stay bit-exact?
 //
 // Every rank produces n words and sends them to its right neighbour on the
 // ring, all ranks at once, each iteration:
@@ -8,22 +8,39 @@
 //     send src -> right neighbour's dst           // communication
 //     fence
 //
-// Same node, so "send" is a store through ompx_peer_ptr (NVLink / xGMI) or a
-// copy-engine copy. Variants:
+// On one node "send" is a store through ompx_peer_ptr (NVLink / xGMI) or a
+// copy-engine copy; across nodes it goes through the NIC. Variants:
 //
 //   compute-only / copy-only  compute alone, copy alone: the max(compute,
 //                copy) bound pipelining can at best reach
+//   put-only / mpi-only  the send alone, as ompx_put or as MPI: the transfer
+//                side of that bound for any peer, same node or not
 //
 //   serial-ce    compute kernel, then host ompx_put (copy engine). The
-//                program as a user writes it.
+//                program as a user writes it. Built with put discovery
+//                (build_giomp_after.sh) the pass moves this put into the
+//                kernel: the pipelined program with no source change.
 //   serial-kc    compute kernel, then a copy kernel storing through the peer
 //                pointer (what the library's put_auto does on the node).
+//   mpi          compute kernel, then GPU-aware MPI_Irecv / MPI_Isend /
+//                MPI_Waitall on the device buffers: the same program in MPI.
+//   mpi-pipe     the MPI program pipelined by hand: the loop is cut into P
+//                pieces, each a kernel of its own, and each piece is sent
+//                with MPI_Isend as soon as its kernel returns (receives
+//                posted up front, MPI_Testall after each piece so the
+//                library progresses). What an MPI programmer would write.
 //   compiled     the serial-ce kernel with the send stated inside it as
 //                ompx_pipelined_put; the gicc-passes plugin (chunk-lower)
 //                proves it splittable and rewrites it: at element grain
 //                every word is stored to the peer as it is produced, at block
 //                grain each dist_schedule block is sent as it completes.
 //                Nothing about the pipelining is written by hand.
+//   compiled-loop  the same send stated in the loop body of the combined
+//                construct the compute kernel already is: the kernel stays
+//                SPMD (a statement after the loop makes clang emit a generic
+//                kernel, which costs up to 28% on MI250X), and the pass
+//                lowers it in box form: stores mirrored to a same-node peer,
+//                a put to any other peer sent by the last team to finish.
 //   compute-teams  the compiled kernel's shape without the send, to tell
 //                what the shape costs from what sending costs.
 //   nobarrier    pipelined without waiting for the block to be complete:
@@ -45,10 +62,16 @@
 //   bash examples/omp/build_giomp_example.sh examples/omp/pipeline_intranode.cpp OUT
 // Run  : GICC_HALO_IPC=1 GICC_PROXY_ENABLED=1 GICC_SKIP_DWQ_INIT=1 \
 //            srun -N1 -n4 --gpus-per-node=4 --gpu-bind=none ./OUT [options]
-//        With GICC_HALO_IPC=0 nothing is IPC-mapped: only serial-ce and
-//        compiled run, the latter through its proxy fallback.
+//        With GICC_HALO_IPC=0, or one rank per node, nothing is IPC-mapped:
+//        the variants that store through the peer pointer are skipped and
+//        compiled runs through its fallback, one proxy put per block. The
+//        MPI variants need a GPU-aware MPI (MPICH_GPU_SUPPORT_ENABLED=1 on
+//        Cray MPICH).
 // Options: --n WORDS --work ROUNDS | --works R1,R2,... --teams T --iters I
-//          --warmup W --verify-iters V --chunks C1,C2,...
+//          --warmup W --verify-iters V --chunks C1,C2,... --pieces P1,P2,...
+// Timing: the MPI variants complete with MPI_Waitall alone; the others end
+// each iteration with ompx_fence, which a one-sided put needs before the
+// receiver may read.
 // Exit code 1 when a checked variant loses a word or the control does not.
 
 #include "gicc/omp.h"
@@ -87,6 +110,7 @@ struct Opts {
     int verify_iters = 3;
     std::vector<size_t> chunks = {size_t(1) << 14, size_t(1) << 16,
                                   size_t(1) << 18, size_t(1) << 20};
+    std::vector<size_t> pieces = {4, 16, 64};
 };
 
 static Opts parse(int argc, char** argv) {
@@ -114,6 +138,11 @@ static Opts parse(int argc, char** argv) {
             for (char* s = std::strtok(const_cast<char*>(v), ","); s;
                  s = std::strtok(nullptr, ","))
                 o.chunks.push_back(std::strtoull(s, nullptr, 0));
+        } else if (k == "--pieces") {
+            o.pieces.clear();
+            for (char* s = std::strtok(const_cast<char*>(v), ","); s;
+                 s = std::strtok(nullptr, ","))
+                o.pieces.push_back(std::strtoull(s, nullptr, 0));
         } else {
             std::fprintf(stderr, "unknown option %s\n", k.c_str());
             std::exit(2);
@@ -129,16 +158,24 @@ struct Ctx {
     int me, left, right, np;
 };
 
-enum class Variant { ComputeOnly, ComputeTeams, CopyOnly, SerialCE, SerialKC, Compiled, NoBarrier };
+enum class Variant {
+    ComputeOnly, ComputeTeams, CopyOnly, PutOnly, MpiOnly,
+    SerialCE, SerialKC, Mpi, MpiPipe, Compiled, CompiledLoop, NoBarrier
+};
 
 static const char* name(Variant v) {
     switch (v) {
         case Variant::ComputeOnly: return "compute-only";
         case Variant::ComputeTeams: return "compute-teams";
         case Variant::CopyOnly:    return "copy-only";
+        case Variant::PutOnly:     return "put-only";
+        case Variant::MpiOnly:     return "mpi-only";
         case Variant::SerialCE:    return "serial-ce";
         case Variant::SerialKC:    return "serial-kc";
+        case Variant::Mpi:         return "mpi";
+        case Variant::MpiPipe:     return "mpi-pipe";
         case Variant::Compiled:    return "compiled";
+        case Variant::CompiledLoop: return "compiled-loop";
         case Variant::NoBarrier:   return "nobarrier";
     }
     return "?";
@@ -153,6 +190,24 @@ static void compute(const Ctx& c, const Opts& o, int it) {
     for (size_t i = 0; i < n; ++i) src[i] = produce(me, it, i, work);
 }
 
+// compute() over words [lo, hi) only: one piece of mpi-pipe.
+static void compute_range(const Ctx& c, const Opts& o, int it, size_t lo, size_t hi) {
+    uint32_t* src = c.src;
+    const int me = c.me, work = o.work;
+    #pragma omp target teams distribute parallel for num_teams(o.teams) \
+            is_device_ptr(src) firstprivate(lo, hi, me, it, work)
+    for (size_t i = lo; i < hi; ++i) src[i] = produce(me, it, i, work);
+}
+
+// src -> right neighbour's dst and left neighbour's src -> dst, as MPI
+// words [lo, hi); tag tells the pieces of one iteration apart.
+static void mpi_post(const Ctx& c, size_t lo, size_t hi, int tag, MPI_Request* recv,
+                     MPI_Request* send) {
+    const int count = static_cast<int>(hi - lo);
+    if (recv) MPI_Irecv(c.dst + lo, count, MPI_UINT32_T, c.left, tag, MPI_COMM_WORLD, recv);
+    if (send) MPI_Isend(c.src + lo, count, MPI_UINT32_T, c.right, tag, MPI_COMM_WORLD, send);
+}
+
 static void copy_kernel(const Ctx& c, const Opts& o) {
     uint32_t* src = c.src;
     uint32_t* pd = c.peer_dst;
@@ -162,7 +217,13 @@ static void copy_kernel(const Ctx& c, const Opts& o) {
     for (size_t i = 0; i < n; ++i) pd[i] = src[i];
 }
 
-// One iteration's compute + send; the caller fences.
+static bool is_mpi(Variant v) {
+    return v == Variant::MpiOnly || v == Variant::Mpi || v == Variant::MpiPipe;
+}
+
+// One iteration's compute + send; the caller fences, except after an MPI
+// variant, which has waited for its own requests. chunk is the number of
+// pieces for mpi-pipe.
 static void step(Variant v, const Ctx& c, const Opts& o, int it, size_t chunk) {
     uint32_t* src = c.src;
     uint32_t* pd = c.peer_dst;
@@ -186,14 +247,48 @@ static void step(Variant v, const Ctx& c, const Opts& o, int it, size_t chunk) {
     case Variant::CopyOnly:
         copy_kernel(c, o);
         break;
-    case Variant::SerialCE:
-        compute(c, o, it);
-        ompx_put(c.right, c.dst, c.src, n * sizeof(uint32_t));
+    case Variant::SerialCE: {
+        // Written inline, the put's operands in locals: this is the plain
+        // program, and in a build with put discovery (build_giomp_after.sh)
+        // the pass moves the put into the kernel.
+        uint32_t* dst = c.dst;
+        const int right = c.right;
+        #pragma omp target teams distribute parallel for num_teams(o.teams) \
+                is_device_ptr(src) firstprivate(n, me, it, work)
+        for (size_t i = 0; i < n; ++i) src[i] = produce(me, it, i, work);
+        ompx_put(right, dst, src, n * sizeof(uint32_t));
         break;
+    }
     case Variant::SerialKC:
         compute(c, o, it);
         copy_kernel(c, o);
         break;
+    case Variant::PutOnly:
+        ompx_put(c.right, c.dst, c.src, n * sizeof(uint32_t));
+        break;
+    case Variant::MpiOnly:
+    case Variant::Mpi: {
+        if (v == Variant::Mpi) compute(c, o, it);
+        MPI_Request rq[2];
+        mpi_post(c, 0, n, 0, &rq[0], &rq[1]);
+        MPI_Waitall(2, rq, MPI_STATUSES_IGNORE);
+        break;
+    }
+    case Variant::MpiPipe: {
+        const size_t pieces = chunk;
+        std::vector<MPI_Request> rq(2 * pieces, MPI_REQUEST_NULL);
+        for (size_t p = 0; p < pieces; ++p)
+            mpi_post(c, n * p / pieces, n * (p + 1) / pieces, (int)p, &rq[p], nullptr);
+        for (size_t p = 0; p < pieces; ++p) {
+            const size_t lo = n * p / pieces, hi = n * (p + 1) / pieces;
+            compute_range(c, o, it, lo, hi);
+            mpi_post(c, lo, hi, (int)p, nullptr, &rq[pieces + p]);
+            int done;
+            MPI_Testall((int)rq.size(), rq.data(), &done, MPI_STATUSES_IGNORE);
+        }
+        MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
+        break;
+    }
     case Variant::Compiled: {
         uint32_t* dst = c.dst;
         const int right = c.right;
@@ -202,6 +297,18 @@ static void step(Variant v, const Ctx& c, const Opts& o, int it, size_t chunk) {
         {
             #pragma omp distribute parallel for dist_schedule(static, chunk)
             for (size_t i = 0; i < n; ++i) src[i] = produce(me, it, i, work);
+            ompx_pipelined_put(right, dst, src, n * sizeof(uint32_t));
+        }
+        break;
+    }
+    case Variant::CompiledLoop: {
+        uint32_t* dst = c.dst;
+        const int right = c.right;
+        #pragma omp target teams distribute parallel for num_teams(o.teams) \
+                dist_schedule(static, chunk) is_device_ptr(src, dst) \
+                firstprivate(n, me, it, work, chunk, right)
+        for (size_t i = 0; i < n; ++i) {
+            src[i] = produce(me, it, i, work);
             ompx_pipelined_put(right, dst, src, n * sizeof(uint32_t));
         }
         break;
@@ -251,7 +358,9 @@ static void clear_dst(const Ctx& c, const Opts& o) {
 }
 
 static bool sends(Variant v) { return v != Variant::ComputeOnly && v != Variant::ComputeTeams; }
-static bool produces(Variant v) { return v != Variant::CopyOnly; }
+static bool produces(Variant v) {
+    return v != Variant::CopyOnly && v != Variant::PutOnly && v != Variant::MpiOnly;
+}
 
 // Runs verify_iters checked iterations, then timed iterations. Returns the
 // mean iteration time (ms, slowest rank) and the total bad words (all ranks).
@@ -263,7 +372,7 @@ static void run(Variant v, const Ctx& c, const Opts& o, size_t chunk,
             clear_dst(c, o);
             ompx_barrier();                 // nobody sends into a dst being cleared
             step(v, c, o, 1000 + it, chunk);
-            ompx_fence();                   // all sends of this epoch landed
+            if (!is_mpi(v)) ompx_fence();   // all sends of this epoch landed
             bad += check(c, o, 1000 + it);
             ompx_barrier();                 // nobody sends into a dst being checked
         }
@@ -272,9 +381,16 @@ static void run(Variant v, const Ctx& c, const Opts& o, size_t chunk,
     }
     ms = 0;
     if (v == Variant::NoBarrier) return;   // a correctness control only
-    for (int it = 0; it < o.warmup; ++it) { step(v, c, o, it, chunk); ompx_fence(); }
+    for (int it = 0; it < o.warmup; ++it) {
+        step(v, c, o, it, chunk);
+        if (!is_mpi(v)) ompx_fence();
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
     const double t0 = omp_get_wtime();
-    for (int it = 0; it < o.iters; ++it) { step(v, c, o, it, chunk); ompx_fence(); }
+    for (int it = 0; it < o.iters; ++it) {
+        step(v, c, o, it, chunk);
+        if (!is_mpi(v)) ompx_fence();
+    }
     double dt = (omp_get_wtime() - t0) / o.iters * 1e3;
     MPI_Allreduce(MPI_IN_PLACE, &dt, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
     ms = dt;
@@ -306,6 +422,11 @@ int main(int argc, char** argv) {
     ompx_barrier();
 
     if (o.works.empty()) o.works.push_back(o.work);
+    // Under DWQ (GICC_HALO_DWQ=1) there is no CPU proxy, which the compiled
+    // variant's per-block fallback needs for a peer that is not mapped.
+    const char* dwq_env = std::getenv("GICC_HALO_DWQ");
+    const bool dwq = dwq_env && std::atoi(dwq_env) != 0;
+    const bool per_block = all_mapped || !dwq;
 
     // A variant that must deliver every word FAILs on any bad word; the
     // nobarrier control FAILs if it delivers them all, which would mean the
@@ -321,8 +442,11 @@ int main(int argc, char** argv) {
         failures += !ok;
         if (c.me != 0) return;
         char ch[32] = "-";
-        if (v == Variant::Compiled || v == Variant::NoBarrier || v == Variant::ComputeTeams)
+        if (v == Variant::Compiled || v == Variant::CompiledLoop || v == Variant::NoBarrier ||
+            v == Variant::ComputeTeams)
             std::snprintf(ch, sizeof ch, "%zu", chunk);
+        else if (v == Variant::MpiPipe)
+            std::snprintf(ch, sizeof ch, "p=%zu", chunk);
         std::string verdict = !checked ? "(not checked)"
                             : "bad=" + std::to_string(bad) + (ok ? " PASS" : " FAIL") +
                                   (control ? " (control: must be > 0)" : "");
@@ -339,15 +463,24 @@ int main(int argc, char** argv) {
         o.work = w;
         if (c.me == 0)
             std::printf("\nranks=%d n=%zu words (%.1f MB) work=%d teams=%d iters=%d "
-                        "verify_iters=%d%s\n", c.np, o.n, bytes / 1e6, o.work, o.teams,
+                        "verify_iters=%d%s%s\n", c.np, o.n, bytes / 1e6, o.work, o.teams,
                         o.iters, o.verify_iters,
-                        all_mapped ? "" : " (peer not IPC-mapped: fallback path)");
+                        all_mapped ? "" : " (peer not IPC-mapped: fallback path)",
+                        dwq ? " dwq" : " proxy");
         line(Variant::ComputeOnly, 0);
         for (size_t ch : o.chunks) line(Variant::ComputeTeams, ch);
         if (all_mapped) line(Variant::CopyOnly, 0);
+        line(Variant::PutOnly, 0);
+        line(Variant::MpiOnly, 0);
         line(Variant::SerialCE, 0);
         if (all_mapped) line(Variant::SerialKC, 0);
-        for (size_t ch : o.chunks) line(Variant::Compiled, ch);
+        line(Variant::Mpi, 0);
+        for (size_t p : o.pieces) line(Variant::MpiPipe, p);
+        if (per_block)
+            for (size_t ch : o.chunks) line(Variant::Compiled, ch);
+        else if (c.me == 0)
+            std::printf("compiled      skipped: its per-block fallback needs the CPU proxy\n");
+        for (size_t ch : o.chunks) line(Variant::CompiledLoop, ch);
         if (all_mapped) line(Variant::NoBarrier, o.chunks.front());
     }
 
