@@ -5,6 +5,8 @@
 //   mpi_dot      a target region computes the local dot product (OpenMP
 //                reduction) and maps it back; MPI_Allreduce sums it on the
 //                host -- what miniFE does
+//   mpi_dot_pin  giomp_dot's kernel writes the partial straight to pinned host
+//                memory (no map clause); MPI_Allreduce sums it on the host
 //   mpi_dot_dev  giomp_dot's kernel leaves the partial on the device, where
 //                GPU-aware MPI_Allreduce sums it; then it is copied back
 //   giomp_dot    one target region computes the local dot product and sums
@@ -13,7 +15,10 @@
 //                ompx_peer_ptr; across nodes the rank with the same local
 //                index on every other node gets this node's sum by
 //                ompx_put_signal. Everyone adds the partials in the same
-//                order, so every rank gets the same bits.
+//                order, so every rank gets the same bits. The sum goes
+//                straight to pinned host memory. Every rank adds the call
+//                number to its partial, so each call's sum is different and a
+//                stale value would fail the check.
 //
 // Usage: allreduce_bench MODE [N] [ITERS]
 //   N      elements per rank in the dot product (default 65536)
@@ -24,6 +29,10 @@
 
 #include <mpi.h>
 #include <omp.h>
+
+// libomptarget's host allocation the device can write (not in ROCm's omp.h).
+extern "C" void* llvm_omp_target_alloc_host(size_t size, int device);
+extern "C" void omp_target_free(void* ptr, int device);
 
 #include <algorithm>
 #include <cmath>
@@ -39,6 +48,12 @@ constexpr int kTeams = 440;         // 4 per CU on an MI250X GCD
 constexpr int kThreads = 256;
 
 int g_rank = 0, g_size = 1;
+
+// Enough teams for four elements per thread, at most kTeams.
+int teams_for(long n) {
+    const long t = (n + 4L * kThreads - 1) / (4L * kThreads);
+    return (int)std::max(1L, std::min((long)kTeams, t));
+}
 
 // Node layout: `local` ranks per node, this rank's index among them and its
 // node's index, and every rank's (node, local index).
@@ -129,6 +144,7 @@ struct Giomp {
     int* cpeer = nullptr;                 // [nodes]: my counterpart on each node
     double* team_sum = nullptr;           // [kTeams]
     unsigned* done = nullptr;             // teams finished, over all calls
+    double* hres = nullptr;               // pinned host: the global sum
     std::vector<int> h_cpeer;
 };
 
@@ -173,6 +189,7 @@ Giomp giomp_setup() {
     g.cpeer = to_device(g.h_cpeer);
     g.team_sum = to_device(std::vector<double>(kTeams, 0.0));
     g.done = to_device(std::vector<unsigned>(1, 0u));
+    g.hres = (double*)llvm_omp_target_alloc_host(sizeof(double), omp_get_default_device());
     ompx_prepare();
     MPI_Barrier(MPI_COMM_WORLD);
     return g;
@@ -205,17 +222,24 @@ static inline double global_sum(double x, unsigned long long e, int local, int l
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     __atomic_store_n(&flags[p], e, __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    // Pull every same-node rank's partial, in local-index order.
+    // Pull every same-node rank's flag in one pass of plain loads (issued
+    // back to back, one round trip for all); a system-scope acquire between
+    // passes drops the stale lines. Then the partials, in local-index order.
+    for (;;) {
+        bool all = true;
+        for (int j = 0; j < local; ++j) {
+            if (j != li && __atomic_load_n(&peer_flags[j][p], __ATOMIC_RELAXED) < e) all = false;
+        }
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (all) break;
+#ifdef __AMDGCN__
+        __builtin_amdgcn_s_sleep(1);
+#endif
+    }
     double node_sum = 0;
     for (int j = 0; j < local; ++j) {
-        if (j == li) { node_sum += x; continue; }
-        while (__atomic_load_n(&peer_flags[j][p], __ATOMIC_ACQUIRE) < e) {
-#ifdef __AMDGCN__
-            __builtin_amdgcn_s_sleep(1);
-#endif
-        }
-        // After the flag's acquire: the stale lines are gone.
-        node_sum += as_double(__atomic_load_n((unsigned long long*)&peer_vals[j][p], __ATOMIC_RELAXED));
+        node_sum += j == li ? x
+                  : as_double(__atomic_load_n((unsigned long long*)&peer_vals[j][p], __ATOMIC_RELAXED));
     }
     if (nodes == 1) return node_sum;
 
@@ -238,7 +262,8 @@ static inline double global_sum(double x, unsigned long long e, int local, int l
 // The local dot product left on the device, by the kernel giomp_dot uses
 // (a tree per team, the teams' sums added in order by the last team).
 void local_dot_device(const double* x, long n, double* team_sum, unsigned* done, double* dpart) {
-    #pragma omp target teams num_teams(kTeams) thread_limit(kThreads) \
+    const int teams = teams_for(n);
+    #pragma omp target teams num_teams(teams) thread_limit(kThreads) \
         is_device_ptr(x, team_sum, done, dpart) firstprivate(n)
     #pragma omp parallel
     {
@@ -281,7 +306,8 @@ double giomp_dot(Giomp& g, const double* x, long n) {
             ompx_stage_put_signal(g.h_cpeer[m], &g.nvals[p * l.nodes + l.node], &g.mysum[p],
                                   sizeof(double), g.sbase + l.node, e);
     }
-    double out = 0;
+    double* out = g.hres;
+    const int teams = teams_for(n);
     double* vals = g.vals;
     unsigned long long* flags = g.flags;
     double* nvals = g.nvals;
@@ -293,8 +319,8 @@ double giomp_dot(Giomp& g, const double* x, long n) {
     unsigned* done = g.done;
     const int local = l.local, li = l.li, nodes = l.nodes, node = l.node, sbase = g.sbase;
 
-    #pragma omp target teams num_teams(kTeams) thread_limit(kThreads) map(tofrom: out) \
-        is_device_ptr(x, vals, flags, nvals, mysum, peer_vals, peer_flags, cpeer, team_sum, done) \
+    #pragma omp target teams num_teams(teams) thread_limit(kThreads) \
+        is_device_ptr(out, x, vals, flags, nvals, mysum, peer_vals, peer_flags, cpeer, team_sum, done) \
         firstprivate(n, e, local, li, nodes, node, sbase)
     #pragma omp parallel
     {
@@ -319,19 +345,20 @@ double giomp_dot(Giomp& g, const double* x, long n) {
                 % (unsigned)nt == 0) {
                 double partial = 0;
                 for (int k = 0; k < nt; ++k) partial += team_sum[k];
-                out = global_sum(partial, e, local, li, nodes, node, sbase, vals, flags,
+                out[0] = global_sum(partial + (double)e, e, local, li, nodes, node, sbase, vals, flags,
                                  peer_vals, peer_flags, nvals, mysum, cpeer);
             }
         }
     }
-    return out;
+    return out[0];
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s mpi_host|mpi_dot|mpi_dot_dev|giomp_dot [N] [ITERS]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s mpi_host|mpi_dot|mpi_dot_pin|mpi_dot_dev|giomp_dot [N] [ITERS]\n",
+                     argv[0]);
         return 2;
     }
     const char* mode = argv[1];
@@ -353,6 +380,7 @@ int main(int argc, char** argv) {
     if (giomp) g = giomp_setup();
     double* team_sum = to_device(std::vector<double>(kTeams, 0.0));
     unsigned* done = to_device(std::vector<unsigned>(1, 0u));
+    double* hpart = (double*)llvm_omp_target_alloc_host(sizeof(double), dev);
 
     auto one = [&]() -> double {
         if (std::strcmp(mode, "mpi_host") == 0) {
@@ -362,6 +390,12 @@ int main(int argc, char** argv) {
         }
         if (std::strcmp(mode, "mpi_dot") == 0) {
             double v = local_dot(x, n), r = 0;
+            MPI_Allreduce(&v, &r, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+            return r;
+        }
+        if (std::strcmp(mode, "mpi_dot_pin") == 0) {
+            local_dot_device(x, n, team_sum, done, hpart);
+            double v = hpart[0], r = 0;
             MPI_Allreduce(&v, &r, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
             return r;
         }
@@ -375,22 +409,31 @@ int main(int argc, char** argv) {
         return giomp_dot(g, x, n);
     };
 
-    // Check: the exact sum, and the same bits on every rank.
-    const double want = std::strcmp(mode, "mpi_host") == 0
+    // Check: the exact sum, and the same bits on every rank. giomp_dot's sum
+    // grows by g_size every call (see above); every call is checked.
+    const double base = std::strcmp(mode, "mpi_host") == 0
                         ? g_size * (g_size + 1) / 2.0 : exact(n);
+    long calls = 0, wrong = 0;
+    auto want = [&]() { return giomp ? base + (double)g_size * (double)calls : base; };
+    auto checked = [&]() {
+        ++calls;
+        const double r = one();
+        if (std::fabs(r - want()) > 1e-12 * std::fabs(want())) ++wrong;
+        return r;
+    };
     double got = 0;
-    for (int i = 0; i < std::max(1, iters / 10); ++i) got = one();
+    for (int i = 0; i < std::max(1, iters / 10); ++i) got = checked();
     double lo = got, hi = got;
     MPI_Allreduce(MPI_IN_PLACE, &lo, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, &hi, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    const bool ok = std::fabs(got - want) <= 1e-12 * std::fabs(want) && lo == hi;
+    const bool ok = wrong == 0 && lo == hi;
 
     MPI_Barrier(MPI_COMM_WORLD);
     const double t0 = MPI_Wtime();
-    for (int i = 0; i < iters; ++i) got = one();
+    for (int i = 0; i < iters; ++i) got = checked();
     double t = (MPI_Wtime() - t0) / iters;
     MPI_Allreduce(MPI_IN_PLACE, &t, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    int bad = !ok || std::fabs(got - want) > 1e-12 * std::fabs(want);
+    int bad = !ok || wrong != 0;
     MPI_Allreduce(MPI_IN_PLACE, &bad, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
 
     if (g_rank == 0) {
@@ -405,6 +448,7 @@ int main(int argc, char** argv) {
     omp_target_free(dpart, dev);
     omp_target_free(team_sum, dev);
     omp_target_free(done, dev);
+    omp_target_free(hpart, dev);
     if (giomp) ompx_finalize();
     MPI_Finalize();
     return bad;
