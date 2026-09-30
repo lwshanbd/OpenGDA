@@ -72,6 +72,8 @@ int          g_sig_next_cell = 0;
 // ---- pipelined puts left to the quiet (ompx_pipe_deferred in gicc/omp.h) ----
 ompx_pipe_deferred* g_pipe_deferred_host = nullptr;
 ompx_pipe_deferred* g_pipe_deferred_dev  = nullptr;
+char**              g_pipe_peer_heap_host = nullptr;   // ompx_pipe_deferred::peer_heap
+char**              g_pipe_peer_heap_dev  = nullptr;
 // Put i after a launch, queued under DWQ on slot kSigSlots + i when it was
 // posted; set until its bell has rung.
 bool g_after_queued[OMPX_PIPE_AFTER_MAX] = {};
@@ -430,6 +432,36 @@ void nodb_flush() {
     g_nodb_stats.flush_s += nodb_now() - t0;
 }
 
+// A pipelined put the device could not make (ompx_pipe_deferred::fail).
+void pipe_check() {
+    const ompx_pipe_deferred* q = g_pipe_deferred_host;
+    if (q == nullptr || q->fail == 0) return;
+    char what[160];
+    const long long a = q->fail_arg;
+    switch (q->fail) {
+    case OMPX_PIPE_FAIL_NO_PROXY:
+        std::snprintf(what, sizeof(what), "ompx_pipelined_put: peer %lld is not IPC-mapped "
+                      "and the CPU proxy is off; nothing could send the data", a);
+        break;
+    case OMPX_PIPE_FAIL_DIMS:
+        std::snprintf(what, sizeof(what), "ompx_pipelined_put: a %lld-dimensional box has "
+                      "more than 8 dims", a);
+        break;
+    case OMPX_PIPE_FAIL_ALIGN:
+        std::snprintf(what, sizeof(what), "ompx_pipelined_put: the put range and the written "
+                      "box are not aligned to the %lld-byte stores", a);
+        break;
+    case OMPX_PIPE_FAIL_OVERLAP:
+        std::snprintf(what, sizeof(what), "ompx_pipelined_put: the rows of the written box "
+                      "overlap; cannot tell which bytes of the put it does not write");
+        break;
+    default:
+        std::snprintf(what, sizeof(what), "ompx_pipelined_put: failure %d on the device",
+                      q->fail);
+    }
+    die(what);
+}
+
 }  // namespace
 
 extern "C" {
@@ -495,6 +527,11 @@ void ompx_finalize() {
         (void)gpuHostFree(g_pipe_deferred_host);
         g_pipe_deferred_host = nullptr;
         g_pipe_deferred_dev  = nullptr;
+    }
+    if (g_pipe_peer_heap_host != nullptr) {
+        (void)gpuHostFree(g_pipe_peer_heap_host);
+        g_pipe_peer_heap_host = nullptr;
+        g_pipe_peer_heap_dev  = nullptr;
     }
     if (g_sig_host != nullptr) {
         (void)gpuHostFree(g_sig_host);
@@ -797,6 +834,7 @@ static void send_deferred_pipelined() {
 
 void ompx_quiet_host() {
     if (g_runtime == nullptr) return;
+    pipe_check();
     send_deferred_pipelined();
     nodb_flush();
     // Descriptors staged by ompx_put sit in the queue until the NIC is told to
@@ -832,17 +870,46 @@ ompx_ctx* ompx_prepare_ctx() {
     return g_runtime->prepare();
 }
 
+// Non-coherent, so the GPU caches it: every wave of a kernel with pipelined
+// puts reads it. That is safe because the two sides take turns: the host
+// writes it only between launches, and reads what a kernel wrote only after
+// the kernel (or at the quiet); a launch's acquire and a kernel's release
+// make each side's writes visible to the other.
 ompx_pipe_deferred* ompx__pipe_deferred_list() {
     if (g_runtime == nullptr) die("ompx_prepare before ompx_init");
+    const int n = ompx_get_num_ranks();
     if (g_pipe_deferred_dev == nullptr) {
         void* h = nullptr;
-        require_gpu(gpuHostMalloc(&h, sizeof(ompx_pipe_deferred), gpuHostMallocMapped),
+        require_gpu(gpuHostMalloc(&h, sizeof(ompx_pipe_deferred),
+                                  gpuHostMallocMapped | gpuHostMallocNonCoherent),
                     "allocate the deferred pipelined puts");
         std::memset(h, 0, sizeof(ompx_pipe_deferred));
         g_pipe_deferred_host = static_cast<ompx_pipe_deferred*>(h);
         require_gpu(gpuHostGetDevicePointer((void**)&g_pipe_deferred_dev, h, 0),
                     "map the deferred pipelined puts");
+        // Each rank's heap as this GPU reaches it, as the device context's
+        // IPC table has it.
+        require_gpu(gpuHostMalloc(&h, n * sizeof(char*),
+                                  gpuHostMallocMapped | gpuHostMallocNonCoherent),
+                    "allocate the pipelined puts' peer table");
+        g_pipe_peer_heap_host = static_cast<char**>(h);
+        for (int r = 0; r < n; ++r)
+            g_pipe_peer_heap_host[r] =
+                g_runtime->is_local_peer(r)
+                    ? static_cast<char*>(g_runtime->peer_mapped(r, g_heap.index))
+                    : nullptr;
+        require_gpu(gpuHostGetDevicePointer((void**)&g_pipe_peer_heap_dev, h, 0),
+                    "map the pipelined puts' peer table");
     }
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    q->heap_base = g_heap_base;
+    q->peer_heap = g_pipe_peer_heap_dev;
+    q->n_ranks   = n;
+#ifdef GICC_CPU_PROXY
+    q->proxy_on  = !g_dwq_enabled;   // DWQ mode turns the proxy's device side off
+#else
+    q->proxy_on  = 0;
+#endif
     return g_pipe_deferred_dev;
 }
 
@@ -906,6 +973,7 @@ void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, 
 
 void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
                       const void* src, size_t bytes) {
+    pipe_check();
     ompx_pipe_deferred* q = g_pipe_deferred_host;
     bool sent = false;
     if (q != nullptr && i >= 0 && i < OMPX_PIPE_AFTER_MAX && q->after.kernel == kernel) {
