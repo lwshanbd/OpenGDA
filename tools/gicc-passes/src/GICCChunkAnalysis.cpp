@@ -329,6 +329,10 @@ struct Plan {
     SmallVector<const SCEV *, 4> boxStride, boxExtent;
     SmallVector<EntryFact, 4> runs;
     uint64_t elem = 0;
+    // A put in the loop's body (checkLoopPut), and its index among the
+    // posts of the kernel's launches when the host posts it (postLoopPuts).
+    bool loop = false;
+    int post = -1;
 };
 
 // The most box puts one kernel sends by count (ompx__box_plan's kMaxPuts).
@@ -349,11 +353,13 @@ public:
         for (Function &F : M) {
             if (!isOffloadKernel(F)) continue;
             SmallVector<AfterPut, 2> made;
+            unsigned posts = 0;   // the host's posts for the puts after the kernel
             if (auto it = after.find(F.getName()); it != after.end()) {
                 made = stateAfterPuts(F, it->second);
+                posts = it->second.srcArgs.size();
                 FAM.invalidate(F, PreservedAnalyses::none());
             }
-            analyzeKernel(F);
+            analyzeKernel(F, posts);
             if (!made.empty()) {
                 unstateAfterPuts(F, made);
                 changed = true;
@@ -493,7 +499,7 @@ private:
         Value *counted;   // i1: the kernel sends it by count
         unsigned dims;
         uint64_t elem;
-        int after;        // afterIndex of the put
+        Value *after;     // i32: the put's index among the launch's posts, or -1
     };
 
     // State shared by the per-put checks of one kernel.
@@ -507,7 +513,12 @@ private:
         StoreInst *lbSt, *ubSt;
     };
 
-    void analyzeKernel(Function &F) {
+    void analyzeKernel(Function &F, unsigned posts) {
+        // What the host compile of this unit, which runs after this one, is
+        // to post for the kernel: nothing, unless postLoopPuts says more. A
+        // record an earlier compile left must not outlive the code it was
+        // made for.
+        if (lower) writeLoopPutSites(F.getName(), {});
         SmallVector<CallInst *, 4> puts, plain;
         for (Instruction &I : instructions(F)) {
             if (isCallTo(I, kPipelinedPut)) puts.push_back(cast<CallInst>(&I));
@@ -605,6 +616,7 @@ private:
                 plans.push_back(*P);
             }
         if (!lower) return;
+        postLoopPuts(F, plans, posts);
         // A box put to a peer that is not IPC-mapped is sent by the kernel
         // itself once its range is written, when the kernel can count the
         // teams past it: SPMD, a chunked distribute loop over 64-bit bounds.
@@ -641,6 +653,50 @@ private:
             if (verifyFunction(F, &errs()) || verifyFunction(*KI->outlined, &errs()))
                 report_fatal_error("gicc-chunk: lowering produced invalid IR");
         }
+    }
+
+    // The in-loop puts the host compile of this unit, which runs after this
+    // one, is to post before each launch (GICCAfterPut.h): every lowered one
+    // whose arguments are made of the kernel's formals as the host can
+    // compute them, numbered after the kernel's `posts` puts after it.
+    // Under DWQ the post queues the put, so the kernel can release it as it
+    // is written; without one it waits for the next quiet.
+    void postLoopPuts(Function &F, SmallVectorImpl<Plan> &plans, unsigned posts) {
+        if (!getConfig().metaDirSet) return;
+        Function *check = M.getFunction("ompx__loop_after");
+        SmallVector<LoopPutSite, 1> sites;
+        unsigned next = posts;
+        for (Plan &P : plans) {
+            if (!P.loop || !P.box) continue;
+            auto *src = dyn_cast<Argument>(P.srcObj);
+            auto peer = loopPutExpr(P.peer, F), dst = loopPutExpr(P.dst, F);
+            auto rel = loopPutExpr(P.rangeOff, F), bytes = loopPutExpr(P.bytes, F);
+            std::string why;
+            if (!check || check->isDeclaration())
+                why = "this unit does not include gicc/omp_pipeline.h";
+            else if (next >= kLaunchPostsMax)
+                why = "the launch posts " + std::to_string(kLaunchPostsMax) + " puts already";
+            else if (!src || src->getParent() != &F || src->getArgNo() == 0 || !peer || !dst ||
+                     !rel || !bytes)
+                why = "its arguments are not something the host can compute";
+            if (!why.empty()) {
+                out() << "[gicc-chunk]   in-loop put not posted by the host (under DWQ it "
+                         "waits for the next quiet): " << why << "\n";
+                continue;
+            }
+            LoopPutSite site;
+            site.index = next;
+            site.srcArg = src->getArgNo() - 1;
+            site.peer = std::move(*peer);
+            site.dst = std::move(*dst);
+            site.rel = std::move(*rel);
+            site.bytes = std::move(*bytes);
+            sites.push_back(std::move(site));
+            P.post = static_cast<int>(next++);
+            out() << "[gicc-chunk]   in-loop put posted by the host before each launch, as put "
+                  << P.post << "\n";
+        }
+        if (!sites.empty()) writeLoopPutSites(F.getName(), sites);
     }
 
     // The put's length as it is when the distribute loop ran. A phi merging
@@ -889,7 +945,9 @@ private:
         if (llvm::none_of(KF.W.boxes, [&](const BoxWrite &b) { return b.obj == obj; }))
             return illegal("put source '" + objName(obj) +
                            "' is not written by the worksharing loop");
-        return checkBoxPut(KF, CI, obj, off, v[3], v[0], v[1]);
+        auto P = checkBoxPut(KF, CI, obj, off, v[3], v[0], v[1]);
+        if (P) P->loop = true;
+        return P;
     }
 
     void printPlan(const KernelFacts &KF, const Plan &P) {
@@ -1054,16 +1112,30 @@ private:
         for (const EntryFact &f : P.runs)
             facts.push_back(X.expandCodeFor(f.x, f.x->getType(), pre));
 
+        Value *relV = P.post >= 0 ? X.expandCodeFor(P.rangeOff, I64, pre) : nullptr;
         IRBuilder<> B(KI.distInit);
         GlobalVariable *countedSlot = teamSlot(I32, "gicc.box.counted");
+        // Which of the launch's posts the put is: a put after the kernel is
+        // the one it was stated from, an in-loop put the one the host posted
+        // for it if that says what the kernel computes.
+        Value *after = ConstantInt::get(I32, afterIndex(P.put));
+        if (P.post >= 0) {
+            FunctionCallee check = M.getOrInsertFunction("ompx__loop_after", I32, I64, I32, I32,
+                                                         I32, Ptr, I64, I64);
+            const unsigned srcArg = cast<Argument>(P.srcObj)->getArgNo() - 1;
+            after = B.CreateCall(check, {ConstantInt::get(I64, afterPutHash(KI.K.getName())),
+                                         ConstantInt::get(I32, P.post),
+                                         ConstantInt::get(I32, srcArg), peerV, dstV, relV, lenV});
+            // The same in every thread: kept in a scalar register on AMDGPU.
+            if (Triple(M.getTargetTriple()).isAMDGPU())
+                after = B.CreateIntrinsic(Intrinsic::amdgcn_readfirstlane, {I32}, {after});
+        }
         // The peer's copy of the range when it is IPC-mapped; otherwise the
         // kernel sends by count (canCount) or the host does.
-        const int after = afterIndex(P.put);
         FunctionCallee peerFn = M.getOrInsertFunction("ompx__box_peer", Ptr, I32, Ptr, Ptr,
                                                       I64, I32, I32, Ptr);
         Value *pd = B.CreateCall(peerFn, {peerV, dstV, srcV, lenV,
-                                          ConstantInt::get(I32, canCount),
-                                          ConstantInt::get(I32, after),
+                                          ConstantInt::get(I32, canCount), after,
                                           B.CreateAddrSpaceCast(countedSlot, Ptr)});
         Value *counted = B.CreateICmpNE(B.CreateLoad(I32, countedSlot), ConstantInt::get(I32, 0));
         Value *mirror = B.CreateICmpNE(pd, ConstantPointerNull::get(Ptr));
@@ -1262,8 +1334,8 @@ private:
                 M, CT, false, GlobalValue::InternalLinkage, ConstantAggregateZero::get(CT),
                 "gicc.box.count", nullptr, GlobalValue::NotThreadLocal, kmpc::GlobalAddrSpace);
             Value *counted = B.CreateZExt(S.counted, I32);
-            Value *piece = B.CreateCall(pieceFn, {S.len, counted, ConstantInt::get(I32, K),
-                                                  ConstantInt::get(I32, S.after)});
+            Value *piece =
+                B.CreateCall(pieceFn, {S.len, counted, ConstantInt::get(I32, K), S.after});
             // Piece k: [k * piece, (k + 1) * piece) of the range, clipped to
             // it. The first is always there, the whole put when it is one
             // piece; one that clips to nothing is not counted. A loop, not K
@@ -1296,7 +1368,7 @@ private:
             L.CreateStore(src, slot(srcArr));
             L.CreateStore(len, slot(bytesArr));
             L.CreateStore(counter, slot(counterArr));
-            L.CreateStore(ConstantInt::get(I32, S.after), slot(afterArr));
+            L.CreateStore(S.after, slot(afterArr));
             L.CreateCall(hullFn, {src, len, S.box, ConstantInt::get(I32, S.dims), S.stride,
                                   S.extent, ConstantInt::get(I64, S.elem),
                                   L.CreateAddrSpaceCast(slot(loArr), Ptr),
