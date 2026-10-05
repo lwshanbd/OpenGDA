@@ -58,6 +58,10 @@ ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* 
 ompx__after_put(unsigned long long kernel, int i, int src_arg, int32_t* peer, void** dst,
                 int64_t* src_rel, int64_t* bytes)
     __asm__("ompx__after_put");
+[[omp::assume("ompx_spmd_amenable")]] static int32_t
+ompx__loop_after(unsigned long long kernel, int i, int src_arg, int peer, void* dst,
+                 int64_t src_rel, int64_t bytes)
+    __asm__("ompx__loop_after");
 [[omp::assume("ompx_spmd_amenable")]] static int64_t
 ompx__box_grab(unsigned long long* next, int64_t* slot)
     __asm__("ompx__box_grab");
@@ -890,5 +894,37 @@ ompx__after_put(unsigned long long kernel, int i, int src_arg, int32_t* peer, vo
     *dst = d;
     *src_rel = rel;
     *bytes = by;
+}
+
+// ---- an in-loop put the host posted ----------------------------------------
+//
+// The host posts an ompx_pipelined_put in the kernel's loop before each
+// launch, as put i (ompx_pipe_after in gicc/omp.h), from the arguments the
+// device compile recorded; under DWQ that queues it, for the kernel to ring
+// as it is written. Returns i when the post is this kernel's and says what
+// the kernel computes -- src is kernel argument src_arg plus src_rel --
+// else -1: no post, and the put goes as it did without one. A post that
+// says something else is recorded for the host, which stops before any of
+// its groups ring. Every thread of the team calls this, and every one
+// returns the same.
+static __attribute__((used)) int32_t
+ompx__loop_after(unsigned long long kernel, int i, int src_arg, int peer, void* dst,
+                 int64_t src_rel, int64_t bytes) {
+    int32_t r = -1;
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    ompx_pipe_deferred* q = ompx__pipe_deferred;
+    if (q != nullptr && i >= 0 && i < OMPX_PIPE_AFTER_MAX && q->after.kernel == kernel &&
+        q->after.e[i].armed) {
+        const ompx_pipe_after_put& e = q->after.e[i];
+        if (e.peer == peer && e.src_arg == src_arg && e.src_rel == src_rel &&
+            static_cast<int64_t>(e.bytes) == bytes && q->heap_base + e.dst_off == dst)
+            r = i;
+        else
+            ompx__pipe_fail(q, OMPX_PIPE_FAIL_POST, i);
+    }
+#else
+    (void)kernel; (void)i; (void)src_arg; (void)peer; (void)dst; (void)src_rel; (void)bytes;
+#endif
+    return r;
 }
 #pragma omp end declare target
