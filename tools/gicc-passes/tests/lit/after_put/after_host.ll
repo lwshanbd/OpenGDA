@@ -117,7 +117,7 @@ target triple = "x86_64-unknown-linux-gnu"
 @.offloading.entry.__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { ptr @.__omp_offloading_5c59c990_8b000004__Z6fencedPfli_l29.region_id, ptr @.offloading.entry_name.6, i64 0, i32 0, i32 0 }, section "omp_offloading_entries", align 1
 @.offloading.entry_name.7 = internal unnamed_addr constant [56 x i8] c"__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42\00"
 @.offloading.entry.__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { ptr @.__omp_offloading_5c59c990_8b000004__Z5gatedPfiiiiib_l42.region_id, ptr @.offloading.entry_name.7, i64 0, i32 0, i32 0 }, section "omp_offloading_entries", align 1
-@llvm.compiler.used = appending global [10 x ptr] [ptr @_ZL15ompx__box_countPjiPvPKvmi, ptr @ompx__after_put, ptr @ompx__block_put, ptr @ompx__block_put_one, ptr @ompx__box_due, ptr @ompx__box_hull, ptr @ompx__box_peer, ptr @ompx__box_plan, ptr @ompx__box_residual, ptr @ompx__peer_addr], section "llvm.metadata"
+@llvm.compiler.used = appending global [14 x ptr] [ptr @_ZL15ompx__box_countPjiPvPKvmiii, ptr @ompx__after_put, ptr @ompx__block_put, ptr @ompx__block_put_one, ptr @ompx__box_due, ptr @ompx__box_grab, ptr @ompx__box_grab_done, ptr @ompx__box_hull, ptr @ompx__box_peer, ptr @ompx__box_piece, ptr @ompx__box_plan, ptr @ompx__box_residual, ptr @ompx__loop_after, ptr @ompx__peer_addr], section "llvm.metadata"
 
 ; Function Attrs: mustprogress uwtable
 define weak dso_local void @ompx_pipelined_put(i32 noundef %0, ptr noundef %1, ptr noundef %2, i64 noundef %3) local_unnamed_addr #0 {
@@ -156,6 +156,17 @@ define internal noalias noundef ptr @ompx__box_peer(i32 %0, ptr nocapture readno
   ret ptr null
 }
 
+; Function Attrs: mustprogress nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.lifetime.start.p0(i64 immarg, ptr nocapture) #5
+
+; Function Attrs: mustprogress nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.lifetime.end.p0(i64 immarg, ptr nocapture) #5
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define internal noundef i64 @ompx__box_piece(i64 noundef returned %0, i32 %1, i32 %2, i32 %3) #2 {
+  ret i64 %0
+}
+
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(argmem: write) uwtable
 define internal void @ompx__box_hull(ptr nocapture readnone %0, i64 %1, ptr nocapture readnone %2, i32 %3, ptr nocapture readnone %4, ptr nocapture readnone %5, i64 %6, ptr nocapture noundef writeonly %7, ptr nocapture noundef writeonly %8) #4 {
   store i64 0, ptr %7, align 8, !tbaa !16
@@ -164,26 +175,31 @@ define internal void @ompx__box_hull(ptr nocapture readnone %0, i64 %1, ptr noca
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(argmem: write) uwtable
-define internal void @ompx__box_plan(i32 %0, ptr nocapture readnone %1, ptr nocapture readnone %2, ptr nocapture readnone %3, i64 %4, i64 %5, i64 %6, ptr nocapture noundef writeonly %7, ptr nocapture readnone %8) #4 {
+define internal void @ompx__box_plan(i32 %0, ptr nocapture readnone %1, ptr nocapture readnone %2, ptr nocapture readnone %3, i64 %4, i64 %5, i64 %6, ptr nocapture noundef writeonly %7, ptr nocapture readnone %8, ptr nocapture noundef writeonly %9) #4 {
   store i64 0, ptr %7, align 8, !tbaa !16
+  store i64 9223372036854775807, ptr %9, align 8, !tbaa !16
   ret void
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
-define internal void @_ZL15ompx__box_countPjiPvPKvmi(ptr nocapture readnone %0, i32 %1, ptr nocapture readnone %2, ptr nocapture readnone %3, i64 %4, i32 %5) #3 {
+define internal void @_ZL15ompx__box_countPjiPvPKvmiii(ptr nocapture readnone %0, i32 %1, ptr nocapture readnone %2, ptr nocapture readnone %3, i64 %4, i32 %5, i32 %6, i32 %7) #3 {
   ret void
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
-define internal noundef i64 @ompx__box_due(i32 %0, i64 %1, ptr nocapture readnone %2, ptr nocapture readnone %3, ptr nocapture readnone %4, ptr nocapture readnone %5, ptr nocapture readnone %6, ptr nocapture readnone %7, ptr nocapture readnone %8) #2 {
+define internal noundef i64 @ompx__box_grab(ptr nocapture readnone %0, ptr nocapture readnone %1) #2 {
+  ret i64 0
+}
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define internal void @ompx__box_grab_done(ptr nocapture readnone %0, ptr nocapture readnone %1) #2 {
+  ret void
+}
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define internal noundef i64 @ompx__box_due(i32 %0, i64 %1, ptr nocapture readnone %2, ptr nocapture readnone %3, ptr nocapture readnone %4, ptr nocapture readnone %5, ptr nocapture readnone %6, ptr nocapture readnone %7, ptr nocapture readnone %8, i32 %9) #2 {
   ret i64 9223372036854775807
 }
-
-; Function Attrs: mustprogress nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
-declare void @llvm.lifetime.start.p0(i64 immarg, ptr nocapture) #5
-
-; Function Attrs: mustprogress nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
-declare void @llvm.lifetime.end.p0(i64 immarg, ptr nocapture) #5
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(argmem: write) uwtable
 define internal void @ompx__after_put(i64 %0, i32 %1, i32 %2, ptr nocapture noundef writeonly %3, ptr nocapture noundef writeonly %4, ptr nocapture noundef writeonly %5, ptr nocapture noundef writeonly %6) #4 {
@@ -192,6 +208,11 @@ define internal void @ompx__after_put(i64 %0, i32 %1, i32 %2, ptr nocapture noun
   store i64 0, ptr %5, align 8, !tbaa !16
   store i64 0, ptr %6, align 8, !tbaa !16
   ret void
+}
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
+define internal noundef i32 @ompx__loop_after(i64 %0, i32 %1, i32 %2, i32 %3, ptr nocapture readnone %4, i64 %5, i64 %6) #2 {
+  ret i32 -1
 }
 
 ; Function Attrs: uwtable
