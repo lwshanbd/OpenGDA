@@ -31,6 +31,20 @@
 // distribute loop; -fno-openmp-target-big-jump-loop and
 // -fno-openmp-target-no-loop keep the ordinary form.
 //
+// An ompx_pipelined_put in a kernel's loop is the other way round: the
+// device side knows it and the host side does not, and the device side is
+// compiled first. So GICC_MODE=chunk-lower records each one the kernel
+// lowers in GICC_META_DIR/loop-<kernel hash>.json, its arguments as
+// expressions of the kernel's formals, and the host side of the same
+// compile posts it before every launch of the kernel whose arguments those
+// formals are passed as they are (a scalar or an is_device_ptr pointer,
+// not a mapped one) and that waits for the kernel (no nowait), after the
+// puts that follow the launch (ompx__after_post), and calls ompx__loop_done
+// right after it. The kernel checks the post against what it computes
+// (ompx__loop_after) and uses it only when it agrees. Under DWQ that is what
+// lets a kernel release such a put as it is written to a peer that is not
+// IPC-mapped; without the post, the put waits for the next quiet.
+//
 // Why moving the put into the kernel is sound: the put may land at the peer
 // at any moment of the synchronization epoch it is made in, so a race-free
 // program has the peer leave dst alone for all of it. Writes made earlier in
@@ -40,13 +54,21 @@
 // to the stack), along with there being nothing that could change the
 // source after the kernel.
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/Support/JSON.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
+
+namespace llvm {
+class SCEV;
+class Function;
+}  // namespace llvm
 
 namespace gicc::pass {
 
@@ -63,6 +85,34 @@ struct AfterPutSite {
 // Every site recorded in GICC_META_DIR, by kernel name; empty when the
 // build did not name a directory.
 llvm::StringMap<AfterPutSite> readAfterPutSites();
+
+// The puts one launch posts (OMPX_PIPE_AFTER_MAX): those after it first,
+// then the kernel's in-loop ones.
+constexpr unsigned kLaunchPostsMax = 8;
+
+// An in-loop put as the device side records it: its index among the
+// launch's posts, the kernel argument its source is an offset from (as in
+// AfterPutSite), and the put's peer, dst, source offset and length. Each
+// is a SCEV of the kernel's formals as JSON: {"op", "ty", ...} with op
+// const ("v"), arg ("n": formal n, launch argument n - 1), trunc, zext,
+// sext, ptrtoint, add, mul, udiv, umax, smax, umin, smin ("ops"), and ty
+// "ptr" or "i<bits>".
+struct LoopPutSite {
+    unsigned index = 0;
+    unsigned srcArg = 0;
+    llvm::json::Value peer = nullptr, dst = nullptr, rel = nullptr, bytes = nullptr;
+};
+
+// The SCEV S of kernel K's formals as such an expression; nullopt when it
+// has anything else in it.
+std::optional<llvm::json::Value> loopPutExpr(const llvm::SCEV *S, const llvm::Function &K);
+
+// Records kernel's in-loop puts, replacing what an earlier compile left;
+// removes the record when there are none.
+void writeLoopPutSites(llvm::StringRef kernel, llvm::ArrayRef<LoopPutSite> sites);
+
+// Every kernel's in-loop puts recorded in GICC_META_DIR.
+llvm::StringMap<llvm::SmallVector<LoopPutSite, 1>> readLoopPutSites();
 
 struct GICCAfterPutPass : llvm::PassInfoMixin<GICCAfterPutPass> {
     llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &MAM);
