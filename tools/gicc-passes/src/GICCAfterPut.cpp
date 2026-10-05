@@ -8,6 +8,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
@@ -71,10 +72,133 @@ StringMap<AfterPutSite> readAfterPutSites() {
     return sites;
 }
 
+std::optional<json::Value> loopPutExpr(const SCEV *S, const Function &K) {
+    Type *T = S->getType();
+    if (T->isIntegerTy() && T->getIntegerBitWidth() > 64) return std::nullopt;
+    const std::string ty =
+        T->isPointerTy() ? std::string("ptr") : "i" + std::to_string(T->getIntegerBitWidth());
+    StringRef op;
+    switch (S->getSCEVType()) {
+    case scConstant:
+        return json::Object{{"op", "const"}, {"ty", ty},
+                            {"v", cast<SCEVConstant>(S)->getAPInt().getSExtValue()}};
+    case scUnknown: {
+        // Formal 0 is the launch environment, which the host does not pass.
+        auto *A = dyn_cast<Argument>(cast<SCEVUnknown>(S)->getValue());
+        if (!A || A->getParent() != &K || A->getArgNo() == 0) return std::nullopt;
+        return json::Object{{"op", "arg"}, {"ty", ty}, {"n", static_cast<int64_t>(A->getArgNo())}};
+    }
+    case scTruncate:           op = "trunc"; break;
+    case scZeroExtend:         op = "zext"; break;
+    case scSignExtend:         op = "sext"; break;
+    case scPtrToInt:           op = "ptrtoint"; break;
+    case scAddExpr:            op = "add"; break;
+    case scMulExpr:            op = "mul"; break;
+    case scUDivExpr:           op = "udiv"; break;
+    case scUMaxExpr:           op = "umax"; break;
+    case scSMaxExpr:           op = "smax"; break;
+    case scUMinExpr:           op = "umin"; break;
+    case scSMinExpr:           op = "smin"; break;
+    // Differs from umin only in which operand's poison it passes on.
+    case scSequentialUMinExpr: op = "umin"; break;
+    default:
+        return std::nullopt;
+    }
+    json::Array ops;
+    for (const SCEV *O : S->operands()) {
+        auto v = loopPutExpr(O, K);
+        if (!v) return std::nullopt;
+        ops.push_back(std::move(*v));
+    }
+    return json::Object{{"op", op}, {"ty", ty}, {"ops", std::move(ops)}};
+}
+
+namespace {
+SmallString<256> loopPutFile(StringRef kernel) {
+    char name[64];
+    snprintf(name, sizeof(name), "loop-%016llx.json",
+             static_cast<unsigned long long>(afterPutHash(kernel)));
+    SmallString<256> path(getConfig().metaDir);
+    sys::path::append(path, name);
+    return path;
+}
+}  // namespace
+
+void writeLoopPutSites(StringRef kernel, ArrayRef<LoopPutSite> sites) {
+    const Config &cfg = getConfig();
+    if (!cfg.metaDirSet) return;
+    SmallString<256> path = loopPutFile(kernel);
+    if (sites.empty()) {
+        sys::fs::remove(path);
+        return;
+    }
+    json::Array puts;
+    for (const LoopPutSite &s : sites)
+        puts.push_back(json::Object{{"index", static_cast<int64_t>(s.index)},
+                                    {"src_arg", static_cast<int64_t>(s.srcArg)},
+                                    {"peer", s.peer}, {"dst", s.dst}, {"rel", s.rel},
+                                    {"bytes", s.bytes}});
+    sys::fs::create_directories(cfg.metaDir);
+    std::error_code ec;
+    raw_fd_ostream os(path, ec);
+    if (ec) {
+        errs() << "[gicc-chunk] cannot write " << path << ": " << ec.message() << "\n";
+        return;
+    }
+    os << json::Value(json::Object{{"kernel", kernel}, {"puts", std::move(puts)}}) << "\n";
+}
+
+StringMap<SmallVector<LoopPutSite, 1>> readLoopPutSites() {
+    StringMap<SmallVector<LoopPutSite, 1>> sites;
+    const Config &cfg = getConfig();
+    if (!cfg.metaDirSet) return sites;
+    std::error_code ec;
+    for (sys::fs::directory_iterator it(cfg.metaDir, ec), end; it != end && !ec;
+         it.increment(ec)) {
+        StringRef file = sys::path::filename(it->path());
+        if (!file.starts_with("loop-") || !file.ends_with(".json")) continue;
+        auto buf = MemoryBuffer::getFile(it->path());
+        if (!buf) continue;
+        Expected<json::Value> parsed = json::parse((*buf)->getBuffer());
+        if (!parsed) {
+            consumeError(parsed.takeError());
+            continue;
+        }
+        const json::Object *root = parsed->getAsObject();
+        auto kernel = root ? root->getString("kernel") : std::nullopt;
+        const json::Array *puts = root ? root->getArray("puts") : nullptr;
+        if (!kernel || !puts) continue;
+        SmallVector<LoopPutSite, 1> list;
+        for (const json::Value &v : *puts) {
+            const json::Object *o = v.getAsObject();
+            auto index = o ? o->getInteger("index") : std::nullopt;
+            auto srcArg = o ? o->getInteger("src_arg") : std::nullopt;
+            const json::Value *peer = o ? o->get("peer") : nullptr;
+            const json::Value *dst = o ? o->get("dst") : nullptr;
+            const json::Value *rel = o ? o->get("rel") : nullptr;
+            const json::Value *bytes = o ? o->get("bytes") : nullptr;
+            if (!index || !srcArg || *index < 0 || *index >= kLaunchPostsMax || *srcArg < 0 ||
+                !peer || !dst || !rel || !bytes)
+                continue;
+            LoopPutSite s;
+            s.index = static_cast<unsigned>(*index);
+            s.srcArg = static_cast<unsigned>(*srcArg);
+            s.peer = *peer;
+            s.dst = *dst;
+            s.rel = *rel;
+            s.bytes = *bytes;
+            list.push_back(std::move(s));
+        }
+        sites[*kernel] = std::move(list);
+    }
+    return sites;
+}
+
 namespace {
 
 constexpr StringLiteral kLaunch  = "__tgt_target_kernel";
 constexpr StringLiteral kHostPut = "ompx_put_host";
+constexpr StringLiteral kLoopDone = "ompx__loop_done";
 
 raw_ostream &out() { return errs(); }
 
@@ -249,8 +373,9 @@ bool benign(Instruction &I) {
                isa<AllocaInst>(getUnderlyingObject(S->getPointerOperand()));
     if (auto *CB = dyn_cast<CallBase>(&I)) {
         StringRef n = calleeName(*CB);
-        // Another put: it only writes the peer's memory.
-        if (n == kHostPut) return true;
+        // Another put: it only writes the peer's memory. So does the end of
+        // a launch with in-loop puts, which may ring their groups.
+        if (n == kHostPut || n == kLoopDone) return true;
         // The region's host fallback: the kernel itself, run on the host.
         if (n.starts_with("__omp_offloading_")) return true;
         if (isa<DbgInfoIntrinsic>(CB) || CB->isLifetimeStartOrEnd()) return true;
@@ -413,6 +538,201 @@ void bracket(Module &M, FoundSite &S, DominatorTree &DT) {
     }
 }
 
+// ---- in-loop puts (LoopPutSite) ---------------------------------------------
+
+constexpr uint64_t kMapLiteral = 0x100;   // OMP_MAP_LITERAL: handed over as is
+constexpr int64_t kArgsTypes = 32, kArgsFlags = 64;   // in __tgt_kernel_arguments
+
+// What launch L leaves at offset `off` of its __tgt_kernel_arguments: the
+// one store there before it, or a zeroing memset over it; null if neither.
+Value *launchField(CallInst *L, int64_t off, DominatorTree &DT, const DataLayout &DL) {
+    Function &F = *L->getFunction();
+    const Value *kargs = L->getArgOperand(5)->stripPointerCasts();
+    if (StoreInst *S = storeTo(F, kargs, off, L, DT, DL)) return S->getValueOperand();
+    for (Instruction &I : instructions(F)) {
+        auto *MS = dyn_cast<MemSetInst>(&I);
+        if (!MS || !DT.dominates(MS, L)) continue;
+        APInt o(DL.getIndexTypeSizeInBits(MS->getDest()->getType()), 0);
+        if (MS->getDest()->stripAndAccumulateConstantOffsets(DL, o, true) != kargs) continue;
+        auto *len = dyn_cast<ConstantInt>(MS->getLength());
+        auto *val = dyn_cast<ConstantInt>(MS->getValue());
+        if (len && val && val->isZero() && o.getSExtValue() <= off &&
+            off + 8 <= o.getSExtValue() + static_cast<int64_t>(len->getZExtValue()))
+            return ConstantInt::get(Type::getInt64Ty(F.getContext()), 0);
+    }
+    return nullptr;
+}
+
+Value *coerce(IRBuilder<> &B, Value *V, Type *T) {
+    Type *S = V->getType();
+    if (S == T) return V;
+    if (S->isPointerTy() && T->isIntegerTy()) return B.CreatePtrToInt(V, T);
+    if (S->isIntegerTy() && T->isPointerTy())
+        return B.CreateIntToPtr(B.CreateZExtOrTrunc(V, B.getInt64Ty()), T);
+    if (S->isIntegerTy() && T->isIntegerTy()) return B.CreateZExtOrTrunc(V, T);
+    return nullptr;
+}
+
+// What the launch hands the kernel, by argument, with the map types that
+// say which of them reach it unchanged.
+struct LaunchView {
+    SmallVector<Value *, 16> args;
+    const ConstantDataArray *types = nullptr;
+};
+
+// Launch argument j as the kernel receives it, as a T; null unless the
+// launch passes it as is (a scalar, an is_device_ptr pointer): a mapped
+// pointer reaches the kernel translated.
+Value *launchArg(IRBuilder<> &B, const LaunchView &LV, uint64_t j, Type *T) {
+    if (j >= LV.args.size() || !LV.args[j] || !LV.types || j >= LV.types->getNumElements() ||
+        !(LV.types->getElementAsInteger(j) & kMapLiteral))
+        return nullptr;
+    return coerce(B, LV.args[j], T);
+}
+
+Type *exprType(LLVMContext &C, StringRef ty) {
+    if (ty == "ptr") return PointerType::get(C, 0);
+    unsigned bits = 0;
+    if (ty.consume_front("i") && !ty.getAsInteger(10, bits) && bits >= 1 && bits <= 64)
+        return IntegerType::get(C, bits);
+    return nullptr;
+}
+
+// An expression of loopPutExpr's, computed before the launch; null if it
+// does not make sense or names an argument launchArg will not give.
+Value *buildExpr(const json::Value &V, IRBuilder<> &B, const LaunchView &LV, unsigned depth = 0) {
+    const json::Object *o = V.getAsObject();
+    auto op = o ? o->getString("op") : std::nullopt;
+    auto tyName = o ? o->getString("ty") : std::nullopt;
+    Type *T = tyName ? exprType(B.getContext(), *tyName) : nullptr;
+    if (!op || !T || depth > 64) return nullptr;
+    if (*op == "const") {
+        auto v = o->getInteger("v");
+        return v && T->isIntegerTy() ? ConstantInt::get(T, *v, true) : nullptr;
+    }
+    if (*op == "arg") {
+        auto n = o->getInteger("n");
+        return n && *n >= 1 ? launchArg(B, LV, static_cast<uint64_t>(*n - 1), T) : nullptr;
+    }
+    const json::Array *list = o->getArray("ops");
+    if (!list || list->empty()) return nullptr;
+    SmallVector<Value *, 4> xs;
+    for (const json::Value &e : *list) {
+        Value *x = buildExpr(e, B, LV, depth + 1);
+        if (!x) return nullptr;
+        xs.push_back(x);
+    }
+    if (*op == "trunc" || *op == "zext" || *op == "sext") {
+        if (xs.size() != 1 || !T->isIntegerTy() || !xs[0]->getType()->isIntegerTy()) return nullptr;
+        const unsigned from = xs[0]->getType()->getIntegerBitWidth(), to = T->getIntegerBitWidth();
+        if (*op == "trunc" ? from < to : from > to) return nullptr;
+        return *op == "trunc" ? B.CreateTrunc(xs[0], T)
+             : *op == "zext"  ? B.CreateZExt(xs[0], T)
+                              : B.CreateSExt(xs[0], T);
+    }
+    if (*op == "ptrtoint") {
+        if (xs.size() != 1 || !xs[0]->getType()->isPointerTy() || !T->isIntegerTy()) return nullptr;
+        return B.CreatePtrToInt(xs[0], T);
+    }
+    if (*op == "add" && T->isPointerTy()) {
+        // One pointer, and offsets of its index width.
+        Value *base = nullptr, *off = nullptr;
+        for (Value *x : xs) {
+            if (x->getType()->isPointerTy()) {
+                if (base) return nullptr;
+                base = x;
+            } else if (x->getType()->isIntegerTy()) {
+                Value *w = B.CreateSExtOrTrunc(x, B.getInt64Ty());
+                off = off ? B.CreateAdd(off, w) : w;
+            } else {
+                return nullptr;
+            }
+        }
+        if (!base) return nullptr;
+        return off ? B.CreateGEP(B.getInt8Ty(), base, off) : base;
+    }
+    if (!T->isIntegerTy() || any_of(xs, [&](Value *x) { return x->getType() != T; }))
+        return nullptr;
+    if (*op == "udiv") {
+        if (xs.size() != 2) return nullptr;
+        // Never a division by zero on the host; the kernel would compute
+        // something else there, and say so.
+        return B.CreateUDiv(xs[0], B.CreateBinaryIntrinsic(Intrinsic::umax, xs[1],
+                                                           ConstantInt::get(T, 1)));
+    }
+    Intrinsic::ID minmax = *op == "umax" ? Intrinsic::umax
+                         : *op == "smax" ? Intrinsic::smax
+                         : *op == "umin" ? Intrinsic::umin
+                         : *op == "smin" ? Intrinsic::smin
+                                         : Intrinsic::not_intrinsic;
+    if (*op != "add" && *op != "mul" && minmax == Intrinsic::not_intrinsic) return nullptr;
+    Value *r = xs[0];
+    for (size_t k = 1; k < xs.size(); ++k)
+        r = *op == "add"   ? B.CreateAdd(r, xs[k])
+          : *op == "mul"   ? B.CreateMul(r, xs[k])
+                           : B.CreateBinaryIntrinsic(minmax, r, xs[k]);
+    return r;
+}
+
+// Posts the kernel's in-loop puts before launch L, from what L hands it,
+// and has ompx__loop_done follow L for each one posted. Returns how many
+// were; `why` says why the rest were not.
+unsigned postLoopPuts(Module &M, CallInst *L, StringRef kernel, ArrayRef<LoopPutSite> sites,
+                      DominatorTree &DT, std::string &why) {
+    const DataLayout &DL = M.getDataLayout();
+    // A nowait launch returns before the kernel ends: its puts are not
+    // over when the call after it would ring them.
+    auto *flags = dyn_cast_or_null<ConstantInt>(launchField(L, kArgsFlags, DT, DL));
+    if (!flags || (flags->getZExtValue() & 1)) {
+        why = "the launch may not wait for the kernel (nowait)";
+        return 0;
+    }
+    LaunchView LV;
+    LV.args = launchArgs(L, DT, DL);
+    if (Value *t = launchField(L, kArgsTypes, DT, DL))
+        if (auto *G = dyn_cast<GlobalVariable>(t->stripPointerCasts());
+            G && G->hasDefinitiveInitializer())
+            LV.types = dyn_cast<ConstantDataArray>(G->getInitializer());
+    if (LV.args.empty() || !LV.types) {
+        why = "cannot read what the launch hands the kernel";
+        return 0;
+    }
+    LLVMContext &Ctx = M.getContext();
+    Type *I64 = Type::getInt64Ty(Ctx), *I32 = Type::getInt32Ty(Ctx);
+    auto *Ptr = PointerType::get(Ctx, 0);
+    FunctionCallee post = M.getOrInsertFunction("ompx__after_post", Type::getVoidTy(Ctx), I64,
+                                                I32, I32, I32, I32, Ptr, Ptr, I64, I64);
+    FunctionCallee done = M.getOrInsertFunction(kLoopDone, Type::getVoidTy(Ctx), I64, I32);
+    Constant *hash = ConstantInt::get(I64, afterPutHash(kernel));
+    unsigned posted = 0;
+    for (const LoopPutSite &s : sites) {
+        IRBuilder<> B(L);
+        Instruction *before = L->getPrevNode();
+        Value *peer = buildExpr(s.peer, B, LV), *dst = buildExpr(s.dst, B, LV);
+        Value *rel = buildExpr(s.rel, B, LV), *bytes = buildExpr(s.bytes, B, LV);
+        Value *base = launchArg(B, LV, s.srcArg, Ptr);
+        if (peer) peer = coerce(B, peer, I32);
+        if (dst) dst = coerce(B, dst, Ptr);
+        if (rel) rel = coerce(B, rel, I64);
+        if (bytes) bytes = coerce(B, bytes, I64);
+        if (!peer || !dst || !rel || !bytes || !base) {
+            // Take back what was built for it.
+            while (L->getPrevNode() != before) L->getPrevNode()->eraseFromParent();
+            why = "put " + std::to_string(s.index) + ": an argument it is computed from is not "
+                  "handed to the kernel as is (a mapped pointer?)";
+            continue;
+        }
+        // A negative peer sends nothing, and its dst may be anything.
+        Value *armed = B.CreateZExt(B.CreateICmpSGE(peer, ConstantInt::get(I32, 0)), I32);
+        Value *src = B.CreateGEP(Type::getInt8Ty(Ctx), base, rel);
+        B.CreateCall(post, {hash, ConstantInt::get(I32, s.index), ConstantInt::get(I32, s.srcArg),
+                            armed, peer, dst, src, rel, bytes});
+        IRBuilder<>(L->getNextNode()).CreateCall(done, {hash, ConstantInt::get(I32, s.index)});
+        ++posted;
+    }
+    return posted;
+}
+
 }  // namespace
 
 PreservedAnalyses GICCAfterPutPass::run(Module &M, ModuleAnalysisManager &MAM) {
@@ -422,13 +742,44 @@ PreservedAnalyses GICCAfterPutPass::run(Module &M, ModuleAnalysisManager &MAM) {
     if (!discover && !rewrite) return PreservedAnalyses::all();
     Triple T(M.getTargetTriple());
     if (T.isNVPTX() || T.isAMDGPU()) return PreservedAnalyses::all();
-    if (!M.getFunction(kHostPut) || !M.getFunction(kLaunch)) return PreservedAnalyses::all();
+    if (!M.getFunction(kLaunch)) return PreservedAnalyses::all();
+    const bool hostPuts = M.getFunction(kHostPut) != nullptr;
     auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
     StringMap<AfterPutSite> known;
-    if (rewrite) known = readAfterPutSites();
+    StringMap<SmallVector<LoopPutSite, 1>> loops;
+    if (rewrite) {
+        known = readAfterPutSites();
+        loops = readLoopPutSites();
+    }
+    if (!hostPuts && loops.empty()) return PreservedAnalyses::all();
 
     json::Array recorded;
     bool changed = false;
+    // Records (put-discover) or brackets (chunk-lower) the puts after one
+    // launch.
+    auto afterPuts = [&](FoundSite &S, DominatorTree &DT) {
+        json::Array srcArgs;
+        for (const FoundPut &P : S.puts) srcArgs.push_back(static_cast<int64_t>(P.srcArg));
+        out() << "[gicc-after] " << S.kernel << ": " << S.puts.size()
+              << " put(s) after the launch can go from the kernel\n";
+        if (discover) {
+            recorded.push_back(json::Object{{"kernel", S.kernel}, {"src_args", std::move(srcArgs)}});
+            return;
+        }
+        // Bracket only what the first compile recorded the same way: the
+        // device side of this unit was built from that record.
+        auto it = known.find(S.kernel);
+        bool same = it != known.end() && it->second.srcArgs.size() == S.puts.size();
+        for (unsigned i = 0; same && i < S.puts.size(); ++i)
+            same = it->second.srcArgs[i] == S.puts[i].srcArg;
+        if (!same) {
+            out() << "[gicc-after] " << S.kernel << ": not in GICC_META_DIR as found; "
+                     "rebuild with GICC_MODE=put-discover first\n";
+            return;
+        }
+        bracket(M, S, DT);
+        changed = true;
+    };
     for (Function &F : M) {
         if (F.isDeclaration()) continue;
         SmallVector<CallInst *, 4> launches;
@@ -440,29 +791,24 @@ PreservedAnalyses GICCAfterPutPass::run(Module &M, ModuleAnalysisManager &MAM) {
         auto &PDT = FAM.getResult<PostDominatorTreeAnalysis>(F);
         auto &LI = FAM.getResult<LoopAnalysis>(F);
         for (CallInst *L : launches) {
+            // The puts after the launch first: their check reads the code
+            // between it and them, which the in-loop puts' end call joins.
             FoundSite S;
-            if (!findSite(L, DT, PDT, LI, M.getDataLayout(), S)) continue;
-            json::Array srcArgs;
-            for (const FoundPut &P : S.puts) srcArgs.push_back(static_cast<int64_t>(P.srcArg));
-            out() << "[gicc-after] " << S.kernel << ": " << S.puts.size()
-                  << " put(s) after the launch can go from the kernel\n";
-            if (discover) {
-                recorded.push_back(json::Object{{"kernel", S.kernel}, {"src_args", std::move(srcArgs)}});
-                continue;
+            if (hostPuts && findSite(L, DT, PDT, LI, M.getDataLayout(), S)) afterPuts(S, DT);
+            if (!rewrite) continue;
+            const std::string kernel = launchedKernel(L);
+            auto it = loops.find(kernel);
+            if (it == loops.end()) continue;
+            std::string why;
+            const unsigned posted = postLoopPuts(M, L, kernel, it->second, DT, why);
+            if (posted) {
+                out() << "[gicc-after] " << kernel << ": " << posted
+                      << " in-loop put(s) posted before the launch\n";
+                changed = true;
             }
-            // Bracket only what the first compile recorded the same way: the
-            // device side of this unit was built from that record.
-            auto it = known.find(S.kernel);
-            bool same = it != known.end() && it->second.srcArgs.size() == S.puts.size();
-            for (unsigned i = 0; same && i < S.puts.size(); ++i)
-                same = it->second.srcArgs[i] == S.puts[i].srcArg;
-            if (!same) {
-                out() << "[gicc-after] " << S.kernel << ": not in GICC_META_DIR as found; "
-                         "rebuild with GICC_MODE=put-discover first\n";
-                continue;
-            }
-            bracket(M, S, DT);
-            changed = true;
+            if (posted < it->second.size())
+                out() << "[gicc-after] " << kernel << ": an in-loop put is not posted (under "
+                         "DWQ it waits for the next quiet): " << why << "\n";
         }
     }
     if (discover && !recorded.empty()) {
