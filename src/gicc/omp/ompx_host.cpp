@@ -436,7 +436,7 @@ void nodb_flush() {
 void pipe_check() {
     const ompx_pipe_deferred* q = g_pipe_deferred_host;
     if (q == nullptr || q->fail == 0) return;
-    char what[160];
+    char what[256];
     const long long a = q->fail_arg;
     switch (q->fail) {
     case OMPX_PIPE_FAIL_NO_PROXY:
