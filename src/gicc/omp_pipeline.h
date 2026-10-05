@@ -47,12 +47,19 @@
 // grain whatever GICC_CHUNK_GRAIN says: to a same-node peer each store that
 // lands in the range is repeated into the peer's copy, and the bytes of the
 // range the kernel never writes are sent once, at the start of the kernel.
-// To any other peer the range goes whole, once every team has stored its
-// part of it: the kernel runs the loop's chunks that store into the range
-// first and sends it through the CPU proxy while the rest of the loop runs.
-// That needs an SPMD kernel (the put in the loop's body) and the proxy;
-// otherwise the next ompx_quiet or ompx_fence sends it, as it would a put
-// after the kernel.
+// To any other peer the range goes in pieces, each once every team has
+// stored its part of it: the kernel runs the loop's chunks that store into
+// the range first and sends each piece through the CPU proxy while the rest
+// of the loop runs. That needs an SPMD kernel (the put in the loop's body)
+// and the proxy; otherwise the next ompx_quiet or ompx_fence sends it, as it
+// would a put after the kernel. Under DWQ, where the NIC runs only
+// transfers the host queued, the build records the put's arguments in
+// GICC_META_DIR as functions of the kernel's (set it for chunk-lower;
+// build_giomp_after.sh does), and the host queues the pieces before each
+// launch, for the kernel to release as it writes them. That needs the
+// launch to wait for the kernel (no nowait) and to hand the kernel what the
+// put is computed from as it is: scalars and is_device_ptr pointers, not
+// mapped ones; otherwise the put waits for the next quiet.
 //
 // A negative peer sends nothing, so a kernel can state a put that applies
 // to only some ranks (no neighbour at the edge of a decomposition).
