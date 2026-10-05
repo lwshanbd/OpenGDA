@@ -22,10 +22,12 @@
 //
 // Every neighbour gets the pipelined put. A same-node one takes the stores
 // as they happen; one across nodes is sent the range by the kernel once all
-// teams are past it (CPU proxy, SPMD kernel) or by the fence (DWQ, or the
-// generic slab kernel). Run it on two nodes to check the second kind.
+// teams are past it (SPMD kernel: through the CPU proxy, or under DWQ by
+// ringing the pieces the host queued) or by the fence (the generic slab
+// kernel). Run it on two nodes to check the second kind.
 //
-// Build with GICC_MODE=chunk-lower and -foffload-lto -fpass-plugin=...
+// Build with GICC_MODE=chunk-lower, GICC_META_DIR (the DWQ queueing) and
+// -foffload-lto -fpass-plugin=...
 // Usage: pipeline_box_check [steps]
 #include "gicc/omp.h"
 #include "gicc/omp_pipeline.h"

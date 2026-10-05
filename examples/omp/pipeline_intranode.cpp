@@ -40,7 +40,10 @@
 //                SPMD (a statement after the loop makes clang emit a generic
 //                kernel, which costs up to 28% on MI250X), and the pass
 //                lowers it in box form: stores mirrored to a same-node peer,
-//                a put to any other peer sent by the last team to finish.
+//                a put to any other peer sent in pieces, each by the last
+//                team past it -- under DWQ by ringing the pieces the host
+//                queued before the launch, which needs GICC_META_DIR in the
+//                build (build_giomp_after.sh sets it).
 //   compute-teams  the compiled kernel's shape without the send, to tell
 //                what the shape costs from what sending costs.
 //   nobarrier    pipelined without waiting for the block to be complete:
@@ -57,7 +60,7 @@
 //
 // Build (the pass must run on the device compile, or ompx_pipelined_put
 // does not link; GICC_CHUNK_GRAIN=element|block picks the grain):
-//   GICC_MODE=chunk-lower GIOMP_BACKEND=cuda \
+//   GICC_MODE=chunk-lower GICC_META_DIR=OUT.meta GIOMP_BACKEND=cuda \
 //   GIOMP_EXTRA_FLAGS="-foffload-lto -fpass-plugin=<build>/libgicc-passes.so" \
 //   bash examples/omp/build_giomp_example.sh examples/omp/pipeline_intranode.cpp OUT
 // Run  : GICC_HALO_IPC=1 GICC_PROXY_ENABLED=1 GICC_SKIP_DWQ_INIT=1 \
