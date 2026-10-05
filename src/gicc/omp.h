@@ -193,6 +193,13 @@ typedef struct ompx_pipe_deferred_put {
 // group, so the kernel rings a piece once it and every piece before it is
 // written, and leaves in `fired` how many it rang; the host rings the rest
 // after the kernel. The NIC reads the source when the bell rings.
+//
+// An ompx_pipelined_put in a kernel's loop is posted the same way, after
+// the kernel's puts that follow it: the device compile records its
+// arguments as functions of the kernel's (GICC_META_DIR/loop-*.json), and
+// the host computes them before each launch. The kernel checks the post
+// against what it computes itself (OMPX_PIPE_FAIL_POST); ompx__loop_done
+// rings what it did not, right after the launch.
 #define OMPX_PIPE_AFTER_MAX 8
 #define OMPX_PIPE_PIECES_MAX 64
 typedef struct ompx_pipe_after_put {
@@ -220,6 +227,7 @@ typedef struct ompx_pipe_after {
 #define OMPX_PIPE_FAIL_DIMS     2   // a box with too many dims (arg: dims)
 #define OMPX_PIPE_FAIL_ALIGN    3   // range and box not aligned to the stores (arg: bytes)
 #define OMPX_PIPE_FAIL_OVERLAP  4   // the box's rows overlap
+#define OMPX_PIPE_FAIL_POST     5   // an in-loop put posted unlike the kernel computes it (arg: i)
 
 typedef struct ompx_pipe_deferred {
     unsigned               n;
@@ -242,6 +250,7 @@ void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, 
                       void* dst, const void* src, long long src_rel, size_t bytes);
 void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
                       const void* src, size_t bytes);
+void ompx__loop_done(unsigned long long kernel, int i);
 
 // Internal: the size of the pieces a pipelined put to a peer that is not
 // IPC-mapped goes out in, each sent once the kernel has written it: at least
