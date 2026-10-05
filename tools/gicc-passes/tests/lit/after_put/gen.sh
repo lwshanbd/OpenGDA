@@ -139,6 +139,8 @@ CHECKS
 ; the host's post before it uses it.
 ; RUN: rm -rf %t.meta && mkdir -p %t.meta
 ; RUN: echo stale > %t.meta/loop-0000000000000000.json
+; RUN: env GICC_MODE=put-discover GICC_META_DIR=%t.meta %opt -load-pass-plugin=%gicc_passes_so \
+; RUN:   -passes=gicc-after-put -disable-output %S/loop_host.ll 2>/dev/null
 ; RUN: env GICC_MODE=chunk-lower GICC_META_DIR=%t.meta %opt -load-pass-plugin=%gicc_passes_so \
 ; RUN:   -passes='default<O3>' -S %s 2>&1 | %FileCheck %s
 ; RUN: cat %t.meta/loop-*.json | %FileCheck %s --check-prefix=JSON
@@ -155,6 +157,12 @@ CHECKS
 ; CHECK: call ptr @ompx__box_peer({{.*}}, i32 1, i32 [[U]], ptr
 ; CHECK: call i64 @ompx__box_piece(i64 {{.*}}, i32 64, i32 [[U]])
 ; CHECK-NOT: call void @ompx_pipelined_put
+; The kernel with a put after it as well reads that post first, then its
+; in-loop put's as the second.
+; CHECK-LABEL: define {{.*}} @__omp_offloading_{{.*}}both
+; CHECK: call void @ompx__after_put(i64 [[HB:-?[0-9]+]], i32 0,
+; CHECK: call i32 @ompx__loop_after(i64 [[HB]], i32 1,
+; CHECK-NOT: call void @ompx_pipelined_put
 ;
 ; Every kernel's record: peer, dst and length from the formals; the source
 ; is formal 3 (the launch's argument 2) plus 4 * (nx - 4) * ny. A record no
@@ -162,6 +170,7 @@ CHECKS
 ; JSON-DAG: {"kernel":"__omp_offloading_{{[^"]*}}face{{[^"]*}}","puts":[{"bytes":{"op":"mul","ops":[{"op":"const","ty":"i64","v":16},{"n":{{[0-9]+}},"op":"arg","ty":"i64"}],"ty":"i64"},"dst":{"n":{{[0-9]+}},"op":"arg","ty":"ptr"},"index":0,"peer":{"op":"trunc","ops":[{"n":{{[0-9]+}},"op":"arg","ty":"i64"}],"ty":"i32"},"rel":{"op":"mul","ops":[{"op":"const","ty":"i64","v":4},{"op":"add","ops":[{"op":"const","ty":"i64","v":-4},{"n":{{[0-9]+}},"op":"arg","ty":"i64"}],"ty":"i64"},{"n":{{[0-9]+}},"op":"arg","ty":"i64"}],"ty":"i64"},"src_arg":2}]}
 ; JSON-DAG: {"kernel":"__omp_offloading_{{[^"]*}}mapped
 ; JSON-DAG: {"kernel":"__omp_offloading_{{[^"]*}}later
+; JSON-DAG: {"kernel":"__omp_offloading_{{[^"]*}}both{{[^"]*}}","puts":[{{.*}}"index":1,
 ; JSON-DAG: stale
 ;
 HEAD
@@ -177,6 +186,8 @@ HEAD
 ; The device test's compile records the in-loop puts; the host posts each
 ; one before the launch and ends it after, where it can.
 ; RUN: rm -rf %t.meta && mkdir -p %t.meta
+; RUN: env GICC_MODE=put-discover GICC_META_DIR=%t.meta %opt -load-pass-plugin=%gicc_passes_so \
+; RUN:   -passes=gicc-after-put -disable-output %s 2>/dev/null
 ; RUN: env GICC_MODE=chunk-lower GICC_META_DIR=%t.meta %opt -load-pass-plugin=%gicc_passes_so \
 ; RUN:   -passes='default<O3>' -disable-output %S/loop_device.ll 2>/dev/null
 ; RUN: env GICC_MODE=chunk-lower GICC_META_DIR=%t.meta %opt -load-pass-plugin=%gicc_passes_so \
@@ -187,6 +198,8 @@ HEAD
 ; MSG-DAG: [gicc-after] __omp_offloading_{{.*}}face{{.*}}: 1 in-loop put(s) posted before the launch
 ; MSG-DAG: [gicc-after] __omp_offloading_{{.*}}mapped{{.*}}: an in-loop put is not posted {{.*}}: put 0: an argument it is computed from is not handed to the kernel as is (a mapped pointer?)
 ; MSG-DAG: [gicc-after] __omp_offloading_{{.*}}later{{.*}}: an in-loop put is not posted {{.*}}: the launch may not wait for the kernel (nowait)
+; MSG-DAG: [gicc-after] __omp_offloading_{{.*}}both{{.*}}: 1 put(s) after the launch can go from the kernel
+; MSG-DAG: [gicc-after] __omp_offloading_{{.*}}both{{.*}}: 1 in-loop put(s) posted before the launch
 ;
 ; Peer, dst, source and length computed from what the launch hands the
 ; kernel, armed when the peer is not negative.
@@ -206,6 +219,14 @@ HEAD
 ; CHECK-LABEL: define {{.*}}@_Z5later
 ; CHECK-NOT: ompx__after_post
 ; CHECK-NOT: ompx__loop_done
+; The put after the launch is post 0, the in-loop put post 1; each is
+; ended after the launch in its own way.
+; CHECK-LABEL: define {{.*}}@_Z4both
+; CHECK: call void @ompx__after_post(i64 [[HB:-?[0-9]+]], i32 0,
+; CHECK: call void @ompx__after_post(i64 [[HB]], i32 1,
+; CHECK-NEXT: call i32 @__tgt_target_kernel(
+; CHECK-NEXT: call void @ompx__loop_done(i64 [[HB]], i32 1)
+; CHECK: call void @ompx__after_done(i64 [[HB]], i32 0,
 ; CHECK: declare
 ;
 HEAD

@@ -47,3 +47,16 @@ void later(float* v, float* to, int64_t nx, int64_t ny, int right) {
         }
     #pragma omp taskwait
 }
+
+// An in-loop put and a put after the kernel: the host posts the one after
+// it first, so the in-loop put is the launch's second post.
+void both(float* v, float* to, int64_t nx, int64_t ny, int left, int right) {
+    #pragma omp target teams distribute parallel for collapse(2) is_device_ptr(v, to) \
+            firstprivate(nx, ny, right)
+    for (int64_t i = 0; i < nx; ++i)
+        for (int64_t j = 0; j < ny; ++j) {
+            v[i * ny + j] = wave(4.f, i + j);
+            ompx_pipelined_put(right, to, v + (nx - 4) * ny, 4 * ny * sizeof(float));
+        }
+    if (left >= 0) ompx_put(left, v, v, 4 * ny * sizeof(float));
+}
