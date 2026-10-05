@@ -455,6 +455,11 @@ void pipe_check() {
         std::snprintf(what, sizeof(what), "ompx_pipelined_put: the rows of the written box "
                       "overlap; cannot tell which bytes of the put it does not write");
         break;
+    case OMPX_PIPE_FAIL_POST:
+        std::snprintf(what, sizeof(what), "ompx_pipelined_put: the host posted put %lld with "
+                      "other arguments than the kernel computes; were the host and device "
+                      "compiled from one source, into one GICC_META_DIR?", a);
+        break;
     default:
         std::snprintf(what, sizeof(what), "ompx_pipelined_put: failure %d on the device",
                       q->fail);
@@ -998,6 +1003,17 @@ void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
         e.handled = 0;
     }
     if (!sent) ompx_put_host(peer, dst, src, bytes);
+}
+
+// After the launch of a kernel with an in-loop put the host posted as put
+// i: the kernel has sent it, or is to be helped to. A post the kernel found
+// wrong stops the program here, before any of its groups ring.
+void ompx__loop_done(unsigned long long kernel, int i) {
+    pipe_check();
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    if (q == nullptr || i < 0 || i >= OMPX_PIPE_AFTER_MAX || q->after.kernel != kernel) return;
+    release_after(i);
+    q->after.e[i].armed = 0;
 }
 
 // ---- explicit batched DWQ ---------------------------------------------------
