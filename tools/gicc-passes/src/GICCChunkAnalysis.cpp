@@ -108,6 +108,25 @@ namespace gicc::pass {
 
 namespace {
 
+// Team-shared memory the rewrite adds. Aligned explicitly: the optimizer
+// merges stores to neighbouring elements into a 16-byte vector store, and
+// NVPTX traps on one the variable's placement does not align (AMDGPU does
+// not, which is how an unset alignment went unnoticed).
+GlobalVariable *teamGlobal(Module &M, Type *T, const char *name) {
+    auto *G = new GlobalVariable(M, T, false, GlobalValue::InternalLinkage, PoisonValue::get(T),
+                                 name, nullptr, GlobalValue::NotThreadLocal,
+                                 kmpc::SharedAddrSpace);
+    G->setAlignment(Align(16));
+    return G;
+}
+
+// LLVM 22 dropped SCEVExpander's DataLayout argument; it reads the module's.
+#if LLVM_VERSION_MAJOR >= 22
+#define GICC_SCEV_EXPANDER(X, SE, DL, Name) SCEVExpander X(SE, Name)
+#else
+#define GICC_SCEV_EXPANDER(X, SE, DL, Name) SCEVExpander X(SE, DL, Name)
+#endif
+
 raw_ostream &out() { return errs(); }
 
 // Attribute marking the outlined regions GICCChunkPrepPass kept out of
@@ -385,9 +404,7 @@ private:
     // private segment, which the runtime allocates for every wave at each
     // launch (hundreds of microseconds when the kernels around it have none).
     GlobalVariable *teamSlot(Type *T, const char *name) {
-        return new GlobalVariable(M, T, false, GlobalValue::InternalLinkage, PoisonValue::get(T),
-                                  name, nullptr, GlobalValue::NotThreadLocal,
-                                  kmpc::SharedAddrSpace);
+        return teamGlobal(M, T, name);
     }
 
     // A put the host makes after the kernel, stated in it (stateAfterPuts).
@@ -650,9 +667,33 @@ private:
         }
         if (!plans.empty()) {
             changed = true;
+            capRegisters(F);
             if (verifyFunction(F, &errs()) || verifyFunction(*KI->outlined, &errs()))
                 report_fatal_error("gicc-chunk: lowering produced invalid IR");
         }
+    }
+
+    // A rewritten kernel calls omp_pipeline helpers that run a few times per
+    // launch but need far more registers than its loop: planning, residuals,
+    // counting, a device put. On NVPTX a kernel is given the registers of the
+    // hungriest function it calls, so they took a kernel from 70 to 170, two
+    // teams per SM instead of seven and a loop 1.4x slower. Capped, ptxas
+    // spills in the helpers instead. 80 still fits 768 threads per SM, with
+    // room for a loop that needs more than the 55-70 these kernels' do. A
+    // cap or occupancy target the source set is kept.
+    void capRegisters(Function &K) {
+        constexpr unsigned kMaxRegs = 80;
+        if (!Triple(M.getTargetTriple()).isNVPTX() || K.hasFnAttribute("nvvm.maxnreg") ||
+            K.hasFnAttribute("nvvm.minctasm"))
+            return;
+        K.addFnAttr("nvvm.maxnreg", std::to_string(kMaxRegs));
+        // Before LLVM 20 the backend reads it from nvvm.annotations.
+        LLVMContext &Ctx = M.getContext();
+        M.getOrInsertNamedMetadata("nvvm.annotations")
+            ->addOperand(MDNode::get(
+                Ctx, {ValueAsMetadata::get(&K), MDString::get(Ctx, "maxnreg"),
+                      ConstantAsMetadata::get(
+                          ConstantInt::get(Type::getInt32Ty(Ctx), kMaxRegs))}));
     }
 
     // The in-loop puts the host compile of this unit, which runs after this
@@ -1049,7 +1090,7 @@ private:
         BasicBlock::iterator pre = KI.distInit->getIterator();
         const SCEV *srcStart = SE.getAddExpr(
             SE.getSCEV(P.srcObj), SE.getAddExpr(SE.getMulExpr(P.c, P.lb0), P.d));
-        SCEVExpander X(SE, KI.DL, "gicc.chunk");
+        GICC_SCEV_EXPANDER(X, SE, KI.DL, "gicc.chunk");
         Value *peerV = X.expandCodeFor(P.peer, I32, pre);
         Value *dstV  = X.expandCodeFor(P.dst, Ptr, pre);
         Value *srcV  = X.expandCodeFor(srcStart, Ptr, pre);
@@ -1060,11 +1101,7 @@ private:
         Value *delta = B.CreateSub(B.CreatePtrToInt(pd, I64), B.CreatePtrToInt(srcV, I64));
         // Team-shared, like clang's own globalized captures: the main thread
         // writes them before any parallel region starts.
-        auto shared = [&](Type *T, const char *name) {
-            return new GlobalVariable(M, T, false, GlobalValue::InternalLinkage,
-                                      PoisonValue::get(T), name, nullptr,
-                                      GlobalValue::NotThreadLocal, kmpc::SharedAddrSpace);
-        };
+        auto shared = [&](Type *T, const char *name) { return teamGlobal(M, T, name); };
         GlobalVariable *gDelta  = shared(I64, "gicc.chunk.delta");
         GlobalVariable *gMirror = shared(I8, "gicc.chunk.mirror");
         B.CreateStore(delta, gDelta);
@@ -1097,7 +1134,7 @@ private:
         Type *I64 = Type::getInt64Ty(Ctx), *I32 = Type::getInt32Ty(Ctx), *I8 = Type::getInt8Ty(Ctx);
         auto *Ptr = cast<PointerType>(P.put->getArgOperand(1)->getType());
         BasicBlock::iterator pre = KI.distInit->getIterator();
-        SCEVExpander X(SE, KI.DL, "gicc.chunk");
+        GICC_SCEV_EXPANDER(X, SE, KI.DL, "gicc.chunk");
         const SCEV *obj = SE.getSCEV(P.srcObj);
         Value *peerV = X.expandCodeFor(P.peer, I32, pre);
         Value *dstV  = X.expandCodeFor(P.dst, Ptr, pre);
@@ -1169,11 +1206,7 @@ private:
                                 extentArr, ConstantInt::get(I64, P.elem),
                                 B.CreateZExt(runs, I32), ConstantInt::get(I32, KI.spmd())});
 
-        auto shared = [&](Type *T, const char *name) {
-            return new GlobalVariable(M, T, false, GlobalValue::InternalLinkage,
-                                      PoisonValue::get(T), name, nullptr,
-                                      GlobalValue::NotThreadLocal, kmpc::SharedAddrSpace);
-        };
+        auto shared = [&](Type *T, const char *name) { return teamGlobal(M, T, name); };
         GlobalVariable *gDelta  = shared(I64, "gicc.box.delta");
         GlobalVariable *gStart  = shared(I64, "gicc.box.start");
         GlobalVariable *gLen    = shared(I64, "gicc.box.len");
@@ -1473,7 +1506,7 @@ private:
         const SCEV *dstBlk = SE.getAddExpr(P.dst, SE.getMulExpr(P.c, SE.getMinusSCEV(LB, P.lb0)));
         const SCEV *len = SE.getMulExpr(P.c, SE.getAddExpr(SE.getMinusSCEV(UB, LB), SE.getOne(I64)));
         BasicBlock::iterator at = std::next(KI.parallel->getIterator());
-        SCEVExpander X(SE, KI.DL, "gicc.chunk");
+        GICC_SCEV_EXPANDER(X, SE, KI.DL, "gicc.chunk");
         Value *vPeer = X.expandCodeFor(P.peer, I32, at);
         Value *vDst  = X.expandCodeFor(dstBlk, Ptr, at);
         Value *vSrc  = X.expandCodeFor(srcBlk, Ptr, at);
@@ -1543,7 +1576,7 @@ PreservedAnalyses GICCChunkPrepPass::run(Module &M, ModuleAnalysisManager &) {
         const bool kernelHasPut = hasPut(F) || hasAfter(F);
         for (Instruction &I : instructions(F)) {
             auto *CB = dyn_cast<CallBase>(&I);
-            if (!CB || calleeName(*CB) != "__kmpc_parallel_51") continue;
+            if (!CB || !isParallelCall(calleeName(*CB))) continue;
             auto *O = dyn_cast<Function>(CB->getArgOperand(kmpc::ParallelFn)->stripPointerCasts());
             if (!O || O->isDeclaration() || O->hasFnAttribute(kPrepAttr)) continue;
             // The marker after the loop, or in the region's loop itself.

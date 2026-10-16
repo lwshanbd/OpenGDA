@@ -28,7 +28,8 @@ namespace gicc::pass {
 
 // Operand positions in the device runtime calls clang emits.
 namespace kmpc {
-// __kmpc_parallel_51
+// __kmpc_parallel_51, renamed __kmpc_parallel_60 in LLVM 21 with one more
+// operand at the end; the ones read here did not move.
 constexpr unsigned ParallelFn = 5, ParallelWrapper = 6, ParallelArgs = 7;
 // __kmpc_{distribute,for}_static_init_*
 constexpr unsigned InitSched = 2, InitLower = 4, InitUpper = 5, InitStride = 6,
@@ -51,6 +52,8 @@ llvm::StringRef calleeName(const llvm::CallBase &CB);
 // contract covers (they only touch their bound slots).
 bool isBenignCall(const llvm::CallBase &CB);
 bool isCallTo(const llvm::Instruction &I, llvm::StringRef prefix);
+// The device runtime call that starts a parallel region, either name.
+bool isParallelCall(llvm::StringRef name);
 // An offload kernel entry (not one of its outlined helpers).
 bool isOffloadKernel(const llvm::Function &F);
 // A readable name for a kernel object: its IR name or arg#N.

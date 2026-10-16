@@ -27,12 +27,16 @@ bool isBenignCall(const CallBase &CB) {
            n.starts_with("__kmpc_distribute_static_fini") ||
            n == "__kmpc_global_thread_num" ||
            n == "__kmpc_target_init" || n == "__kmpc_target_deinit" ||
-           n == "__kmpc_parallel_51" || n == kPipelinedPut ||
+           isParallelCall(n) || n == kPipelinedPut ||
            // Queries the SPMD form of a combined construct makes.
            n.starts_with("__kmpc_get_hardware_") || n == "__kmpc_get_warp_size" ||
            n == "__kmpc_is_spmd_exec_mode" ||
            // Reads a put the host posted into stack slots (GICCAfterPut.h).
            n == "ompx__after_put";
+}
+
+bool isParallelCall(StringRef name) {
+    return name == "__kmpc_parallel_51" || name == "__kmpc_parallel_60";
 }
 
 bool isCallTo(const Instruction &I, StringRef prefix) {
@@ -107,7 +111,7 @@ std::optional<OmpKernel> OmpKernel::locate(Function &K, std::string &why) {
             KI.distSigned = !n.ends_with("u");
         } else if (n.starts_with("__kmpc_distribute_static_fini")) {
             KI.distFini = CI;
-        } else if (n == "__kmpc_parallel_51") {
+        } else if (isParallelCall(n)) {
             if (KI.parallel) { why = "more than one parallel region"; return std::nullopt; }
             KI.parallel = CI;
         }
@@ -121,7 +125,7 @@ std::optional<OmpKernel> OmpKernel::locate(Function &K, std::string &why) {
     KI.argsArray = dyn_cast<AllocaInst>(
         KI.parallel->getArgOperand(kmpc::ParallelArgs)->stripPointerCasts());
     if (!KI.outlined || KI.outlined->isDeclaration() || !KI.argsArray) {
-        why = "unrecognized __kmpc_parallel_51 operands";
+        why = "unrecognized __kmpc_parallel operands";
         return std::nullopt;
     }
     return KI;
