@@ -192,6 +192,52 @@ uint64_t read_slot(int sig) {
 struct NoDbPut { int peer; void* dst; const void* src; size_t bytes; };
 std::vector<NoDbPut> g_nodb;
 
+// ---- pipelined puts (ompx_pipe_deferred in gicc/omp.h) ----------------------
+// A GPU thread posts its own work requests, so a kernel can send a pipelined
+// put to any peer at any point: the list says proxy_on, the libfabric
+// backend's name for that, and nothing is ever queued behind a bell. What a
+// kernel still leaves here -- a put it is not SPMD enough to count -- the
+// next quiet sends.
+ompx_pipe_deferred* g_pipe_deferred_host = nullptr;
+ompx_pipe_deferred* g_pipe_deferred_dev  = nullptr;
+char**              g_pipe_peer_heap_host = nullptr;   // ompx_pipe_deferred::peer_heap
+char**              g_pipe_peer_heap_dev  = nullptr;
+
+// A pipelined put the device could not make (ompx_pipe_deferred::fail).
+void pipe_check() {
+    const ompx_pipe_deferred* q = g_pipe_deferred_host;
+    if (q == nullptr || q->fail == 0) return;
+    char what[256];
+    const long long a = q->fail_arg;
+    switch (q->fail) {
+    case OMPX_PIPE_FAIL_NO_PROXY:
+        std::snprintf(what, sizeof(what), "ompx_pipelined_put: peer %lld could not be sent "
+                      "to from the device", a);
+        break;
+    case OMPX_PIPE_FAIL_DIMS:
+        std::snprintf(what, sizeof(what), "ompx_pipelined_put: a %lld-dimensional box has "
+                      "more than 8 dims", a);
+        break;
+    case OMPX_PIPE_FAIL_ALIGN:
+        std::snprintf(what, sizeof(what), "ompx_pipelined_put: the put range and the written "
+                      "box are not aligned to the %lld-byte stores", a);
+        break;
+    case OMPX_PIPE_FAIL_OVERLAP:
+        std::snprintf(what, sizeof(what), "ompx_pipelined_put: the rows of the written box "
+                      "overlap; cannot tell which bytes of the put it does not write");
+        break;
+    case OMPX_PIPE_FAIL_POST:
+        std::snprintf(what, sizeof(what), "ompx_pipelined_put: the host posted put %lld with "
+                      "other arguments than the kernel computes; were the host and device "
+                      "compiled from one source, into one GICC_META_DIR?", a);
+        break;
+    default:
+        std::snprintf(what, sizeof(what), "ompx_pipelined_put: failure %d on the device",
+                      q->fail);
+    }
+    die(what);
+}
+
 }  // namespace
 
 extern "C" {
@@ -238,6 +284,14 @@ void ompx_finalize() {
         (void)cudaFreeHost(g_sig_host);
         g_sig_dev = nullptr;
         g_sig_host = nullptr;
+    }
+    if (g_pipe_deferred_host != nullptr) {
+        (void)cudaFreeHost(g_pipe_deferred_host);
+        (void)cudaFreeHost(g_pipe_peer_heap_host);
+        g_pipe_deferred_host = nullptr;
+        g_pipe_deferred_dev = nullptr;
+        g_pipe_peer_heap_host = nullptr;
+        g_pipe_peer_heap_dev = nullptr;
     }
     if (g_stream != nullptr) {
         (void)cudaStreamDestroy(g_stream);
@@ -433,8 +487,26 @@ void ompx_put_no_db_host(int peer, void* dst, const void* src, size_t bytes,
     if (bytes != 0) g_nodb.push_back(NoDbPut{peer, dst, src, bytes});
 }
 
+// Put what kernels left in the deferred list. Their kernels have finished
+// (a quiet follows them), so the sources hold their final values.
+static void send_deferred_pipelined() {
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    if (q == nullptr) return;
+    const unsigned n = __atomic_load_n(&q->n, __ATOMIC_ACQUIRE);
+    if (n == 0) return;
+    if (n > OMPX_PIPE_DEFERRED_MAX) die("more pipelined puts deferred than the list holds");
+    for (unsigned i = 0; i < n; ++i) {
+        const ompx_pipe_deferred_put& e = q->e[i];
+        ompx_put_host(e.peer, g_heap_base + e.dst_off, g_heap_base + e.src_off,
+                      static_cast<size_t>(e.bytes));
+    }
+    __atomic_store_n(&q->n, 0u, __ATOMIC_RELEASE);
+}
+
 void ompx_quiet_host() {
     if (g_runtime == nullptr) return;
+    pipe_check();
+    send_deferred_pipelined();
     for (const NoDbPut& p : g_nodb) ompx_put_host(p.peer, p.dst, p.src, p.bytes);
     g_nodb.clear();
     if (g_ipc_pending) {
@@ -457,6 +529,86 @@ void ompx_fence() {
 
 ompx_ctx* ompx_prepare_ctx() {
     return g_runtime->prepare();
+}
+
+// Mapped host memory: the host writes it only between launches and reads
+// what a kernel wrote only after the kernel (or at the quiet).
+ompx_pipe_deferred* ompx__pipe_deferred_list() {
+    if (g_runtime == nullptr) die("ompx_prepare before ompx_init");
+    const int n = ompx_get_num_ranks();
+    if (g_pipe_deferred_dev == nullptr) {
+        void* h = nullptr;
+        require_cuda(cudaHostAlloc(&h, sizeof(ompx_pipe_deferred), cudaHostAllocMapped),
+                     "allocate the deferred pipelined puts");
+        std::memset(h, 0, sizeof(ompx_pipe_deferred));
+        g_pipe_deferred_host = static_cast<ompx_pipe_deferred*>(h);
+        require_cuda(cudaHostGetDevicePointer((void**)&g_pipe_deferred_dev, h, 0),
+                     "map the deferred pipelined puts");
+        // Each rank's heap as this GPU reaches it through CUDA IPC, or null.
+        require_cuda(cudaHostAlloc(&h, n * sizeof(char*), cudaHostAllocMapped),
+                     "allocate the pipelined puts' peer table");
+        g_pipe_peer_heap_host = static_cast<char**>(h);
+        for (int r = 0; r < n; ++r) g_pipe_peer_heap_host[r] = peer_heap(r);
+        require_cuda(cudaHostGetDevicePointer((void**)&g_pipe_peer_heap_dev, h, 0),
+                     "map the pipelined puts' peer table");
+    }
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    q->heap_base = g_heap_base;
+    q->peer_heap = g_pipe_peer_heap_dev;
+    q->n_ranks   = n;
+    q->proxy_on  = 1;   // the GPU posts its own puts
+    return g_pipe_deferred_dev;
+}
+
+// ---- puts after a kernel launch (ompx_pipe_after in gicc/omp.h) --------------
+// The plugin's second compile brackets a launch followed by ompx_put calls:
+// each put is posted before the launch, and replaced by ompx__after_done
+// after it. The kernel reads the post and sends the put itself; the host
+// makes it only if the kernel did not. Nothing is queued: there is no bell.
+void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, int peer,
+                      void* dst, const void* src, long long src_rel, size_t bytes) {
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    if (q == nullptr || i < 0 || i >= OMPX_PIPE_AFTER_MAX) return;
+    (void)src;
+    ompx_pipe_after_put& e = q->after.e[i];
+    e.armed = 0;
+    e.handled = 0;
+    e.bell = nullptr;
+    e.fired = 0;
+    e.pieces = 0;
+    e.piece = 0;
+    if (armed) {
+        e.peer    = peer;
+        e.src_arg = src_arg;
+        e.dst_off = offset_of(dst, "ompx_put dst");
+        e.src_rel = src_rel;
+        e.bytes   = bytes;
+        e.armed   = 1;
+    }
+    q->after.kernel = kernel;
+}
+
+void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
+                      const void* src, size_t bytes) {
+    pipe_check();
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    bool sent = false;
+    if (q != nullptr && i >= 0 && i < OMPX_PIPE_AFTER_MAX && q->after.kernel == kernel) {
+        ompx_pipe_after_put& e = q->after.e[i];
+        sent = e.armed && __atomic_load_n(&e.handled, __ATOMIC_ACQUIRE);
+        e.armed = 0;
+        e.handled = 0;
+    }
+    if (!sent) ompx_put_host(peer, dst, src, bytes);
+}
+
+// After the launch of a kernel with an in-loop put the host posted as put
+// i: the kernel has sent it. A post the kernel found wrong stops here.
+void ompx__loop_done(unsigned long long kernel, int i) {
+    pipe_check();
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    if (q == nullptr || i < 0 || i >= OMPX_PIPE_AFTER_MAX || q->after.kernel != kernel) return;
+    q->after.e[i].armed = 0;
 }
 
 // A GPU-posted transfer starts when its thread rings the doorbell; there is
