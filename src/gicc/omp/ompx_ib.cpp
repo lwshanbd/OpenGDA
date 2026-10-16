@@ -1,6 +1,6 @@
-// GiOMP host runtime on InfiniBand. Compiled as CUDA source (clang -x cuda)
+// GiOMP runtime on InfiniBand. Compiled as CUDA source (clang -x cuda)
 // and linked into libgicc_omp, so OpenMP application TUs only need the public
-// gicc/omp.h header and the library -- the same contract as ompx_host.cpp,
+// gicc/omp.h header and the library -- the same contract as ompx_ofi.cpp,
 // which implements the API over libfabric.
 //
 // The difference is who moves the data. Over libfabric a target region hands

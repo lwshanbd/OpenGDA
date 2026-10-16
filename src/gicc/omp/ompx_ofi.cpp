@@ -1,4 +1,4 @@
-// GiOMP host runtime implementation. This translation unit is compiled as GPU
+// GiOMP runtime over libfabric (OFI). This translation unit is compiled as GPU
 // source (-x hip / -x cuda) and owns the OFI Runtime, so OpenMP application
 // translation units only need the public gicc/omp.h header and libgicc_omp.
 //

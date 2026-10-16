@@ -1,6 +1,6 @@
 #!/bin/bash
 # build_libgicc_omp.sh - produce libgicc_omp.{so,a} from the GPU runtime TUs
-# + ompx_host.cpp.
+# + ompx_ofi.cpp (or ompx_ib.cpp for GIOMP_BACKEND=ib).
 #
 # Two backends, selected by GIOMP_BACKEND:
 #
@@ -75,10 +75,10 @@ ib)
 esac
 
 if [[ "${BACKEND}" == "ib" ]]; then
-  SRCS=( "${GICC_ROOT}/src/gicc/omp/ompx_host_ib.cpp" )
+  SRCS=( "${GICC_ROOT}/src/gicc/omp/ompx_ib.cpp" )
 else
   SRCS=(
-    "${GICC_ROOT}/src/gicc/omp/ompx_host.cpp"
+    "${GICC_ROOT}/src/gicc/omp/ompx_ofi.cpp"
     "${GICC_ROOT}/src/gicc/platform/ofi/runtime_helpers.cpp"
     "${GICC_ROOT}/src/gicc/platform/ofi/proxy/proxy_thread.cpp"
     "${GICC_ROOT}/src/gicc/platform/ofi/proxy/proxy_libfabric.cpp"
