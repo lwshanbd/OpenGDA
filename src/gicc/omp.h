@@ -288,10 +288,14 @@ static inline unsigned long long ompx__pipe_piece(unsigned long long bytes, int 
 // and C++ alike; ompx_put/get/quiet have no C device body, so a C application
 // issues those from the host and only pulls the trigger on the device.
 #pragma omp declare target
-static ompx_ctx* ompx__ctx = 0;
-static ompx_pipe_deferred* ompx__pipe_deferred = 0;   // ompx__pipe_deferred_list
 // Weak, so every translation unit shares one copy in host and device image
-// alike; the plugin's instrumentation in any unit reads it by name.
+// alike. ompx_prepare's target region has the same kernel name in every C++
+// unit (it is named after this header), and libomptarget launches one of
+// those copies for all of them: with a copy of these per unit, a second
+// unit's kernels would never see the context.
+__attribute__((weak)) ompx_ctx* ompx__ctx = 0;
+__attribute__((weak)) ompx_pipe_deferred* ompx__pipe_deferred = 0;   // ompx__pipe_deferred_list
+// The plugin's instrumentation in any unit reads this one by name.
 __attribute__((weak)) ompx_nodb_state ompx__nodb;
 #pragma omp end declare target
 
