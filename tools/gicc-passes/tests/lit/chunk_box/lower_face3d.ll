@@ -8,8 +8,8 @@
 ; The kernel resolves the peer, sends the unwritten part of the range, and
 ; hands the range and the peer offset to the region.
 ; CHECK-LABEL: define {{.*}} @__omp_offloading_
-; A generic kernel cannot count the teams past the range: a peer that is
-; not IPC-mapped is left to the next quiet.
+; A generic kernel cannot count the chunks that write the range: a peer
+; that is not IPC-mapped is left to the next quiet.
 ; CHECK: [[PD:%.*]] = call ptr @ompx__box_peer(i32 {{%.*}}, ptr {{%.*}}, ptr {{%.*}}, i64 {{%.*}}, i32 0, i32 -1, ptr addrspacecast (ptr addrspace(3) @gicc.box.counted to ptr))
 ; The kernel is still generic when the pass runs, so one thread per team
 ; sends the residual.

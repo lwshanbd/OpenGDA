@@ -636,7 +636,7 @@ private:
         postLoopPuts(F, plans, posts);
         // A box put to a peer that is not IPC-mapped is sent by the kernel
         // itself once its range is written, when the kernel can count the
-        // teams past it: SPMD, a chunked distribute loop over 64-bit bounds.
+        // chunks that write it: SPMD, a chunked distribute loop over 64-bit bounds.
         // Otherwise the next quiet sends it.
         const unsigned nBox = llvm::count_if(plans, [](const Plan &P) { return P.box; });
         const bool canCount =
@@ -660,7 +660,7 @@ private:
         if (canCount) {
             lowerBoxCounting(*KI, bounds->first, bounds->second, sends);
             out() << "[gicc-chunk]   a peer that is not IPC-mapped is sent to by the kernel, "
-                     "once every team is past the range (chunks rotated to store it first)\n";
+                     "once the chunks that write the range have run (rotated to run first)\n";
         } else if (nBox > 0) {
             out() << "[gicc-chunk]   a peer that is not IPC-mapped is sent to by the next "
                      "ompx_quiet\n";
@@ -678,11 +678,12 @@ private:
     // counting, a device put. On NVPTX a kernel is given the registers of the
     // hungriest function it calls, so they took a kernel from 70 to 170, two
     // teams per SM instead of seven and a loop 1.4x slower. Capped, ptxas
-    // spills in the helpers instead. 80 still fits 768 threads per SM, with
-    // room for a loop that needs more than the 55-70 these kernels' do. A
-    // cap or occupancy target the source set is kept.
+    // spills in the helpers instead. 96 fits 640 threads per SM and the
+    // minimod stencil, whose loop needs 110 uncapped: there 96 ran 6-15%
+    // faster than 80 or 104, and 88 or 128 no better. A cap or occupancy
+    // target the source set is kept.
     void capRegisters(Function &K) {
-        constexpr unsigned kMaxRegs = 80;
+        constexpr unsigned kMaxRegs = 96;
         if (!Triple(M.getTargetTriple()).isNVPTX() || K.hasFnAttribute("nvvm.maxnreg") ||
             K.hasFnAttribute("nvvm.minctasm"))
             return;
@@ -1265,9 +1266,10 @@ private:
     // distribute loop runs its chunks rotated so that those storing into the
     // counted ranges come first (ompx__box_plan): the block bounds handed to
     // the parallel region become lb + shift, wrapped, and the outlined loop
-    // is left alone. Each chunk then compares lb with the smallest point at
-    // which a counted put is due, and past it calls ompx__box_due, which
-    // counts the team past those ranges; the last team past one sends it.
+    // is left alone. Before each chunk, and past the loop, a team whose last
+    // chunk came before the latest point a counted put is due calls
+    // ompx__box_due, which counts that chunk for each put waiting on it;
+    // the chunk that completes a put's count sends it.
     // All of it sits behind one test of whether the launch counts anything,
     // weighted as rare: once the device link inlines the region into the
     // kernel this is the hot loop, one chunk per element of each thread,
@@ -1305,7 +1307,7 @@ private:
         GlobalVariable *afterArr = array(I32, "gicc.box.after");
         GlobalVariable *shiftSlot = teamSlot(I64, "gicc.box.shift");
         GlobalVariable *firstSlot = teamSlot(I64, "gicc.box.first");
-        AllocaInst *nextSlot = EB.CreateAlloca(I64, AS, nullptr, "gicc.box.next");
+        AllocaInst *ranSlot = EB.CreateAlloca(I64, AS, nullptr, "gicc.box.ran");
         auto at = [&](IRBuilder<> &B, GlobalVariable *A, unsigned i) {
             return B.CreateConstInBoundsGEP2_32(A->getValueType(), A, 0, i);
         };
@@ -1328,8 +1330,32 @@ private:
         // rotation, and nothing is ever due.
         Value *anyCounted = nullptr;
         Value *lb0 = lbSt->getValueOperand(), *ub0 = ubSt->getValueOperand();
-        Value *chunk = KI.distInit->getArgOperand(kmpc::InitChunk);
         Value *one = ConstantInt::get(I64, 1);
+        {
+            IRBuilder<> CB(KI.distInit);
+            for (const BoxSend &S : sends)
+                anyCounted = anyCounted ? CB.CreateOr(anyCounted, S.counted) : S.counted;
+        }
+        // Chunks of at least kMinChunk iterations, a multiple of the loop's
+        // own: a distribute loop's chunks may go to any team. Without a
+        // dist_schedule clang deals one element per thread per chunk. A
+        // counting launch takes each chunk from the shared counter, two team
+        // barriers and a device atomic apiece, which at that grain cost a
+        // stencil kernel a third of its time; and the rewritten loop pays its
+        // per-chunk tests even when nothing is counted, which left the
+        // minimod stencil 40% slower on one rank. 8192 ran it fastest at
+        // grids of 600 and 1000, counting or not (16384 is as fast at 600,
+        // 5% slower at 1000).
+        Value *chunk = KI.distInit->getArgOperand(kmpc::InitChunk);
+        {
+            constexpr uint64_t kMinChunk = 8192;
+            IRBuilder<> CB(KI.distInit);
+            Value *c = CB.CreateBinaryIntrinsic(Intrinsic::umax, chunk, one);
+            Value *k = CB.CreateUDiv(
+                CB.CreateAdd(ConstantInt::get(I64, kMinChunk), CB.CreateSub(c, one)), c);
+            chunk = CB.CreateMul(c, k, "gicc.box.chunk");
+            KI.distInit->setArgOperand(kmpc::InitChunk, chunk);
+        }
         // The loop's iterations, and its chunks' span: computed where they
         // are used, both rarely -- the span's is a 64-bit division.
         auto itersAt = [&](IRBuilder<> &B) { return B.CreateAdd(B.CreateSub(ub0, lb0), one); };
@@ -1337,11 +1363,6 @@ private:
             return B.CreateMul(
                 B.CreateUDiv(B.CreateAdd(itersAt(B), B.CreateSub(chunk, one)), chunk), chunk);
         };
-        {
-            IRBuilder<> CB(KI.distInit);
-            for (const BoxSend &S : sends)
-                anyCounted = anyCounted ? CB.CreateOr(anyCounted, S.counted) : S.counted;
-        }
         // Planned, box_plan fills due and shift from thread 0; otherwise every
         // thread stores the same defaults. Never both: a default stored late
         // would overwrite the plan.
@@ -1417,12 +1438,14 @@ private:
                               B.CreateAddrSpaceCast(firstSlot, Ptr)});
         B.SetInsertPoint(KI.distInit);
         Value *shift = uniform(B, B.CreateLoad(I64, shiftSlot, "gicc.box.shift"));
-        Value *next = uniform(B, B.CreateLoad(I64, firstSlot, "gicc.box.first"));
-        B.CreateStore(next, nextSlot);
+        // The latest due[] of a counted put: a chunk before it may be one a
+        // put waits for. The team has run none yet.
+        Value *latest = uniform(B, B.CreateLoad(I64, firstSlot, "gicc.box.latest"));
+        B.CreateStore(ConstantInt::get(I64, INT64_MAX), ranSlot);
 
         // Whether this launch counts anything at all: on most ranks (every
         // peer IPC-mapped) nothing is, and a chunk then costs one test more.
-        Value *active = B.CreateICmpNE(next, ConstantInt::get(I64, INT64_MAX));
+        Value *active = B.CreateICmpNE(latest, ConstantInt::get(I64, INT64_MAX));
         MDNode *rarely = MDBuilder(Ctx).createBranchWeights(1, 1000);
 
         // Each chunk of a counting launch: the bounds of the chunk it now
@@ -1457,25 +1480,28 @@ private:
         RB.CreateStore(RB.CreateIntToPtr(lbR, slotT), lbSlot->getPointerOperand());
         RB.CreateStore(RB.CreateIntToPtr(ubR, slotT), ubSlot->getPointerOperand());
 
-        FunctionCallee dueFn = M.getOrInsertFunction(
-            "ompx__box_due", I64, I32, I64, Ptr, Ptr, Ptr, Ptr, Ptr, Ptr, Ptr, I32);
-        auto dueCall = [&](Instruction *where, Value *pos, Value *go) {
-            Instruction *then = SplitBlockAndInsertIfThen(go, where->getIterator(), false, rarely);
+        FunctionCallee dueFn =
+            M.getOrInsertFunction("ompx__box_due", Type::getVoidTy(Ctx), I32, I64, Ptr, Ptr,
+                                  Ptr, Ptr, Ptr, Ptr, Ptr, I32, I64, I64);
+        // The chunk the team ran last, counted where a put waits for it.
+        auto dueCall = [&](Instruction *where, IRBuilder<> &At) {
+            Value *ran = At.CreateLoad(I64, ranSlot);
+            Instruction *then = SplitBlockAndInsertIfThen(At.CreateICmpSLT(ran, latest),
+                                                          where->getIterator(), false, rarely);
             IRBuilder<> T(then);
-            Value *left = T.CreateCall(dueFn, {ConstantInt::get(I32, n), pos, flat(T, dueArr),
-                                               flat(T, peerArr), flat(T, dstArr), flat(T, srcArr),
-                                               flat(T, bytesArr), flat(T, counterArr),
-                                               flat(T, afterArr), ConstantInt::get(I32, K)});
-            T.CreateStore(uniform(T, left), nextSlot);
+            T.CreateCall(dueFn, {ConstantInt::get(I32, n), ran, flat(T, dueArr), flat(T, peerArr),
+                                 flat(T, dstArr), flat(T, srcArr), flat(T, bytesArr),
+                                 flat(T, counterArr), flat(T, afterArr),
+                                 ConstantInt::get(I32, K), lb0, chunk});
         };
-        dueCall(counting, pos, RB.CreateICmpSGE(pos, RB.CreateLoad(I64, nextSlot)));
-        // Past the loop: every counted put not yet counted, and, the last
-        // team there, the chunk counter reset for the next launch.
+        dueCall(counting, RB);
+        RB.SetInsertPoint(counting);
+        RB.CreateStore(pos, ranSlot);
+        // Past the loop: the team's last chunk, and, the last team there,
+        // the chunk counter reset for the next launch.
         {
             IRBuilder<> FB(KI.distFini);
-            Value *left = FB.CreateICmpNE(FB.CreateLoad(I64, nextSlot),
-                                          ConstantInt::get(I64, INT64_MAX));
-            dueCall(KI.distFini, ConstantInt::get(I64, INT64_MAX - 1), left);
+            dueCall(KI.distFini, FB);
             Instruction *fin =
                 SplitBlockAndInsertIfThen(active, KI.distFini->getIterator(), false, rarely);
             FunctionCallee doneFn =
@@ -1485,7 +1511,7 @@ private:
         }
 
         DominatorTree DT(KI.K);
-        PromoteMemToReg({nextSlot}, DT);
+        PromoteMemToReg({ranSlot}, DT);
     }
 
     // One send per block right after its parallel region joins. Under the

@@ -64,8 +64,8 @@ done
 ; CHECK: _kernel_environment = {{.*}} { %struct.ConfigurationEnvironmentTy { i8 0, i8 {{[01]}}, i8 2,
 ; CHECK-LABEL: define {{.*}} @__omp_offloading_
 ; The kernel is SPMD, so it can send to a peer that is not IPC-mapped
-; itself, by counting the teams past the range. The source states the put
-; (after index -1).
+; itself, by counting the chunks that write the range. The source states
+; the put (after index -1).
 ; CHECK: call ptr @ompx__box_peer({{.*}}, i32 1, i32 -1, ptr addrspacecast (ptr addrspace(3) @gicc.box.counted to ptr))
 ; The team shares the residual copy.
 ; CHECK: call void @ompx__box_residual({{.*}}, i32 1)
@@ -79,14 +79,15 @@ done
 ; CHECK: call void @ompx__box_plan(i32 64,
 ; CHECK: call void @__kmpc_distribute_static_init
 ; Before each chunk: the next chunk from the counter the teams share, its
-; rotated bounds, then, once a counted put may be due, the count of a team
-; past its range.
+; rotated bounds, then, if the chunk the team ran last may be one a counted
+; put waits for, its count.
 ; CHECK: call i64 @ompx__box_grab(
 ; CHECK: [[UB:%.*]] = call i64 @llvm.umin.i64(
-; CHECK: call i64 @ompx__box_due(i32 64, i64 %gicc.box.pos,
+; CHECK: call void @ompx__box_due(i32 64, i64 %
 ; CHECK: call void @__kmpc_parallel_51(
-; And once past the loop, then the counter reset by the last team.
-; CHECK: call i64 @ompx__box_due(i32 64, i64 9223372036854775806,
+; And once past the loop for the team's last chunk, then the counter reset
+; by the last team.
+; CHECK: call void @ompx__box_due(i32 64, i64 %
 ; CHECK: call void @ompx__box_grab_done(
 ; CHECK: call void @__kmpc_distribute_static_fini(
 ; CHECK-LABEL: define internal void @__omp_offloading_{{.*}}_omp_outlined_omp_outlined(
@@ -112,8 +113,8 @@ CHECKS
 ; The kernel resolves the peer, sends the unwritten part of the range, and
 ; hands the range and the peer offset to the region.
 ; CHECK-LABEL: define {{.*}} @__omp_offloading_
-; A generic kernel cannot count the teams past the range: a peer that is
-; not IPC-mapped is left to the next quiet.
+; A generic kernel cannot count the chunks that write the range: a peer
+; that is not IPC-mapped is left to the next quiet.
 ; CHECK: [[PD:%.*]] = call ptr @ompx__box_peer(i32 {{%.*}}, ptr {{%.*}}, ptr {{%.*}}, i64 {{%.*}}, i32 0, i32 -1, ptr addrspacecast (ptr addrspace(3) @gicc.box.counted to ptr))
 ; The kernel is still generic when the pass runs, so one thread per team
 ; sends the residual.

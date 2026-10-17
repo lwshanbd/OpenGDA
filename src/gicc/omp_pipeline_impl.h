@@ -68,10 +68,10 @@ ompx__box_grab(unsigned long long* next, int64_t* slot)
 [[omp::assume("ompx_spmd_amenable")]] static void
 ompx__box_grab_done(unsigned long long* next, unsigned* done)
     __asm__("ompx__box_grab_done");
-[[omp::assume("ompx_spmd_amenable")]] static int64_t
-ompx__box_due(int n, int64_t lb, int64_t* due, const int32_t* peer, void* const* dst,
+[[omp::assume("ompx_spmd_amenable")]] static void
+ompx__box_due(int n, int64_t ran, const int64_t* due, const int32_t* peer, void* const* dst,
               const void* const* src, const int64_t* bytes, unsigned* const* counter,
-              const int32_t* after, int pieces)
+              const int32_t* after, int pieces, int64_t lb0, int64_t chunk)
     __asm__("ompx__box_due");
 
 #if defined(__NVPTX__) || defined(__AMDGCN__)
@@ -455,8 +455,9 @@ ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* bo
 // when it posted it (a put the host makes after the kernel). To make that
 // early, the distribute loop takes its chunks in a rotated order that
 // starts with the ones storing into the ranges (ompx__box_plan), and a team
-// that has moved past a range's last chunk says so (ompx__box_count). The
-// team that says so last sends the range; the kernel goes on with the rest
+// that has run one of the chunks up to a range's last says so
+// (ompx__box_count). The team that says so last sends the range; the kernel
+// goes on with the rest
 // of its loop while it travels. Otherwise the put is left for the next
 // quiet, or, if queued, for the host to ring after the kernel.
 
@@ -509,8 +510,8 @@ static inline int64_t ompx__ceil_div(int64_t a, int64_t b) {
 }
 #endif
 
-// A counted put goes out in pieces, each sent once every team is past it
-// (ompx__box_count): sent whole, a put over most of the loop would leave
+// A counted put goes out in pieces, each sent once the chunks it waits for
+// have run (ompx__box_count): sent whole, a put over most of the loop would leave
 // only when the loop ends, with nothing left to hide it behind. Returns the
 // size of the pieces of a put of `bytes` (ompx__pipe_piece in gicc/omp.h),
 // no more than pieces_max (a power of two) of them; the pass makes piece k
@@ -602,11 +603,13 @@ ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, const i
 // loop runs, where it would run the chunk at lb, the one at
 // lb0 + (lb - lb0 + *shift) mod (chunks * chunk): that puts the counted
 // puts' chunks first, the rotation starting right after the widest stretch
-// of chunks none of them stores in. due[p] is the first lb at which a team
-// has run every chunk put p needs -- lb0 when no chunk stores into the
-// range, which is then final already -- and INT64_MAX for a put not counted;
-// *first is the smallest due[p], so that the kernel reads one value, not n
-// (read together, n of them took a vector register each). shift, due and
+// of chunks none of them stores in. due[p] is the end of the chunks put p
+// needs, in that order: the put goes once every chunk before due[p] has run
+// -- the first chunk alone when none stores into the range, which is then
+// final already -- and INT64_MAX for a put not counted. *first is the
+// largest due[p] of a counted put, or INT64_MAX if none is, so that the
+// kernel reads one value, not n (read together, n of them took a vector
+// register each). shift, due and
 // first are team memory: in an SPMD kernel every thread calls this, and
 // thread 0 plans for the team, in team memory too (see ompx_gap_list).
 #if defined(__NVPTX__) || defined(__AMDGCN__)
@@ -657,21 +660,21 @@ static inline void ompx__plan_team(int n, const int32_t* counted, const int64_t*
         }
     }
     *shift = start * chunk;
-    int64_t soonest = INT64_MAX;
+    int64_t latest = INT64_MIN;
     for (int p = 0; p < n; ++p) {
         int64_t d;
         if (!counted[p]) {
             d = INT64_MAX;
         } else if (lo[p] > hi[p]) {
-            d = lb0;
+            d = lb0 + chunk;
         } else {
             const int64_t last = ((hi[p] / chunk - start) % chunks + chunks) % chunks;
             d = lb0 + (last + 1) * chunk;
         }
         due[p] = d;
-        if (d < soonest) soonest = d;
+        if (d != INT64_MAX && d > latest) latest = d;
     }
-    *first = soonest;
+    *first = latest == INT64_MIN ? INT64_MAX : latest;
 }
 #endif
 
@@ -732,15 +735,17 @@ static inline void ompx__after_release(ompx_pipe_deferred* q, int after, int pie
 }
 #endif
 
-// Called by every thread of a team, once the team has stored the last word
-// it stores into [src, src + bytes), piece `piece` of a put the pass laid
-// out in pieces_max. The team to call it last sends the range: every other
-// team's part of it has reached the device's L2 by then, and a system-scope
-// fence writes it back for the NIC. The counter is left at zero for the
-// next launch.
+// Called by every thread of a team that has run one of the `need` chunks
+// piece `piece` of a put (laid out in pieces_max) waits for. The call that
+// makes `need` sends the range: every team's part of it has reached the
+// device's L2 by then, and a system-scope fence writes it back for the NIC.
+// Chunks, not teams, are counted: a team the GPU has not started yet runs
+// none of them, since the chunks go out in order (ompx__box_grab), and
+// waiting for it held the range back until the last wave. The counter is
+// left at zero for the next launch.
 static __attribute__((used)) void
 ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t bytes,
-                int after, int piece, int pieces_max) {
+                int after, int piece, int pieces_max, unsigned need) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
 #if defined(__AMDGCN__)
     __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
@@ -749,9 +754,8 @@ ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t 
 #endif
     ompx_sync_block_acq_rel();
     if (ompx_thread_id_x() != 0 || ompx_thread_id_y() != 0 || ompx_thread_id_z() != 0) return;
-    const unsigned teams = static_cast<unsigned>(omp_get_num_teams());
     if (__scoped_atomic_fetch_add(counter, 1u, __ATOMIC_ACQ_REL, __MEMORY_SCOPE_DEVICE) !=
-        teams - 1)
+        need - 1)
         return;
     __scoped_atomic_store_n(counter, 0u, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -766,16 +770,16 @@ ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t 
     }
 #else
     (void)counter; (void)peer; (void)dst; (void)src; (void)bytes; (void)after; (void)piece;
-    (void)pieces_max;
+    (void)pieces_max; (void)need;
 #endif
 }
 
 // A counting launch hands its chunks out in order, each to the first team
 // ready for one, instead of chunk t + j * teams to team t. Waves are
-// scheduled oldest first, so the teams that start last fall behind; a range
-// goes out only once every team is past it, and with chunks dealt round
-// robin the ranges came out slowly at first and in a rush at the end, where
-// nothing is left to hide them behind. Each team still runs as many chunks
+// scheduled oldest first, so the teams that start last fall behind, and
+// with chunks dealt round robin the ranges' chunks ran slowly at first and
+// in a rush at the end, where nothing is left to hide them behind; dealt in
+// order, they run first, and a team the GPU starts late runs none of them. Each team still runs as many chunks
 // as it was dealt, so every chunk is taken once. Returns the number of the
 // chunk to run next, in the order the plan's shift rotates. Called by every
 // thread of the team: thread 0 takes it, and the team reads it from team
@@ -829,33 +833,30 @@ ompx__box_grab_done(unsigned long long* next, unsigned* done) {
 #endif
 }
 
-// Called by every thread of a team before the chunk at lb (lb near INT64_MAX
-// once the loop is done) when some counted put may be due: counts the team
-// past every put whose due[p] <= lb, marks those INT64_MAX, and returns the
-// smallest due[] left. Entry p is piece p % pieces of its put. Not kept out
-// of line: a kernel is given the vector registers of the hungriest function
-// it calls, and this one, compiled on its own, needed 85 where the minimod
-// stencil needs 78 -- a wave per SIMD less. Inlined into its rare branch it
-// costs the loop none.
-static __attribute__((used)) int64_t
-ompx__box_due(int n, int64_t lb, int64_t* due, const int32_t* peer, void* const* dst,
+// Called by every thread of a team that has just run the chunk at `ran`
+// (its position in the order of ompx__box_grab) when that may be one some
+// counted put waits for: counts the chunk for every put whose due[p] lies
+// past it. Entry p is piece p % pieces of its put, and waits for the
+// (due[p] - lb0) / chunk chunks before due[p]. Not kept out of line: a
+// kernel is given the vector registers of the hungriest function it calls,
+// and this one, compiled on its own, needed 85 where the minimod stencil
+// needs 78 -- a wave per SIMD less. Inlined into its rare branch it costs
+// the loop none.
+static __attribute__((used)) void
+ompx__box_due(int n, int64_t ran, const int64_t* due, const int32_t* peer, void* const* dst,
               const void* const* src, const int64_t* bytes, unsigned* const* counter,
-              const int32_t* after, int pieces) {
-    int64_t next = INT64_MAX;
+              const int32_t* after, int pieces, int64_t lb0, int64_t chunk) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     for (int p = 0; p < n; ++p) {
-        if (due[p] <= lb) {
+        if (due[p] != INT64_MAX && ran < due[p])
             ompx__box_count(counter[p], peer[p], dst[p], src[p], static_cast<size_t>(bytes[p]),
-                            after[p], p & (pieces - 1), pieces);
-            due[p] = INT64_MAX;
-        }
-        if (due[p] < next) next = due[p];
+                            after[p], p & (pieces - 1), pieces,
+                            static_cast<unsigned>((due[p] - lb0) / chunk));
     }
 #else
-    (void)n; (void)lb; (void)due; (void)peer; (void)dst; (void)src; (void)bytes; (void)counter;
-    (void)after; (void)pieces;
+    (void)n; (void)ran; (void)due; (void)peer; (void)dst; (void)src; (void)bytes; (void)counter;
+    (void)after; (void)pieces; (void)lb0; (void)chunk;
 #endif
-    return next;
 }
 
 // ---- a put the host makes after the kernel ----------------------------------
