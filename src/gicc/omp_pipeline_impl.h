@@ -52,7 +52,7 @@ ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, const i
 [[omp::assume("ompx_spmd_amenable")]] static void
 ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* hi,
                int64_t lb0, int64_t iters, int64_t chunk, int64_t* shift, int64_t* due,
-               int64_t* first)
+               int64_t* first, int64_t* shared)
     __asm__("ompx__box_plan");
 [[omp::assume("ompx_spmd_amenable")]] static void
 ompx__after_put(unsigned long long kernel, int i, int src_arg, int32_t* peer, void** dst,
@@ -66,7 +66,7 @@ ompx__loop_after(unsigned long long kernel, int i, int src_arg, int peer, void* 
 ompx__box_grab(unsigned long long* next, int64_t* slot)
     __asm__("ompx__box_grab");
 [[omp::assume("ompx_spmd_amenable")]] static void
-ompx__box_grab_done(unsigned long long* next, unsigned* done)
+ompx__box_grab_done(unsigned long long* next, unsigned* done, int64_t* shared)
     __asm__("ompx__box_grab_done");
 [[omp::assume("ompx_spmd_amenable")]] static void
 ompx__box_due(int n, int64_t ran, const int64_t* due, const int32_t* peer, void* const* dst,
@@ -84,6 +84,13 @@ ompx__box_due(int n, int64_t ran, const int64_t* due, const int32_t* peer, void*
 // device context is not, and every wave of a rewritten kernel reads it.
 // Missing if ompx_prepare() was not called in this translation unit, which
 // leaves nothing to record the failure in.
+// The smallest put a kernel sends by count. Counting costs the launch on
+// the order of 100 us (chunks handed out in order, the plan, the counts),
+// whatever the put's size; a put smaller than this goes out in less time
+// than that, so it waits for the next quiet instead, as one after the
+// kernel would.
+constexpr size_t kOmpxCountMinBytes = size_t(1) << 20;
+
 static inline ompx_pipe_deferred* ompx__pipe_list() {
     ompx_pipe_deferred* q = ompx__pipe_deferred;
     if (q == nullptr) __builtin_trap();
@@ -482,7 +489,7 @@ ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count
         p = ompx__peer_base(q, peer, dst);
         if (p == nullptr) {
             if (q->proxy_on) {
-                if (can_count) by_count = 1;
+                if (can_count && bytes >= kOmpxCountMinBytes) by_count = 1;
                 else if (omp_get_team_num() == 0 && ompx__sequential_thread())
                     ompx__pipe_defer(q, peer, dst, src, bytes);
             } else if (ompx__after_bell(after) != nullptr) {
@@ -678,20 +685,54 @@ static inline void ompx__plan_team(int n, const int32_t* counted, const int64_t*
 }
 #endif
 
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+// The plan is the same for every team of a launch, and made by one thread
+// while the rest of its team waits: made by every team, that wait came once
+// per wave of teams, and took a third of a short kernel. So the first team
+// to get here makes it, in `shared` (state, shift, first, then due[]: global
+// memory of the kernel's), and the others copy it, waiting while it is
+// made -- by a team that is running, which waits for nobody. The launch's
+// last team clears the state (ompx__box_grab_done), after every team has
+// read the plan.
+constexpr unsigned long long kOmpxPlanNone = 0, kOmpxPlanMaking = 1, kOmpxPlanMade = 2;
+static inline void ompx__plan_shared(int n, const int32_t* counted, const int64_t* lo,
+                                     const int64_t* hi, int64_t lb0, int64_t iters,
+                                     int64_t chunk, int64_t* shift, int64_t* due,
+                                     int64_t* first, int64_t* shared) {
+    auto* state = reinterpret_cast<unsigned long long*>(shared);
+    unsigned long long s = __scoped_atomic_load_n(state, __ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE);
+    if (s == kOmpxPlanNone &&
+        __scoped_atomic_compare_exchange_n(state, &s, kOmpxPlanMaking, false, __ATOMIC_ACQ_REL,
+                                           __ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE)) {
+        ompx__plan_team(n, counted, lo, hi, lb0, iters, chunk, shift, due, first);
+        shared[1] = *shift;
+        shared[2] = *first;
+        for (int p = 0; p < n; ++p) shared[3 + p] = due[p];
+        __scoped_atomic_store_n(state, kOmpxPlanMade, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+        return;
+    }
+    while (s != kOmpxPlanMade)
+        s = __scoped_atomic_load_n(state, __ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE);
+    *shift = shared[1];
+    *first = shared[2];
+    for (int p = 0; p < n; ++p) due[p] = shared[3 + p];
+}
+#endif
+
 static __attribute__((used)) void
 ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* hi,
                int64_t lb0, int64_t iters, int64_t chunk, int64_t* shift, int64_t* due,
-               int64_t* first) {
+               int64_t* first, int64_t* shared) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     // One barrier, which every thread of an SPMD team reaches at this one
     // call: it is an aligned barrier, and the optimizer relies on that.
     const bool spmd = __kmpc_is_spmd_exec_mode();
     if (!spmd || (ompx_thread_id_x() == 0 && ompx_thread_id_y() == 0 && ompx_thread_id_z() == 0))
-        ompx__plan_team(n, counted, lo, hi, lb0, iters, chunk, shift, due, first);
+        ompx__plan_shared(n, counted, lo, hi, lb0, iters, chunk, shift, due, first, shared);
     if (spmd) ompx_sync_block_acq_rel();
 #else
     (void)n; (void)counted; (void)lo; (void)hi; (void)lb0; (void)iters; (void)chunk;
-    (void)due;
+    (void)due; (void)shared;
     *shift = 0;
     *first = INT64_MAX;
 #endif
@@ -807,7 +848,7 @@ ompx__box_grab(unsigned long long* next, int64_t* slot) {
 // kernel rang (every team has counted all its pieces by now) before
 // clearing that for the next launch too.
 static __attribute__((used)) void
-ompx__box_grab_done(unsigned long long* next, unsigned* done) {
+ompx__box_grab_done(unsigned long long* next, unsigned* done, int64_t* shared) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     if (ompx_thread_id_x() != 0 || ompx_thread_id_y() != 0 || ompx_thread_id_z() != 0) return;
     const unsigned teams = static_cast<unsigned>(omp_get_num_teams());
@@ -815,6 +856,8 @@ ompx__box_grab_done(unsigned long long* next, unsigned* done) {
         teams - 1) {
         __scoped_atomic_store_n(next, 0ull, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
         __scoped_atomic_store_n(done, 0u, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+        __scoped_atomic_store_n(reinterpret_cast<unsigned long long*>(shared), kOmpxPlanNone,
+                                __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
         for (int a = 0; a < OMPX_PIPE_AFTER_MAX; ++a) {
             const unsigned rung = __scoped_atomic_load_n(&ompx__after_rung[a], __ATOMIC_ACQUIRE,
                                                          __MEMORY_SCOPE_DEVICE);
@@ -829,7 +872,7 @@ ompx__box_grab_done(unsigned long long* next, unsigned* done) {
         }
     }
 #else
-    (void)next; (void)done;
+    (void)next; (void)done; (void)shared;
 #endif
 }
 

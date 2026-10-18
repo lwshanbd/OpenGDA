@@ -1469,13 +1469,20 @@ private:
             }
             B.SetInsertPoint(planned);
         }
+        // The launch's plan, made by its first team (ompx__box_plan): state,
+        // shift, first, then due[].
+        auto *PT = ArrayType::get(I64, 3 + n);
+        auto *sharedPlan = new GlobalVariable(
+            M, PT, false, GlobalValue::InternalLinkage, ConstantAggregateZero::get(PT),
+            "gicc.box.plan", nullptr, GlobalValue::NotThreadLocal, kmpc::GlobalAddrSpace);
+        Constant *planPtr = ConstantExpr::getAddrSpaceCast(sharedPlan, Ptr);
         FunctionCallee planFn =
             M.getOrInsertFunction("ompx__box_plan", Type::getVoidTy(Ctx), I32, Ptr, Ptr, Ptr, I64,
-                                  I64, I64, Ptr, Ptr, Ptr);
+                                  I64, I64, Ptr, Ptr, Ptr, Ptr);
         B.CreateCall(planFn, {ConstantInt::get(I32, n), flat(B, countedArr), flat(B, loArr),
                               flat(B, hiArr), lb0, itersAt(B), chunk,
                               B.CreateAddrSpaceCast(shiftSlot, Ptr), flat(B, dueArr),
-                              B.CreateAddrSpaceCast(firstSlot, Ptr)});
+                              B.CreateAddrSpaceCast(firstSlot, Ptr), planPtr});
         B.SetInsertPoint(KI.distInit);
         Value *shift = uniform(B, B.CreateLoad(I64, shiftSlot, "gicc.box.shift"));
         // The latest due[] of a counted put: a chunk before it may be one a
@@ -1544,10 +1551,11 @@ private:
             dueCall(KI.distFini, FB);
             Instruction *fin =
                 SplitBlockAndInsertIfThen(active, KI.distFini->getIterator(), false, rarely);
-            FunctionCallee doneFn =
-                M.getOrInsertFunction("ompx__box_grab_done", Type::getVoidTy(Ctx), Ptr, Ptr);
+            FunctionCallee doneFn = M.getOrInsertFunction("ompx__box_grab_done",
+                                                          Type::getVoidTy(Ctx), Ptr, Ptr, Ptr);
             IRBuilder<>(fin).CreateCall(doneFn, {ConstantExpr::getAddrSpaceCast(grabNext, Ptr),
-                                                 ConstantExpr::getAddrSpaceCast(grabDone, Ptr)});
+                                                 ConstantExpr::getAddrSpaceCast(grabDone, Ptr),
+                                                 planPtr});
         }
 
         DominatorTree DT(KI.K);
