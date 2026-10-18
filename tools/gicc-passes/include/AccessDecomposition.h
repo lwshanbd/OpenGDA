@@ -119,6 +119,7 @@ private:
     std::optional<Lin> build(llvm::Value *v, std::string &why);
     std::optional<Lin> buildPointer(llvm::Value *p, llvm::Value *&base, std::string &why);
     std::optional<Lin> buildShifted(llvm::Value *v, unsigned &k, std::string &why);
+    bool monotone(llvm::Value *v, unsigned depth = 0);
     std::optional<Lin> digit(llvm::Instruction *I, bool remainder, std::string &why);
     bool eq(const llvm::SCEV *a, const llvm::SCEV *b);
 

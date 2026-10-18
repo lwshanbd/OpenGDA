@@ -51,3 +51,16 @@ void busy(float* v, int64_t n, int peer, float* dst) {
     #pragma omp taskwait
     if (peer >= 0) ompx_put(peer, dst, v + n - 64, 64 * sizeof(float));
 }
+
+// A nowait region with a depend clause, on a buffer named by a global the
+// host loads again for the put: the same value, nothing writing it between.
+float* g_halo;
+void depended(int64_t n, int peer, float* dst) {
+    float* v = g_halo;
+    #pragma omp target teams distribute parallel for is_device_ptr(v) firstprivate(n) \
+            nowait depend(inout: g_halo)
+    for (int64_t i = 0; i < n; ++i)
+        v[i] = wave(3.f, i);
+    #pragma omp taskwait
+    if (peer >= 0) ompx_put(peer, dst, g_halo + n - 64, 64 * sizeof(float));
+}

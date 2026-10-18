@@ -145,15 +145,20 @@ const SCEV *exactDivideCarriers(ScalarEvolution &SE, const SCEV *a, const SCEV *
         else fb.push_back(x);
     }
     SmallVector<const SCEV *, 4> fa = factors(a);
+    bool all = true;
     for (const SCEV *x : fb) {
         auto it = std::find_if(fa.begin(), fa.end(), [&](const SCEV *y) {
             return intCarrier(y) == intCarrier(x) || sameSCEV(SE, x, y) ||
                    castBlind(SE, x) == castBlind(SE, y);
         });
-        if (it == fa.end()) return nullptr;
+        if (it == fa.end()) { all = false; break; }
         fa.erase(it);
     }
-    return fa.empty() ? SE.getOne(a->getType()) : SE.getMulExpr(fa);
+    if (all) return fa.empty() ? SE.getOne(a->getType()) : SE.getMulExpr(fa);
+    // Both cast-blind, as a whole: a product of carriers inside one cast
+    // (sext(8 * zext(trunc(n))) over 2 * zext(trunc(n))).
+    const SCEV *q = exactDivide(SE, castBlind(SE, a), castBlind(SE, b));
+    return q && q->getType() == a->getType() ? q : nullptr;
 }
 
 // Division or remainder of X - q_0*R_0 - ... - q_{d-1}*R_{d-1} by a
@@ -448,7 +453,8 @@ std::optional<AccessDecomposer::Lin> AccessDecomposer::build(Value *v, std::stri
     case Instruction::SExt: {
         auto a = build(I->getOperand(0), why);
         if (!a) return std::nullopt;
-        if (!a->sx) {
+        if (!a->sx && monotone(I->getOperand(0))) usedTrunc = true;
+        else if (!a->sx) {
             why = "sign extension of index arithmetic that may have wrapped (no nsw)";
             return std::nullopt;
         }
@@ -484,6 +490,61 @@ std::optional<AccessDecomposer::Lin> AccessDecomposer::build(Value *v, std::stri
         why = std::string("unsupported operation '") + I->getOpcodeName() +
               "' on the loop index";
         return std::nullopt;
+    }
+}
+
+// A narrow index made of sums and products of loop digits and invariants
+// that are not negative, the factors positive (a constant or a trip
+// count): every value it is made of is no larger than it. It is the index
+// the source computed in its narrow type, which fits that type (overflow is
+// undefined), so none of those values wrapped either -- whatever flags the
+// optimizer left after refactoring the source's arithmetic (instcombine
+// turns a * k + b * k into (a + b) * k with no nsw). Trusted as the trunc
+// rule is.
+bool AccessDecomposer::monotone(Value *v, unsigned depth) {
+    if (depth > 16 || !v->getType()->isIntegerTy() || v->getType()->getIntegerBitWidth() >= 64)
+        return false;
+    const SCEV *S = SE.getSCEV(v);
+    // Known so, or so whenever the loop runs (its guards).
+    auto positiveInvariant = [&](const SCEV *x) {
+        if (!SE.isLoopInvariant(x, L)) return false;
+        if (SE.isKnownPositive(x) ||
+            SE.isLoopEntryGuardedByCond(L, ICmpInst::ICMP_SGT, x, SE.getZero(x->getType())))
+            return true;
+        return llvm::any_of(chain, [&](const SCEV *R) { return castBase(R) == castBase(x); });
+    };
+    if (SE.isLoopInvariant(S, L))
+        return SE.isKnownNonNegative(S) || positiveInvariant(S) ||
+               SE.isLoopEntryGuardedByCond(L, ICmpInst::ICMP_SGE, S, SE.getZero(S->getType()));
+    auto *I = dyn_cast<Instruction>(v);
+    if (!I) return false;
+    std::string ignored;
+    switch (I->getOpcode()) {
+    case Instruction::Trunc: {   // a rebuilt loop index, not negative
+        // c0 plus a digit, or the innermost remainder X - sum q_d R_d, times
+        // its coefficient: a remainder's own terms aside, none negative.
+        auto a = build(I, ignored);
+        if (!a || !singleIndex(*a) || !SE.isKnownNonNegative(a->c0)) return false;
+        const SCEV *cX = coef(*a, -1);
+        return llvm::all_of(a->t, [&](auto &t) {
+            const bool absorbed = t.first >= 0 && unsigned(t.first) < chain.size() &&
+                                  SE.getAddExpr(t.second, SE.getMulExpr(cX, chain[t.first]))
+                                      ->isZero();
+            return absorbed || SE.isKnownNonNegative(t.second);
+        });
+    }
+    case Instruction::Add:
+        return monotone(I->getOperand(0), depth + 1) && monotone(I->getOperand(1), depth + 1);
+    case Instruction::Shl:
+        return isa<ConstantInt>(I->getOperand(1)) && monotone(I->getOperand(0), depth + 1);
+    case Instruction::Mul:
+        for (unsigned k = 0; k < 2; ++k)
+            if (positiveInvariant(SE.getSCEV(I->getOperand(k))) &&
+                monotone(I->getOperand(1 - k), depth + 1))
+                return true;
+        return false;
+    default:
+        return false;
     }
 }
 

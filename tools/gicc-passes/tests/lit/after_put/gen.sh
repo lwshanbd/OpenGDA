@@ -254,7 +254,8 @@ HEAD
 ; FIND-DAG: [gicc-after] __omp_offloading_{{.*}}copied{{.*}}: a put stays after the kernel: argument 0 of the put cannot be computed before the launch
 ; FIND-DAG: [gicc-after] __omp_offloading_{{.*}}waited{{.*}}: 1 put(s) after the launch can go from the kernel
 ; FIND-DAG: [gicc-after] __omp_offloading_{{.*}}busy{{.*}}: the puts after this nowait region stay after it: code between its task and the taskwait may synchronize: ompx_barrier
-; JSON: "sites":[{"kernel":"__omp_offloading_{{[^"]*}}neighbours{{[^"]*}}","src_args":[[[A:[0-9]+]],[[A]],[[A]],[[A]],[[A]],[[A]]]},{"kernel":"__omp_offloading_{{[^"]*}}waited{{[^"]*}}","src_args":[{{[0-9]+}}]}]
+; FIND-DAG: [gicc-after] __omp_offloading_{{.*}}depended{{.*}}: 1 put(s) after the launch can go from the kernel
+; JSON: "sites":[{"kernel":"__omp_offloading_{{[^"]*}}neighbours{{[^"]*}}","src_args":[[[A:[0-9]+]],[[A]],[[A]],[[A]],[[A]],[[A]]]},{"kernel":"__omp_offloading_{{[^"]*}}waited{{[^"]*}}","src_args":[{{[0-9]+}}]},{"kernel":"__omp_offloading_{{[^"]*}}depended{{[^"]*}}","src_args":[{{[0-9]+}}]}]
 ;
 ; Each post is first cleared, then armed once the loop runs and reaches
 ; that iteration; only then are the iteration's peer and dst loaded.
@@ -293,6 +294,14 @@ HEAD
 ; BRACKET-LABEL: define {{.*}}@_Z4busy
 ; BRACKET-NOT: ompx__after_post
 ; BRACKET: call void @ompx_put_host(
+; With a depend clause the task is created by __kmpc_omp_task_with_deps;
+; the put reloads g_halo, which reads what the task was handed.
+; BRACKET-LABEL: define {{.*}}@_Z8depended
+; BRACKET: call void @ompx__after_post(i64 [[D:-?[0-9]+]], i32 0,
+; BRACKET: call i32 @__kmpc_omp_task_with_deps(
+; BRACKET-NEXT: call i32 @__kmpc_omp_taskwait(
+; BRACKET: call void @ompx__after_done(i64 [[D]], i32 0,
+; BRACKET-NOT: call void @ompx_put_host(
 ;
 HEAD
     sed 's/^/; /; s/ *$//' Inputs/after_shapes.cpp

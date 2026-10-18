@@ -31,8 +31,9 @@
 // distribute loop; -fno-openmp-target-big-jump-loop and
 // -fno-openmp-target-no-loop keep the ordinary form.
 //
-// A nowait region is a task whose entry launches the kernel: when a
-// taskwait follows the task's creation with only such benign code between,
+// A nowait region (with depend clauses or without) is a task whose entry
+// launches the kernel: when a taskwait follows the task's creation with
+// only such benign code between,
 // the puts after the taskwait are posted before the task is created and
 // made after the taskwait only if the kernel did not, as for a region that
 // waits.

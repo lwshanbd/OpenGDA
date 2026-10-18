@@ -229,6 +229,17 @@ private:
         if (const SCEV *k = KI.toKernel(x, SK); k && kernelPositive(k)) return true;
         if (auto *M = dyn_cast<SCEVMulExpr>(x))
             return llvm::all_of(M->operands(), [&](const SCEV *op) { return isPositive(op, L); });
+        // zext(trunc(v) to iN) > 0 when trunc(v) to i(N+1) > 0: that value
+        // is below 2^N, so its low N bits are not all zero (clang reads a
+        // 32-bit trip count times a constant this way).
+        if (auto *Z = dyn_cast<SCEVZeroExtendExpr>(x))
+            if (auto *T = dyn_cast<SCEVTruncateExpr>(Z->getOperand())) {
+                const unsigned n = T->getType()->getIntegerBitWidth();
+                const SCEV *v = T->getOperand();
+                if (n + 1 < v->getType()->getIntegerBitWidth() &&
+                    isPositive(SE.getTruncateExpr(v, IntegerType::get(SE.getContext(), n + 1)), L))
+                    return true;
+            }
         // sext(t) > 0 iff t > 0; zext(t) > 0 if t > 0 read signed.
         if (isa<SCEVSignExtendExpr>(x) || isa<SCEVZeroExtendExpr>(x))
             return isPositive(cast<SCEVCastExpr>(x)->getOperand(), L);

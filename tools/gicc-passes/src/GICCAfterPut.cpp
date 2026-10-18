@@ -208,6 +208,7 @@ constexpr StringLiteral kLaunch  = "__tgt_target_kernel";
 constexpr StringLiteral kHostPut = "ompx_put_host";
 constexpr StringLiteral kLoopDone = "ompx__loop_done";
 constexpr StringLiteral kTask = "__kmpc_omp_task";
+constexpr StringLiteral kTaskDeps = "__kmpc_omp_task_with_deps";   // with depend clauses
 constexpr StringLiteral kTargetTask = "__kmpc_omp_target_task_alloc";
 constexpr StringLiteral kTaskwait = "__kmpc_omp_taskwait";
 
@@ -602,6 +603,29 @@ struct Hoister {
     }
 };
 
+// Whether loads `before` (ahead of the launch, at `post`) and `after` (past
+// it) read one value: of one address, which nothing between them may write
+// -- the code in before's block up to the launch, but the OpenMP runtime
+// calls that set the launch up (a target task's allocation writes only the
+// task), and what H checks for the code past it and the kernel
+// (Hoister::survives).
+bool sameLoad(const Value *before, const Value *after, const Hoister &H, Instruction *post) {
+    auto *La = dyn_cast<LoadInst>(before);
+    auto *Lp = dyn_cast<LoadInst>(after);
+    if (!La || !Lp || !H.AA || !La->isSimple() || La->getType() != Lp->getType() ||
+        La->getPointerOperand() != Lp->getPointerOperand() ||
+        !H.survives(const_cast<LoadInst *>(Lp)))
+        return false;
+    if (La->getParent() != post->getParent() || !La->comesBefore(post)) return false;
+    const MemoryLocation loc = MemoryLocation::get(La);
+    for (const Instruction *I = La->getNextNode(); I != post; I = I->getNextNode()) {
+        if (auto *CB = dyn_cast<CallBase>(I); CB && calleeName(*CB).starts_with("__kmpc_"))
+            continue;
+        if (I->mayWriteToMemory() && isModSet(H.AA->getModRefInfo(I, loc))) return false;
+    }
+    return true;
+}
+
 // Code that neither orders this rank with another nor can change what a
 // put after it reads.
 bool benign(Instruction &I) {
@@ -759,7 +783,8 @@ bool checkPut(const Launch &Ln, CallInst *put, Analyses &A, AAResults *AA, Found
     const Value *obj = sourceObject(put->getArgOperand(2), Ln.post, DT);
     for (unsigned j = 0; j < args.size(); ++j) {
         if (!args[j] || !args[j]->getType()->isPointerTy()) continue;
-        if (sourceObject(args[j], Ln.post, DT) != obj) continue;
+        const Value *argObj = sourceObject(args[j], Ln.post, DT);
+        if (argObj != obj && !sameLoad(argObj, obj, H, Ln.post)) continue;
         P.put = put;
         P.srcArg = j;
         P.base = args[j];
@@ -782,10 +807,12 @@ Launch plainLaunch(CallInst *L, DominatorTree &DT, const DataLayout &DL) {
 }
 
 // A nowait target region is a task (__kmpc_omp_target_task_alloc, then
-// __kmpc_omp_task at TC) whose entry function launches the kernel from a
-// base-pointer array in the task, which the creating function fills. Its
-// kernel is over after a taskwait that follows TC with only benign code
-// between them.
+// __kmpc_omp_task at TC, or __kmpc_omp_task_with_deps with depend clauses)
+// whose entry function launches the kernel from a base-pointer array in the
+// task, which the creating function fills. Its kernel is over after a
+// taskwait that follows TC with only benign code between them. Tasks it
+// depends on may still run after the posts; none of them has puts after
+// it, which would have needed a taskwait of their own, before TC.
 std::optional<Launch> taskLaunch(CallInst *TC, FunctionAnalysisManager &FAM,
                                  const DataLayout &DL) {
     auto *alloc = dyn_cast<CallInst>(TC->getArgOperand(2)->stripPointerCasts());
@@ -1241,7 +1268,7 @@ PreservedAnalyses GICCAfterPutPass::run(Module &M, ModuleAnalysisManager &MAM) {
         for (Instruction &I : instructions(F))
             if (auto *CI = dyn_cast<CallInst>(&I); CI && calleeName(*CI) == kLaunch)
                 launches.push_back(CI);
-            else if (CI && calleeName(*CI) == kTask)
+            else if (CI && (calleeName(*CI) == kTask || calleeName(*CI) == kTaskDeps))
                 tasks.push_back(CI);
         if (launches.empty() && tasks.empty()) continue;
         auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);

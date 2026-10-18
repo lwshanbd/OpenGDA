@@ -14,7 +14,7 @@
 ;
 ; // CHECK: [gicc-write] kernel {{.*}}
 ; // CHECK-NEXT: when ((trunc i64 %1 to i32) > 0) ((trunc i64 %2 to i32) > 0)
-; // CHECK-NEXT: store to ptr not analysable: store address: sign extension of index arithmetic that may have wrapped (no nsw)
+; // CHECK-NEXT: store to ptr not analysable: store address: collapse radix (zext i31 (trunc i64 ((1 + %5) /u 2) to i31) to i64) cannot be proven positive (a division the source wrote?)
 
 source_filename = "Inputs/reject_step2_int.cpp"
 target datalayout = "e-p6:32:32-i64:64-i128:128-v16:16-v32:32-n16:32:64"

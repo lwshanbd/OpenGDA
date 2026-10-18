@@ -15,7 +15,8 @@
 ; FIND-DAG: [gicc-after] __omp_offloading_{{.*}}copied{{.*}}: a put stays after the kernel: argument 0 of the put cannot be computed before the launch
 ; FIND-DAG: [gicc-after] __omp_offloading_{{.*}}waited{{.*}}: 1 put(s) after the launch can go from the kernel
 ; FIND-DAG: [gicc-after] __omp_offloading_{{.*}}busy{{.*}}: the puts after this nowait region stay after it: code between its task and the taskwait may synchronize: ompx_barrier
-; JSON: "sites":[{"kernel":"__omp_offloading_{{[^"]*}}neighbours{{[^"]*}}","src_args":[[[A:[0-9]+]],[[A]],[[A]],[[A]],[[A]],[[A]]]},{"kernel":"__omp_offloading_{{[^"]*}}waited{{[^"]*}}","src_args":[{{[0-9]+}}]}]
+; FIND-DAG: [gicc-after] __omp_offloading_{{.*}}depended{{.*}}: 1 put(s) after the launch can go from the kernel
+; JSON: "sites":[{"kernel":"__omp_offloading_{{[^"]*}}neighbours{{[^"]*}}","src_args":[[[A:[0-9]+]],[[A]],[[A]],[[A]],[[A]],[[A]]]},{"kernel":"__omp_offloading_{{[^"]*}}waited{{[^"]*}}","src_args":[{{[0-9]+}}]},{"kernel":"__omp_offloading_{{[^"]*}}depended{{[^"]*}}","src_args":[{{[0-9]+}}]}]
 ;
 ; Each post is first cleared, then armed once the loop runs and reaches
 ; that iteration; only then are the iteration's peer and dst loaded.
@@ -54,6 +55,14 @@
 ; BRACKET-LABEL: define {{.*}}@_Z4busy
 ; BRACKET-NOT: ompx__after_post
 ; BRACKET: call void @ompx_put_host(
+; With a depend clause the task is created by __kmpc_omp_task_with_deps;
+; the put reloads g_halo, which reads what the task was handed.
+; BRACKET-LABEL: define {{.*}}@_Z8depended
+; BRACKET: call void @ompx__after_post(i64 [[D:-?[0-9]+]], i32 0,
+; BRACKET: call i32 @__kmpc_omp_task_with_deps(
+; BRACKET-NEXT: call i32 @__kmpc_omp_taskwait(
+; BRACKET: call void @ompx__after_done(i64 [[D]], i32 0,
+; BRACKET-NOT: call void @ompx_put_host(
 ;
 ; // Loops of puts and nowait regions before puts (GICCAfterPut.h).
 ; #include "gicc/omp.h"
@@ -108,48 +117,61 @@
 ;     #pragma omp taskwait
 ;     if (peer >= 0) ompx_put(peer, dst, v + n - 64, 64 * sizeof(float));
 ; }
+;
+; // A nowait region with a depend clause, on a buffer named by a global the
+; // host loads again for the put: the same value, nothing writing it between.
+; float* g_halo;
+; void depended(int64_t n, int peer, float* dst) {
+;     float* v = g_halo;
+;     #pragma omp target teams distribute parallel for is_device_ptr(v) firstprivate(n) \
+;             nowait depend(inout: g_halo)
+;     for (int64_t i = 0; i < n; ++i)
+;         v[i] = wave(3.f, i);
+;     #pragma omp taskwait
+;     if (peer >= 0) ompx_put(peer, dst, g_halo + n - 64, 64 * sizeof(float));
+; }
 
-source_filename = "after_shapes.cpp"
+source_filename = "Inputs/after_shapes.cpp"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32"
 target triple = "aarch64-unknown-linux-gnu"
 
-%struct.ompx_nodb_state = type { ptr, ptr, i32, i32, i32, i32, [8 x %struct.ompx_nodb_entry] }
-%struct.ompx_nodb_entry = type { ptr, i64, ptr, ptr }
 %struct.ident_t = type { i32, i32, i32, i32, ptr }
 %struct.__tgt_offload_entry = type { i64, i16, i16, i32, ptr, ptr, i64, i64, ptr }
 %struct.__tgt_kernel_arguments = type { i32, i32, ptr, ptr, ptr, ptr, ptr, ptr, i64, i64, [3 x i32], [3 x i32], i32 }
+%struct.kmp_depend_info = type { i64, i64, i8 }
 
 @ompx__ctx = weak dso_local global ptr null, align 8
 @ompx__pipe_deferred = weak dso_local global ptr null, align 8
-@ompx__nodb = weak dso_local global %struct.ompx_nodb_state zeroinitializer, align 8
 @stderr = external local_unnamed_addr global ptr, align 8
 @.str = private unnamed_addr constant [92 x i8] c"ompx_pipelined_put: the target region fell back to the host, which it cannot run correctly\0A\00", align 1
 @0 = private unnamed_addr constant [23 x i8] c";unknown;unknown;0;0;;\00", align 4
 @1 = private unnamed_addr constant %struct.ident_t { i32 0, i32 2050, i32 0, i32 22, ptr @0 }, align 8
 @2 = private unnamed_addr constant %struct.ident_t { i32 0, i32 514, i32 0, i32 22, ptr @0 }, align 8
 @3 = private unnamed_addr constant %struct.ident_t { i32 0, i32 2, i32 0, i32 22, ptr @0 }, align 8
-@.__omp_offloading_25e8f0c4_6e019e36__Z10neighboursPflliPKiPKS__l15.region_id = weak constant i8 0
-@.__omp_offloading_25e8f0c4_6e019e36__Z6copiedPfS_lliPKiPKS__l24.region_id = weak constant i8 0
+@.__omp_offloading_25e8f0c4_2f00856c__Z10neighboursPflliPKiPKS__l15.region_id = weak constant i8 0
+@.__omp_offloading_25e8f0c4_2f00856c__Z6copiedPfS_lliPKiPKS__l24.region_id = weak constant i8 0
 @.offload_sizes.1 = private unnamed_addr constant [4 x i64] [i64 8, i64 8, i64 0, i64 8]
 @.offload_maptypes.2 = private unnamed_addr constant [4 x i64] [i64 288, i64 288, i64 34, i64 16384]
-@.__omp_offloading_25e8f0c4_6e019e36__Z6waitedPfliS__l37.region_id = weak constant i8 0
-@.__omp_offloading_25e8f0c4_6e019e36__Z4busyPfliS__l47.region_id = weak constant i8 0
-@.offload_sizes.5 = private unnamed_addr constant [2 x i64] [i64 8, i64 8]
-@.offload_maptypes.6 = private unnamed_addr constant [2 x i64] [i64 288, i64 288]
+@.__omp_offloading_25e8f0c4_2f00856c__Z6waitedPfliS__l37.region_id = weak constant i8 0
+@.__omp_offloading_25e8f0c4_2f00856c__Z4busyPfliS__l47.region_id = weak constant i8 0
+@g_halo = dso_local global ptr null, align 8
+@.__omp_offloading_25e8f0c4_2f00856c__Z8dependedliPf_l60.region_id = weak constant i8 0
+@.offload_sizes.10 = private unnamed_addr constant [2 x i64] [i64 8, i64 8]
+@.offload_maptypes.11 = private unnamed_addr constant [2 x i64] [i64 288, i64 288]
 @.offloading.entry_name = internal unnamed_addr constant [10 x i8] c"ompx__ctx\00", section ".llvm.rodata.offloading", align 1
 @.offloading.entry.ompx__ctx = weak local_unnamed_addr constant %struct.__tgt_offload_entry { i64 0, i16 1, i16 1, i32 0, ptr @ompx__ctx, ptr @.offloading.entry_name, i64 8, i64 0, ptr null }, section "llvm_offload_entries", align 8
-@.offloading.entry_name.10 = internal unnamed_addr constant [20 x i8] c"ompx__pipe_deferred\00", section ".llvm.rodata.offloading", align 1
-@.offloading.entry.ompx__pipe_deferred = weak local_unnamed_addr constant %struct.__tgt_offload_entry { i64 0, i16 1, i16 1, i32 0, ptr @ompx__pipe_deferred, ptr @.offloading.entry_name.10, i64 8, i64 0, ptr null }, section "llvm_offload_entries", align 8
-@.offloading.entry_name.11 = internal unnamed_addr constant [11 x i8] c"ompx__nodb\00", section ".llvm.rodata.offloading", align 1
-@.offloading.entry.ompx__nodb = weak local_unnamed_addr constant %struct.__tgt_offload_entry { i64 0, i16 1, i16 1, i32 0, ptr @ompx__nodb, ptr @.offloading.entry_name.11, i64 288, i64 0, ptr null }, section "llvm_offload_entries", align 8
-@.offloading.entry_name.12 = internal unnamed_addr constant [66 x i8] c"__omp_offloading_25e8f0c4_6e019e36__Z10neighboursPflliPKiPKS__l15\00", section ".llvm.rodata.offloading", align 1
-@.offloading.entry.__omp_offloading_25e8f0c4_6e019e36__Z10neighboursPflliPKiPKS__l15 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { i64 0, i16 1, i16 1, i32 0, ptr @.__omp_offloading_25e8f0c4_6e019e36__Z10neighboursPflliPKiPKS__l15.region_id, ptr @.offloading.entry_name.12, i64 0, i64 0, ptr null }, section "llvm_offload_entries", align 8
-@.offloading.entry_name.13 = internal unnamed_addr constant [63 x i8] c"__omp_offloading_25e8f0c4_6e019e36__Z6copiedPfS_lliPKiPKS__l24\00", section ".llvm.rodata.offloading", align 1
-@.offloading.entry.__omp_offloading_25e8f0c4_6e019e36__Z6copiedPfS_lliPKiPKS__l24 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { i64 0, i16 1, i16 1, i32 0, ptr @.__omp_offloading_25e8f0c4_6e019e36__Z6copiedPfS_lliPKiPKS__l24.region_id, ptr @.offloading.entry_name.13, i64 0, i64 0, ptr null }, section "llvm_offload_entries", align 8
-@.offloading.entry_name.14 = internal unnamed_addr constant [55 x i8] c"__omp_offloading_25e8f0c4_6e019e36__Z6waitedPfliS__l37\00", section ".llvm.rodata.offloading", align 1
-@.offloading.entry.__omp_offloading_25e8f0c4_6e019e36__Z6waitedPfliS__l37 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { i64 0, i16 1, i16 1, i32 0, ptr @.__omp_offloading_25e8f0c4_6e019e36__Z6waitedPfliS__l37.region_id, ptr @.offloading.entry_name.14, i64 0, i64 0, ptr null }, section "llvm_offload_entries", align 8
-@.offloading.entry_name.15 = internal unnamed_addr constant [53 x i8] c"__omp_offloading_25e8f0c4_6e019e36__Z4busyPfliS__l47\00", section ".llvm.rodata.offloading", align 1
-@.offloading.entry.__omp_offloading_25e8f0c4_6e019e36__Z4busyPfliS__l47 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { i64 0, i16 1, i16 1, i32 0, ptr @.__omp_offloading_25e8f0c4_6e019e36__Z4busyPfliS__l47.region_id, ptr @.offloading.entry_name.15, i64 0, i64 0, ptr null }, section "llvm_offload_entries", align 8
+@.offloading.entry_name.15 = internal unnamed_addr constant [20 x i8] c"ompx__pipe_deferred\00", section ".llvm.rodata.offloading", align 1
+@.offloading.entry.ompx__pipe_deferred = weak local_unnamed_addr constant %struct.__tgt_offload_entry { i64 0, i16 1, i16 1, i32 0, ptr @ompx__pipe_deferred, ptr @.offloading.entry_name.15, i64 8, i64 0, ptr null }, section "llvm_offload_entries", align 8
+@.offloading.entry_name.16 = internal unnamed_addr constant [66 x i8] c"__omp_offloading_25e8f0c4_2f00856c__Z10neighboursPflliPKiPKS__l15\00", section ".llvm.rodata.offloading", align 1
+@.offloading.entry.__omp_offloading_25e8f0c4_2f00856c__Z10neighboursPflliPKiPKS__l15 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { i64 0, i16 1, i16 1, i32 0, ptr @.__omp_offloading_25e8f0c4_2f00856c__Z10neighboursPflliPKiPKS__l15.region_id, ptr @.offloading.entry_name.16, i64 0, i64 0, ptr null }, section "llvm_offload_entries", align 8
+@.offloading.entry_name.17 = internal unnamed_addr constant [63 x i8] c"__omp_offloading_25e8f0c4_2f00856c__Z6copiedPfS_lliPKiPKS__l24\00", section ".llvm.rodata.offloading", align 1
+@.offloading.entry.__omp_offloading_25e8f0c4_2f00856c__Z6copiedPfS_lliPKiPKS__l24 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { i64 0, i16 1, i16 1, i32 0, ptr @.__omp_offloading_25e8f0c4_2f00856c__Z6copiedPfS_lliPKiPKS__l24.region_id, ptr @.offloading.entry_name.17, i64 0, i64 0, ptr null }, section "llvm_offload_entries", align 8
+@.offloading.entry_name.18 = internal unnamed_addr constant [55 x i8] c"__omp_offloading_25e8f0c4_2f00856c__Z6waitedPfliS__l37\00", section ".llvm.rodata.offloading", align 1
+@.offloading.entry.__omp_offloading_25e8f0c4_2f00856c__Z6waitedPfliS__l37 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { i64 0, i16 1, i16 1, i32 0, ptr @.__omp_offloading_25e8f0c4_2f00856c__Z6waitedPfliS__l37.region_id, ptr @.offloading.entry_name.18, i64 0, i64 0, ptr null }, section "llvm_offload_entries", align 8
+@.offloading.entry_name.19 = internal unnamed_addr constant [53 x i8] c"__omp_offloading_25e8f0c4_2f00856c__Z4busyPfliS__l47\00", section ".llvm.rodata.offloading", align 1
+@.offloading.entry.__omp_offloading_25e8f0c4_2f00856c__Z4busyPfliS__l47 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { i64 0, i16 1, i16 1, i32 0, ptr @.__omp_offloading_25e8f0c4_2f00856c__Z4busyPfliS__l47.region_id, ptr @.offloading.entry_name.19, i64 0, i64 0, ptr null }, section "llvm_offload_entries", align 8
+@.offloading.entry_name.20 = internal unnamed_addr constant [55 x i8] c"__omp_offloading_25e8f0c4_2f00856c__Z8dependedliPf_l60\00", section ".llvm.rodata.offloading", align 1
+@.offloading.entry.__omp_offloading_25e8f0c4_2f00856c__Z8dependedliPf_l60 = weak local_unnamed_addr constant %struct.__tgt_offload_entry { i64 0, i16 1, i16 1, i32 0, ptr @.__omp_offloading_25e8f0c4_2f00856c__Z8dependedliPf_l60.region_id, ptr @.offloading.entry_name.20, i64 0, i64 0, ptr null }, section "llvm_offload_entries", align 8
 @llvm.compiler.used = appending global [14 x ptr] [ptr @_ZL15ompx__box_countPjiPvPKvmiiij, ptr @ompx__after_put, ptr @ompx__block_put, ptr @ompx__block_put_one, ptr @ompx__box_due, ptr @ompx__box_grab, ptr @ompx__box_grab_done, ptr @ompx__box_hull, ptr @ompx__box_peer, ptr @ompx__box_piece, ptr @ompx__box_plan, ptr @ompx__box_residual, ptr @ompx__loop_after, ptr @ompx__peer_addr], section "llvm.metadata"
 
 ; Function Attrs: mustprogress uwtable
@@ -208,7 +230,7 @@ define internal void @ompx__box_hull(ptr readnone nocapture %0, i64 %1, ptr read
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(argmem: write) uwtable
-define internal void @ompx__box_plan(i32 %0, ptr readnone nocapture %1, ptr readnone nocapture %2, ptr readnone nocapture %3, i64 %4, i64 %5, i64 %6, ptr noundef writeonly nocapture %7, ptr readnone nocapture %8, ptr noundef writeonly nocapture %9) #4 {
+define internal void @ompx__box_plan(i32 %0, ptr readnone nocapture %1, ptr readnone nocapture %2, ptr readnone nocapture %3, i64 %4, i64 %5, i64 %6, ptr noundef writeonly nocapture %7, ptr readnone nocapture %8, ptr noundef writeonly nocapture %9, ptr readnone nocapture %10) #4 {
   store i64 0, ptr %7, align 8, !tbaa !39
   store i64 9223372036854775807, ptr %9, align 8, !tbaa !39
   ret void
@@ -225,7 +247,7 @@ define internal noundef i64 @ompx__box_grab(ptr readnone nocapture %0, ptr readn
 }
 
 ; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(none) uwtable
-define internal void @ompx__box_grab_done(ptr readnone nocapture %0, ptr readnone nocapture %1) #2 {
+define internal void @ompx__box_grab_done(ptr readnone nocapture %0, ptr readnone nocapture %1, ptr readnone nocapture %2) #2 {
   ret void
 }
 
@@ -265,21 +287,21 @@ define dso_local void @_Z10neighboursPflliPKiPKS_(ptr noundef %0, i64 noundef %1
   %13 = getelementptr inbounds nuw i8, ptr %9, i64 16
   store ptr %8, ptr %13, align 8
   %14 = getelementptr inbounds nuw i8, ptr %9, i64 24
-  store ptr @.offload_sizes.5, ptr %14, align 8
+  store ptr @.offload_sizes.10, ptr %14, align 8
   %15 = getelementptr inbounds nuw i8, ptr %9, i64 32
-  store ptr @.offload_maptypes.6, ptr %15, align 8
+  store ptr @.offload_maptypes.11, ptr %15, align 8
   %16 = getelementptr inbounds nuw i8, ptr %9, i64 40
   %17 = getelementptr inbounds nuw i8, ptr %9, i64 56
   call void @llvm.memset.p0.i64(ptr noundef nonnull align 8 dereferenceable(16) %16, i8 0, i64 16, i1 false)
   store i64 %1, ptr %17, align 8
   %18 = getelementptr inbounds nuw i8, ptr %9, i64 64
   call void @llvm.memset.p0.i64(ptr noundef nonnull align 8 dereferenceable(36) %18, i8 0, i64 36, i1 false)
-  %19 = call i32 @__tgt_target_kernel(ptr nonnull @3, i64 -1, i32 0, i32 0, ptr nonnull @.__omp_offloading_25e8f0c4_6e019e36__Z10neighboursPflliPKiPKS__l15.region_id, ptr nonnull %9)
+  %19 = call i32 @__tgt_target_kernel(ptr nonnull @3, i64 -1, i32 0, i32 0, ptr nonnull @.__omp_offloading_25e8f0c4_2f00856c__Z10neighboursPflliPKiPKS__l15.region_id, ptr nonnull %9)
   %20 = icmp eq i32 %19, 0
   br i1 %20, label %22, label %21
 
 21:                                               ; preds = %6
-  call void (ptr, i32, ptr, ...) @__kmpc_fork_teams(ptr nonnull @3, i32 2, ptr nonnull @__omp_offloading_25e8f0c4_6e019e36__Z10neighboursPflliPKiPKS__l15.omp_outlined, i64 %1, ptr %0)
+  call void (ptr, i32, ptr, ...) @__kmpc_fork_teams(ptr nonnull @3, i32 2, ptr nonnull @__omp_offloading_25e8f0c4_2f00856c__Z10neighboursPflliPKiPKS__l15.omp_outlined, i64 %1, ptr %0)
   br label %22
 
 22:                                               ; preds = %21, %6
@@ -309,7 +331,7 @@ define dso_local void @_Z10neighboursPflliPKiPKS_(ptr noundef %0, i64 noundef %1
 }
 
 ; Function Attrs: alwaysinline norecurse nounwind uwtable
-define internal void @__omp_offloading_25e8f0c4_6e019e36__Z10neighboursPflliPKiPKS__l15.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, ptr noundef %3) #7 {
+define internal void @__omp_offloading_25e8f0c4_2f00856c__Z10neighboursPflliPKiPKS__l15.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, ptr noundef %3) #7 {
   %5 = alloca i64, align 8
   %6 = alloca i64, align 8
   %7 = alloca i64, align 8
@@ -340,7 +362,7 @@ define internal void @__omp_offloading_25e8f0c4_6e019e36__Z10neighboursPflliPKiP
   %18 = phi i64 [ %23, %17 ], [ %14, %10 ]
   %19 = phi i64 [ %22, %17 ], [ %15, %10 ]
   %20 = load i64, ptr %5, align 8
-  call void (ptr, i32, ptr, ...) @__kmpc_fork_call(ptr nonnull @3, i32 4, ptr nonnull @__omp_offloading_25e8f0c4_6e019e36__Z10neighboursPflliPKiPKS__l15.omp_outlined.omp_outlined, i64 %20, i64 %18, i64 %2, ptr %3)
+  call void (ptr, i32, ptr, ...) @__kmpc_fork_call(ptr nonnull @3, i32 4, ptr nonnull @__omp_offloading_25e8f0c4_2f00856c__Z10neighboursPflliPKiPKS__l15.omp_outlined.omp_outlined, i64 %20, i64 %18, i64 %2, ptr %3)
   %21 = load i64, ptr %7, align 8, !tbaa !39
   %22 = add nsw i64 %21, %19
   %23 = load i64, ptr %6, align 8, !tbaa !39
@@ -363,7 +385,7 @@ define internal void @__omp_offloading_25e8f0c4_6e019e36__Z10neighboursPflliPKiP
 declare void @__kmpc_for_static_init_8(ptr, i32, i32, ptr, ptr, ptr, ptr, i64, i64) local_unnamed_addr #8
 
 ; Function Attrs: alwaysinline norecurse nounwind uwtable
-define internal void @__omp_offloading_25e8f0c4_6e019e36__Z10neighboursPflliPKiPKS__l15.omp_outlined.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, ptr noundef writeonly nocapture %5) #7 personality ptr @__gxx_personality_v0 {
+define internal void @__omp_offloading_25e8f0c4_2f00856c__Z10neighboursPflliPKiPKS__l15.omp_outlined.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, ptr noundef writeonly nocapture %5) #7 personality ptr @__gxx_personality_v0 {
   %7 = alloca i64, align 8
   %8 = alloca i64, align 8
   %9 = alloca i64, align 8
@@ -504,12 +526,12 @@ define dso_local void @_Z6copiedPfS_lliPKiPKS_(ptr noundef %0, ptr noundef %1, i
   store i64 %2, ptr %26, align 8
   %27 = getelementptr inbounds nuw i8, ptr %12, i64 64
   call void @llvm.memset.p0.i64(ptr noundef nonnull align 8 dereferenceable(36) %27, i8 0, i64 36, i1 false)
-  %28 = call i32 @__tgt_target_kernel(ptr nonnull @3, i64 -1, i32 0, i32 0, ptr nonnull @.__omp_offloading_25e8f0c4_6e019e36__Z6copiedPfS_lliPKiPKS__l24.region_id, ptr nonnull %12)
+  %28 = call i32 @__tgt_target_kernel(ptr nonnull @3, i64 -1, i32 0, i32 0, ptr nonnull @.__omp_offloading_25e8f0c4_2f00856c__Z6copiedPfS_lliPKiPKS__l24.region_id, ptr nonnull %12)
   %29 = icmp eq i32 %28, 0
   br i1 %29, label %31, label %30
 
 30:                                               ; preds = %7
-  call void (ptr, i32, ptr, ...) @__kmpc_fork_teams(ptr nonnull @3, i32 3, ptr nonnull @__omp_offloading_25e8f0c4_6e019e36__Z6copiedPfS_lliPKiPKS__l24.omp_outlined, i64 %2, ptr %0, ptr %1)
+  call void (ptr, i32, ptr, ...) @__kmpc_fork_teams(ptr nonnull @3, i32 3, ptr nonnull @__omp_offloading_25e8f0c4_2f00856c__Z6copiedPfS_lliPKiPKS__l24.omp_outlined, i64 %2, ptr %0, ptr %1)
   br label %31
 
 31:                                               ; preds = %30, %7
@@ -539,7 +561,7 @@ define dso_local void @_Z6copiedPfS_lliPKiPKS_(ptr noundef %0, ptr noundef %1, i
 }
 
 ; Function Attrs: alwaysinline norecurse nounwind uwtable
-define internal void @__omp_offloading_25e8f0c4_6e019e36__Z6copiedPfS_lliPKiPKS__l24.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, ptr noundef %3, ptr noundef %4) #7 {
+define internal void @__omp_offloading_25e8f0c4_2f00856c__Z6copiedPfS_lliPKiPKS__l24.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, ptr noundef %3, ptr noundef %4) #7 {
   %6 = alloca i64, align 8
   %7 = alloca i64, align 8
   %8 = alloca i64, align 8
@@ -570,7 +592,7 @@ define internal void @__omp_offloading_25e8f0c4_6e019e36__Z6copiedPfS_lliPKiPKS_
   %19 = phi i64 [ %24, %18 ], [ %15, %11 ]
   %20 = phi i64 [ %23, %18 ], [ %16, %11 ]
   %21 = load i64, ptr %6, align 8
-  call void (ptr, i32, ptr, ...) @__kmpc_fork_call(ptr nonnull @3, i32 5, ptr nonnull @__omp_offloading_25e8f0c4_6e019e36__Z6copiedPfS_lliPKiPKS__l24.omp_outlined.omp_outlined, i64 %21, i64 %19, i64 %2, ptr %3, ptr %4)
+  call void (ptr, i32, ptr, ...) @__kmpc_fork_call(ptr nonnull @3, i32 5, ptr nonnull @__omp_offloading_25e8f0c4_2f00856c__Z6copiedPfS_lliPKiPKS__l24.omp_outlined.omp_outlined, i64 %21, i64 %19, i64 %2, ptr %3, ptr %4)
   %22 = load i64, ptr %8, align 8, !tbaa !39
   %23 = add nsw i64 %22, %20
   %24 = load i64, ptr %7, align 8, !tbaa !39
@@ -590,7 +612,7 @@ define internal void @__omp_offloading_25e8f0c4_6e019e36__Z6copiedPfS_lliPKiPKS_
 }
 
 ; Function Attrs: alwaysinline norecurse nounwind uwtable
-define internal void @__omp_offloading_25e8f0c4_6e019e36__Z6copiedPfS_lliPKiPKS__l24.omp_outlined.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, ptr noundef writeonly nocapture %5, ptr noundef writeonly nocapture %6) #7 {
+define internal void @__omp_offloading_25e8f0c4_2f00856c__Z6copiedPfS_lliPKiPKS__l24.omp_outlined.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, ptr noundef writeonly nocapture %5, ptr noundef writeonly nocapture %6) #7 {
   %8 = ptrtoint ptr %5 to i64
   %9 = ptrtoint ptr %6 to i64
   %10 = alloca i64, align 8
@@ -705,7 +727,7 @@ define dso_local void @_Z6waitedPfliS_(ptr noundef %0, i64 noundef %1, i32 nound
   %13 = getelementptr inbounds nuw i8, ptr %6, i64 72
   store ptr %0, ptr %13, align 8, !tbaa !62
   %14 = getelementptr inbounds nuw i8, ptr %6, i64 80
-  tail call void @llvm.memcpy.p0.p0.i64(ptr noundef nonnull align 8 dereferenceable(16) %14, ptr noundef nonnull align 8 dereferenceable(16) @.offload_sizes.5, i64 16, i1 false), !tbaa.struct !63
+  tail call void @llvm.memcpy.p0.p0.i64(ptr noundef nonnull align 8 dereferenceable(16) %14, ptr noundef nonnull align 8 dereferenceable(16) @.offload_sizes.10, i64 16, i1 false), !tbaa.struct !63
   %15 = tail call i32 @__kmpc_omp_task(ptr nonnull @3, i32 %5, ptr nonnull %6)
   %16 = tail call i32 @__kmpc_omp_taskwait(ptr nonnull @3, i32 %5)
   %17 = icmp sgt i32 %2, -1
@@ -722,7 +744,7 @@ define dso_local void @_Z6waitedPfliS_(ptr noundef %0, i64 noundef %1, i32 nound
 }
 
 ; Function Attrs: alwaysinline norecurse nounwind uwtable
-define internal void @__omp_offloading_25e8f0c4_6e019e36__Z6waitedPfliS__l37.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, ptr noundef %3) #7 {
+define internal void @__omp_offloading_25e8f0c4_2f00856c__Z6waitedPfliS__l37.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, ptr noundef %3) #7 {
   %5 = alloca i64, align 8
   %6 = alloca i64, align 8
   %7 = alloca i64, align 8
@@ -753,7 +775,7 @@ define internal void @__omp_offloading_25e8f0c4_6e019e36__Z6waitedPfliS__l37.omp
   %18 = phi i64 [ %23, %17 ], [ %14, %10 ]
   %19 = phi i64 [ %22, %17 ], [ %15, %10 ]
   %20 = load i64, ptr %5, align 8
-  call void (ptr, i32, ptr, ...) @__kmpc_fork_call(ptr nonnull @3, i32 4, ptr nonnull @__omp_offloading_25e8f0c4_6e019e36__Z6waitedPfliS__l37.omp_outlined.omp_outlined, i64 %20, i64 %18, i64 %2, ptr %3)
+  call void (ptr, i32, ptr, ...) @__kmpc_fork_call(ptr nonnull @3, i32 4, ptr nonnull @__omp_offloading_25e8f0c4_2f00856c__Z6waitedPfliS__l37.omp_outlined.omp_outlined, i64 %20, i64 %18, i64 %2, ptr %3)
   %21 = load i64, ptr %7, align 8, !tbaa !39
   %22 = add nsw i64 %21, %19
   %23 = load i64, ptr %6, align 8, !tbaa !39
@@ -773,7 +795,7 @@ define internal void @__omp_offloading_25e8f0c4_6e019e36__Z6waitedPfliS__l37.omp
 }
 
 ; Function Attrs: alwaysinline norecurse nounwind uwtable
-define internal void @__omp_offloading_25e8f0c4_6e019e36__Z6waitedPfliS__l37.omp_outlined.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, ptr noundef writeonly nocapture %5) #7 {
+define internal void @__omp_offloading_25e8f0c4_2f00856c__Z6waitedPfliS__l37.omp_outlined.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, ptr noundef writeonly nocapture %5) #7 {
   %7 = alloca i64, align 8
   %8 = alloca i64, align 8
   %9 = alloca i64, align 8
@@ -876,7 +898,7 @@ define internal noundef i32 @.omp_task_entry.(i32 %0, ptr noalias noundef %1) #1
   %12 = getelementptr inbounds nuw i8, ptr %3, i64 24
   store ptr %8, ptr %12, align 8, !noalias !69
   %13 = getelementptr inbounds nuw i8, ptr %3, i64 32
-  store ptr @.offload_maptypes.6, ptr %13, align 8, !noalias !69
+  store ptr @.offload_maptypes.11, ptr %13, align 8, !noalias !69
   %14 = getelementptr inbounds nuw i8, ptr %3, i64 40
   %15 = getelementptr inbounds nuw i8, ptr %3, i64 56
   call void @llvm.memset.p0.i64(ptr noundef nonnull align 8 dereferenceable(16) %14, i8 0, i64 16, i1 false)
@@ -885,7 +907,7 @@ define internal noundef i32 @.omp_task_entry.(i32 %0, ptr noalias noundef %1) #1
   store i64 1, ptr %16, align 8, !noalias !69
   %17 = getelementptr inbounds nuw i8, ptr %3, i64 72
   call void @llvm.memset.p0.i64(ptr noundef nonnull align 8 dereferenceable(28) %17, i8 0, i64 28, i1 false)
-  %18 = call i32 @__tgt_target_kernel(ptr nonnull @3, i64 -1, i32 0, i32 0, ptr nonnull @.__omp_offloading_25e8f0c4_6e019e36__Z6waitedPfliS__l37.region_id, ptr nonnull %3), !noalias !66
+  %18 = call i32 @__tgt_target_kernel(ptr nonnull @3, i64 -1, i32 0, i32 0, ptr nonnull @.__omp_offloading_25e8f0c4_2f00856c__Z6waitedPfliS__l37.region_id, ptr nonnull %3), !noalias !66
   %19 = icmp eq i32 %18, 0
   br i1 %19, label %24, label %20
 
@@ -893,7 +915,7 @@ define internal noundef i32 @.omp_task_entry.(i32 %0, ptr noalias noundef %1) #1
   %21 = getelementptr inbounds nuw i8, ptr %4, i64 8
   %22 = load i64, ptr %5, align 8, !tbaa !39, !noalias !66
   %23 = load ptr, ptr %21, align 8, !tbaa !42, !alias.scope !66, !noalias !71
-  call void (ptr, i32, ptr, ...) @__kmpc_fork_teams(ptr nonnull @3, i32 2, ptr nonnull @__omp_offloading_25e8f0c4_6e019e36__Z6waitedPfliS__l37.omp_outlined, i64 %22, ptr %23), !noalias !66
+  call void (ptr, i32, ptr, ...) @__kmpc_fork_teams(ptr nonnull @3, i32 2, ptr nonnull @__omp_offloading_25e8f0c4_2f00856c__Z6waitedPfliS__l37.omp_outlined, i64 %22, ptr %23), !noalias !66
   br label %24
 
 24:                                               ; preds = %2, %20
@@ -932,7 +954,7 @@ define dso_local void @_Z4busyPfliS_(ptr noundef %0, i64 noundef %1, i32 noundef
   %13 = getelementptr inbounds nuw i8, ptr %6, i64 72
   store ptr %0, ptr %13, align 8, !tbaa !62
   %14 = getelementptr inbounds nuw i8, ptr %6, i64 80
-  tail call void @llvm.memcpy.p0.p0.i64(ptr noundef nonnull align 8 dereferenceable(16) %14, ptr noundef nonnull align 8 dereferenceable(16) @.offload_sizes.5, i64 16, i1 false), !tbaa.struct !63
+  tail call void @llvm.memcpy.p0.p0.i64(ptr noundef nonnull align 8 dereferenceable(16) %14, ptr noundef nonnull align 8 dereferenceable(16) @.offload_sizes.10, i64 16, i1 false), !tbaa.struct !63
   %15 = tail call i32 @__kmpc_omp_task(ptr nonnull @3, i32 %5, ptr nonnull %6)
   tail call void @ompx_barrier()
   %16 = tail call i32 @__kmpc_omp_taskwait(ptr nonnull @3, i32 %5)
@@ -950,7 +972,7 @@ define dso_local void @_Z4busyPfliS_(ptr noundef %0, i64 noundef %1, i32 noundef
 }
 
 ; Function Attrs: alwaysinline norecurse nounwind uwtable
-define internal void @__omp_offloading_25e8f0c4_6e019e36__Z4busyPfliS__l47.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, ptr noundef %3) #7 {
+define internal void @__omp_offloading_25e8f0c4_2f00856c__Z4busyPfliS__l47.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, ptr noundef %3) #7 {
   %5 = alloca i64, align 8
   %6 = alloca i64, align 8
   %7 = alloca i64, align 8
@@ -981,7 +1003,7 @@ define internal void @__omp_offloading_25e8f0c4_6e019e36__Z4busyPfliS__l47.omp_o
   %18 = phi i64 [ %23, %17 ], [ %14, %10 ]
   %19 = phi i64 [ %22, %17 ], [ %15, %10 ]
   %20 = load i64, ptr %5, align 8
-  call void (ptr, i32, ptr, ...) @__kmpc_fork_call(ptr nonnull @3, i32 4, ptr nonnull @__omp_offloading_25e8f0c4_6e019e36__Z4busyPfliS__l47.omp_outlined.omp_outlined, i64 %20, i64 %18, i64 %2, ptr %3)
+  call void (ptr, i32, ptr, ...) @__kmpc_fork_call(ptr nonnull @3, i32 4, ptr nonnull @__omp_offloading_25e8f0c4_2f00856c__Z4busyPfliS__l47.omp_outlined.omp_outlined, i64 %20, i64 %18, i64 %2, ptr %3)
   %21 = load i64, ptr %7, align 8, !tbaa !39
   %22 = add nsw i64 %21, %19
   %23 = load i64, ptr %6, align 8, !tbaa !39
@@ -1001,7 +1023,7 @@ define internal void @__omp_offloading_25e8f0c4_6e019e36__Z4busyPfliS__l47.omp_o
 }
 
 ; Function Attrs: alwaysinline norecurse nounwind uwtable
-define internal void @__omp_offloading_25e8f0c4_6e019e36__Z4busyPfliS__l47.omp_outlined.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, ptr noundef writeonly nocapture %5) #7 {
+define internal void @__omp_offloading_25e8f0c4_2f00856c__Z4busyPfliS__l47.omp_outlined.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, ptr noundef writeonly nocapture %5) #7 {
   %7 = alloca i64, align 8
   %8 = alloca i64, align 8
   %9 = alloca i64, align 8
@@ -1104,7 +1126,7 @@ define internal noundef i32 @.omp_task_entry..9(i32 %0, ptr noalias noundef %1) 
   %12 = getelementptr inbounds nuw i8, ptr %3, i64 24
   store ptr %8, ptr %12, align 8, !noalias !77
   %13 = getelementptr inbounds nuw i8, ptr %3, i64 32
-  store ptr @.offload_maptypes.6, ptr %13, align 8, !noalias !77
+  store ptr @.offload_maptypes.11, ptr %13, align 8, !noalias !77
   %14 = getelementptr inbounds nuw i8, ptr %3, i64 40
   %15 = getelementptr inbounds nuw i8, ptr %3, i64 56
   call void @llvm.memset.p0.i64(ptr noundef nonnull align 8 dereferenceable(16) %14, i8 0, i64 16, i1 false)
@@ -1113,7 +1135,7 @@ define internal noundef i32 @.omp_task_entry..9(i32 %0, ptr noalias noundef %1) 
   store i64 1, ptr %16, align 8, !noalias !77
   %17 = getelementptr inbounds nuw i8, ptr %3, i64 72
   call void @llvm.memset.p0.i64(ptr noundef nonnull align 8 dereferenceable(28) %17, i8 0, i64 28, i1 false)
-  %18 = call i32 @__tgt_target_kernel(ptr nonnull @3, i64 -1, i32 0, i32 0, ptr nonnull @.__omp_offloading_25e8f0c4_6e019e36__Z4busyPfliS__l47.region_id, ptr nonnull %3), !noalias !74
+  %18 = call i32 @__tgt_target_kernel(ptr nonnull @3, i64 -1, i32 0, i32 0, ptr nonnull @.__omp_offloading_25e8f0c4_2f00856c__Z4busyPfliS__l47.region_id, ptr nonnull %3), !noalias !74
   %19 = icmp eq i32 %18, 0
   br i1 %19, label %24, label %20
 
@@ -1121,7 +1143,7 @@ define internal noundef i32 @.omp_task_entry..9(i32 %0, ptr noalias noundef %1) 
   %21 = getelementptr inbounds nuw i8, ptr %4, i64 8
   %22 = load i64, ptr %5, align 8, !tbaa !39, !noalias !74
   %23 = load ptr, ptr %21, align 8, !tbaa !42, !alias.scope !74, !noalias !79
-  call void (ptr, i32, ptr, ...) @__kmpc_fork_teams(ptr nonnull @3, i32 2, ptr nonnull @__omp_offloading_25e8f0c4_6e019e36__Z4busyPfliS__l47.omp_outlined, i64 %22, ptr %23), !noalias !74
+  call void (ptr, i32, ptr, ...) @__kmpc_fork_teams(ptr nonnull @3, i32 2, ptr nonnull @__omp_offloading_25e8f0c4_2f00856c__Z4busyPfliS__l47.omp_outlined, i64 %22, ptr %23), !noalias !74
   br label %24
 
 24:                                               ; preds = %2, %20
@@ -1130,6 +1152,232 @@ define internal noundef i32 @.omp_task_entry..9(i32 %0, ptr noalias noundef %1) 
 }
 
 declare void @ompx_barrier() local_unnamed_addr #9
+
+; Function Attrs: mustprogress uwtable
+define dso_local void @_Z8dependedliPf(i64 noundef %0, i32 noundef %1, ptr noundef %2) local_unnamed_addr #0 {
+  %4 = alloca [1 x %struct.kmp_depend_info], align 8
+  %5 = tail call i32 @__kmpc_global_thread_num(ptr nonnull @3)
+  %6 = load ptr, ptr @g_halo, align 8, !tbaa !42
+  %7 = tail call ptr @__kmpc_omp_target_task_alloc(ptr nonnull @3, i32 %5, i32 1, i64 96, i64 16, ptr nonnull @.omp_task_entry..14, i64 -1)
+  %8 = load ptr, ptr %7, align 8, !tbaa !57
+  store i64 %0, ptr %8, align 8, !tbaa !39
+  %9 = getelementptr inbounds nuw i8, ptr %8, i64 8
+  store ptr %6, ptr %9, align 8, !tbaa !42
+  %10 = getelementptr inbounds nuw i8, ptr %7, i64 40
+  store i64 %0, ptr %10, align 8, !tbaa !61
+  %11 = getelementptr inbounds nuw i8, ptr %7, i64 48
+  store i64 %0, ptr %11, align 8
+  %12 = getelementptr inbounds nuw i8, ptr %7, i64 56
+  store ptr %6, ptr %12, align 8, !tbaa !62
+  %13 = getelementptr inbounds nuw i8, ptr %7, i64 64
+  store i64 %0, ptr %13, align 8
+  %14 = getelementptr inbounds nuw i8, ptr %7, i64 72
+  store ptr %6, ptr %14, align 8, !tbaa !62
+  %15 = getelementptr inbounds nuw i8, ptr %7, i64 80
+  tail call void @llvm.memcpy.p0.p0.i64(ptr noundef nonnull align 8 dereferenceable(16) %15, ptr noundef nonnull align 8 dereferenceable(16) @.offload_sizes.10, i64 16, i1 false), !tbaa.struct !63
+  store i64 ptrtoint (ptr @g_halo to i64), ptr %4, align 8, !tbaa !80
+  %16 = getelementptr inbounds nuw i8, ptr %4, i64 8
+  store i64 8, ptr %16, align 8, !tbaa !82
+  %17 = getelementptr inbounds nuw i8, ptr %4, i64 16
+  store i8 3, ptr %17, align 8, !tbaa !83
+  %18 = call i32 @__kmpc_omp_task_with_deps(ptr nonnull @3, i32 %5, ptr nonnull %7, i32 1, ptr nonnull %4, i32 0, ptr null)
+  %19 = call i32 @__kmpc_omp_taskwait(ptr nonnull @3, i32 %5)
+  %20 = icmp sgt i32 %1, -1
+  br i1 %20, label %21, label %25
+
+21:                                               ; preds = %3
+  %22 = load ptr, ptr @g_halo, align 8, !tbaa !42
+  %23 = getelementptr inbounds float, ptr %22, i64 %0
+  %24 = getelementptr inbounds i8, ptr %23, i64 -256
+  call void @ompx_put_host(i32 noundef %1, ptr noundef %2, ptr noundef nonnull %24, i64 noundef 256)
+  br label %25
+
+25:                                               ; preds = %21, %3
+  ret void
+}
+
+; Function Attrs: alwaysinline norecurse nounwind uwtable
+define internal void @__omp_offloading_25e8f0c4_2f00856c__Z8dependedliPf_l60.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, ptr noundef %3) #7 {
+  %5 = alloca i64, align 8
+  %6 = alloca i64, align 8
+  %7 = alloca i64, align 8
+  %8 = alloca i32, align 4
+  %9 = icmp sgt i64 %2, 0
+  br i1 %9, label %10, label %26
+
+10:                                               ; preds = %4
+  %11 = add nsw i64 %2, -1
+  call void @llvm.lifetime.start.p0(ptr nonnull %5) #8
+  store i64 0, ptr %5, align 8, !tbaa !39
+  call void @llvm.lifetime.start.p0(ptr nonnull %6) #8
+  store i64 %11, ptr %6, align 8, !tbaa !39
+  call void @llvm.lifetime.start.p0(ptr nonnull %7) #8
+  store i64 1, ptr %7, align 8, !tbaa !39
+  call void @llvm.lifetime.start.p0(ptr nonnull %8) #8
+  store i32 0, ptr %8, align 4, !tbaa !32
+  %12 = load i32, ptr %0, align 4, !tbaa !32
+  call void @__kmpc_for_static_init_8(ptr nonnull @1, i32 %12, i32 92, ptr nonnull %8, ptr nonnull %5, ptr nonnull %6, ptr nonnull %7, i64 1, i64 1)
+  %13 = load i64, ptr %6, align 8, !tbaa !39
+  %14 = call i64 @llvm.smin.i64(i64 %13, i64 %11)
+  store i64 %14, ptr %6, align 8, !tbaa !39
+  %15 = load i64, ptr %5, align 8, !tbaa !39
+  %16 = icmp sgt i64 %15, %14
+  br i1 %16, label %25, label %17
+
+17:                                               ; preds = %10, %17
+  %18 = phi i64 [ %23, %17 ], [ %14, %10 ]
+  %19 = phi i64 [ %22, %17 ], [ %15, %10 ]
+  %20 = load i64, ptr %5, align 8
+  call void (ptr, i32, ptr, ...) @__kmpc_fork_call(ptr nonnull @3, i32 4, ptr nonnull @__omp_offloading_25e8f0c4_2f00856c__Z8dependedliPf_l60.omp_outlined.omp_outlined, i64 %20, i64 %18, i64 %2, ptr %3)
+  %21 = load i64, ptr %7, align 8, !tbaa !39
+  %22 = add nsw i64 %21, %19
+  %23 = load i64, ptr %6, align 8, !tbaa !39
+  %24 = icmp sgt i64 %22, %23
+  br i1 %24, label %25, label %17
+
+25:                                               ; preds = %17, %10
+  call void @__kmpc_for_static_fini(ptr nonnull @1, i32 %12)
+  br label %26
+
+26:                                               ; preds = %25, %4
+  call void @llvm.lifetime.end.p0(ptr nonnull %8) #8
+  call void @llvm.lifetime.end.p0(ptr nonnull %7) #8
+  call void @llvm.lifetime.end.p0(ptr nonnull %6) #8
+  call void @llvm.lifetime.end.p0(ptr nonnull %5) #8
+  ret void
+}
+
+; Function Attrs: alwaysinline norecurse nounwind uwtable
+define internal void @__omp_offloading_25e8f0c4_2f00856c__Z8dependedliPf_l60.omp_outlined.omp_outlined(ptr noalias noundef readonly nocapture %0, ptr noalias readnone nocapture %1, i64 noundef %2, i64 noundef %3, i64 noundef %4, ptr noundef writeonly nocapture %5) #7 {
+  %7 = alloca i64, align 8
+  %8 = alloca i64, align 8
+  %9 = alloca i64, align 8
+  %10 = alloca i32, align 4
+  %11 = icmp sgt i64 %4, 0
+  br i1 %11, label %12, label %51
+
+12:                                               ; preds = %6
+  %13 = add nsw i64 %4, -1
+  call void @llvm.lifetime.start.p0(ptr nonnull %7) #8
+  call void @llvm.lifetime.start.p0(ptr nonnull %8) #8
+  store i64 %2, ptr %7, align 8, !tbaa !39
+  store i64 %3, ptr %8, align 8, !tbaa !39
+  call void @llvm.lifetime.start.p0(ptr nonnull %9) #8
+  store i64 1, ptr %9, align 8, !tbaa !39
+  call void @llvm.lifetime.start.p0(ptr nonnull %10) #8
+  store i32 0, ptr %10, align 4, !tbaa !32
+  %14 = load i32, ptr %0, align 4, !tbaa !32
+  call void @__kmpc_for_static_init_8(ptr nonnull @2, i32 %14, i32 34, ptr nonnull %10, ptr nonnull %7, ptr nonnull %8, ptr nonnull %9, i64 1, i64 1)
+  %15 = load i64, ptr %8, align 8, !tbaa !39
+  %16 = call i64 @llvm.smin.i64(i64 %15, i64 %13)
+  store i64 %16, ptr %8, align 8, !tbaa !39
+  %17 = load i64, ptr %7, align 8, !tbaa !39
+  %18 = icmp sgt i64 %17, %16
+  br i1 %18, label %50, label %19
+
+19:                                               ; preds = %12
+  %20 = add i64 %16, 1
+  %21 = sub i64 %20, %17
+  %22 = icmp ult i64 %21, 4
+  br i1 %22, label %41, label %23
+
+23:                                               ; preds = %19
+  %24 = and i64 %21, -4
+  %25 = add i64 %17, %24
+  %26 = insertelement <4 x i64> poison, i64 %17, i64 0
+  %27 = shufflevector <4 x i64> %26, <4 x i64> poison, <4 x i32> zeroinitializer
+  %28 = add <4 x i64> %27, <i64 0, i64 1, i64 2, i64 3>
+  %29 = getelementptr float, ptr %5, i64 %17
+  br label %30
+
+30:                                               ; preds = %30, %23
+  %31 = phi i64 [ 0, %23 ], [ %36, %30 ]
+  %32 = phi <4 x i64> [ %28, %23 ], [ %37, %30 ]
+  %33 = sitofp <4 x i64> %32 to <4 x float>
+  %34 = fmul <4 x float> %33, splat (float 3.000000e+00)
+  %35 = getelementptr float, ptr %29, i64 %31
+  store <4 x float> %34, ptr %35, align 4, !tbaa !46
+  %36 = add nuw i64 %31, 4
+  %37 = add <4 x i64> %32, splat (i64 4)
+  %38 = icmp eq i64 %36, %24
+  br i1 %38, label %39, label %30, !llvm.loop !84
+
+39:                                               ; preds = %30
+  %40 = icmp eq i64 %21, %24
+  br i1 %40, label %50, label %41
+
+41:                                               ; preds = %19, %39
+  %42 = phi i64 [ %17, %19 ], [ %25, %39 ]
+  br label %43
+
+43:                                               ; preds = %41, %43
+  %44 = phi i64 [ %48, %43 ], [ %42, %41 ]
+  %45 = sitofp i64 %44 to float
+  %46 = fmul float %45, 3.000000e+00
+  %47 = getelementptr inbounds float, ptr %5, i64 %44
+  store float %46, ptr %47, align 4, !tbaa !46
+  %48 = add i64 %44, 1
+  %49 = icmp eq i64 %44, %16
+  br i1 %49, label %50, label %43, !llvm.loop !85
+
+50:                                               ; preds = %43, %39, %12
+  call void @__kmpc_for_static_fini(ptr nonnull @2, i32 %14)
+  call void @llvm.lifetime.end.p0(ptr nonnull %10) #8
+  call void @llvm.lifetime.end.p0(ptr nonnull %9) #8
+  call void @llvm.lifetime.end.p0(ptr nonnull %8) #8
+  call void @llvm.lifetime.end.p0(ptr nonnull %7) #8
+  br label %51
+
+51:                                               ; preds = %50, %6
+  ret void
+}
+
+; Function Attrs: norecurse nounwind uwtable
+define internal noundef i32 @.omp_task_entry..14(i32 %0, ptr noalias noundef %1) #11 {
+  %3 = alloca %struct.__tgt_kernel_arguments, align 8
+  %4 = load ptr, ptr %1, align 8, !tbaa !57
+  %5 = getelementptr inbounds nuw i8, ptr %1, i64 40
+  tail call void @llvm.experimental.noalias.scope.decl(metadata !86)
+  call void @llvm.lifetime.start.p0(ptr nonnull %3)
+  %6 = getelementptr inbounds nuw i8, ptr %1, i64 48
+  %7 = getelementptr inbounds nuw i8, ptr %1, i64 64
+  %8 = getelementptr inbounds nuw i8, ptr %1, i64 80
+  %9 = load i64, ptr %5, align 8, !tbaa !39, !noalias !86
+  store <2 x i32> <i32 3, i32 2>, ptr %3, align 8, !noalias !89
+  %10 = getelementptr inbounds nuw i8, ptr %3, i64 8
+  store ptr %6, ptr %10, align 8, !noalias !89
+  %11 = getelementptr inbounds nuw i8, ptr %3, i64 16
+  store ptr %7, ptr %11, align 8, !noalias !89
+  %12 = getelementptr inbounds nuw i8, ptr %3, i64 24
+  store ptr %8, ptr %12, align 8, !noalias !89
+  %13 = getelementptr inbounds nuw i8, ptr %3, i64 32
+  store ptr @.offload_maptypes.11, ptr %13, align 8, !noalias !89
+  %14 = getelementptr inbounds nuw i8, ptr %3, i64 40
+  %15 = getelementptr inbounds nuw i8, ptr %3, i64 56
+  call void @llvm.memset.p0.i64(ptr noundef nonnull align 8 dereferenceable(16) %14, i8 0, i64 16, i1 false)
+  store i64 %9, ptr %15, align 8, !noalias !89
+  %16 = getelementptr inbounds nuw i8, ptr %3, i64 64
+  store i64 1, ptr %16, align 8, !noalias !89
+  %17 = getelementptr inbounds nuw i8, ptr %3, i64 72
+  call void @llvm.memset.p0.i64(ptr noundef nonnull align 8 dereferenceable(28) %17, i8 0, i64 28, i1 false)
+  %18 = call i32 @__tgt_target_kernel(ptr nonnull @3, i64 -1, i32 0, i32 0, ptr nonnull @.__omp_offloading_25e8f0c4_2f00856c__Z8dependedliPf_l60.region_id, ptr nonnull %3), !noalias !86
+  %19 = icmp eq i32 %18, 0
+  br i1 %19, label %24, label %20
+
+20:                                               ; preds = %2
+  %21 = getelementptr inbounds nuw i8, ptr %4, i64 8
+  %22 = load i64, ptr %5, align 8, !tbaa !39, !noalias !86
+  %23 = load ptr, ptr %21, align 8, !tbaa !42, !alias.scope !86, !noalias !91
+  call void (ptr, i32, ptr, ...) @__kmpc_fork_teams(ptr nonnull @3, i32 2, ptr nonnull @__omp_offloading_25e8f0c4_2f00856c__Z8dependedliPf_l60.omp_outlined, i64 %22, ptr %23), !noalias !86
+  br label %24
+
+24:                                               ; preds = %2, %20
+  call void @llvm.lifetime.end.p0(ptr nonnull %3)
+  ret i32 0
+}
+
+; Function Attrs: nounwind
+declare i32 @__kmpc_omp_task_with_deps(ptr, i32, ptr, i32, ptr, i32, ptr) local_unnamed_addr #8
 
 ; Function Attrs: nofree nounwind
 declare noundef i64 @fwrite(ptr noundef readonly nocapture, i64 noundef, i64 noundef, ptr noundef nocapture) local_unnamed_addr #13
@@ -1169,31 +1417,31 @@ attributes #18 = { noreturn nounwind }
 !llvm.ident = !{!31}
 !llvm.errno.tbaa = !{!32}
 
-!0 = !{i32 0, i32 636022980, i32 1845599798, !"_Z10neighboursPflliPKiPKS_", i32 15, i32 0, i32 14}
-!1 = !{i32 0, i32 636022980, i32 1845599798, !"_Z4busyPfliS_", i32 47, i32 0, i32 17}
-!2 = !{i32 0, i32 636022980, i32 1845599798, !"_Z6copiedPfS_lliPKiPKS_", i32 24, i32 0, i32 15}
-!3 = !{i32 0, i32 636022980, i32 1845599798, !"_Z6waitedPfliS_", i32 37, i32 0, i32 16}
-!4 = !{i32 1, !"_ZN4gicc4mlx5L7kMaxMsgE", i32 0, i32 0}
-!5 = !{i32 1, !"_ZN4gicc4mlx5L8kMaxWqesE", i32 0, i32 1}
-!6 = !{i32 1, !"_ZN4gicc4mlx53devL10kInlineMaxE", i32 0, i32 10}
-!7 = !{i32 1, !"ompx__pipe_deferred", i32 0, i32 12}
-!8 = !{i32 1, !"_ZN4gicc4mlx53devL10kCqeReqErrE", i32 0, i32 7}
-!9 = !{i32 1, !"ompx__ctx", i32 0, i32 11}
-!10 = !{i32 1, !"_ZN4gicc4mlx53devL10kInlineSegE", i32 0, i32 5}
-!11 = !{i32 1, !"_ZN4gicc4mlx53devL11kCqeInvalidE", i32 0, i32 6}
-!12 = !{i32 1, !"_ZN4gicc4mlx53devL11kOpRdmaReadE", i32 0, i32 3}
-!13 = !{i32 1, !"_ZN4gicc4mlx53devL12kOpRdmaWriteE", i32 0, i32 2}
-!14 = !{i32 1, !"_ZN4gicc4mlx53devL11kCqeRespErrE", i32 0, i32 8}
-!15 = !{i32 1, !"_ZN4gicc4mlx53devL8kStallNsE", i32 0, i32 9}
-!16 = !{i32 1, !"ompx__nodb", i32 0, i32 13}
+!0 = !{i32 0, i32 636022980, i32 788563308, !"_Z10neighboursPflliPKiPKS_", i32 15, i32 0, i32 13}
+!1 = !{i32 0, i32 636022980, i32 788563308, !"_Z4busyPfliS_", i32 47, i32 0, i32 16}
+!2 = !{i32 0, i32 636022980, i32 788563308, !"_Z6copiedPfS_lliPKiPKS_", i32 24, i32 0, i32 14}
+!3 = !{i32 0, i32 636022980, i32 788563308, !"_Z6waitedPfliS_", i32 37, i32 0, i32 15}
+!4 = !{i32 0, i32 636022980, i32 788563308, !"_Z8dependedliPf", i32 60, i32 0, i32 17}
+!5 = !{i32 1, !"_ZN4gicc4mlx5L7kMaxMsgE", i32 0, i32 0}
+!6 = !{i32 1, !"_ZN4gicc4mlx5L8kMaxWqesE", i32 0, i32 1}
+!7 = !{i32 1, !"_ZN4gicc4mlx53devL10kInlineMaxE", i32 0, i32 10}
+!8 = !{i32 1, !"ompx__pipe_deferred", i32 0, i32 12}
+!9 = !{i32 1, !"_ZN4gicc4mlx53devL10kCqeReqErrE", i32 0, i32 7}
+!10 = !{i32 1, !"ompx__ctx", i32 0, i32 11}
+!11 = !{i32 1, !"_ZN4gicc4mlx53devL10kInlineSegE", i32 0, i32 5}
+!12 = !{i32 1, !"_ZN4gicc4mlx53devL11kCqeInvalidE", i32 0, i32 6}
+!13 = !{i32 1, !"_ZN4gicc4mlx53devL11kOpRdmaReadE", i32 0, i32 3}
+!14 = !{i32 1, !"_ZN4gicc4mlx53devL12kOpRdmaWriteE", i32 0, i32 2}
+!15 = !{i32 1, !"_ZN4gicc4mlx53devL11kCqeRespErrE", i32 0, i32 8}
+!16 = !{i32 1, !"_ZN4gicc4mlx53devL8kStallNsE", i32 0, i32 9}
 !17 = !{i32 1, !"_ZN4gicc4mlx53devL13kCtrlCqUpdateE", i32 0, i32 4}
 !18 = !{ptr @.offloading.entry_name}
-!19 = !{ptr @.offloading.entry_name.10}
-!20 = !{ptr @.offloading.entry_name.11}
-!21 = !{ptr @.offloading.entry_name.12}
-!22 = !{ptr @.offloading.entry_name.13}
-!23 = !{ptr @.offloading.entry_name.14}
-!24 = !{ptr @.offloading.entry_name.15}
+!19 = !{ptr @.offloading.entry_name.15}
+!20 = !{ptr @.offloading.entry_name.16}
+!21 = !{ptr @.offloading.entry_name.17}
+!22 = !{ptr @.offloading.entry_name.18}
+!23 = !{ptr @.offloading.entry_name.19}
+!24 = !{ptr @.offloading.entry_name.20}
 !25 = !{i32 1, !"wchar_size", i32 4}
 !26 = !{i32 7, !"openmp", i32 51}
 !27 = !{i32 8, !"PIC Level", i32 2}
@@ -1249,3 +1497,15 @@ attributes #18 = { noreturn nounwind }
 !77 = !{!78, !75}
 !78 = distinct !{!78, !76, !".omp_outlined..7: argument 0"}
 !79 = !{!78}
+!80 = !{!81, !40, i64 0}
+!81 = !{!"_ZTS15kmp_depend_info", !40, i64 0, !40, i64 8, !34, i64 16}
+!82 = !{!81, !40, i64 8}
+!83 = !{!81, !34, i64 16}
+!84 = distinct !{!84, !49, !50}
+!85 = distinct !{!85, !50, !49}
+!86 = !{!87}
+!87 = distinct !{!87, !88, !".omp_outlined..12: argument 1"}
+!88 = distinct !{!88, !".omp_outlined..12"}
+!89 = !{!90, !87}
+!90 = distinct !{!90, !88, !".omp_outlined..12: argument 0"}
+!91 = !{!90}
