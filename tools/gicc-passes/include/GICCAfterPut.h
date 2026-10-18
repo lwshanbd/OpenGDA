@@ -31,6 +31,26 @@
 // distribute loop; -fno-openmp-target-big-jump-loop and
 // -fno-openmp-target-no-loop keep the ordinary form.
 //
+// A nowait region is a task whose entry launches the kernel: when a
+// taskwait follows the task's creation with only such benign code between,
+// the puts after the taskwait are posted before the task is created and
+// made after the taskwait only if the kernel did not, as for a region that
+// waits.
+//
+// A put in a loop after the launch (a neighbour list) is posted once per
+// iteration, for the loop's first iterations (up to six posts): each post
+// is armed only when the loop reaches that iteration, the trip count
+// computed before the launch, and the host makes the later iterations'
+// puts as before. A put's arguments may load host memory (the neighbour
+// list itself) before the launch when nothing between the launch and the
+// put stores to it and the kernel cannot: a kernel writes device memory,
+// and host memory changes at a launch only as a map(from) is copied back,
+// or under a requires directive that has host and device share memory --
+// so a launch with either loads nothing early. A program that shares
+// memory with the device behind OpenMP's back (pinned host memory handed
+// over as a device pointer) is taken not to read a put's arguments from
+// memory the kernel writes.
+//
 // An ompx_pipelined_put in a kernel's loop is the other way round: the
 // device side knows it and the host side does not, and the device side is
 // compiled first. So GICC_MODE=chunk-lower records each one the kernel

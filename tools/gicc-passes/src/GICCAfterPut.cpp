@@ -4,13 +4,18 @@
 #include "OmpKernel.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/CFG.h"
+#include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
@@ -23,6 +28,8 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Triple.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -200,6 +207,9 @@ namespace {
 constexpr StringLiteral kLaunch  = "__tgt_target_kernel";
 constexpr StringLiteral kHostPut = "ompx_put_host";
 constexpr StringLiteral kLoopDone = "ompx__loop_done";
+constexpr StringLiteral kTask = "__kmpc_omp_task";
+constexpr StringLiteral kTargetTask = "__kmpc_omp_target_task_alloc";
+constexpr StringLiteral kTaskwait = "__kmpc_omp_taskwait";
 
 raw_ostream &out() { return errs(); }
 
@@ -210,12 +220,50 @@ struct FoundPut {
     // The branch conditions that lead from code every launch reaches to the
     // put, each with the value it must have.
     SmallVector<std::pair<Value *, bool>, 2> conds;
+    // What the code between the launch and the put may write.
+    SmallVector<Instruction *, 4> writes;
+    // A put in a loop after the launch posts one put per iteration, for its
+    // first `slots` iterations; the host makes the others as before.
+    Loop *loop = nullptr;
+    PHINode *iv = nullptr;              // an integer induction variable of it
+    const SCEV *backedges = nullptr;    // how many times it repeats
+    Value *trips = nullptr;             // that, computed in its preheader
+    Value *iter = nullptr;              // the iteration the put is in, at the put
+    unsigned first = 0;                 // the post of its first iteration
+    unsigned slots = 1;
 };
+
+// The posts a loop of puts takes at most.
+constexpr unsigned kLoopSlots = 6;
 
 struct FoundSite {
     CallInst *launch;
     std::string kernel;
     SmallVector<FoundPut, 2> puts;
+    AAResults *AA = nullptr;   // set when loads may move before the launch
+    ScalarEvolution *SE = nullptr;
+};
+
+struct Analyses {
+    DominatorTree &DT;
+    PostDominatorTree &PDT;
+    LoopInfo &LI;
+    ScalarEvolution &SE;
+    AAResults &AA;
+};
+
+// A launch the puts after which may go from its kernel: a target region
+// that waits for the kernel (post and start both the launch), or a nowait
+// one whose task the host then waits for (post its task's creation, start
+// the taskwait).
+struct Launch {
+    CallInst *post = nullptr;       // the puts are posted before it
+    Instruction *start = nullptr;   // the kernel is over after it
+    std::string kernel;
+    SmallVector<Value *, 16> args;   // as launchArgs
+    const ConstantDataArray *maps = nullptr;
+    SmallVector<BasicBlock *, 2> hosts;   // as hostRuns
+    SmallVector<Instruction *, 2> writes;   // what runs from post to start writes
 };
 
 // The kernel a launch starts: its region id is the global
@@ -274,7 +322,7 @@ SmallVector<BasicBlock *, 2> hostRuns(CallInst *L, StringRef kernel, DominatorTr
 
 // Whether every path from the entry to I runs L's region first: on the
 // device through L, or on the host through one of `hosts`.
-bool afterRegion(CallInst *L, ArrayRef<BasicBlock *> hosts, Instruction *I) {
+bool afterRegion(Instruction *L, ArrayRef<BasicBlock *> hosts, Instruction *I) {
     BasicBlock *LB = L->getParent(), *IB = I->getParent();
     if (IB == LB) return L->comesBefore(I);
     SmallPtrSet<BasicBlock *, 16> seen;
@@ -324,6 +372,51 @@ StoreInst *storeTo(Function &F, const Value *base, int64_t off, Instruction *at,
 constexpr uint64_t kMapTargetParam = 0x20;
 constexpr int64_t kArgsTypes = 32;   // the map types, in __tgt_kernel_arguments
 
+// The map types of launch L's entries, or null.
+const ConstantDataArray *launchMapTypes(CallInst *L, DominatorTree &DT, const DataLayout &DL) {
+    const Value *kargs = L->getArgOperand(5)->stripPointerCasts();
+    if (StoreInst *mt = storeTo(*L->getFunction(), kargs, kArgsTypes, L, DT, DL))
+        if (auto *G = dyn_cast<GlobalVariable>(mt->getValueOperand()->stripPointerCasts());
+            G && G->isConstant() && G->hasInitializer())
+            return dyn_cast<ConstantDataArray>(G->getInitializer());
+    return nullptr;
+}
+
+// The kernel arguments in a base-pointer array at `arr` + `at0` in F, as
+// stored before `at`, by the map types `maps`; see launchArgs.
+SmallVector<Value *, 16> entryArgs(Function &F, const Value *arr, int64_t at0,
+                                   const ConstantDataArray *maps, Instruction *at,
+                                   DominatorTree &DT, const DataLayout &DL,
+                                   SmallVectorImpl<uint64_t> *types) {
+    SmallVector<Value *, 16> args;
+    const int64_t slot = static_cast<int64_t>(DL.getPointerSize());
+    const int64_t end = at0 + slot * static_cast<int64_t>(maps->getNumElements());
+    DenseMap<int64_t, SmallVector<StoreInst *, 2>> slots;
+    for (Instruction &I : instructions(F)) {
+        auto *S = dyn_cast<StoreInst>(&I);
+        if (!S) continue;
+        APInt o(DL.getIndexTypeSizeInBits(S->getPointerOperand()->getType()), 0);
+        if (S->getPointerOperand()->stripAndAccumulateConstantOffsets(DL, o, true) != arr)
+            continue;
+        const int64_t off = o.getSExtValue();
+        if (off < at0 || (at0 > 0 && off >= end)) continue;   // the rest of a task
+        if (off >= end || (off - at0) % slot) return args;
+        slots[off - at0].push_back(S);
+    }
+    int64_t last = -1;
+    for (auto &[off, S] : slots) last = std::max(last, off);
+    for (int64_t off = 0; off <= last; off += slot) {
+        const uint64_t k = static_cast<uint64_t>(off / slot);
+        const uint64_t type = maps->getElementAsInteger(k);
+        if (!(type & kMapTargetParam)) continue;
+        if (types) types->push_back(type);
+        auto it = slots.find(off);
+        StoreInst *S = it == slots.end() ? nullptr : reachingStore(it->second, at, DT);
+        args.push_back(S ? S->getValueOperand() : nullptr);
+    }
+    return args;
+}
+
 // The values a launch hands its kernel, by argument: the entries of the
 // base-pointer array its __tgt_kernel_arguments points at (the third field,
 // after two i32s) that are kernel arguments by their map type (the sixth
@@ -336,36 +429,9 @@ SmallVector<Value *, 16> launchArgs(CallInst *L, DominatorTree &DT, const DataLa
     const Value *kargs = L->getArgOperand(5)->stripPointerCasts();
     StoreInst *bp = storeTo(F, kargs, 8, L, DT, DL);
     if (!bp) return args;
-    const ConstantDataArray *maps = nullptr;
-    if (StoreInst *mt = storeTo(F, kargs, kArgsTypes, L, DT, DL))
-        if (auto *G = dyn_cast<GlobalVariable>(mt->getValueOperand()->stripPointerCasts());
-            G && G->isConstant() && G->hasInitializer())
-            maps = dyn_cast<ConstantDataArray>(G->getInitializer());
+    const ConstantDataArray *maps = launchMapTypes(L, DT, DL);
     if (!maps) return args;   // which entries are arguments is unknown
-    const Value *arr = bp->getValueOperand()->stripPointerCasts();
-    DenseMap<int64_t, SmallVector<StoreInst *, 2>> slots;
-    for (Instruction &I : instructions(F)) {
-        auto *S = dyn_cast<StoreInst>(&I);
-        if (!S) continue;
-        APInt o(DL.getIndexTypeSizeInBits(S->getPointerOperand()->getType()), 0);
-        if (S->getPointerOperand()->stripAndAccumulateConstantOffsets(DL, o, true) != arr)
-            continue;
-        slots[o.getSExtValue()].push_back(S);
-    }
-    const int64_t slot = static_cast<int64_t>(DL.getPointerSize());
-    int64_t last = -1;
-    for (auto &[off, S] : slots) last = std::max(last, off);
-    for (int64_t off = 0; off <= last; off += slot) {
-        const uint64_t k = static_cast<uint64_t>(off / slot);
-        if (k >= maps->getNumElements()) return {};
-        const uint64_t type = maps->getElementAsInteger(k);
-        if (!(type & kMapTargetParam)) continue;
-        if (types) types->push_back(type);
-        auto it = slots.find(off);
-        StoreInst *S = it == slots.end() ? nullptr : reachingStore(it->second, L, DT);
-        args.push_back(S ? S->getValueOperand() : nullptr);
-    }
-    return args;
+    return entryArgs(F, bp->getValueOperand()->stripPointerCasts(), 0, maps, L, DT, DL, types);
 }
 
 // What a load of a pointer variable reads at `at` when nothing but the
@@ -406,35 +472,135 @@ const Value *sourceObject(Value *V, Instruction *at, DominatorTree &DT) {
     return getUnderlyingObject(V);
 }
 
-// Can V be computed before `at`: it is available there already, or a pure
-// computation of values that are. No loads: the kernel may change memory.
-bool canHoist(Value *V, Instruction *at, DominatorTree &DT, unsigned depth = 0) {
-    auto *I = dyn_cast<Instruction>(V);
-    if (!I || DT.dominates(I, at)) return true;
-    if (auto *Ld = dyn_cast<LoadInst>(I))
-        if (Value *f = forwarded(Ld, at, DT)) return canHoist(f, at, DT, depth + 1);
-    if (depth > 32 || isa<PHINode>(I) || isa<LoadInst>(I) || isa<AllocaInst>(I) ||
-        I->mayHaveSideEffects() || !isSafeToSpeculativelyExecute(I))
-        return false;
-    for (Value *op : I->operands())
-        if (!canHoist(op, at, DT, depth + 1)) return false;
+constexpr uint64_t kMapFrom = 0x2;   // OMP_MAP_FROM: copied back at the end
+// OMP_REQ_UNIFIED_ADDRESS and OMP_REQ_UNIFIED_SHARED_MEMORY.
+constexpr uint64_t kReqUnified = 0x002 | 0x008;
+
+// Whether a requires directive lets host and device share memory
+// (unified_address, unified_shared_memory). Clang records the directive in
+// an offload entry named ".requires" (LLVM 20 on) or registers it with
+// __tgt_register_requires (before).
+bool unifiedMemory(const Module &M) {
+    for (const GlobalVariable &G : M.globals()) {
+        if (G.getName() != ".offloading.entry..requires") continue;
+        auto *C = G.hasInitializer() ? dyn_cast<ConstantStruct>(G.getInitializer()) : nullptr;
+        auto *flags = C && C->getNumOperands() > 7 ? dyn_cast<ConstantInt>(C->getOperand(7)) : nullptr;
+        if (!flags || (flags->getZExtValue() & kReqUnified)) return true;
+    }
+    if (const Function *R = M.getFunction("__tgt_register_requires"))
+        for (const User *U : R->users()) {
+            auto *C = dyn_cast<CallBase>(U);
+            auto *flags = C && C->arg_size() == 1 ? dyn_cast<ConstantInt>(C->getArgOperand(0))
+                                                  : nullptr;
+            if (!flags || (flags->getZExtValue() & kReqUnified)) return true;
+        }
+    return false;
+}
+
+// Whether a load of host memory reads the same before a launch with map
+// types `maps` as after it, as far as the kernel goes. A kernel writes device memory -- its
+// copies of what it maps, what it is handed with is_device_ptr -- and host
+// memory changes only as the launch copies a map(from) back, or where a
+// requires directive has the two share memory. (Memory a program shares
+// behind OpenMP's back, pinned host memory handed over as a device
+// pointer, it is taken not to read a put's arguments from.)
+bool loadsSurvive(const Module &M, const ConstantDataArray *maps) {
+    if (unifiedMemory(M) || !maps) return false;
+    for (unsigned k = 0; k < maps->getNumElements(); ++k)
+        if (maps->getElementAsInteger(k) & kMapFrom) return false;
     return true;
 }
 
-Value *hoist(Value *V, Instruction *at, DominatorTree &DT, DenseMap<Value *, Value *> &done) {
-    auto *I = dyn_cast<Instruction>(V);
-    if (!I || DT.dominates(I, at)) return V;
-    if (Value *c = done.lookup(I)) return c;
-    if (auto *Ld = dyn_cast<LoadInst>(I))
-        if (Value *f = forwarded(Ld, at, DT)) return done[I] = hoist(f, at, DT, done);
-    Instruction *C = I->clone();
-    for (unsigned k = 0; k < C->getNumOperands(); ++k)
-        C->setOperand(k, hoist(I->getOperand(k), at, DT, done));
-    C->insertInto(at->getParent(), at->getIterator());
-    C->setName(I->getName() + ".post");
-    done[I] = C;
-    return C;
-}
+// Computes before launch L what the code after it computes: values
+// available there already and pure computations of them; with `AA`, loads
+// whose memory neither the kernel (loadsSurvive) nor the code between
+// (`writes`) changes; and, inside loop `loop`, its induction variables at
+// a given iteration. No other loads: the kernel may change memory.
+struct Hoister {
+    Instruction *L;
+    DominatorTree &DT;
+    AAResults *AA = nullptr;
+    ArrayRef<Instruction *> writes;
+    Loop *loop = nullptr;
+    ScalarEvolution *SE = nullptr;
+
+    // P's constant step, when it is an induction variable of `loop`.
+    std::optional<int64_t> step(PHINode *P) const {
+        if (!loop || !SE || P->getParent() != loop->getHeader() || !loop->getLoopPreheader() ||
+            !SE->isSCEVable(P->getType()))
+            return std::nullopt;
+        auto *AR = dyn_cast<SCEVAddRecExpr>(SE->getSCEV(P));
+        if (!AR || AR->getLoop() != loop || !AR->isAffine()) return std::nullopt;
+        auto *C = dyn_cast<SCEVConstant>(AR->getStepRecurrence(*SE));
+        if (!C || C->getAPInt().getSignificantBits() > 64) return std::nullopt;
+        return C->getAPInt().getSExtValue();
+    }
+
+    bool survives(LoadInst *Ld) const {
+        if (!AA || !Ld->isSimple()) return false;
+        const MemoryLocation loc = MemoryLocation::get(Ld);
+        return none_of(writes, [&](Instruction *W) { return isModSet(AA->getModRefInfo(W, loc)); });
+    }
+
+    bool can(Value *V, unsigned depth = 0) const {
+        auto *I = dyn_cast<Instruction>(V);
+        if (!I || DT.dominates(I, L)) return true;
+        if (depth > 32) return false;
+        if (auto *Ld = dyn_cast<LoadInst>(I)) {
+            if (Value *f = forwarded(Ld, L, DT)) return can(f, depth + 1);
+            return survives(Ld) && can(Ld->getPointerOperand(), depth + 1);
+        }
+        if (auto *P = dyn_cast<PHINode>(I))
+            return step(P) && can(P->getIncomingValueForBlock(loop->getLoopPreheader()), depth + 1);
+        if (isa<AllocaInst>(I) || I->mayHaveSideEffects() || !isSafeToSpeculativelyExecute(I))
+            return false;
+        for (Value *op : I->operands())
+            if (!can(op, depth + 1)) return false;
+        return true;
+    }
+
+    // Whether V computes before L without loading memory (but what
+    // forwarded() reads): safe to compute whether or not the put runs.
+    bool speculable(Value *V, unsigned depth = 0) const {
+        auto *I = dyn_cast<Instruction>(V);
+        if (!I || DT.dominates(I, L)) return true;
+        if (depth > 32) return false;
+        if (auto *Ld = dyn_cast<LoadInst>(I)) {
+            Value *f = forwarded(Ld, L, DT);
+            return f && speculable(f, depth + 1);
+        }
+        if (isa<PHINode>(I)) return false;
+        for (Value *op : I->operands())
+            if (!speculable(op, depth + 1)) return false;
+        return true;
+    }
+
+    // V at B's insertion point, at iteration `iter` (an i64) of `loop`.
+    Value *emit(Value *V, IRBuilder<> &B, DenseMap<Value *, Value *> &done, Value *iter) const {
+        auto *I = dyn_cast<Instruction>(V);
+        if (!I || DT.dominates(I, L)) return V;
+        if (Value *c = done.lookup(I)) return c;
+        Value *r;
+        auto *Ld = dyn_cast<LoadInst>(I);
+        if (Value *f = Ld ? forwarded(Ld, L, DT) : nullptr) {
+            r = emit(f, B, done, iter);
+        } else if (auto *P = dyn_cast<PHINode>(I)) {
+            Value *start = emit(P->getIncomingValueForBlock(loop->getLoopPreheader()), B, done, iter);
+            Value *by = B.CreateMul(iter, B.getInt64(*step(P)));
+            r = P->getType()->isPointerTy()
+                    ? B.CreateGEP(B.getInt8Ty(), start, by, P->getName() + ".post")
+                    : B.CreateAdd(start, B.CreateSExtOrTrunc(by, P->getType()), P->getName() + ".post");
+        } else {
+            Instruction *C = I->clone();
+            for (unsigned k = 0; k < C->getNumOperands(); ++k)
+                C->setOperand(k, emit(I->getOperand(k), B, done, iter));
+            B.Insert(C, I->getName() + ".post");
+            r = C;
+        }
+        done[I] = r;
+        return r;
+    }
+};
 
 // Code that neither orders this rank with another nor can change what a
 // put after it reads.
@@ -457,15 +623,43 @@ bool benign(Instruction &I) {
     return !I.mayHaveSideEffects();
 }
 
-// Checks one put after launch L; fills P when it can be posted.
-bool checkPut(CallInst *L, ArrayRef<BasicBlock *> hosts, CallInst *put, ArrayRef<Value *> args,
-              DominatorTree &DT, PostDominatorTree &PDT, LoopInfo &LI, FoundPut &P,
-              std::string &why) {
-    BasicBlock *LB = L->getParent(), *PB = put->getParent();
-    if (LI.getLoopFor(PB) != LI.getLoopFor(LB)) {
-        why = "the put is in a loop the launch is not";
-        return false;
+// Whether benign code I writes memory of this rank's host.
+bool writesHost(Instruction &I) {
+    if (auto *CB = dyn_cast<CallBase>(&I)) {
+        StringRef n = calleeName(*CB);
+        if (n == kHostPut || n == kLoopDone || CB->isLifetimeStartOrEnd() ||
+            isa<DbgInfoIntrinsic>(CB))
+            return false;
     }
+    return I.mayWriteToMemory();
+}
+
+// Checks one put after launch L; fills P when it can be posted.
+bool checkPut(const Launch &Ln, CallInst *put, Analyses &A, AAResults *AA, FoundPut &P,
+              std::string &why) {
+    DominatorTree &DT = A.DT;
+    LoopInfo &LI = A.LI;
+    Instruction *L = Ln.start;
+    ArrayRef<BasicBlock *> hosts = Ln.hosts;
+    ArrayRef<Value *> args = Ln.args;
+    BasicBlock *LB = L->getParent(), *PB = put->getParent();
+    Loop *home = LI.getLoopFor(LB), *in = LI.getLoopFor(PB);
+    P.loop = nullptr;
+    if (in != home) {
+        // A loop of puts: directly inside the launch's loop, with the put on
+        // every iteration (it dominates the latch, the one way out).
+        BasicBlock *latch = in ? in->getLoopLatch() : nullptr;
+        if (!in || in->getParentLoop() != home || !in->getLoopPreheader() || !latch ||
+            in->getExitingBlock() != latch || !DT.dominates(PB, latch)) {
+            why = "the put is in a loop the launch is not";
+            return false;
+        }
+        P.loop = in;
+    }
+    auto here = [&](BasicBlock *B) {
+        Loop *l = LI.getLoopFor(B);
+        return l == home || (P.loop && l == P.loop);
+    };
     // Every block on a path from the region to the put: from the launch, or
     // from the region run on the host.
     SmallPtrSet<BasicBlock *, 8> region{PB};
@@ -475,7 +669,7 @@ bool checkPut(CallInst *L, ArrayRef<BasicBlock *> hosts, CallInst *put, ArrayRef
         if (B == LB || is_contained(hosts, B)) continue;
         for (BasicBlock *pred : predecessors(B)) {
             bool after = is_contained(hosts, pred) || afterRegion(L, hosts, pred->getTerminator());
-            if (!after || LI.getLoopFor(pred) != LI.getLoopFor(LB)) {
+            if (!after || !here(pred)) {
                 why = "a path reaches the put without the launch";
                 return false;
             }
@@ -492,27 +686,34 @@ bool checkPut(CallInst *L, ArrayRef<BasicBlock *> hosts, CallInst *put, ArrayRef
                 fallback = Br->getSuccessor(Cmp->getPredicate() == ICmpInst::ICMP_NE ? 0 : 1);
     // So is a run on the host when the if clause is false, which posts
     // nothing: after_done finds no post and the host puts.
+    P.writes.assign(Ln.writes.begin(), Ln.writes.end());
     for (BasicBlock *B : region) {
         if (fallback && B != PB && DT.dominates(fallback, B)) continue;
         if (B != PB && any_of(hosts, [&](BasicBlock *H) { return DT.dominates(H, B); })) continue;
         for (Instruction &I : *B) {
             if (B == LB && (&I == L || !L->comesBefore(&I))) continue;
-            if (B == PB && (&I == put || !I.comesBefore(put))) continue;
+            // In a loop of puts, all of the put's block runs before later
+            // iterations' puts.
+            if (B == PB && (&I == put || (!P.loop && !I.comesBefore(put)))) continue;
             if (!benign(I)) {
                 why = "code between the launch and the put may synchronize or write the "
                       "source: " + (isa<CallBase>(I) ? calleeName(cast<CallBase>(I)).str()
                                                     : std::string(I.getOpcodeName()));
                 return false;
             }
+            if (writesHost(I)) P.writes.push_back(&I);
         }
     }
-    // The branches that decide whether the put runs.
+    const Hoister H{Ln.post, DT, AA, P.writes, P.loop, &A.SE};
+    // The branches that decide whether the put runs: whether its loop does.
     P.conds.clear();
-    BasicBlock *B = PB;
-    for (unsigned n = 0; !PDT.dominates(B, LB); ++n) {
+    BasicBlock *B = P.loop ? P.loop->getLoopPreheader() : PB;
+    for (unsigned n = 0; !A.PDT.dominates(B, LB); ++n) {
         BasicBlock *pred = B->getSinglePredecessor();
         auto *Br = pred ? dyn_cast<BranchInst>(pred->getTerminator()) : nullptr;
-        if (!Br || pred == LB || n > 16) {
+        // A launch's own branch is to its host fallback; a taskwait's is
+        // the program's.
+        if (!Br || (pred == LB && Ln.post == Ln.start) || n > 16) {
             why = "cannot tell before the launch whether the put runs";
             return false;
         }
@@ -520,21 +721,45 @@ bool checkPut(CallInst *L, ArrayRef<BasicBlock *> hosts, CallInst *put, ArrayRef
         B = pred;
     }
     for (auto &[c, v] : P.conds)
-        if (!canHoist(c, L, DT)) {
+        if (!H.can(c)) {
             why = "whether the put runs is decided by something the kernel may change";
             return false;
         }
     for (unsigned k = 0; k < 4; ++k)
-        if (!canHoist(put->getArgOperand(k), L, DT)) {
+        if (!H.can(put->getArgOperand(k))) {
             why = "argument " + std::to_string(k) + " of the put cannot be computed before "
                   "the launch";
             return false;
         }
+    if (P.loop) {
+        // How many times the loop runs, and which iteration a put is in.
+        const SCEV *n = A.SE.getBackedgeTakenCount(P.loop);
+        if (isa<SCEVCouldNotCompute>(n) || !n->getType()->isIntegerTy() ||
+            SCEVExprContains(n, [&](const SCEV *S) {
+                if (auto *D = dyn_cast<SCEVUDivExpr>(S)) return !isa<SCEVConstant>(D->getRHS());
+                if (auto *U = dyn_cast<SCEVUnknown>(S)) return !H.can(U->getValue());
+                return isa<SCEVAddRecExpr>(S);
+            })) {
+            why = "how many times the loop of puts runs cannot be computed before the launch";
+            return false;
+        }
+        P.backedges = n;
+        P.iv = nullptr;
+        for (PHINode &Ph : P.loop->getHeader()->phis())
+            if (Ph.getType()->isIntegerTy() && H.step(&Ph).value_or(0) != 0) {
+                P.iv = &Ph;
+                break;
+            }
+        if (!P.iv) {
+            why = "the loop of puts has no induction variable";
+            return false;
+        }
+    }
     // The source: an offset from something the kernel is handed.
-    const Value *obj = sourceObject(put->getArgOperand(2), L, DT);
+    const Value *obj = sourceObject(put->getArgOperand(2), Ln.post, DT);
     for (unsigned j = 0; j < args.size(); ++j) {
         if (!args[j] || !args[j]->getType()->isPointerTy()) continue;
-        if (sourceObject(args[j], L, DT) != obj) continue;
+        if (sourceObject(args[j], Ln.post, DT) != obj) continue;
         P.put = put;
         P.srcArg = j;
         P.base = args[j];
@@ -544,30 +769,100 @@ bool checkPut(CallInst *L, ArrayRef<BasicBlock *> hosts, CallInst *put, ArrayRef
     return false;
 }
 
-bool findSite(CallInst *L, DominatorTree &DT, PostDominatorTree &PDT, LoopInfo &LI,
-              const DataLayout &DL, FoundSite &S) {
-    S.launch = L;
-    S.kernel = launchedKernel(L);
-    if (S.kernel.empty()) return false;
-    SmallVector<Value *, 16> args = launchArgs(L, DT, DL);
-    if (args.empty()) return false;
-    Function &F = *L->getFunction();
-    SmallVector<BasicBlock *, 2> hosts = hostRuns(L, S.kernel, DT);
+Launch plainLaunch(CallInst *L, DominatorTree &DT, const DataLayout &DL) {
+    Launch Ln;
+    Ln.post = L;
+    Ln.start = L;
+    Ln.kernel = launchedKernel(L);
+    if (Ln.kernel.empty()) return Ln;
+    Ln.args = launchArgs(L, DT, DL);
+    Ln.maps = launchMapTypes(L, DT, DL);
+    Ln.hosts = hostRuns(L, Ln.kernel, DT);
+    return Ln;
+}
+
+// A nowait target region is a task (__kmpc_omp_target_task_alloc, then
+// __kmpc_omp_task at TC) whose entry function launches the kernel from a
+// base-pointer array in the task, which the creating function fills. Its
+// kernel is over after a taskwait that follows TC with only benign code
+// between them.
+std::optional<Launch> taskLaunch(CallInst *TC, FunctionAnalysisManager &FAM,
+                                 const DataLayout &DL) {
+    auto *alloc = dyn_cast<CallInst>(TC->getArgOperand(2)->stripPointerCasts());
+    if (!alloc || calleeName(*alloc) != kTargetTask || alloc->arg_size() < 6) return std::nullopt;
+    auto *E = dyn_cast<Function>(alloc->getArgOperand(5)->stripPointerCasts());
+    if (!E || E->isDeclaration() || E->arg_size() < 2) return std::nullopt;
+    CallInst *TL = nullptr;
+    for (Instruction &I : instructions(*E))
+        if (auto *C = dyn_cast<CallInst>(&I); C && calleeName(*C) == kLaunch) {
+            if (TL) return std::nullopt;
+            TL = C;
+        }
+    if (!TL) return std::nullopt;
+    auto &EDT = FAM.getResult<DominatorTreeAnalysis>(*E);
+    Launch Ln;
+    Ln.post = TC;
+    Ln.kernel = launchedKernel(TL);
+    Ln.maps = launchMapTypes(TL, EDT, DL);
+    StoreInst *bp = storeTo(*E, TL->getArgOperand(5)->stripPointerCasts(), 8, TL, EDT, DL);
+    if (Ln.kernel.empty() || !Ln.maps || !bp) return std::nullopt;
+    // The array, at an offset in the task (the entry's second argument).
+    APInt at0(DL.getIndexTypeSizeInBits(bp->getValueOperand()->getType()), 0);
+    if (bp->getValueOperand()->stripAndAccumulateConstantOffsets(DL, at0, true) != E->getArg(1) ||
+        at0.getSExtValue() <= 0)
+        return std::nullopt;
+    // Said only when a put follows the task.
+    Function &F = *TC->getFunction();
+    auto stays = [&](const Twine &why) {
+        if (any_of(instructions(F), [&](Instruction &I) {
+                auto *C = dyn_cast<CallInst>(&I);
+                return C && calleeName(*C) == kHostPut && afterRegion(TC, {}, C);
+            }))
+            out() << "[gicc-after] " << Ln.kernel << ": the puts after this nowait region stay "
+                     "after it: " << why << "\n";
+        return std::nullopt;
+    };
+    for (Instruction *I = TC->getNextNode(); I && !Ln.start; I = I->getNextNode()) {
+        if (auto *C = dyn_cast<CallInst>(I); C && calleeName(*C) == kTaskwait) {
+            Ln.start = C;
+        } else if (!benign(*I)) {
+            return stays("code between its task and the taskwait may synchronize: " +
+                         (isa<CallBase>(I) ? calleeName(*cast<CallBase>(I))
+                                           : StringRef(I->getOpcodeName())));
+        } else if (writesHost(*I)) {
+            Ln.writes.push_back(I);
+        }
+    }
+    if (!Ln.start) return stays("no taskwait follows its task in the same block");
+    Ln.args = entryArgs(F, alloc, at0.getSExtValue(), Ln.maps, TC,
+                        FAM.getResult<DominatorTreeAnalysis>(F), DL, nullptr);
+    return Ln;
+}
+
+bool findSite(const Launch &Ln, ArrayRef<Launch> all, Analyses &A, FoundSite &S) {
+    S.launch = Ln.post;
+    S.kernel = Ln.kernel;
+    if (Ln.args.empty()) return false;
+    S.AA = loadsSurvive(*Ln.post->getModule(), Ln.maps) ? &A.AA : nullptr;
+    S.SE = &A.SE;
+    Function &F = *Ln.post->getFunction();
+    unsigned used = 0;   // posts
     for (Instruction &I : instructions(F)) {
         auto *put = dyn_cast<CallInst>(&I);
-        if (!put || calleeName(*put) != kHostPut || !afterRegion(L, hosts, put)) continue;
+        if (!put || calleeName(*put) != kHostPut || !afterRegion(Ln.start, Ln.hosts, put)) continue;
         // The launch nearest before the put only.
-        bool nearer = false;
-        for (Instruction &J : instructions(F))
-            if (auto *L2 = dyn_cast<CallInst>(&J); L2 && L2 != L && calleeName(*L2) == kLaunch &&
-                                                   afterRegion(L, hosts, L2) &&
-                                                   afterRegion(L2, hostRuns(L2, launchedKernel(L2), DT), put))
-                nearer = true;
-        if (nearer) continue;
-        if (S.puts.size() == 8) break;   // OMPX_PIPE_AFTER_MAX
+        if (any_of(all, [&](const Launch &L2) {
+                return L2.start != Ln.start && afterRegion(Ln.start, Ln.hosts, L2.start) &&
+                       afterRegion(L2.start, L2.hosts, put);
+            }))
+            continue;
+        if (used == kLaunchPostsMax) break;
         FoundPut P;
         std::string why;
-        if (checkPut(L, hosts, put, args, DT, PDT, LI, P, why)) {
+        if (checkPut(Ln, put, A, S.AA, P, why)) {
+            P.first = used;
+            P.slots = P.loop ? std::min(kLoopSlots, kLaunchPostsMax - used) : 1;
+            used += P.slots;
             S.puts.push_back(std::move(P));
         } else {
             out() << "[gicc-after] " << S.kernel << ": a put stays after the kernel: " << why
@@ -575,6 +870,35 @@ bool findSite(CallInst *L, DominatorTree &DT, PostDominatorTree &PDT, LoopInfo &
         }
     }
     return !S.puts.empty();
+}
+
+// What bracket needs computed in a loop of puts, done before it changes
+// the control flow (which leaves the loop and scalar evolution analyses
+// behind): the loop's trip count, in its preheader, and the iteration
+// number at the put. False if the trip count cannot be computed before the
+// launch after all.
+bool prepareLoops(FoundSite &S, DominatorTree &DT, const DataLayout &DL) {
+    for (FoundPut &P : S.puts) {
+        if (!P.loop) continue;
+#if LLVM_VERSION_MAJOR >= 22   // which dropped the DataLayout argument
+        SCEVExpander X(*S.SE, "gicc.trips");
+        (void)DL;
+#else
+        SCEVExpander X(*S.SE, DL, "gicc.trips");
+#endif
+        P.trips = X.expandCodeFor(P.backedges, P.backedges->getType(),
+                                  P.loop->getLoopPreheader()->getTerminator());
+        if (!Hoister{S.launch, DT, S.AA, P.writes, P.loop, S.SE}.can(P.trips)) return false;
+        IRBuilder<> B(P.put);
+        auto *AR = cast<SCEVAddRecExpr>(S.SE->getSCEV(P.iv));
+        const APInt step = cast<SCEVConstant>(AR->getStepRecurrence(*S.SE))->getAPInt();
+        Value *d = B.CreateSub(P.iv, P.iv->getIncomingValueForBlock(P.loop->getLoopPreheader()));
+        if (step.isNegative()) d = B.CreateNeg(d);
+        const APInt by = step.abs();
+        if (!by.isOne()) d = B.CreateUDiv(d, ConstantInt::get(d->getType(), by));
+        P.iter = B.CreateZExtOrTrunc(d, B.getInt64Ty(), "gicc.iter");
+    }
+    return true;
 }
 
 // Posts every put before the launch and makes each one after it only if the
@@ -588,28 +912,84 @@ void bracket(Module &M, FoundSite &S, DominatorTree &DT) {
     FunctionCallee done = M.getOrInsertFunction("ompx__after_done", Type::getVoidTy(Ctx), I64,
                                                 I32, I32, Ptr, Ptr, I64);
     Constant *hash = ConstantInt::get(I64, afterPutHash(S.kernel));
-    DenseMap<Value *, Value *> hoisted;
-    IRBuilder<> B(S.launch);
-    for (unsigned i = 0; i < S.puts.size(); ++i) {
-        FoundPut &P = S.puts[i];
-        auto arg = [&](unsigned k) { return hoist(P.put->getArgOperand(k), S.launch, DT, hoisted); };
-        Value *armed = B.getTrue();
-        for (auto &[c, v] : P.conds) {
-            Value *h = hoist(c, S.launch, DT, hoisted);
-            armed = B.CreateAnd(armed, v ? h : B.CreateNot(h));
+    DomTreeUpdater DTU(DT, DomTreeUpdater::UpdateStrategy::Eager);
+    for (FoundPut &P : S.puts) {
+        const Hoister H{S.launch, DT, S.AA, P.writes, P.loop, S.SE};
+        Constant *srcArg = ConstantInt::get(I32, P.srcArg);
+        // One put that loads nothing: posted armed by its conditions.
+        const bool plain =
+            !P.loop && all_of(P.conds, [&](auto &c) { return H.speculable(c.first); }) &&
+            all_of(seq(0u, 4u), [&](unsigned k) { return H.speculable(P.put->getArgOperand(k)); });
+        if (plain) {
+            DenseMap<Value *, Value *> hoisted;
+            IRBuilder<> B(S.launch);
+            Value *armed = B.getTrue();
+            for (auto &[c, v] : P.conds) {
+                Value *h = H.emit(c, B, hoisted, nullptr);
+                armed = B.CreateAnd(armed, v ? h : B.CreateNot(h));
+            }
+            auto arg = [&](unsigned k) { return H.emit(P.put->getArgOperand(k), B, hoisted, nullptr); };
+            Value *src = arg(2);
+            Value *rel = B.CreateSub(B.CreatePtrToInt(src, I64), B.CreatePtrToInt(P.base, I64));
+            B.CreateCall(post, {hash, ConstantInt::get(I32, P.first), srcArg,
+                                B.CreateZExt(armed, I32), arg(0), arg(1), src, rel,
+                                B.CreateZExtOrTrunc(arg(3), I64)});
         }
-        Value *src = arg(2);
-        Value *rel = B.CreateSub(B.CreatePtrToInt(src, I64), B.CreatePtrToInt(P.base, I64));
-        B.CreateCall(post, {hash, ConstantInt::get(I32, i), ConstantInt::get(I32, P.srcArg),
-                            B.CreateZExt(armed, I32), arg(0), arg(1), src, rel,
-                            B.CreateZExtOrTrunc(arg(3), I64)});
-        IRBuilder<> A(P.put);
-        A.CreateCall(done, {hash, ConstantInt::get(I32, i), P.put->getArgOperand(0),
-                            P.put->getArgOperand(1), P.put->getArgOperand(2),
-                            A.CreateZExtOrTrunc(P.put->getArgOperand(3), I64)});
-        P.put->eraseFromParent();
+        // Otherwise each post unarmed, then armed once each condition in
+        // turn holds, from the outermost: what one loads is safe to load
+        // once the ones around it hold.
+        for (unsigned j = 0; !plain && j < P.slots; ++j) {
+            Constant *slot = ConstantInt::get(I32, P.first + j);
+            IRBuilder<>(S.launch).CreateCall(
+                post, {hash, slot, srcArg, ConstantInt::get(I32, 0), ConstantInt::get(I32, 0),
+                       ConstantPointerNull::get(Ptr), ConstantPointerNull::get(Ptr),
+                       ConstantInt::get(I64, 0), ConstantInt::get(I64, 0)});
+            DenseMap<Value *, Value *> hoisted;
+            Value *iter = P.loop ? ConstantInt::get(I64, j) : nullptr;
+            Instruction *at = S.launch;
+            auto guard = [&](Value *c) {
+                at = SplitBlockAndInsertIfThen(c, at, false, nullptr, &DTU);
+            };
+            for (auto it = P.conds.rbegin(); it != P.conds.rend(); ++it) {
+                IRBuilder<> B(at);
+                Value *c = H.emit(it->first, B, hoisted, iter);
+                guard(it->second ? c : B.CreateNot(c));
+            }
+            if (P.loop) {
+                IRBuilder<> B(at);
+                Value *n = H.emit(P.trips, B, hoisted, iter);
+                guard(B.CreateICmpULE(ConstantInt::get(n->getType(), j), n));
+            }
+            IRBuilder<> B(at);
+            auto arg = [&](unsigned k) { return H.emit(P.put->getArgOperand(k), B, hoisted, iter); };
+            Value *peer = arg(0), *dst = arg(1), *src = arg(2), *bytes = arg(3);
+            Value *rel = B.CreateSub(B.CreatePtrToInt(src, I64), B.CreatePtrToInt(P.base, I64));
+            B.CreateCall(post, {hash, slot, srcArg, ConstantInt::get(I32, 1), peer, dst, src, rel,
+                                B.CreateZExtOrTrunc(bytes, I64)});
+        }
+        CallInst *put = P.put;
+        Value *slot = ConstantInt::get(I32, P.first);
+        if (P.loop) {
+            // The first iterations' puts were posted; the others the host
+            // makes as before.
+            IRBuilder<> A(put);
+            Value *posted = A.CreateICmpULT(P.iter, ConstantInt::get(I64, P.slots));
+            Instruction *then = nullptr, *other = nullptr;
+            SplitBlockAndInsertIfThenElse(posted, put, &then, &other, nullptr, &DTU);
+            put->moveBefore(*other->getParent(), other->getIterator());
+            IRBuilder<> T(then);
+            slot = T.CreateAdd(slot, T.CreateTrunc(P.iter, I32));
+            T.CreateCall(done, {hash, slot, put->getArgOperand(0), put->getArgOperand(1),
+                                put->getArgOperand(2), T.CreateZExtOrTrunc(put->getArgOperand(3), I64)});
+            continue;
+        }
+        IRBuilder<> A(put);
+        A.CreateCall(done, {hash, slot, put->getArgOperand(0), put->getArgOperand(1),
+                            put->getArgOperand(2), A.CreateZExtOrTrunc(put->getArgOperand(3), I64)});
+        put->eraseFromParent();
     }
 }
+
 
 // ---- in-loop puts (LoopPutSite) ---------------------------------------------
 
@@ -828,9 +1208,15 @@ PreservedAnalyses GICCAfterPutPass::run(Module &M, ModuleAnalysisManager &MAM) {
     // launch.
     auto afterPuts = [&](FoundSite &S, DominatorTree &DT) {
         json::Array srcArgs;
-        for (const FoundPut &P : S.puts) srcArgs.push_back(static_cast<int64_t>(P.srcArg));
+        SmallVector<unsigned, 8> slots;
+        for (const FoundPut &P : S.puts)
+            for (unsigned j = 0; j < P.slots; ++j) slots.push_back(P.srcArg);
+        for (unsigned a : slots) srcArgs.push_back(static_cast<int64_t>(a));
         out() << "[gicc-after] " << S.kernel << ": " << S.puts.size()
-              << " put(s) after the launch can go from the kernel\n";
+              << " put(s) after the launch can go from the kernel";
+        if (slots.size() > S.puts.size())
+            out() << ", in " << slots.size() << " posts (a loop's first iterations)";
+        out() << "\n";
         if (discover) {
             recorded.push_back(json::Object{{"kernel", S.kernel}, {"src_args", std::move(srcArgs)}});
             return;
@@ -838,9 +1224,9 @@ PreservedAnalyses GICCAfterPutPass::run(Module &M, ModuleAnalysisManager &MAM) {
         // Bracket only what the first compile recorded the same way: the
         // device side of this unit was built from that record.
         auto it = known.find(S.kernel);
-        bool same = it != known.end() && it->second.srcArgs.size() == S.puts.size();
-        for (unsigned i = 0; same && i < S.puts.size(); ++i)
-            same = it->second.srcArgs[i] == S.puts[i].srcArg;
+        bool same = it != known.end() && it->second.srcArgs.size() == slots.size();
+        for (unsigned i = 0; same && i < slots.size(); ++i)
+            same = it->second.srcArgs[i] == slots[i];
         if (!same) {
             out() << "[gicc-after] " << S.kernel << ": not in GICC_META_DIR as found; "
                      "rebuild with GICC_MODE=put-discover first\n";
@@ -851,19 +1237,42 @@ PreservedAnalyses GICCAfterPutPass::run(Module &M, ModuleAnalysisManager &MAM) {
     };
     for (Function &F : M) {
         if (F.isDeclaration()) continue;
-        SmallVector<CallInst *, 4> launches;
+        SmallVector<CallInst *, 4> launches, tasks;
         for (Instruction &I : instructions(F))
             if (auto *CI = dyn_cast<CallInst>(&I); CI && calleeName(*CI) == kLaunch)
                 launches.push_back(CI);
-        if (launches.empty()) continue;
+            else if (CI && calleeName(*CI) == kTask)
+                tasks.push_back(CI);
+        if (launches.empty() && tasks.empty()) continue;
         auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);
-        auto &PDT = FAM.getResult<PostDominatorTreeAnalysis>(F);
-        auto &LI = FAM.getResult<LoopAnalysis>(F);
+        Analyses A{DT, FAM.getResult<PostDominatorTreeAnalysis>(F),
+                   FAM.getResult<LoopAnalysis>(F), FAM.getResult<ScalarEvolutionAnalysis>(F),
+                   FAM.getResult<AAManager>(F)};
+        // The puts after each launch first, all found before any is
+        // bracketed: their check reads the code between the launch and
+        // them, which bracketing and the in-loop puts' end call change.
+        SmallVector<FoundSite, 2> sites;
+        if (hostPuts) {
+            SmallVector<Launch, 4> all;
+            for (CallInst *L : launches) all.push_back(plainLaunch(L, DT, M.getDataLayout()));
+            for (CallInst *TC : tasks)
+                if (auto Ln = taskLaunch(TC, FAM, M.getDataLayout())) all.push_back(std::move(*Ln));
+            for (const Launch &Ln : all) {
+                FoundSite S;
+                if (findSite(Ln, all, A, S)) sites.push_back(std::move(S));
+            }
+        }
+        if (rewrite)
+            for (FoundSite &S : sites) {
+                changed |= any_of(S.puts, [](const FoundPut &P) { return P.loop; });
+                if (prepareLoops(S, DT, M.getDataLayout())) continue;
+                    out() << "[gicc-after] " << S.kernel << ": the puts after the launch stay "
+                         "there: a loop's trip count cannot be computed before it\n";
+                S.puts.clear();
+            }
+        for (FoundSite &S : sites)
+            if (!S.puts.empty()) afterPuts(S, DT);
         for (CallInst *L : launches) {
-            // The puts after the launch first: their check reads the code
-            // between it and them, which the in-loop puts' end call joins.
-            FoundSite S;
-            if (hostPuts && findSite(L, DT, PDT, LI, M.getDataLayout(), S)) afterPuts(S, DT);
             if (!rewrite) continue;
             const std::string kernel = launchedKernel(L);
             auto it = loops.find(kernel);
