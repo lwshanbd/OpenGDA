@@ -52,6 +52,10 @@ llvm::StringRef calleeName(const llvm::CallBase &CB);
 // contract covers (they only touch their bound slots).
 bool isBenignCall(const llvm::CallBase &CB);
 bool isCallTo(const llvm::Instruction &I, llvm::StringRef prefix);
+// Replaces the loads of a parallel region's worksharing-loop bound and
+// stride slots that its for_static_init dominates with one load right after
+// the init (nothing else writes them). Returns whether anything changed.
+bool hoistThreadSlotLoads(llvm::Function &O);
 // The device runtime call that starts a parallel region, either name.
 bool isParallelCall(llvm::StringRef name);
 // An offload kernel entry (not one of its outlined helpers).

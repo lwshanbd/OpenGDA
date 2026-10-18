@@ -2,6 +2,8 @@
 #include "KernelInventory.h"
 
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Support/raw_ostream.h"
@@ -20,7 +22,13 @@ bool isBenignCall(const CallBase &CB) {
         if (II->isLifetimeStartOrEnd() || II->isAssumeLikeIntrinsic()) return true;
         return !II->mayWriteToMemory();
     }
+    if (!CB.mayWriteToMemory()) return true;
     StringRef n = calleeName(CB);
+    // Device math libraries (libdevice, OCML): values in, value out, unless
+    // a pointer argument takes a second result.
+    if ((n.starts_with("__nv_") || n.starts_with("__ocml_")) &&
+        llvm::none_of(CB.args(), [](const Use &A) { return A->getType()->isPointerTy(); }))
+        return true;
     return n.starts_with("__kmpc_for_static_init") ||
            n.starts_with("__kmpc_for_static_fini") ||
            n.starts_with("__kmpc_distribute_static_init") ||
@@ -32,7 +40,73 @@ bool isBenignCall(const CallBase &CB) {
            n.starts_with("__kmpc_get_hardware_") || n == "__kmpc_get_warp_size" ||
            n == "__kmpc_is_spmd_exec_mode" ||
            // Reads a put the host posted into stack slots (GICCAfterPut.h).
-           n == "ompx__after_put";
+           n == "ompx__after_put" ||
+           // A reduction clause: the runtime combines the reduction list
+           // through its own buffers and writes only the reduction variable,
+           // which the write analysis sees as an ordinary store.
+           n.starts_with("__kmpc_nvptx_parallel_reduce_nowait") ||
+           n.starts_with("__kmpc_nvptx_teams_reduce_nowait") ||
+           n == "__kmpc_reduction_get_fixed_buffer";
+}
+
+// The thread loop's bound and stride slots are written by its
+// for_static_init and nothing after it, so a load of one the init
+// dominates is the value right after the init. Reloaded in the loop --
+// left there when a store to another stack slot (a reduction's
+// accumulator) could not be told apart from them -- the stride is no
+// longer a step the IV's recurrence can name; one load after the init
+// makes it one again. Returns whether anything changed.
+bool hoistThreadSlotLoads(Function &O) {
+    CallInst *init = nullptr;
+    for (Instruction &I : instructions(O))
+        if (isCallTo(I, "__kmpc_for_static_init")) {
+            if (init) return false;
+            init = cast<CallInst>(&I);
+        }
+    if (!init) return false;
+    DominatorTree DT(O);
+    bool changed = false;
+    for (unsigned arg : {kmpc::InitLower, kmpc::InitUpper, kmpc::InitStride}) {
+        Value *slot = init->getArgOperand(arg)->stripPointerCasts();
+        if (!isa<AllocaInst>(slot)) continue;
+        // Every other use: a store before the init in its block, a load,
+        // a cast, or lifetime markers.
+        SmallVector<LoadInst *, 4> loads;
+        SmallVector<Value *, 8> work{slot};
+        bool ok = true;
+        while (ok && !work.empty()) {
+            Value *V = work.pop_back_val();
+            for (User *U : V->users()) {
+                auto *UI = cast<Instruction>(U);
+                if (isa<AddrSpaceCastInst>(UI) || isa<BitCastInst>(UI)) work.push_back(UI);
+                else if (auto *L = dyn_cast<LoadInst>(UI)) loads.push_back(L);
+                else if (auto *S = dyn_cast<StoreInst>(UI))
+                    ok = S->getPointerOperand() == V && S->getParent() == init->getParent() &&
+                         S->comesBefore(init);
+                else if (auto *II = dyn_cast<IntrinsicInst>(UI))
+                    ok = II->isLifetimeStartOrEnd();
+                else
+                    ok = UI == init;
+            }
+        }
+        if (!ok) continue;
+        SmallVector<LoadInst *, 4> late;
+        for (LoadInst *L : loads)
+            if (L->getParent() != init->getParent() && DT.dominates(init, L) &&
+                !L->isVolatile() && !L->isAtomic())
+                late.push_back(L);
+        if (late.empty()) continue;
+        IRBuilder<> B(init->getNextNode());
+        Value *once = B.CreateLoad(late[0]->getType(), late[0]->getPointerOperand(),
+                                   late[0]->getName() + ".once");
+        for (LoadInst *L : late) {
+            if (L->getType() != once->getType()) continue;
+            L->replaceAllUsesWith(once);
+            L->eraseFromParent();
+            changed = true;
+        }
+    }
+    return changed;
 }
 
 bool isParallelCall(StringRef name) {

@@ -19,6 +19,8 @@ void summarizeKernel(Function &F, FunctionAnalysisManager &FAM) {
     out << "[gicc-write] kernel " << F.getName() << "\n";
     std::string why;
     auto KI = OmpKernel::locate(F, why);
+    if (KI && hoistThreadSlotLoads(*KI->outlined))
+        FAM.invalidate(*KI->outlined, PreservedAnalyses::none());
     auto W = KI ? collectWrites(*KI, FAM, UnknownStore::Record, why) : std::nullopt;
     if (!W) {
         out << tag << "not analysable: " << why << "\n";

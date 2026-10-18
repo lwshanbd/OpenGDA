@@ -1,5 +1,5 @@
 // Parallel over (k, j) while every k updates the same C[i][j] through a
-// sequential i loop: the store moves with the inner loop (and races).
+// sequential i loop: the store ignores k (and races).
 #include <cstddef>
 void step(float* C, const float* A, const float* B, int N, int Ns) {
     #pragma omp target teams distribute parallel for collapse(2) is_device_ptr(A, B, C)
@@ -11,8 +11,8 @@ void step(float* C, const float* A, const float* B, int N, int Ns) {
 
 // CHECK: [gicc-write] kernel {{.*}}
 // CHECK-NEXT: when ((trunc i64 %1 to i32) > 0) ((trunc i64 %2 to i32) > 0)
-// CHECK-NEXT: store to ptr not analysable: store address moves with a sequential loop nested in the worksharing loop
-// CHECK-NEXT: store to ptr not analysable: store address moves with a sequential loop nested in the worksharing loop
-// CHECK-NEXT: store to ptr not analysable: store address moves with a sequential loop nested in the worksharing loop
-// CHECK-NEXT: store to ptr not analysable: store address moves with a sequential loop nested in the worksharing loop
-// CHECK-NEXT: store to ptr not analysable: store address moves with a sequential loop nested in the worksharing loop
+// CHECK-NEXT: store to ptr not analysable: store address: a sequential loop in the worksharing loop whose start, step or trip count changes with the worksharing loop
+// CHECK-NEXT: store to ptr not analysable: store address: the address walks a sequential loop nested in the worksharing loop but not collapse digit 0: its iterations write the same words
+// CHECK-NEXT: store to ptr not analysable: store address: {{.*}}
+// CHECK-NEXT: store to ptr not analysable: store address: {{.*}}
+// CHECK-NEXT: store to ptr not analysable: store address: {{.*}}

@@ -6,6 +6,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
@@ -288,9 +289,24 @@ bool afterRegion(CallInst *L, ArrayRef<BasicBlock *> hosts, Instruction *I) {
 }
 
 // The one store to `base` + `off` that dominates `at`, or null.
+// Of the stores to one slot, the one `at` reads: it dominates `at`, and no
+// other can run between them -- a slot stored once, or in each of the
+// copies of a loop the optimizer unswitched. Null otherwise.
+StoreInst *reachingStore(ArrayRef<StoreInst *> stores, Instruction *at, DominatorTree &DT) {
+    StoreInst *found = nullptr;
+    for (StoreInst *S : stores)
+        if (DT.dominates(S, at) && (!found || DT.dominates(found, S))) found = S;
+    if (!found) return nullptr;
+    for (StoreInst *S : stores)
+        if (S != found && !DT.dominates(S, found) && isPotentiallyReachable(found, S, nullptr, &DT) &&
+            isPotentiallyReachable(S, at, nullptr, &DT))
+            return nullptr;
+    return found;
+}
+
 StoreInst *storeTo(Function &F, const Value *base, int64_t off, Instruction *at,
                    DominatorTree &DT, const DataLayout &DL) {
-    StoreInst *found = nullptr;
+    SmallVector<StoreInst *, 2> stores;
     for (Instruction &I : instructions(F)) {
         auto *S = dyn_cast<StoreInst>(&I);
         if (!S) continue;
@@ -298,43 +314,96 @@ StoreInst *storeTo(Function &F, const Value *base, int64_t off, Instruction *at,
         const Value *b =
             S->getPointerOperand()->stripAndAccumulateConstantOffsets(DL, o, true);
         if (b != base || o.getSExtValue() != off) continue;
-        if (found) return nullptr;
-        found = S;
+        stores.push_back(S);
     }
-    return found && DT.dominates(found, at) ? found : nullptr;
+    return reachingStore(stores, at, DT);
 }
+
+// The map-type flag of an entry the kernel receives as an argument; the
+// others (a mapped pointer's attachment, a struct's members) it does not.
+constexpr uint64_t kMapTargetParam = 0x20;
+constexpr int64_t kArgsTypes = 32;   // the map types, in __tgt_kernel_arguments
 
 // The values a launch hands its kernel, by argument: the entries of the
 // base-pointer array its __tgt_kernel_arguments points at (the third field,
-// after two i32s). Null where an entry is stored more than once or not
-// before the launch.
-SmallVector<Value *, 16> launchArgs(CallInst *L, DominatorTree &DT, const DataLayout &DL) {
+// after two i32s) that are kernel arguments by their map type (the sixth
+// field). Null where an entry is stored more than once or not before the
+// launch. With `types`, also each argument's map type.
+SmallVector<Value *, 16> launchArgs(CallInst *L, DominatorTree &DT, const DataLayout &DL,
+                                    SmallVectorImpl<uint64_t> *types = nullptr) {
     SmallVector<Value *, 16> args;
     Function &F = *L->getFunction();
     const Value *kargs = L->getArgOperand(5)->stripPointerCasts();
     StoreInst *bp = storeTo(F, kargs, 8, L, DT, DL);
     if (!bp) return args;
+    const ConstantDataArray *maps = nullptr;
+    if (StoreInst *mt = storeTo(F, kargs, kArgsTypes, L, DT, DL))
+        if (auto *G = dyn_cast<GlobalVariable>(mt->getValueOperand()->stripPointerCasts());
+            G && G->isConstant() && G->hasInitializer())
+            maps = dyn_cast<ConstantDataArray>(G->getInitializer());
+    if (!maps) return args;   // which entries are arguments is unknown
     const Value *arr = bp->getValueOperand()->stripPointerCasts();
-    DenseMap<int64_t, StoreInst *> slots;
-    SmallPtrSet<StoreInst *, 4> ambiguous;
+    DenseMap<int64_t, SmallVector<StoreInst *, 2>> slots;
     for (Instruction &I : instructions(F)) {
         auto *S = dyn_cast<StoreInst>(&I);
         if (!S) continue;
         APInt o(DL.getIndexTypeSizeInBits(S->getPointerOperand()->getType()), 0);
         if (S->getPointerOperand()->stripAndAccumulateConstantOffsets(DL, o, true) != arr)
             continue;
-        auto [it, fresh] = slots.try_emplace(o.getSExtValue(), S);
-        if (!fresh) ambiguous.insert(it->second);
+        slots[o.getSExtValue()].push_back(S);
     }
     const int64_t slot = static_cast<int64_t>(DL.getPointerSize());
     int64_t last = -1;
     for (auto &[off, S] : slots) last = std::max(last, off);
     for (int64_t off = 0; off <= last; off += slot) {
-        StoreInst *S = slots.lookup(off);
-        args.push_back(S && !ambiguous.count(S) && DT.dominates(S, L) ? S->getValueOperand()
-                                                                      : nullptr);
+        const uint64_t k = static_cast<uint64_t>(off / slot);
+        if (k >= maps->getNumElements()) return {};
+        const uint64_t type = maps->getElementAsInteger(k);
+        if (!(type & kMapTargetParam)) continue;
+        if (types) types->push_back(type);
+        auto it = slots.find(off);
+        StoreInst *S = it == slots.end() ? nullptr : reachingStore(it->second, L, DT);
+        args.push_back(S ? S->getValueOperand() : nullptr);
     }
     return args;
+}
+
+// What a load of a pointer variable reads at `at` when nothing but the
+// offload runtime can have written it since: a stack slot stored once,
+// before `at`, whose address goes only into other stack slots -- the
+// launch's base-pointer array, which the runtime reads (a mapped pointer's
+// attachment) but whose host variables it never writes. Null otherwise.
+Value *forwarded(LoadInst *Ld, Instruction *at, DominatorTree &DT) {
+    auto *A = dyn_cast<AllocaInst>(Ld->getPointerOperand()->stripPointerCasts());
+    if (!A || Ld->isVolatile() || Ld->isAtomic()) return nullptr;
+    StoreInst *only = nullptr;
+    for (User *U : A->users()) {
+        if (isa<LoadInst>(U)) continue;
+        if (auto *II = dyn_cast<IntrinsicInst>(U); II && II->isLifetimeStartOrEnd()) continue;
+        auto *S = dyn_cast<StoreInst>(U);
+        if (!S) return nullptr;
+        if (S->getPointerOperand() == A) {
+            if (only) return nullptr;
+            only = S;
+        } else if (S->getValueOperand() != A ||
+                   !isa<AllocaInst>(getUnderlyingObject(S->getPointerOperand()))) {
+            return nullptr;
+        }
+    }
+    if (!only || only->getValueOperand()->getType() != Ld->getType() || !DT.dominates(only, at))
+        return nullptr;
+    return only->getValueOperand();
+}
+
+// getUnderlyingObject, looking through forwarded loads.
+const Value *sourceObject(Value *V, Instruction *at, DominatorTree &DT) {
+    for (unsigned n = 0; n < 4; ++n) {
+        auto *Ld = dyn_cast<LoadInst>(getUnderlyingObject(V));
+        Value *f = Ld ? forwarded(Ld, at, DT) : nullptr;
+        if (!f) break;
+        V = f;
+    }
+    return getUnderlyingObject(V);
 }
 
 // Can V be computed before `at`: it is available there already, or a pure
@@ -342,6 +411,8 @@ SmallVector<Value *, 16> launchArgs(CallInst *L, DominatorTree &DT, const DataLa
 bool canHoist(Value *V, Instruction *at, DominatorTree &DT, unsigned depth = 0) {
     auto *I = dyn_cast<Instruction>(V);
     if (!I || DT.dominates(I, at)) return true;
+    if (auto *Ld = dyn_cast<LoadInst>(I))
+        if (Value *f = forwarded(Ld, at, DT)) return canHoist(f, at, DT, depth + 1);
     if (depth > 32 || isa<PHINode>(I) || isa<LoadInst>(I) || isa<AllocaInst>(I) ||
         I->mayHaveSideEffects() || !isSafeToSpeculativelyExecute(I))
         return false;
@@ -354,6 +425,8 @@ Value *hoist(Value *V, Instruction *at, DominatorTree &DT, DenseMap<Value *, Val
     auto *I = dyn_cast<Instruction>(V);
     if (!I || DT.dominates(I, at)) return V;
     if (Value *c = done.lookup(I)) return c;
+    if (auto *Ld = dyn_cast<LoadInst>(I))
+        if (Value *f = forwarded(Ld, at, DT)) return done[I] = hoist(f, at, DT, done);
     Instruction *C = I->clone();
     for (unsigned k = 0; k < C->getNumOperands(); ++k)
         C->setOperand(k, hoist(I->getOperand(k), at, DT, done));
@@ -458,10 +531,10 @@ bool checkPut(CallInst *L, ArrayRef<BasicBlock *> hosts, CallInst *put, ArrayRef
             return false;
         }
     // The source: an offset from something the kernel is handed.
-    const Value *obj = getUnderlyingObject(put->getArgOperand(2));
+    const Value *obj = sourceObject(put->getArgOperand(2), L, DT);
     for (unsigned j = 0; j < args.size(); ++j) {
         if (!args[j] || !args[j]->getType()->isPointerTy()) continue;
-        if (getUnderlyingObject(args[j]) != obj) continue;
+        if (sourceObject(args[j], L, DT) != obj) continue;
         P.put = put;
         P.srcArg = j;
         P.base = args[j];
@@ -541,7 +614,7 @@ void bracket(Module &M, FoundSite &S, DominatorTree &DT) {
 // ---- in-loop puts (LoopPutSite) ---------------------------------------------
 
 constexpr uint64_t kMapLiteral = 0x100;   // OMP_MAP_LITERAL: handed over as is
-constexpr int64_t kArgsTypes = 32, kArgsFlags = 64;   // in __tgt_kernel_arguments
+constexpr int64_t kArgsFlags = 64;   // in __tgt_kernel_arguments
 
 // What launch L leaves at offset `off` of its __tgt_kernel_arguments: the
 // one store there before it, or a zeroing memset over it; null if neither.
@@ -577,15 +650,15 @@ Value *coerce(IRBuilder<> &B, Value *V, Type *T) {
 // say which of them reach it unchanged.
 struct LaunchView {
     SmallVector<Value *, 16> args;
-    const ConstantDataArray *types = nullptr;
+    SmallVector<uint64_t, 16> types;
 };
 
 // Launch argument j as the kernel receives it, as a T; null unless the
 // launch passes it as is (a scalar, an is_device_ptr pointer): a mapped
 // pointer reaches the kernel translated.
 Value *launchArg(IRBuilder<> &B, const LaunchView &LV, uint64_t j, Type *T) {
-    if (j >= LV.args.size() || !LV.args[j] || !LV.types || j >= LV.types->getNumElements() ||
-        !(LV.types->getElementAsInteger(j) & kMapLiteral))
+    if (j >= LV.args.size() || !LV.args[j] || j >= LV.types.size() ||
+        !(LV.types[j] & kMapLiteral))
         return nullptr;
     return coerce(B, LV.args[j], T);
 }
@@ -688,12 +761,8 @@ unsigned postLoopPuts(Module &M, CallInst *L, StringRef kernel, ArrayRef<LoopPut
         return 0;
     }
     LaunchView LV;
-    LV.args = launchArgs(L, DT, DL);
-    if (Value *t = launchField(L, kArgsTypes, DT, DL))
-        if (auto *G = dyn_cast<GlobalVariable>(t->stripPointerCasts());
-            G && G->hasDefinitiveInitializer())
-            LV.types = dyn_cast<ConstantDataArray>(G->getInitializer());
-    if (LV.args.empty() || !LV.types) {
+    LV.args = launchArgs(L, DT, DL, &LV.types);
+    if (LV.args.empty()) {
         why = "cannot read what the launch hands the kernel";
         return 0;
     }

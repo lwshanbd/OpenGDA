@@ -18,11 +18,13 @@
 //     unsigned: nsw / nuw arithmetic on such operands does (a signed
 //     overflow would be undefined behaviour in the source);
 //   - trunc (also as shl + ashr, instcombine's sext(trunc(x))) is accepted
-//     only on a single rebuilt loop index (one digit plus a loop-invariant
-//     offset). That value is a source loop variable, or a source index
-//     computed in the narrow type that the optimizer folded (i*m + j into
-//     the collapsed IV): either way it fits that type, a signed overflow
-//     in the source being undefined behaviour. This is a trusted
+//     on rebuilt loop indices: a single one (one digit plus a loop-invariant
+//     offset) or a combination of them, but not on a remainder taken with
+//     another radix than its division. That value is a source loop
+//     variable, or a source index computed in the narrow type that the
+//     optimizer folded ((i*m + j)*n + k into the collapsed IV): either way
+//     it fits that type, a signed overflow in the source being undefined
+//     behaviour. This is a trusted
 //     assumption -- a source that deliberately wraps a 64-bit index into
 //     an int would break it -- reported through AccessDecomp::trustedTrunc.
 //     The same holds for the narrow add instcombine makes of a trunc of
@@ -57,6 +59,9 @@ struct AccessDecomp {
     // kernel's trip count). 1-D loops have one dimension and no radix.
     llvm::SmallVector<const llvm::SCEV *, 4> extent;
     llvm::SmallVector<const llvm::SCEV *, 4> radix;   // R_1 .. R_{D-1}
+    // The last innerDims dimensions are sequential loops nested in the
+    // worksharing loop (AccessDecomposer::innerIV), not its digits.
+    unsigned innerDims = 0;
     bool trustedTrunc = false;           // relied on the loop-variable trunc rule
     // Radix pairs (R_d, R') taken as equal because they differ only by
     // casts; the box is valid only once the caller proves each pair.
@@ -71,6 +76,14 @@ bool sameSCEV(llvm::ScalarEvolution &SE, const llvm::SCEV *a, const llvm::SCEV *
 const llvm::SCEV *exactDivide(llvm::ScalarEvolution &SE, const llvm::SCEV *a,
                               const llvm::SCEV *b);
 
+// a / b as exactDivide, but matching a factor x of b with ext(trunc(x)) in
+// a (a captured int and the 64-bit value carrying it), or with another
+// spelling of the same int expression under different casts; the quotient
+// is made of a's factors. Trusted: they differ only for a count no int can
+// hold.
+const llvm::SCEV *exactDivideCarriers(llvm::ScalarEvolution &SE, const llvm::SCEV *a,
+                                      const llvm::SCEV *b);
+
 // Decomposes one store address; use a fresh decomposer per store.
 class AccessDecomposer {
 public:
@@ -81,8 +94,10 @@ public:
     std::optional<AccessDecomp> decompose(llvm::Value *ptr, std::string &why);
 
 private:
-    // A value as a math integer: c0 + sum(coef * key), key -1 the IV and
-    // key d >= 0 digit d; coefficients and c0 are loop-invariant i64 SCEVs.
+    // A value as a math integer: c0 + sum(coef * key), key -1 the IV, key
+    // d >= 0 digit d and key kInner + k the k-th sequential loop nested in
+    // the worksharing loop (counted from 0); coefficients and c0 are
+    // loop-invariant i64 SCEVs.
     // sx / ux: the IR value, read signed / unsigned in its own width,
     // equals that math value (otherwise it only agrees modulo 2^width).
     struct Lin {
@@ -113,6 +128,16 @@ private:
     llvm::PHINode *iv;
     llvm::Type *I64;
     llvm::SmallVector<const llvm::SCEV *, 4> chain;   // radix of digit d
+    // The nested sequential loops an index walks: each a dimension of the
+    // box, its iterations counted from 0 (extent: the trip count, 0 if
+    // negative).
+    static constexpr int kInner = 1 << 16;
+    struct InnerLoop {
+        const llvm::Loop *loop;
+        const llvm::SCEV *extent;
+    };
+    llvm::SmallVector<InnerLoop, 2> inner;
+    std::optional<Lin> innerIV(llvm::PHINode *PN, std::string &why);
     bool usedTrunc = false;
     llvm::SmallVector<std::pair<const llvm::SCEV *, const llvm::SCEV *>, 2> assumed;
 };

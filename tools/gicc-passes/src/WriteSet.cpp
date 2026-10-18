@@ -139,6 +139,7 @@ public:
             auto *St = dyn_cast<StoreInst>(&I);
             if (!St || isa<AllocaInst>(getUnderlyingObject(St->getPointerOperand())))
                 continue;   // thread-private
+            if (kernelLocal(St)) continue;
             if (!store(St)) return std::nullopt;
         }
         return std::move(W);
@@ -177,6 +178,21 @@ private:
         return true;
     }
 
+    // A store into memory the kernel itself provides -- its stack, team
+    // memory, or __kmpc_alloc_shared, as a reduction variable or a value
+    // the region shares is -- and no put can send: put sources are kernel
+    // arguments.
+    bool kernelLocal(StoreInst *St) {
+        Value *obj = getUnderlyingObject(St->getPointerOperand());
+        if (isa<Argument>(obj)) obj = KI.resolveOutlined(obj);
+        if (!obj) return false;
+        obj = getUnderlyingObject(obj);
+        if (isa<AllocaInst>(obj)) return true;
+        if (auto *G = dyn_cast<GlobalVariable>(obj)) return G->getAddressSpace() == 3;
+        auto *CB = dyn_cast<CallBase>(obj);
+        return CB && calleeName(*CB) == "__kmpc_alloc_shared";
+    }
+
     // A store the analysis cannot describe: listed under Record (go on),
     // fatal under Fail.
     bool unknown(StoreInst *St, const std::string &reason) {
@@ -193,17 +209,11 @@ private:
         while (L->getParentLoop()) L = L->getParentLoop();
         const SCEVAddRecExpr *iv = loopCoversBlock(L);
         if (!iv) return false;
-        if (inner != L) {
-            // Inside a sequential loop nested in the worksharing loop (a
-            // per-element compute loop): fine if the address does not move
-            // with it, as it then depends on the worksharing IV alone.
-            // Conditional: the inner loop may not run.
-            for (Loop *l = inner; l != L; l = l->getParentLoop())
-                if (!SE.isLoopInvariant(SE.getSCEV(St->getPointerOperand()), l))
-                    return unknown(St, "store address moves with a sequential loop "
-                                       "nested in the worksharing loop");
-        }
-        return box(St, L, iv, /*inInnerLoop=*/inner != L);
+        // Inside a sequential loop nested in the worksharing loop: a
+        // per-element compute loop, where the address does not move with it,
+        // or a row the address walks, which the box takes as one more
+        // dimension (AccessDecomposer::innerIV).
+        return box(St, L, iv, inner);
     }
 
     // x > 0 for an outlined-function value, whenever the loop body runs:
@@ -222,6 +232,14 @@ private:
         // sext(t) > 0 iff t > 0; zext(t) > 0 if t > 0 read signed.
         if (isa<SCEVSignExtendExpr>(x) || isa<SCEVZeroExtendExpr>(x))
             return isPositive(cast<SCEVCastExpr>(x)->getOperand(), L);
+        // trunc(a * b): clang's 32-bit trip count of an inner loop pair,
+        // positive when each factor read in 32 bits is (trusted as for the
+        // radix it is: a product no int holds breaks clang's digits first).
+        if (auto *T = dyn_cast<SCEVTruncateExpr>(x))
+            if (auto *M = dyn_cast<SCEVMulExpr>(T->getOperand()))
+                return llvm::all_of(M->operands(), [&](const SCEV *op) {
+                    return isPositive(SE.getTruncateExpr(op, T->getType()), L);
+                });
         return false;
     }
 
@@ -238,7 +256,38 @@ private:
     }
 
     // Each store as a box over the loop's digits, in kernel values.
-    bool box(StoreInst *St, Loop *L, const SCEVAddRecExpr *iv, bool inInnerLoop) {
+    // Whether St runs on every iteration of the worksharing loop L and, if
+    // it is in nested sequential loops, on every iteration of those: each
+    // one entered unless a guard the same on every iteration of L says
+    // otherwise (the box's extent then reads as no iterations).
+    bool everyIteration(StoreInst *St, Loop *L, Loop *inner) {
+        BasicBlock *latch = L->getLoopLatch();
+        if (inner == L) return latch && DT.dominates(St->getParent(), latch);
+        for (Loop *l = inner; l != L; l = l->getParentLoop()) {
+            BasicBlock *lat = l->getLoopLatch(), *outerLatch = l->getParentLoop()->getLoopLatch();
+            BasicBlock *bb = l == inner ? St->getParent() : nullptr;
+            if (!lat || !outerLatch || (bb && !DT.dominates(bb, lat))) return false;
+            // Entered every time its parent's body runs, or behind a guard
+            // whose condition does not change with L.
+            BasicBlock *entry = l->getLoopPreheader();
+            if (!entry) return false;
+            if (!DT.dominates(entry, outerLatch)) {
+                // if (c) { preheader; loop } with c the same on every
+                // iteration of L, skipping to the loop's exit or past it.
+                BasicBlock *P = entry->getSinglePredecessor(), *exit = l->getExitBlock();
+                auto *G = P ? dyn_cast<BranchInst>(P->getTerminator()) : nullptr;
+                if (!G || !G->isConditional() || !exit || !L->isLoopInvariant(G->getCondition()))
+                    return false;
+                BasicBlock *skip = G->getSuccessor(G->getSuccessor(0) == entry ? 1 : 0);
+                if (skip != exit && skip != exit->getSingleSuccessor()) return false;
+                entry = P;
+            }
+            if (!DT.dominates(entry, outerLatch)) return false;
+        }
+        return true;
+    }
+
+    bool box(StoreInst *St, Loop *L, const SCEVAddRecExpr *iv, Loop *inner) {
         auto fail = [&](const std::string &reason) {
             return unknown(St, "store address: " + reason);
         };
@@ -258,6 +307,15 @@ private:
             if (!provenEqual(L, R, R2))
                 return fail("collapse radix " + scevStr(R) + " and " + scevStr(R2) +
                             " differ only by a cast, but they cannot be proven equal");
+        // Through a nested loop, each iteration of the worksharing loop must
+        // write words of its own: a digit the address ignores makes every
+        // value of it store the same row (an accumulation, and a race).
+        if (b->innerDims)
+            for (size_t d = 0; d + b->innerDims < b->stride.size(); ++d)
+                if (b->stride[d]->isZero())
+                    return fail("the address walks a sequential loop nested in the worksharing "
+                                "loop but not collapse digit " + std::to_string(d) +
+                                ": its iterations write the same words");
         Value *obj = KI.resolveOutlined(b->base);
         if (!obj || !isa<Argument>(obj)) return fail("store base is not a kernel argument");
 
@@ -274,9 +332,12 @@ private:
         const SCEV *R1 = b->radix.empty() ? nullptr : KI.toKernel(b->radix[0], SK);
         const SCEV *n1 = b->radix.empty() ? N
                          : R1 ? exactDivide(SK, N, SK.getNoopOrSignExtend(R1, I64)) : nullptr;
+        if (!n1 && R1) n1 = exactDivideCarriers(SK, N, SK.getNoopOrSignExtend(R1, I64));
         if (!n1)
             return fail("the iteration count " + scevStr(N) +
-                        " is not a proven multiple of collapse radix " + scevStr(b->radix[0]));
+                        " is not a proven multiple of collapse radix " + scevStr(b->radix[0]) +
+                        (R1 ? " (" + scevStr(R1) + " in the kernel)"
+                            : std::string(" (which has no counterpart in the kernel)")));
         bw.extent.push_back(n1);
         for (size_t d = 0; d < b->stride.size(); ++d) {
             const SCEV *s = KI.toKernel(b->stride[d], SK);
@@ -287,8 +348,7 @@ private:
         }
         bw.offset = KI.toKernel(b->offset, SK);
         if (!bw.offset) return fail("the box has no counterpart in kernel values");
-        BasicBlock *latch = L->getLoopLatch();
-        bw.unconditional = !inInnerLoop && latch && DT.dominates(St->getParent(), latch);
+        bw.unconditional = everyIteration(St, L, inner);
         W.boxes.push_back(bw);
         W.storesTo[obj].push_back(St);
         return true;
@@ -342,8 +402,14 @@ private:
         // where SCEV cannot fold the casts on it), or an add recurrence SCEV
         // proves to be one step ahead.
         const SCEVAddRecExpr *cur = nullptr;
+        // The compared value may be the back-edge value extended (a narrow
+        // IV compared in 64 bits).
+        Value *ivNarrow = ivSide;
+        if (auto *E = dyn_cast<CastInst>(ivSide); E && (isa<SExtInst>(E) || isa<ZExtInst>(E)))
+            ivNarrow = E->getOperand(0);
         for (PHINode &PN : L->getHeader()->phis()) {
-            if (PN.getIncomingValueForBlock(latch) != ivSide) continue;
+            Value *in = PN.getIncomingValueForBlock(latch);
+            if (in != ivSide && in != ivNarrow) continue;
             auto *ar = dyn_cast<SCEVAddRecExpr>(SE.getSCEV(&PN));
             if (ar && ar->getLoop() == L && ar->isAffine()) cur = ar;
         }
@@ -365,11 +431,15 @@ private:
             why = "loop IV is not the thread's lb stepped by its stride";
             return nullptr;
         }
-        // Compare in the wider of the two types.
+        // Compare in the wider of the two types, extended as the predicate
+        // reads them: a 32-bit loop's bounds are unsigned (for_static_init_4u).
         const SCEV *ub = SE.getSCEV(bSide), *lb = cur->getStart();
         Type *T = SE.getWiderType(ub->getType(), lb->getType());
-        if (!SE.isLoopEntryGuardedByCond(L, P, SE.getNoopOrSignExtend(lb, T),
-                                         SE.getNoopOrSignExtend(ub, T))) {
+        auto ext = [&](const SCEV *v) {
+            return ICmpInst::isUnsigned(P) ? SE.getNoopOrZeroExtend(v, T)
+                                           : SE.getNoopOrSignExtend(v, T);
+        };
+        if (!SE.isLoopEntryGuardedByCond(L, P, ext(lb), ext(ub))) {
             why = "first iteration is not guarded by lb <= UB";
             return nullptr;
         }
@@ -388,6 +458,18 @@ private:
             if (auto *X = dyn_cast<SCEVZeroExtendExpr>(s)) { isSext = false; return X->getOperand(); }
             return nullptr;
         };
+        // ext(trunc(x)) and x: clang divides a collapsed 32-bit loop's IV by
+        // its inner trip count truncated to 32 bits and multiplies back by
+        // the full one. They differ only when that count does not fit 32
+        // bits, where clang's own digits -- the source's loop variables --
+        // are already wrong; trusted like the loop-variable trunc rule.
+        auto truncOf = [](const SCEV *e, const SCEV *x) {
+            auto *E = dyn_cast<SCEVIntegralCastExpr>(e);
+            auto *T = E && !isa<SCEVTruncateExpr>(E) ? dyn_cast<SCEVTruncateExpr>(E->getOperand())
+                                                     : nullptr;
+            return T && T->getOperand() == x;
+        };
+        if (truncOf(a, b) || truncOf(b, a) || truncOf(R, R2) || truncOf(R2, R)) return true;
         bool sa = false, sb = false;
         const SCEV *ta = narrow(a, sa), *tb = narrow(b, sb);
         if (!ta || !tb || ta != tb || sa == sb) return false;

@@ -96,6 +96,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 #include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 
@@ -357,6 +358,9 @@ struct Plan {
 // The most box puts one kernel sends by count (ompx__box_plan's kMaxPuts).
 constexpr unsigned kMaxCountedPuts = 8;
 
+// A distribute loop's bound or chunk type the counting can widen to 64 bits.
+static bool isCountableInt(Type *T) { return T->isIntegerTy(32) || T->isIntegerTy(64); }
+
 class ChunkAnalyzer {
     Module &M;
     FunctionAnalysisManager &FAM;
@@ -553,6 +557,8 @@ private:
         if (puts.empty() && plain.empty() && loopPuts.empty()) return;
 
         out() << "[gicc-chunk] kernel " << F.getName() << "\n";
+        if (KI && hoistThreadSlotLoads(*KI->outlined))
+            FAM.invalidate(*KI->outlined, PreservedAnalyses::none());
         if (!KI) {
             for (CallInst *CI : puts) report(CI, Verdict::Illegal, why);
             return;
@@ -636,15 +642,17 @@ private:
         postLoopPuts(F, plans, posts);
         // A box put to a peer that is not IPC-mapped is sent by the kernel
         // itself once its range is written, when the kernel can count the
-        // chunks that write it: SPMD, a chunked distribute loop over 64-bit bounds.
+        // chunks that write it: SPMD, a chunked distribute loop over 32- or
+        // 64-bit bounds (counted in 64 bits).
         // Otherwise the next quiet sends it.
         const unsigned nBox = llvm::count_if(plans, [](const Plan &P) { return P.box; });
         const bool canCount =
             nBox > 0 && nBox <= kMaxCountedPuts && KI->spmd() && bounds &&
             cast<ConstantInt>(KI->distInit->getArgOperand(kmpc::InitSched))->getSExtValue() ==
                 kmpc::SchedDistChunked &&
-            KI->distInit->getArgOperand(kmpc::InitChunk)->getType()->isIntegerTy(64) &&
-            bounds->first->getValueOperand()->getType()->isIntegerTy(64) &&
+            isCountableInt(KI->distInit->getArgOperand(kmpc::InitChunk)->getType()) &&
+            isCountableInt(bounds->first->getValueOperand()->getType()) &&
+            isCountableInt(bounds->second->getValueOperand()->getType()) &&
             slotStores(*KI).has_value();
         // Expand every plan before any CFG edit: SCEV, the expanders and the
         // dominator tree all describe the function as it is now.
@@ -1329,15 +1337,23 @@ private:
         // of the team computes it, and the hulls divide. Otherwise no
         // rotation, and nothing is ever due.
         Value *anyCounted = nullptr;
-        Value *lb0 = lbSt->getValueOperand(), *ub0 = ubSt->getValueOperand();
+        // The loop's bounds and chunk, in 64 bits: a 32-bit loop's are
+        // extended as its distribute init reads them.
+        auto wide = [&](Value *V, Instruction *at) -> Value * {
+            if (V->getType() == I64) return V;
+            IRBuilder<> XB(at);
+            return KI.distSigned ? XB.CreateSExt(V, I64) : XB.CreateZExt(V, I64);
+        };
+        Value *lb0 = wide(lbSt->getValueOperand(), lbSt->getNextNode());
+        Value *ub0 = wide(ubSt->getValueOperand(), ubSt->getNextNode());
         Value *one = ConstantInt::get(I64, 1);
         {
             IRBuilder<> CB(KI.distInit);
             for (const BoxSend &S : sends)
                 anyCounted = anyCounted ? CB.CreateOr(anyCounted, S.counted) : S.counted;
         }
-        // Chunks of at least kMinChunk iterations, a multiple of the loop's
-        // own: a distribute loop's chunks may go to any team. Without a
+        // Chunks of up to kMinChunk iterations, a multiple of the loop's own:
+        // a distribute loop's chunks may go to any team. Without a
         // dist_schedule clang deals one element per thread per chunk. A
         // counting launch takes each chunk from the shared counter, two team
         // barriers and a device atomic apiece, which at that grain cost a
@@ -1345,16 +1361,29 @@ private:
         // per-chunk tests even when nothing is counted, which left the
         // minimod stencil 40% slower on one rank. 8192 ran it fastest at
         // grids of 600 and 1000, counting or not (16384 is as fast at 600,
-        // 5% slower at 1000).
+        // 5% slower at 1000). But no larger than leaves every team
+        // kChunksPerTeam chunks: an iteration may be a whole row (a
+        // sequential loop in the body), and 8192 of those in one chunk left
+        // one team running a 2048-row sweep alone.
         Value *chunk = KI.distInit->getArgOperand(kmpc::InitChunk);
         {
-            constexpr uint64_t kMinChunk = 8192;
+            constexpr uint64_t kMinChunk = 8192, kChunksPerTeam = 4;
+            Type *CT = chunk->getType();
             IRBuilder<> CB(KI.distInit);
-            Value *c = CB.CreateBinaryIntrinsic(Intrinsic::umax, chunk, one);
-            Value *k = CB.CreateUDiv(
-                CB.CreateAdd(ConstantInt::get(I64, kMinChunk), CB.CreateSub(c, one)), c);
+            Value *c = CB.CreateBinaryIntrinsic(Intrinsic::umax, wide(chunk, KI.distInit), one);
+            FunctionCallee numTeams = M.getOrInsertFunction("omp_get_num_teams", I32);
+            Value *teams = CB.CreateZExt(CB.CreateCall(numTeams), I64);
+            Value *iters = CB.CreateAdd(CB.CreateSub(ub0, lb0), one);
+            iters = CB.CreateSelect(CB.CreateICmpSGT(iters, ConstantInt::get(I64, 0)), iters,
+                                    ConstantInt::get(I64, 0));
+            Value *want = CB.CreateBinaryIntrinsic(
+                Intrinsic::umin, ConstantInt::get(I64, kMinChunk),
+                CB.CreateUDiv(iters, CB.CreateMul(CB.CreateBinaryIntrinsic(Intrinsic::umax, teams, one),
+                                                  ConstantInt::get(I64, kChunksPerTeam))));
+            Value *k = CB.CreateBinaryIntrinsic(
+                Intrinsic::umax, one, CB.CreateUDiv(CB.CreateAdd(want, CB.CreateSub(c, one)), c));
             chunk = CB.CreateMul(c, k, "gicc.box.chunk");
-            KI.distInit->setArgOperand(kmpc::InitChunk, chunk);
+            KI.distInit->setArgOperand(kmpc::InitChunk, CB.CreateTrunc(chunk, CT));
         }
         // The loop's iterations, and its chunks' span: computed where they
         // are used, both rarely -- the span's is a 64-bit division.
@@ -1423,10 +1452,26 @@ private:
             L.CreateStore(len, slot(bytesArr));
             L.CreateStore(counter, slot(counterArr));
             L.CreateStore(S.after, slot(afterArr));
-            L.CreateCall(hullFn, {src, len, S.box, ConstantInt::get(I32, S.dims), S.stride,
-                                  S.extent, ConstantInt::get(I64, S.elem),
-                                  L.CreateAddrSpaceCast(slot(loArr), Ptr),
-                                  L.CreateAddrSpaceCast(slot(hiArr), Ptr)});
+            // A piece with nothing to count stores an empty hull instead:
+            // the plan skips it, and every thread of every team would
+            // otherwise work out the hull of each of the K pieces, most of
+            // them empty (a put of one piece), before its loop starts.
+            // Either branch, never both: the slots are team memory every
+            // thread stores to.
+            {
+                Value *loP = slot(loArr), *hiP = slot(hiArr);
+                Value *nonEmpty = L.CreateICmpNE(has, ConstantInt::get(I32, 0));
+                Instruction *full, *empty;
+                SplitBlockAndInsertIfThenElse(nonEmpty, L.GetInsertPoint(), &full, &empty);
+                IRBuilder<> F(full);
+                F.CreateCall(hullFn, {src, len, S.box, ConstantInt::get(I32, S.dims), S.stride,
+                                      S.extent, ConstantInt::get(I64, S.elem),
+                                      F.CreateAddrSpaceCast(loP, Ptr),
+                                      F.CreateAddrSpaceCast(hiP, Ptr)});
+                IRBuilder<> E(empty);
+                E.CreateStore(ConstantInt::get(I64, 0), loP);
+                E.CreateStore(ConstantInt::get(I64, -1, true), hiP);
+            }
             B.SetInsertPoint(planned);
         }
         FunctionCallee planFn =
@@ -1561,7 +1606,7 @@ private:
 
 }  // namespace
 
-PreservedAnalyses GICCChunkPrepPass::run(Module &M, ModuleAnalysisManager &) {
+PreservedAnalyses GICCChunkPrepPass::run(Module &M, ModuleAnalysisManager &MAM) {
     // Also when only analysing: a put in a loop's body is read in the shape
     // this prepares.
     if (getConfig().mode != Mode::ChunkLower && getConfig().mode != Mode::ChunkAnalyze)
@@ -1569,6 +1614,7 @@ PreservedAnalyses GICCChunkPrepPass::run(Module &M, ModuleAnalysisManager &) {
     Triple T(M.getTargetTriple());
     if (!T.isNVPTX() && !T.isAMDGPU()) return PreservedAnalyses::all();
     bool changed = false;
+    auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
     // The marker is only read by this pass, which replaces it. Said to touch
     // no memory the program can see, it stays in the loop but no longer
     // keeps the optimizer from hoisting the loop's own loads past it (the
@@ -1613,6 +1659,14 @@ PreservedAnalyses GICCChunkPrepPass::run(Module &M, ModuleAnalysisManager &) {
             O->removeFnAttr(Attribute::AlwaysInline);
             O->addFnAttr(Attribute::NoInline);
             O->addFnAttr(kPrepAttr, always ? "alwaysinline" : "");
+            // A sequential loop in the worksharing loop's body (a row of
+            // a 2-D sweep) is read as a dimension of the box its stores
+            // write; unrolled with a remainder, its stores come apart into
+            // copies the write analysis cannot put back together.
+            LoopInfo &LI = FAM.getResult<LoopAnalysis>(*O);
+            for (Loop *Top : LI)
+                for (Loop *Sub : Top->getLoopsInPreorder())
+                    if (Sub != Top) addStringMetadataToLoop(Sub, "llvm.loop.unroll.runtime.disable");
             changed = true;
         }
     }

@@ -92,6 +92,70 @@ const SCEV *exactDivide(ScalarEvolution &SE, const SCEV *a, const SCEV *b) {
     return fa.empty() ? SE.getOne(T) : SE.getMulExpr(fa);
 }
 
+// x for ext(trunc(x)): a 64-bit value carrying a 32-bit int, as a kernel
+// receives a captured int, read through its low half.
+static const SCEV *intCarrier(const SCEV *s) {
+    if (auto *E = dyn_cast<SCEVIntegralCastExpr>(s); E && !isa<SCEVTruncateExpr>(E))
+        if (auto *T = dyn_cast<SCEVTruncateExpr>(E->getOperand())) return T->getOperand();
+    return s;
+}
+
+// s with every integer cast inside it dropped, rebuilt in 64 bits: two
+// spellings of one int expression (sext(-2 + trunc(n)) and
+// -2 + zext(trunc(n)) once n > 2 is known) come out the same.
+static const SCEV *castBlind(ScalarEvolution &SE, const SCEV *s, unsigned depth = 0) {
+    Type *I64 = Type::getInt64Ty(s->getType()->getContext());
+    if (depth > 8 || !s->getType()->isIntegerTy() || s->getType()->getIntegerBitWidth() > 64)
+        return s;
+    if (auto *C = dyn_cast<SCEVCastExpr>(s)) return castBlind(SE, C->getOperand(), depth + 1);
+    if (auto *K = dyn_cast<SCEVConstant>(s)) return SE.getConstant(K->getAPInt().sext(64));
+    auto ops = [&](const SCEVNAryExpr *N) {
+        SmallVector<const SCEV *, 4> v;
+        for (const SCEV *op : N->operands()) v.push_back(castBlind(SE, op, depth + 1));
+        return v;
+    };
+    if (auto *A = dyn_cast<SCEVAddExpr>(s)) {
+        SmallVector<const SCEV *, 4> v = ops(A);
+        return SE.getAddExpr(v);
+    }
+    if (auto *M = dyn_cast<SCEVMulExpr>(s)) {
+        SmallVector<const SCEV *, 4> v = ops(M);
+        return SE.getMulExpr(v);
+    }
+    return SE.getNoopOrSignExtend(s, I64);
+}
+
+const SCEV *exactDivideCarriers(ScalarEvolution &SE, const SCEV *a, const SCEV *b) {
+    auto factors = [](const SCEV *s) {
+        SmallVector<const SCEV *, 4> f;
+        if (auto *M = dyn_cast<SCEVMulExpr>(s)) f.append(M->operands().begin(), M->operands().end());
+        else f.push_back(s);
+        return f;
+    };
+    // b's factors as 64-bit carriers: ext(trunc(x)), ext(trunc(x) * trunc(y))
+    // or ext(trunc(x * y)) give x, y.
+    SmallVector<const SCEV *, 4> fb;
+    const SCEV *nb = b;
+    if (auto *E = dyn_cast<SCEVIntegralCastExpr>(nb); E && !isa<SCEVTruncateExpr>(E))
+        nb = E->getOperand();
+    if (auto *T = dyn_cast<SCEVTruncateExpr>(nb)) nb = T->getOperand();
+    for (const SCEV *x : factors(nb)) {
+        if (auto *T = dyn_cast<SCEVTruncateExpr>(x)) x = T->getOperand();
+        if (auto *M = dyn_cast<SCEVMulExpr>(x)) fb.append(M->operands().begin(), M->operands().end());
+        else fb.push_back(x);
+    }
+    SmallVector<const SCEV *, 4> fa = factors(a);
+    for (const SCEV *x : fb) {
+        auto it = std::find_if(fa.begin(), fa.end(), [&](const SCEV *y) {
+            return intCarrier(y) == intCarrier(x) || sameSCEV(SE, x, y) ||
+                   castBlind(SE, x) == castBlind(SE, y);
+        });
+        if (it == fa.end()) return nullptr;
+        fa.erase(it);
+    }
+    return fa.empty() ? SE.getOne(a->getType()) : SE.getMulExpr(fa);
+}
+
 // Division or remainder of X - q_0*R_0 - ... - q_{d-1}*R_{d-1} by a
 // loop-invariant R: the digit q_d (or X - ... - q_d*R_d for a remainder).
 std::optional<AccessDecomposer::Lin>
@@ -144,9 +208,10 @@ AccessDecomposer::digit(Instruction *I, bool remainder, std::string &why) {
     return r;
 }
 
-// Why a value is not a single index: names the common case of a remainder
+// Why a truncated value cannot be trusted to fit its type: a remainder
 // X - q_d*R' whose R' is not the radix R the digit was divided by (clang
-// masks the radix for 32-bit loops with a non-unit step).
+// masks the radix for 32-bit loops with a non-unit step) -- that one is not
+// an index the source wrote. Empty for any other combination of indices.
 std::string AccessDecomposer::whyNotSingle(const Lin &a) {
     const SCEV *cX = coef(a, -1);
     for (unsigned d = 0; d < chain.size(); ++d) {
@@ -157,7 +222,7 @@ std::string AccessDecomposer::whyNotSingle(const Lin &a) {
                    " is taken with a different radix than its division (" +
                    "cannot prove them equal)";
     }
-    return "truncation of an index combining several loop dimensions";
+    return "";
 }
 
 // v as F << k, F built from the values shifted left by k: shl x, k -> x;
@@ -280,6 +345,9 @@ std::optional<AccessDecomposer::Lin> AccessDecomposer::build(Value *v, std::stri
             r.sx = r.ux = true;   // X in [0, N), sext and zext agree
             return done(r);
         }
+        // The IV of a sequential loop nested in the worksharing loop.
+        if (auto r = innerIV(PN, why)) return done(*r);
+        if (!why.empty()) return std::nullopt;
         // Merge of the same index computed on several paths (e.g. once per
         // branch and not CSE'd): all incoming values must agree.
         std::optional<Lin> r;
@@ -363,10 +431,7 @@ std::optional<AccessDecomposer::Lin> AccessDecomposer::build(Value *v, std::stri
             if (why.empty() || !M) why = "arithmetic shift of the loop index";
             return std::nullopt;
         }
-        if (!singleIndex(*F)) {
-            why = whyNotSingle(*F);
-            return std::nullopt;
-        }
+        if (!singleIndex(*F) && !(why = whyNotSingle(*F)).empty()) return std::nullopt;
         usedTrunc = true;
         Lin r = scale(*F, SE.getConstant(I64, uint64_t(1) << (k - M->getZExtValue())));
         r.sx = true;
@@ -405,11 +470,9 @@ std::optional<AccessDecomposer::Lin> AccessDecomposer::build(Value *v, std::stri
     case Instruction::Trunc: {
         auto a = build(I->getOperand(0), why);
         if (!a) return std::nullopt;
-        if (!singleIndex(*a)) {
-            why = whyNotSingle(*a);
-            return std::nullopt;
-        }
-        // One rebuilt loop index: the source loop variable, which fits the
+        if (!singleIndex(*a) && !(why = whyNotSingle(*a)).empty()) return std::nullopt;
+        // A rebuilt loop index: the source loop variable, or an index the
+        // source computed from several in the narrow type, which fits the
         // type it was declared with.
         usedTrunc = true;
         Lin r = *a;
@@ -422,6 +485,45 @@ std::optional<AccessDecomposer::Lin> AccessDecomposer::build(Value *v, std::stri
               "' on the loop index";
         return std::nullopt;
     }
+}
+
+// PN as start + step * t, t the iteration of a sequential loop nested in
+// the worksharing loop, when start, step and the trip count are the same
+// on every iteration of the worksharing loop; nullopt with `why` empty when
+// PN is not such a loop's header phi. Like the worksharing loop's own
+// variable, a source loop variable fits its type.
+std::optional<AccessDecomposer::Lin> AccessDecomposer::innerIV(PHINode *PN, std::string &why) {
+    auto *AR = dyn_cast<SCEVAddRecExpr>(SE.getSCEV(PN));
+    if (!AR || AR->getLoop() == L || !L->contains(AR->getLoop()) ||
+        AR->getLoop()->getHeader() != PN->getParent())
+        return std::nullopt;
+    const Loop *IL = AR->getLoop();
+    const SCEV *start = AR->getStart();
+    const SCEV *step = AR->isAffine() ? AR->getStepRecurrence(SE) : nullptr;
+    const SCEV *btc = SE.getBackedgeTakenCount(IL);
+    if (!step || isa<SCEVCouldNotCompute>(btc) || !SE.isLoopInvariant(start, L) ||
+        !SE.isLoopInvariant(step, L) || !SE.isLoopInvariant(btc, L)) {
+        why = "a sequential loop in the worksharing loop whose start, step or trip "
+              "count changes with the worksharing loop";
+        return std::nullopt;
+    }
+    int key = -1;
+    for (unsigned k = 0; k < inner.size(); ++k)
+        if (inner[k].loop == IL) key = kInner + int(k);
+    if (key < 0) {
+        // The trip count assumes the loop runs; under a guard that fails it
+        // may read as negative, which is no iterations.
+        const SCEV *n = SE.getAddExpr(SE.getNoopOrSignExtend(btc, I64), SE.getOne(I64));
+        inner.push_back({IL, SE.getSMaxExpr(n, SE.getZero(I64))});
+        key = kInner + int(inner.size() - 1);
+    }
+    Lin r;
+    r.c0 = SE.getNoopOrSignExtend(start, I64);
+    r.t.push_back({key, SE.getNoopOrSignExtend(step, I64)});
+    r.sx = true;
+    r.ux = SE.isKnownNonNegative(start) && SE.isKnownNonNegative(step);
+    usedTrunc |= PN->getType()->getIntegerBitWidth() < 64;
+    return r;
 }
 
 std::optional<AccessDecomposer::Lin>
@@ -489,6 +591,14 @@ std::optional<AccessDecomp> AccessDecomposer::decompose(Value *ptr, std::string 
         D.extent.push_back(n);
     }
     if (K > 0) D.extent.push_back(chain[K - 1]);
+    // Then the nested sequential loops, innermost last.
+    for (unsigned k = 0; k < inner.size(); ++k) {
+        const SCEV *c = coef(*A, kInner + int(k));
+        if (c->isZero()) continue;
+        D.stride.push_back(c);
+        D.extent.push_back(inner[k].extent);
+        ++D.innerDims;
+    }
     return D;
 }
 
