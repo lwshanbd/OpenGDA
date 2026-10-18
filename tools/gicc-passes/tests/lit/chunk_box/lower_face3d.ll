@@ -22,12 +22,12 @@
 ; A store in the range is repeated at the peer offset.
 ; CHECK-LABEL: define internal void @__omp_offloading_{{.*}}_omp_outlined_omp_outlined(
 ; CHECK: [[DELTA:%.*]] = load i64, ptr addrspace(3) @gicc.box.delta
-; The put_no_db mirror checks the original store first; then the box check.
+; The original store, then the box check.
 ; CHECK: store float [[V:%[0-9]+]], ptr [[P:%[0-9]+]], align 4, !tbaa
 ; CHECK: %gicc.box.in = and i1
 ; CHECK-NEXT: br i1 %gicc.box.in
 ; CHECK: [[R:%.*]] = getelementptr i8, ptr [[P]], i64 [[DELTA]]
-; CHECK-NEXT: store float [[V]], ptr [[R]], align 4, !gicc.repeat
+; CHECK-NEXT: store float [[V]], ptr [[R]], align 4
 ; CHECK-NOT: gicc-chunk-noinline
 ; CHECK-NOT: ompx__box_due(
 

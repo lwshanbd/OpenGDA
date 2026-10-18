@@ -140,13 +140,11 @@ CHECK-NOT: ompx_pipelined_put
 The worksharing loop stores every word locally and to the peer.
 CHECK-LABEL: define internal void @__omp_offloading_{{.*}}_omp_outlined_omp_outlined(
 CHECK: load i64, ptr addrspace(3) @gicc.chunk.delta
-The put_no_db mirror checks the store; the peer copy is left to itself.
-CHECK: call ptr @__gicc_nodb_mirror(
+Each store is repeated into the peer when the range is mirrored.
 CHECK: store i32 [[V:%.*]], ptr [[P:%.*]], align 4, !tbaa
 CHECK-NEXT: [[R:%.*]] = getelementptr i8, ptr [[P]], i64 {{%.*}}
 CHECK-NEXT: [[T:%.*]] = select i1 {{%.*}}, ptr [[R]], ptr [[P]]
-CHECK-NEXT: store i32 [[V]], ptr [[T]], align 4, !gicc.repeat
-CHECK-NOT: call ptr @__gicc_nodb_mirror(ptr [[T]]
+CHECK-NEXT: store i32 [[V]], ptr [[T]], align 4
 And it is alwaysinline again, with the prep marker gone.
 CHECK-NOT: gicc-chunk-noinline"
 

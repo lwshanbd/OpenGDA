@@ -1,6 +1,5 @@
 #include "GICCAfterPut.h"
 #include "GICCChunkAnalysis.h"
-#include "GICCNoDbMirror.h"
 #include "GICCWriteSummary.h"
 #include "GICCDeviceDiscovery.h"
 #include "GICCFeatureExtraction.h"
@@ -132,7 +131,6 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     // Host side of puts after a launch; self-gated.
                     MPM.addPass(GICCAfterPutPass());
                     MPM.addPass(GICCChunkAnalysisPass());
-                    MPM.addPass(GICCNoDbMirrorPass());
                     if (getConfig().mode != Mode::OmpDwq) return;
                     MPM.addPass(GICCOmpDeviceDiscoveryPass());
                     MPM.addPass(GICCOmpHostDiscoveryPass());
@@ -191,10 +189,6 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-chunk-analysis") {
                         MPM.addPass(GICCChunkAnalysisPass());
-                        return true;
-                    }
-                    if (Name == "gicc-nodb-mirror") {
-                        MPM.addPass(GICCNoDbMirrorPass());
                         return true;
                     }
                     if (Name == "gicc-after-put") {

@@ -83,7 +83,6 @@ set(_GICC_PASS_SOURCES
     src/WriteSet.cpp
     src/GICCChunkAnalysis.cpp
     src/GICCAfterPut.cpp
-    src/GICCNoDbMirror.cpp
     src/GICCWriteSummary.cpp
     src/GICCFeatureExtraction.cpp
     src/GICCTraceSynthesis.cpp
