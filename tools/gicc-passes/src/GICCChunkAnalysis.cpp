@@ -79,6 +79,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CFG.h"
+#include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -96,6 +97,8 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 #include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
@@ -366,6 +369,9 @@ class ChunkAnalyzer {
     FunctionAnalysisManager &FAM;
     bool lower;
     bool changed = false;
+    // The team flags saying a mirrored store's peer is mapped, set by the
+    // kernel being lowered.
+    SmallVector<GlobalVariable *, 2> mirrorFlags;
 
 public:
     ChunkAnalyzer(Module &M, FunctionAnalysisManager &FAM, bool lower)
@@ -658,6 +664,7 @@ private:
         // dominator tree all describe the function as it is now.
         SmallVector<std::pair<CallInst *, Value *>, 2> fallbacks;
         SmallVector<BoxSend, 2> sends;
+        mirrorFlags.clear();
         for (const Plan &P : plans)
             if (auto fb = lowerPut(*KI, *W, P, SE, canCount, sends)) fallbacks.push_back(*fb);
         for (auto [call, mirror] : fallbacks) {
@@ -675,10 +682,127 @@ private:
         }
         if (!plans.empty()) {
             changed = true;
+            versionLaunch(*KI);
             capRegisters(F);
             if (verifyFunction(F, &errs()) || verifyFunction(*KI->outlined, &errs()))
                 report_fatal_error("gicc-chunk: lowering produced invalid IR");
         }
+    }
+
+    // Every mirrored store tests whether its peer is mapped, and a launch
+    // whose peers are all on other nodes (or none of whose ranges are
+    // mirrored) runs those tests for nothing: in the Jacobi sweep they cost
+    // 7%. Such a launch runs a copy of the distribute loop whose region
+    // reads the mirror flags as false, chosen by one test before the loop.
+    // The test goes outside the loop, not at the region's entry: the device
+    // link inlines the region into the loop, and two copies of it in one
+    // loop body spill the minimod stencil's loop (2.5% slower).
+    void versionLaunch(OmpKernel &KI) {
+        if (mirrorFlags.empty()) return;
+        Function &O = *KI.outlined;
+        ValueToValueMapTy OMap;
+        Function *plain = CloneFunction(&O, OMap);
+        plain->setName(O.getName() + ".gicc.plain");
+        plain->setLinkage(GlobalValue::InternalLinkage);
+        SmallVector<BasicBlock *, 32> blocks;
+        for (BasicBlock &BB : *plain) blocks.push_back(&BB);
+        unmirror(*plain, blocks);
+        if (versionLoop(KI, *plain)) {
+            out() << "[gicc-chunk]   a launch with no mirrored peer runs the loop unmirrored\n";
+            return;
+        }
+        // The loop is not a single-entry, single-exit piece of the kernel:
+        // test at the region's entry instead. Its allocas stay in its entry
+        // block, ahead of the test: the mirror's loads went in before them.
+        BasicBlock &E = O.getEntryBlock();
+        SmallVector<AllocaInst *, 8> allocas;
+        for (Instruction &I : E)
+            if (auto *AI = dyn_cast<AllocaInst>(&I); AI && AI->isStaticAlloca())
+                allocas.push_back(AI);
+        for (AllocaInst *AI : llvm::reverse(allocas)) AI->moveBefore(E, E.getFirstInsertionPt());
+        IRBuilder<> B(&E, E.getFirstNonPHIOrDbgOrAlloca());
+        Instruction *none = SplitBlockAndInsertIfThen(B.CreateNot(anyMirrored(B)),
+                                                      B.GetInsertPoint(), /*Unreachable=*/true);
+        IRBuilder<> NB(none);
+        SmallVector<Value *, 12> args;
+        for (Argument &A : O.args()) args.push_back(&A);
+        NB.CreateCall(plain, args);
+        NB.CreateRetVoid();
+        none->eraseFromParent();
+        out() << "[gicc-chunk]   a launch with no mirrored peer runs the region unmirrored\n";
+    }
+
+    Value *anyMirrored(IRBuilder<> &B) {
+        Type *I8 = B.getInt8Ty();
+        Value *any = B.getFalse();
+        for (GlobalVariable *G : mirrorFlags)
+            any = B.CreateOr(any, B.CreateICmpNE(B.CreateLoad(I8, G), ConstantInt::get(I8, 0)));
+        return any;
+    }
+
+    // Reads every mirror flag in `blocks` of F as false and folds what that
+    // leaves dead.
+    void unmirror(Function &F, ArrayRef<BasicBlock *> blocks) {
+        SmallVector<LoadInst *, 4> flagLoads;
+        for (BasicBlock *BB : blocks)
+            for (Instruction &I : *BB)
+                if (auto *L = dyn_cast<LoadInst>(&I);
+                    L && llvm::is_contained(mirrorFlags, L->getPointerOperand()))
+                    flagLoads.push_back(L);
+        for (LoadInst *L : flagLoads)
+            replaceAndRecursivelySimplify(L, ConstantInt::get(L->getType(), 0));
+        for (BasicBlock *BB : blocks) ConstantFoldTerminator(BB, /*DeleteDeadConditions=*/true);
+        removeUnreachableBlocks(F);
+        for (BasicBlock &BB : F) SimplifyInstructionsInBlock(&BB);
+    }
+
+    // Copies the kernel's distribute loop, from its init call through its
+    // fini call, with the copy's region `plain`, and branches to the copy
+    // when no mirror flag is set. False when the loop has another entry or
+    // exit, or a value it defines is used after it.
+    bool versionLoop(OmpKernel &KI, Function &plain) {
+        Function &K = KI.K;
+        BasicBlock *pre = KI.distInit->getParent();
+        BasicBlock *head = SplitBlock(pre, KI.distInit);
+        BasicBlock *last = KI.distFini->getParent();
+        BasicBlock *tail = SplitBlock(last, KI.distFini->getNextNode());
+        SmallVector<BasicBlock *, 32> loop;
+        SmallPtrSet<BasicBlock *, 32> in;
+        SmallVector<BasicBlock *, 32> work{head};
+        in.insert(head);
+        while (!work.empty()) {
+            BasicBlock *BB = work.pop_back_val();
+            loop.push_back(BB);
+            for (BasicBlock *S : successors(BB))
+                if (S != tail && in.insert(S).second) work.push_back(S);
+        }
+        bool closed = !in.count(pre) && head->getSinglePredecessor() == pre;
+        for (BasicBlock *BB : loop) {
+            for (BasicBlock *P : predecessors(BB))
+                if (BB != head && !in.count(P)) closed = false;
+            for (BasicBlock *S : successors(BB))
+                if (S != tail && !in.count(S)) closed = false;
+            for (Instruction &I : *BB)
+                for (User *U : I.users())
+                    if (auto *UI = dyn_cast<Instruction>(U); UI && !in.count(UI->getParent()))
+                        closed = false;
+        }
+        if (!closed) return false;   // the split blocks are harmless
+        ValueToValueMapTy VMap;
+        VMap[KI.outlined] = &plain;
+        SmallVector<BasicBlock *, 32> copy;
+        for (BasicBlock *BB : loop) {
+            BasicBlock *C = CloneBasicBlock(BB, VMap, ".gicc.plain", &K);
+            VMap[BB] = C;
+            copy.push_back(C);
+        }
+        remapInstructionsInBlocks(copy, VMap);
+        Instruction *br = pre->getTerminator();
+        IRBuilder<> B(br);
+        B.CreateCondBr(anyMirrored(B), head, cast<BasicBlock>(VMap[head]));
+        br->eraseFromParent();
+        unmirror(K, copy);
+        return true;
     }
 
     // A rewritten kernel calls omp_pipeline helpers that run a few times per
@@ -1113,6 +1237,7 @@ private:
         auto shared = [&](Type *T, const char *name) { return teamGlobal(M, T, name); };
         GlobalVariable *gDelta  = shared(I64, "gicc.chunk.delta");
         GlobalVariable *gMirror = shared(I8, "gicc.chunk.mirror");
+        mirrorFlags.push_back(gMirror);
         B.CreateStore(delta, gDelta);
         B.CreateStore(B.CreateZExt(mirror, I8), gMirror);
 
@@ -1217,6 +1342,7 @@ private:
         GlobalVariable *gStart  = shared(I64, "gicc.box.start");
         GlobalVariable *gLen    = shared(I64, "gicc.box.len");
         GlobalVariable *gMirror = shared(I8, "gicc.box.mirror");
+        mirrorFlags.push_back(gMirror);
         B.CreateStore(delta, gDelta);
         B.CreateStore(B.CreatePtrToInt(srcV, I64), gStart);
         B.CreateStore(lenV, gLen);

@@ -34,8 +34,13 @@
 ; CHECK: call void @ompx__box_due(i32 64, i64 %
 ; CHECK: call void @ompx__box_grab_done(
 ; CHECK: call void @__kmpc_distribute_static_fini(
+; A launch with no mirrored peer runs a copy of the loop, whose region
+; is unmirrored.
+; CHECK: call void @__kmpc_parallel_51({{.*}}_omp_outlined_omp_outlined.gicc.plain,
 ; CHECK-LABEL: define internal void @__omp_offloading_{{.*}}_omp_outlined_omp_outlined(
 ; CHECK: %gicc.box.in = and i1
+; CHECK-LABEL: define internal void @__omp_offloading_{{.*}}_omp_outlined_omp_outlined.gicc.plain(
+; CHECK-NOT: gicc.box
 ; CHECK-NOT: ompx_pipelined_put
 
 source_filename = "InputsO3/legal_inloop_face3d.cpp"

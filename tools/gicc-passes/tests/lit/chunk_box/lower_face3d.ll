@@ -13,7 +13,7 @@
 ; CHECK: [[PD:%.*]] = call ptr @ompx__box_peer(i32 {{%.*}}, ptr {{%.*}}, ptr {{%.*}}, i64 {{%.*}}, i32 0, i32 -1, ptr addrspacecast (ptr addrspace(3) @gicc.box.counted to ptr))
 ; The kernel is still generic when the pass runs, so one thread per team
 ; sends the residual.
-; CHECK: call void @ompx__box_residual(ptr [[PD]], ptr {{%.*}}, i64 {{%.*}}, ptr {{%.*}}, i32 3, ptr addrspacecast (ptr addrspace(3) @gicc.box.stride to ptr), ptr addrspacecast (ptr addrspace(3) @gicc.box.extent to ptr), i64 4, i32 {{%.*}}, i32 0)
+; CHECK: call void @ompx__box_residual(ptr [[PD]], ptr {{%.*}}, i64 {{%.*}}, ptr {{%.*}}, i32 3, ptr addrspacecast (ptr addrspace(3) @gicc.box.stride to ptr), ptr addrspacecast (ptr addrspace(3) @gicc.box.extent to ptr), i64 4, i32 {{.*}}, i32 0)
 ; CHECK: store i64 {{%.*}}, ptr addrspace(3) @gicc.box.delta
 ; CHECK: store i64 {{%.*}}, ptr addrspace(3) @gicc.box.start
 ; CHECK: store i64 {{%.*}}, ptr addrspace(3) @gicc.box.len

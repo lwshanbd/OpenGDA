@@ -90,8 +90,13 @@ done
 ; CHECK: call void @ompx__box_due(i32 64, i64 %
 ; CHECK: call void @ompx__box_grab_done(
 ; CHECK: call void @__kmpc_distribute_static_fini(
+; A launch with no mirrored peer runs a copy of the loop, whose region
+; is unmirrored.
+; CHECK: call void @__kmpc_parallel_51({{.*}}_omp_outlined_omp_outlined.gicc.plain,
 ; CHECK-LABEL: define internal void @__omp_offloading_{{.*}}_omp_outlined_omp_outlined(
 ; CHECK: %gicc.box.in = and i1
+; CHECK-LABEL: define internal void @__omp_offloading_{{.*}}_omp_outlined_omp_outlined.gicc.plain(
+; CHECK-NOT: gicc.box
 ; CHECK-NOT: ompx_pipelined_put
 CHECKS
     echo
@@ -117,7 +122,7 @@ CHECKS
 ; CHECK: [[PD:%.*]] = call ptr @ompx__box_peer(i32 {{%.*}}, ptr {{%.*}}, ptr {{%.*}}, i64 {{%.*}}, i32 0, i32 -1, ptr addrspacecast (ptr addrspace(3) @gicc.box.counted to ptr))
 ; The kernel is still generic when the pass runs, so one thread per team
 ; sends the residual.
-; CHECK: call void @ompx__box_residual(ptr [[PD]], ptr {{%.*}}, i64 {{%.*}}, ptr {{%.*}}, i32 3, ptr addrspacecast (ptr addrspace(3) @gicc.box.stride to ptr), ptr addrspacecast (ptr addrspace(3) @gicc.box.extent to ptr), i64 4, i32 {{%.*}}, i32 0)
+; CHECK: call void @ompx__box_residual(ptr [[PD]], ptr {{%.*}}, i64 {{%.*}}, ptr {{%.*}}, i32 3, ptr addrspacecast (ptr addrspace(3) @gicc.box.stride to ptr), ptr addrspacecast (ptr addrspace(3) @gicc.box.extent to ptr), i64 4, i32 {{.*}}, i32 0)
 ; CHECK: store i64 {{%.*}}, ptr addrspace(3) @gicc.box.delta
 ; CHECK: store i64 {{%.*}}, ptr addrspace(3) @gicc.box.start
 ; CHECK: store i64 {{%.*}}, ptr addrspace(3) @gicc.box.len
