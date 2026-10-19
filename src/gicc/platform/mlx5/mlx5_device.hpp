@@ -11,7 +11,18 @@
  *     any kernel;
  *   - OpenMP offload (clang -fopenmp --offload-arch=sm_XX): the functions
  *     are `declare target`, usable inside `#pragma omp target`.
- * Everything that touches the NIC is PTX inline assembly, which both accept.
+ * Under CUDA everything that touches the NIC is PTX inline assembly. Under
+ * OpenMP it is clang's scoped atomics and NVVM builtins, which emit the same
+ * instructions, except that clang 22 emits device scope as system scope
+ * (.sys for .gpu: stronger, never weaker). OpenMP-opt cannot see into
+ * inline assembly, and one asm
+ * statement anywhere in the device image keeps it from proving that no
+ * kernel changes thread state, so every SPMD kernel of the program -- the
+ * application's compute loops included -- keeps the runtime's thread-state
+ * allocation and runs with more registers (MiniMod's PML kernel 96 -> 120).
+ * A device printf is such a call too (to vprintf), so the reports of a
+ * failed transfer sit in functions of their own that tell OpenMP-opt they
+ * make no OpenMP call.
  * The OpenMP host pass also compiles declare-target bodies; there the
  * primitives trap, because nothing on the host may call them.
  */
@@ -30,6 +41,15 @@
 
 #if defined(__CUDA_ARCH__) || defined(__NVPTX__)
   #define GICC_MLX5_PTX 1
+#endif
+#if defined(GICC_MLX5_PTX) && !defined(__CUDACC__)
+  #define GICC_MLX5_BUILTIN 1
+#endif
+
+#ifdef GICC_MLX5_BUILTIN
+  #define GICC_MLX5_REPORT [[omp::assume("omp_no_openmp")]] inline __attribute__((noinline, cold))
+#else
+  #define GICC_MLX5_REPORT GICC_MLX5_FN
 #endif
 
 #if !defined(__CUDACC__) && defined(_OPENMP)
@@ -56,7 +76,7 @@ constexpr uint64_t kStallNs = 20ull * 1000 * 1000 * 1000;
 //==============================================================================
 
 GICC_MLX5_FN uint32_t be32(uint32_t x) {
-#ifdef GICC_MLX5_PTX
+#if defined(GICC_MLX5_PTX) && !defined(GICC_MLX5_BUILTIN)
     uint32_t r;
     asm("prmt.b32 %0, %1, 0, 0x0123;" : "=r"(r) : "r"(x));
     return r;
@@ -66,7 +86,9 @@ GICC_MLX5_FN uint32_t be32(uint32_t x) {
 }
 
 GICC_MLX5_FN void trap() {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    __builtin_trap();
+#elif defined(GICC_MLX5_PTX)
     asm volatile("trap;");
 #elif !defined(__CUDACC__)
     __builtin_trap();
@@ -74,7 +96,10 @@ GICC_MLX5_FN void trap() {
 }
 
 GICC_MLX5_FN void st_v4(uint32_t* p, uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    typedef uint32_t u32x4 __attribute__((ext_vector_type(4)));
+    *reinterpret_cast<u32x4*>(p) = u32x4{a, b, c, d};
+#elif defined(GICC_MLX5_PTX)
     asm volatile("st.global.v4.b32 [%0], {%1, %2, %3, %4};"
                  :: "l"(p), "r"(a), "r"(b), "r"(c), "r"(d) : "memory");
 #else
@@ -83,13 +108,17 @@ GICC_MLX5_FN void st_v4(uint32_t* p, uint32_t a, uint32_t b, uint32_t c, uint32_
 }
 
 GICC_MLX5_FN void fence_sys() {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    __scoped_atomic_thread_fence(__ATOMIC_SEQ_CST, __MEMORY_SCOPE_SYSTEM);
+#elif defined(GICC_MLX5_PTX)
     asm volatile("fence.sc.sys;" ::: "memory");
 #endif
 }
 
 GICC_MLX5_FN void st_sys_u32(volatile uint32_t* p, uint32_t v) {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    __scoped_atomic_store_n(const_cast<uint32_t*>(p), v, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
+#elif defined(GICC_MLX5_PTX)
     asm volatile("st.relaxed.sys.global.b32 [%0], %1;" :: "l"(p), "r"(v) : "memory");
 #else
     (void)p; (void)v; trap();
@@ -97,7 +126,9 @@ GICC_MLX5_FN void st_sys_u32(volatile uint32_t* p, uint32_t v) {
 }
 
 GICC_MLX5_FN void st_u32(uint32_t* p, uint32_t v) {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    *p = v;
+#elif defined(GICC_MLX5_PTX)
     asm volatile("st.global.b32 [%0], %1;" :: "l"(p), "r"(v) : "memory");
 #else
     (void)p; (void)v; trap();
@@ -106,7 +137,9 @@ GICC_MLX5_FN void st_u32(uint32_t* p, uint32_t v) {
 
 // Doorbell register: an MMIO store, never merged or cached.
 GICC_MLX5_FN void st_mmio_u64(uint64_t* p, uint64_t v) {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    __scoped_atomic_store_n(p, v, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
+#elif defined(GICC_MLX5_PTX)
     asm volatile("st.relaxed.sys.global.b64 [%0], %1;" :: "l"(p), "l"(v) : "memory");
 #else
     (void)p; (void)v; trap();
@@ -115,7 +148,9 @@ GICC_MLX5_FN void st_mmio_u64(uint64_t* p, uint64_t v) {
 
 // Written by the NIC, so read at system scope (never from a stale L1 line).
 GICC_MLX5_FN uint32_t ld_sys_u32(const uint32_t* p) {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    return __scoped_atomic_load_n(p, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
+#elif defined(GICC_MLX5_PTX)
     uint32_t r;
     asm volatile("ld.relaxed.sys.global.b32 %0, [%1];" : "=r"(r) : "l"(p) : "memory");
     return r;
@@ -125,7 +160,9 @@ GICC_MLX5_FN uint32_t ld_sys_u32(const uint32_t* p) {
 }
 
 GICC_MLX5_FN uint64_t ld_acquire_u64(const uint64_t* p) {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    return __scoped_atomic_load_n(p, __ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE);
+#elif defined(GICC_MLX5_PTX)
     uint64_t r;
     asm volatile("ld.acquire.gpu.global.b64 %0, [%1];" : "=l"(r) : "l"(p) : "memory");
     return r;
@@ -135,7 +172,9 @@ GICC_MLX5_FN uint64_t ld_acquire_u64(const uint64_t* p) {
 }
 
 GICC_MLX5_FN uint64_t ld_relaxed_u64(const uint64_t* p) {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    return __scoped_atomic_load_n(p, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+#elif defined(GICC_MLX5_PTX)
     uint64_t r;
     asm volatile("ld.relaxed.gpu.global.b64 %0, [%1];" : "=l"(r) : "l"(p) : "memory");
     return r;
@@ -144,9 +183,14 @@ GICC_MLX5_FN uint64_t ld_relaxed_u64(const uint64_t* p) {
 #endif
 }
 
-// Two adjacent counters in one 16-byte load (p 16-byte aligned).
+// Two adjacent counters in one 16-byte load (p 16-byte aligned). There is
+// no builtin for a vector atomic load, so OpenMP reads them one after the
+// other; the PTX vector form does not read them as one value either.
 GICC_MLX5_FN void ld_relaxed_u64x2(const uint64_t* p, uint64_t* a, uint64_t* b) {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    *a = __scoped_atomic_load_n(p, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+    *b = __scoped_atomic_load_n(p + 1, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+#elif defined(GICC_MLX5_PTX)
     asm volatile("ld.relaxed.gpu.global.v2.b64 {%0, %1}, [%2];"
                  : "=l"(*a), "=l"(*b) : "l"(p) : "memory");
 #else
@@ -155,7 +199,9 @@ GICC_MLX5_FN void ld_relaxed_u64x2(const uint64_t* p, uint64_t* a, uint64_t* b) 
 }
 
 GICC_MLX5_FN void st_release_u64(uint64_t* p, uint64_t v) {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    __scoped_atomic_store_n(p, v, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+#elif defined(GICC_MLX5_PTX)
     asm volatile("st.release.gpu.global.b64 [%0], %1;" :: "l"(p), "l"(v) : "memory");
 #else
     (void)p; (void)v; trap();
@@ -163,7 +209,9 @@ GICC_MLX5_FN void st_release_u64(uint64_t* p, uint64_t v) {
 }
 
 GICC_MLX5_FN uint64_t atomic_add_u64(uint64_t* p, uint64_t v) {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    return __scoped_atomic_fetch_add(p, v, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+#elif defined(GICC_MLX5_PTX)
     uint64_t r;
     asm volatile("atom.relaxed.gpu.global.add.u64 %0, [%1], %2;"
                  : "=l"(r) : "l"(p), "l"(v) : "memory");
@@ -174,19 +222,46 @@ GICC_MLX5_FN uint64_t atomic_add_u64(uint64_t* p, uint64_t v) {
 }
 
 GICC_MLX5_FN void backoff() {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    __nvvm_nanosleep(32);
+#elif defined(GICC_MLX5_PTX)
     asm volatile("nanosleep.u32 32;");
 #endif
 }
 
 GICC_MLX5_FN uint64_t now_ns() {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    return __nvvm_read_ptx_sreg_globaltimer();
+#elif defined(GICC_MLX5_PTX)
     uint64_t t;
     asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
     return t;
 #else
     return 0;
 #endif
+}
+
+//==============================================================================
+// Failure reports: each prints and traps.
+//==============================================================================
+
+GICC_MLX5_REPORT void report_cqe_error(uint32_t qpn, uint32_t opcode, uint32_t synd,
+                                       uint32_t wqe) {
+    printf("[gicc] IB completion error on QP 0x%x: opcode 0x%x syndrome 0x%x "
+           "wqe %u\n", qpn, opcode, synd, wqe);
+    trap();
+}
+
+GICC_MLX5_REPORT void report_stall(uint32_t qpn, uint64_t target, uint64_t ready) {
+    printf("[gicc] QP 0x%x stalled: waiting for %llu completions, "
+           "%llu rung\n", qpn, (unsigned long long)target, (unsigned long long)ready);
+    trap();
+}
+
+GICC_MLX5_REPORT void report_oversize(uint32_t n, uint32_t nwqes) {
+    printf("[gicc] %u WQEs in one transfer exceed half of the %u-slot send "
+           "queue\n", n, nwqes);
+    trap();
 }
 
 //==============================================================================
@@ -207,10 +282,7 @@ GICC_MLX5_FN uint64_t completed(const QpView* qp, uint64_t ready, uint32_t tail)
     if (opcode == kCqeReqErr || opcode == kCqeRespErr) {
         // Bytes 60..63 hold only the counter; the syndrome sits at byte 55.
         const uint32_t synd = ld_sys_u32(qp->cqe_tail - 2) >> 24;
-        printf("[gicc] IB completion error on QP 0x%x: opcode 0x%x syndrome 0x%x "
-               "wqe %u\n", qp->qpn, opcode, synd,
-               (unsigned)((be32(tail) >> 16) & 0xffff));
-        trap();
+        report_cqe_error(qp->qpn, opcode, synd, (be32(tail) >> 16) & 0xffff);
     }
     const uint16_t counter = (uint16_t)(be32(tail) >> 16);
     const int16_t  ahead   = (int16_t)(uint16_t)(counter - (uint16_t)(ready - 1));
@@ -230,10 +302,7 @@ GICC_MLX5_FN void wait_completed(const QpView* qp, uint64_t target) {
         if (start == 0) {
             start = now_ns();
         } else if (now_ns() - start > kStallNs) {
-            printf("[gicc] QP 0x%x stalled: waiting for %llu completions, "
-                   "%llu rung\n", qp->qpn, (unsigned long long)target,
-                   (unsigned long long)ready);
-            trap();
+            report_stall(qp->qpn, target, ready);
         }
     }
 }
@@ -243,9 +312,7 @@ GICC_MLX5_FN void wait_completed(const QpView* qp, uint64_t target) {
 // yet rung: publish() rings once half the ring is waiting (see there).
 GICC_MLX5_FN uint64_t reserve(QpView* qp, uint32_t n) {
     if (n > qp->nwqes / 2) {
-        printf("[gicc] %u WQEs in one transfer exceed half of the %u-slot send "
-               "queue\n", n, qp->nwqes);
-        trap();
+        report_oversize(n, qp->nwqes);
     }
     const uint64_t first = atomic_add_u64(qp->resv, n);
     const uint64_t end   = first + n;
@@ -498,7 +565,9 @@ GICC_MLX5_FN void quiet_all(const DeviceCtx* c) {
 }
 
 GICC_MLX5_FN uint64_t signal_read(const DeviceCtx* c, int sig) {
-#ifdef GICC_MLX5_PTX
+#ifdef GICC_MLX5_BUILTIN
+    return __scoped_atomic_load_n(c->sig_base + sig, __ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
+#elif defined(GICC_MLX5_PTX)
     uint64_t v;
     asm volatile("ld.acquire.sys.global.b64 %0, [%1];"
                  : "=l"(v) : "l"(c->sig_base + sig) : "memory");
