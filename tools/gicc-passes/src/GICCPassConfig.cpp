@@ -52,6 +52,13 @@ Config buildConfig() {
     c.featuresOut = envOr("GICC_FEATURES_OUT", "");
     c.hintIn      = envOr("GICC_HINT_IN", "");
     c.chunkGrain  = parseGrain(std::getenv("GICC_CHUNK_GRAIN"));
+    if (const char *e = std::getenv("GICC_DIST_CHUNK")) {
+        char *end = nullptr;
+        const unsigned long long v = std::strtoull(e, &end, 10);
+        if (end == e || *end) llvm::report_fatal_error("GICC_DIST_CHUNK must be a count");
+        c.distChunk = v;
+        c.distChunkSet = true;
+    }
     return c;
 }
 

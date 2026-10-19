@@ -1347,8 +1347,9 @@ private:
             for (const BoxSend &S : sends)
                 anyCounted = anyCounted ? CB.CreateOr(anyCounted, S.counted) : S.counted;
         }
-        // Chunks of up to kMinChunk iterations, a multiple of the loop's own:
-        // a distribute loop's chunks may go to any team. Without a
+        // Chunks of up to GICC_DIST_CHUNK iterations (8192 unless set), a
+        // multiple of the loop's own: a distribute loop's chunks may go to
+        // any team (GICCDistChunk.h does the same for every kernel). Without a
         // dist_schedule clang deals one element per thread per chunk. A
         // counting launch takes each chunk from the shared counter, two team
         // barriers and a device atomic apiece, which at that grain cost a
@@ -1360,26 +1361,7 @@ private:
         // kChunksPerTeam chunks: an iteration may be a whole row (a
         // sequential loop in the body), and 8192 of those in one chunk left
         // one team running a 2048-row sweep alone.
-        Value *chunk = KI.distInit->getArgOperand(kmpc::InitChunk);
-        {
-            constexpr uint64_t kMinChunk = 8192, kChunksPerTeam = 4;
-            Type *CT = chunk->getType();
-            IRBuilder<> CB(KI.distInit);
-            Value *c = CB.CreateBinaryIntrinsic(Intrinsic::umax, wide(chunk, KI.distInit), one);
-            FunctionCallee numTeams = M.getOrInsertFunction("omp_get_num_teams", I32);
-            Value *teams = CB.CreateZExt(CB.CreateCall(numTeams), I64);
-            Value *iters = CB.CreateAdd(CB.CreateSub(ub0, lb0), one);
-            iters = CB.CreateSelect(CB.CreateICmpSGT(iters, ConstantInt::get(I64, 0)), iters,
-                                    ConstantInt::get(I64, 0));
-            Value *want = CB.CreateBinaryIntrinsic(
-                Intrinsic::umin, ConstantInt::get(I64, kMinChunk),
-                CB.CreateUDiv(iters, CB.CreateMul(CB.CreateBinaryIntrinsic(Intrinsic::umax, teams, one),
-                                                  ConstantInt::get(I64, kChunksPerTeam))));
-            Value *k = CB.CreateBinaryIntrinsic(
-                Intrinsic::umax, one, CB.CreateUDiv(CB.CreateAdd(want, CB.CreateSub(c, one)), c));
-            chunk = CB.CreateMul(c, k, "gicc.box.chunk");
-            KI.distInit->setArgOperand(kmpc::InitChunk, CB.CreateTrunc(chunk, CT));
-        }
+        Value *chunk = KI.widenDistChunk(lb0, ub0, getConfig().distChunk);
         // The loop's iterations, and its chunks' span: computed where they
         // are used, both rarely -- the span's is a 64-bit division.
         auto itersAt = [&](IRBuilder<> &B) { return B.CreateAdd(B.CreateSub(ub0, lb0), one); };

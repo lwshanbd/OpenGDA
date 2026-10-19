@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace gicc::pass {
@@ -35,6 +36,7 @@ enum class Target {
 //   GICC_FEATURES_OUT  ("")
 //   GICC_HINT_IN       ("")
 //   GICC_CHUNK_GRAIN   ("element")
+//   GICC_DIST_CHUNK    (unset: 8192 for chunk-lower, no gicc-dist-chunk)
 // How chunk-lower sends a pipelined put: every store mirrored to the peer
 // as it happens, or one send per distribute block as the block completes.
 enum class ChunkGrain { Element, Block };
@@ -50,6 +52,10 @@ struct Config {
     std::string featuresOut;
     std::string hintIn;
     ChunkGrain  chunkGrain     = ChunkGrain::Element;
+    // The distribute chunk, in iterations, kernels are widened to; set,
+    // every kernel's (gicc-dist-chunk), and 0 then turns that off.
+    uint64_t    distChunk      = 8192;
+    bool        distChunkSet   = false;
 };
 
 // Returns a singleton Config, lazily populated from getenv() on first call.

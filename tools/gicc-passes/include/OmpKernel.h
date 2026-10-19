@@ -107,6 +107,12 @@ public:
     // False for a generic kernel, even one the device link may yet make
     // SPMD.
     bool spmd() const;
+    // Makes the distribute loop's chunk a multiple k of its own of up to
+    // `target` iterations, but no larger than leaves every team
+    // kChunksPerTeam of them; returns the new chunk in 64 bits. lb0 and ub0
+    // are the loop's bounds, in 64 bits.
+    llvm::Value *widenDistChunk(llvm::Value *lb0, llvm::Value *ub0, uint64_t target) const;
+    static constexpr uint64_t kChunksPerTeam = 4;
 
 private:
     explicit OmpKernel(llvm::Function &K)

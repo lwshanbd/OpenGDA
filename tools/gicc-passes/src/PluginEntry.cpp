@@ -1,5 +1,6 @@
 #include "GICCAfterPut.h"
 #include "GICCChunkAnalysis.h"
+#include "GICCDistChunk.h"
 #include "GICCWriteSummary.h"
 #include "GICCDeviceDiscovery.h"
 #include "GICCFeatureExtraction.h"
@@ -131,6 +132,9 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     // Host side of puts after a launch; self-gated.
                     MPM.addPass(GICCAfterPutPass());
                     MPM.addPass(GICCChunkAnalysisPass());
+                    // After chunk-lower, which widens its own kernels;
+                    // self-gated on GICC_DIST_CHUNK.
+                    MPM.addPass(GICCDistChunkPass());
                     if (getConfig().mode != Mode::OmpDwq) return;
                     MPM.addPass(GICCOmpDeviceDiscoveryPass());
                     MPM.addPass(GICCOmpHostDiscoveryPass());
@@ -189,6 +193,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-chunk-analysis") {
                         MPM.addPass(GICCChunkAnalysisPass());
+                        return true;
+                    }
+                    if (Name == "gicc-dist-chunk") {
+                        MPM.addPass(GICCDistChunkPass());
                         return true;
                     }
                     if (Name == "gicc-after-put") {

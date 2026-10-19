@@ -360,4 +360,30 @@ OmpKernel::distBounds(DominatorTree &DT) const {
     return std::make_pair(lbSt, ubSt);
 }
 
+Value *OmpKernel::widenDistChunk(Value *lb0, Value *ub0, uint64_t target) const {
+    Module &M = *K.getParent();
+    Type *I64 = Type::getInt64Ty(M.getContext());
+    Value *one = ConstantInt::get(I64, 1);
+    Value *chunk = distInit->getArgOperand(kmpc::InitChunk);
+    Type *CT = chunk->getType();
+    IRBuilder<> B(distInit);
+    Value *c = chunk;
+    if (CT != I64) c = distSigned ? B.CreateSExt(c, I64) : B.CreateZExt(c, I64);
+    c = B.CreateBinaryIntrinsic(Intrinsic::umax, c, one);
+    FunctionCallee numTeams = M.getOrInsertFunction("omp_get_num_teams", B.getInt32Ty());
+    Value *teams = B.CreateZExt(B.CreateCall(numTeams), I64);
+    Value *iters = B.CreateAdd(B.CreateSub(ub0, lb0), one);
+    iters = B.CreateSelect(B.CreateICmpSGT(iters, ConstantInt::get(I64, 0)), iters,
+                           ConstantInt::get(I64, 0));
+    Value *want = B.CreateBinaryIntrinsic(
+        Intrinsic::umin, ConstantInt::get(I64, target),
+        B.CreateUDiv(iters, B.CreateMul(B.CreateBinaryIntrinsic(Intrinsic::umax, teams, one),
+                                        ConstantInt::get(I64, kChunksPerTeam))));
+    Value *k = B.CreateBinaryIntrinsic(
+        Intrinsic::umax, one, B.CreateUDiv(B.CreateAdd(want, B.CreateSub(c, one)), c));
+    Value *wide = B.CreateMul(c, k, "gicc.dist.chunk");
+    distInit->setArgOperand(kmpc::InitChunk, B.CreateTrunc(wide, CT));
+    return wide;
+}
+
 }  // namespace gicc::pass
