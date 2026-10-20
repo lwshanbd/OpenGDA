@@ -372,6 +372,10 @@ class ChunkAnalyzer {
     // The team flags saying a mirrored store's peer is mapped, set by the
     // kernel being lowered.
     SmallVector<GlobalVariable *, 2> mirrorFlags;
+    // Whether a counting launch counts anything, and its latest due chunk
+    // (lowerBoxCounting), both read before the distribute loop; null when
+    // the kernel does not count.
+    Value *countActive = nullptr, *countLatest = nullptr;
 
 public:
     ChunkAnalyzer(Module &M, FunctionAnalysisManager &FAM, bool lower)
@@ -665,6 +669,7 @@ private:
         SmallVector<std::pair<CallInst *, Value *>, 2> fallbacks;
         SmallVector<BoxSend, 2> sends;
         mirrorFlags.clear();
+        countActive = countLatest = nullptr;
         for (const Plan &P : plans)
             if (auto fb = lowerPut(*KI, *W, P, SE, canCount, sends)) fallbacks.push_back(*fb);
         for (auto [call, mirror] : fallbacks) {
@@ -689,28 +694,35 @@ private:
         }
     }
 
-    // Every mirrored store tests whether its peer is mapped, and a launch
-    // whose peers are all on other nodes (or none of whose ranges are
-    // mirrored) runs those tests for nothing: in the Jacobi sweep they cost
-    // 7%. Such a launch runs a copy of the distribute loop whose region
-    // reads the mirror flags as false, chosen by one test before the loop.
-    // The test goes outside the loop, not at the region's entry: the device
-    // link inlines the region into the loop, and two copies of it in one
-    // loop body spill the minimod stencil's loop (2.5% slower).
+    // Every mirrored store tests whether its peer is mapped, and every
+    // chunk of a counting launch whether the launch counts anything. A
+    // launch with neither -- its peers all on other nodes and its puts too
+    // small to count, or every peer mapped and no range mirrored -- runs
+    // those tests for nothing: they cost the Jacobi sweep 7% and more. Such
+    // a launch runs a copy of the distribute loop in which both read false,
+    // chosen by one test before the loop. The test goes outside the loop,
+    // not at the region's entry: the device link inlines the region into
+    // the loop, and two copies of it in one loop body spill the minimod
+    // stencil's loop (2.5% slower).
     void versionLaunch(OmpKernel &KI) {
-        if (mirrorFlags.empty()) return;
+        if (mirrorFlags.empty() && !countActive) return;
         Function &O = *KI.outlined;
-        ValueToValueMapTy OMap;
-        Function *plain = CloneFunction(&O, OMap);
-        plain->setName(O.getName() + ".gicc.plain");
-        plain->setLinkage(GlobalValue::InternalLinkage);
-        SmallVector<BasicBlock *, 32> blocks;
-        for (BasicBlock &BB : *plain) blocks.push_back(&BB);
-        unmirror(*plain, blocks);
-        if (versionLoop(KI, *plain)) {
-            out() << "[gicc-chunk]   a launch with no mirrored peer runs the loop unmirrored\n";
+        Function *plain = nullptr;
+        if (!mirrorFlags.empty()) {
+            ValueToValueMapTy OMap;
+            plain = CloneFunction(&O, OMap);
+            plain->setName(O.getName() + ".gicc.plain");
+            plain->setLinkage(GlobalValue::InternalLinkage);
+            SmallVector<BasicBlock *, 32> blocks;
+            for (BasicBlock &BB : *plain) blocks.push_back(&BB);
+            unmirror(*plain, blocks);
+        }
+        if (versionLoop(KI, plain)) {
+            out() << "[gicc-chunk]   a launch that mirrors and counts nothing runs the loop "
+                     "without either\n";
             return;
         }
+        if (!plain) return;
         // The loop is not a single-entry, single-exit piece of the kernel:
         // test at the region's entry instead. Its allocas stay in its entry
         // block, ahead of the test: the mirror's loads went in before them.
@@ -757,10 +769,11 @@ private:
     }
 
     // Copies the kernel's distribute loop, from its init call through its
-    // fini call, with the copy's region `plain`, and branches to the copy
-    // when no mirror flag is set. False when the loop has another entry or
-    // exit, or a value it defines is used after it.
-    bool versionLoop(OmpKernel &KI, Function &plain) {
+    // fini call, with the copy's region `plain` (if any) and nothing
+    // counted, and branches to the copy when no mirror flag is set and
+    // nothing is counted. False when the loop has another entry or exit, or
+    // a value it defines is used after it.
+    bool versionLoop(OmpKernel &KI, Function *plain) {
         Function &K = KI.K;
         BasicBlock *pre = KI.distInit->getParent();
         BasicBlock *head = SplitBlock(pre, KI.distInit);
@@ -788,20 +801,44 @@ private:
                         closed = false;
         }
         if (!closed) return false;   // the split blocks are harmless
-        ValueToValueMapTy VMap;
-        VMap[KI.outlined] = &plain;
-        SmallVector<BasicBlock *, 32> copy;
-        for (BasicBlock *BB : loop) {
-            BasicBlock *C = CloneBasicBlock(BB, VMap, ".gicc.plain", &K);
-            VMap[BB] = C;
-            copy.push_back(C);
-        }
-        remapInstructionsInBlocks(copy, VMap);
+        // A copy of the loop with its region unmirrored, or nothing counted,
+        // or both.
+        SmallVector<BasicBlock *, 64> copies;
+        auto copyLoop = [&](bool unmirrored, bool uncounted) {
+            ValueToValueMapTy VMap;
+            if (unmirrored) VMap[KI.outlined] = plain;
+            if (uncounted) {
+                VMap[countActive] = ConstantInt::getFalse(K.getContext());
+                VMap[countLatest] = ConstantInt::get(countLatest->getType(), INT64_MAX);
+            }
+            SmallVector<BasicBlock *, 32> copy;
+            for (BasicBlock *BB : loop) {
+                BasicBlock *C = CloneBasicBlock(BB, VMap, ".gicc.plain", &K);
+                VMap[BB] = C;
+                copy.push_back(C);
+            }
+            remapInstructionsInBlocks(copy, VMap);
+            // An unmirrored copy reads the mirror flags as false; the
+            // optimizer folds an uncounted copy's constant tests.
+            if (unmirrored) copies.append(copy.begin(), copy.end());
+            return cast<BasicBlock>(VMap[head]);
+        };
+        // Mirroring: the loop as lowered. Otherwise, counting: the loop
+        // unmirrored. Neither: the loop with neither.
         Instruction *br = pre->getTerminator();
         IRBuilder<> B(br);
-        B.CreateCondBr(anyMirrored(B), head, cast<BasicBlock>(VMap[head]));
+        if (plain && countActive) {
+            BasicBlock *counting = copyLoop(true, false), *idle = copyLoop(true, true);
+            BasicBlock *mid = BasicBlock::Create(K.getContext(), "gicc.unmirrored", &K, counting);
+            IRBuilder<>(mid).CreateCondBr(countActive, counting, idle);
+            B.CreateCondBr(anyMirrored(B), head, mid);
+        } else if (plain) {
+            B.CreateCondBr(anyMirrored(B), head, copyLoop(true, false));
+        } else {
+            B.CreateCondBr(countActive, head, copyLoop(false, true));
+        }
         br->eraseFromParent();
-        unmirror(K, copy);
+        unmirror(K, copies);
         return true;
     }
 
@@ -1601,6 +1638,8 @@ private:
         // Whether this launch counts anything at all: on most ranks (every
         // peer IPC-mapped) nothing is, and a chunk then costs one test more.
         Value *active = B.CreateICmpNE(latest, ConstantInt::get(I64, INT64_MAX));
+        countActive = active;
+        countLatest = latest;
         MDNode *rarely = MDBuilder(Ctx).createBranchWeights(1, 1000);
 
         // Each chunk of a counting launch: the bounds of the chunk it now

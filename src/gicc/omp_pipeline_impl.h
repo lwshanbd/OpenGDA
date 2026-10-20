@@ -475,34 +475,52 @@ ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* bo
 // else at the next quiet, team 0 leaving it in the deferred list. `after`
 // is the put's index among those the host posted, or -1. A negative peer
 // sends nothing.
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+// Team memory for ompx__box_peer's answer.
+[[clang::loader_uninitialized]] static void* ompx__peer_slot;
+#pragma omp allocate(ompx__peer_slot) allocator(omp_pteam_mem_alloc)
+#endif
+
 static __attribute__((used)) void*
 ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count, int after,
                int32_t* counted) {
-    // *counted is team memory that every thread stores to: once each, with
-    // the same value (a default stored first could land after another
-    // thread's answer).
     int32_t by_count = 0;
     void* p = nullptr;
 #if defined(__NVPTX__) || defined(__AMDGCN__)
-    if (peer >= 0) {
-        ompx_pipe_deferred* q = ompx__pipe_list();
-        p = ompx__peer_base(q, peer, dst);
-        if (p == nullptr) {
-            if (q->proxy_on) {
-                if (can_count && bytes >= kOmpxCountMinBytes) by_count = 1;
-                else if (omp_get_team_num() == 0 && ompx__sequential_thread())
+    // What it reads is mapped host memory. Every thread of an SPMD team
+    // calls this, and each reading it for itself took the Jacobi sweep's
+    // kernel 5% longer across nodes: the team's thread 0 reads it, and the
+    // team takes the answer from team memory (*counted, and the slot) --
+    // between two barriers, the second so that no thread still reads the
+    // slot when thread 0 writes the next put's. Every thread reaches the
+    // same barriers: they are aligned, and the optimizer relies on that.
+    const bool spmd = __kmpc_is_spmd_exec_mode();
+    if (ompx__sequential_thread()) {
+        if (peer >= 0) {
+            ompx_pipe_deferred* q = ompx__pipe_list();
+            p = ompx__peer_base(q, peer, dst);
+            if (p == nullptr) {
+                if (q->proxy_on) {
+                    if (can_count && bytes >= kOmpxCountMinBytes) by_count = 1;
+                    else if (omp_get_team_num() == 0) ompx__pipe_defer(q, peer, dst, src, bytes);
+                } else if (ompx__after_bell(after) != nullptr) {
+                    by_count = can_count;
+                } else if (omp_get_team_num() == 0) {
                     ompx__pipe_defer(q, peer, dst, src, bytes);
-            } else if (ompx__after_bell(after) != nullptr) {
-                by_count = can_count;
-            } else if (omp_get_team_num() == 0 && ompx__sequential_thread()) {
-                ompx__pipe_defer(q, peer, dst, src, bytes);
+                }
             }
         }
+        *counted = by_count;
+        ompx__peer_slot = p;
     }
+    if (!spmd) return p;
+    ompx_sync_block_acq_rel();
+    p = ompx__peer_slot;
+    ompx_sync_block_acq_rel();
 #else
     (void)peer; (void)dst; (void)src; (void)bytes; (void)can_count; (void)after;
-#endif
     *counted = by_count;
+#endif
     return p;
 }
 
@@ -913,31 +931,39 @@ ompx__box_due(int n, int64_t ran, const int64_t* due, const int32_t* peer, void*
 static __attribute__((used)) void
 ompx__after_put(unsigned long long kernel, int i, int src_arg, int32_t* peer, void** dst,
                 int64_t* src_rel, int64_t* bytes) {
-    // The outs are team memory every thread stores to: once each, with the
-    // same value (see ompx__box_peer).
-    int32_t pe = -1;
-    void* d = nullptr;
-    int64_t rel = 0, by = 0;
+    // The outs are team memory, and the post mapped host memory: the team's
+    // thread 0 reads it and stores them, and every thread of an SPMD team
+    // then reaches the one barrier (see ompx__box_peer).
 #if defined(__NVPTX__) || defined(__AMDGCN__)
-    ompx_pipe_deferred* q = ompx__pipe_deferred;
-    ompx_pipe_after_put* e = q != nullptr && i >= 0 && i < OMPX_PIPE_AFTER_MAX &&
-                                     q->after.kernel == kernel
-                                 ? &q->after.e[i]
-                                 : nullptr;
-    if (e != nullptr && e->armed && e->src_arg == src_arg) {
-        pe = e->peer;
-        d = q->heap_base + e->dst_off;
-        rel = e->src_rel;
-        by = static_cast<int64_t>(e->bytes);
-        if (omp_get_team_num() == 0 && ompx__sequential_thread()) e->handled = 1;
+    if (ompx__sequential_thread()) {
+        int32_t pe = -1;
+        void* d = nullptr;
+        int64_t rel = 0, by = 0;
+        ompx_pipe_deferred* q = ompx__pipe_deferred;
+        ompx_pipe_after_put* e = q != nullptr && i >= 0 && i < OMPX_PIPE_AFTER_MAX &&
+                                         q->after.kernel == kernel
+                                     ? &q->after.e[i]
+                                     : nullptr;
+        if (e != nullptr && e->armed && e->src_arg == src_arg) {
+            pe = e->peer;
+            d = q->heap_base + e->dst_off;
+            rel = e->src_rel;
+            by = static_cast<int64_t>(e->bytes);
+            if (omp_get_team_num() == 0) e->handled = 1;
+        }
+        *peer = pe;
+        *dst = d;
+        *src_rel = rel;
+        *bytes = by;
     }
+    if (__kmpc_is_spmd_exec_mode()) ompx_sync_block_acq_rel();
 #else
     (void)kernel; (void)i; (void)src_arg;
+    *peer = -1;
+    *dst = nullptr;
+    *src_rel = 0;
+    *bytes = 0;
 #endif
-    *peer = pe;
-    *dst = d;
-    *src_rel = rel;
-    *bytes = by;
 }
 
 // ---- an in-loop put the host posted ----------------------------------------
