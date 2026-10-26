@@ -65,13 +65,15 @@ def run_script(app: core.App, rd: Path, jobs: list[dict], repeats: int) -> Path:
             lines.append(f"env {env} {r['launch']} {j['exe']} {r.get('args', '')} "
                          f"> {j['tag']}.r{rep}.out 2>&1 </dev/null")
     # One profiled run each, apart from the timed ones: Nsight Systems on every
-    # rank, then rank 0's kernel summary as CSV.
+    # rank, then rank 0's kernel summary as CSV. prof_args, when given, replace
+    # args for this run (to leave out work the timed region does not cover).
     nsys = r.get("nsys")
+    pargs = r.get("prof_args", r.get("args", ""))
     for j in jobs if nsys else []:
         env = " ".join(f"{k}={shlex.quote(v)}" for k, v in j["env"].items())
         rep = f"{j['tag']}.nsys.%q{{SLURM_PROCID}}"
         lines.append(f"env {env} {r['launch']} {nsys} profile -t cuda -o {rep} --force-overwrite true "
-                     f"{j['exe']} {r.get('args', '')} > {j['tag']}.prof.out 2>&1 </dev/null")
+                     f"{j['exe']} {pargs} > {j['tag']}.prof.out 2>&1 </dev/null")
         lines.append(f"{nsys} stats -q -r cuda_gpu_kern_sum -f csv -o {j['tag']} --force-overwrite true "
                      f"{j['tag']}.nsys.0.nsys-rep > /dev/null 2>&1")
     p = rd / "run.sh"
