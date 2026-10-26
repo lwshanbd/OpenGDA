@@ -42,9 +42,9 @@
       "note": "teams per kernel for every launch; 0 lets the runtime pick"
     },
     "OMP_TEAMS_THREAD_LIMIT": {
-      "min": 0,
+      "min": 32,
       "max": 1024,
-      "note": "threads per team; 0 lets the runtime pick"
+      "note": "threads per team, at least a warp; unset lets the runtime pick"
     }
   },
   "build_knobs": {

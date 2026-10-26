@@ -175,7 +175,9 @@ def materialize(app: App, cfg: dict[str, Any]) -> dict[str, Any]:
     defs = []
     for key, val in (cfg.get("build") or {}).items():
         if key == "OMPX_PIPE_COUNT_MIN_LOG2":
-            defs.append(f"'-DOMPX_PIPE_COUNT_MIN=((size_t)1<<{val})'")
+            # No spaces, no quotes: the build scripts split the flags on
+            # whitespace and never re-parse them.
+            defs.append(f"-DOMPX_PIPE_COUNT_MIN=((size_t)1<<{val})")
         else:
             defs.append(f"-D{key}={val}")
     env = {k: str(v) for k, v in (cfg.get("runtime") or {}).items() if v}
