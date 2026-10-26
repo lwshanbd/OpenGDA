@@ -1,0 +1,64 @@
+{
+  "name": "miniweather",
+  "description": "miniWeather (GiOMP port): 2-D atmospheric dynamics, x-direction halo sent by the puts after set_halo_values_x. 4000 x 2000 cells, 10 s of simulated time, one GH200 per rank.",
+  "host": "maple-1",
+  "build": {
+    "script": "apps/miniweather/build.sh",
+    "env": {
+      "MW_SOURCE": "/shared/data1/Users/l1065028/giomp_bench/miniweather/miniWeather_giomp.cpp",
+      "MW_DEFS": "-D_NX=4000 -D_NZ=2000 -D_SIM_TIME=10 -D_OUT_FREQ=-1 -D_DATA_SPEC=DATA_SPEC_THERMAL -DNO_INFORM"
+    },
+    "parallel": 4
+  },
+  "run": {
+    "alloc": "salloc -p maple --account=app -N2 --ntasks-per-node=1 --cpus-per-task=4 --gres=gpu:1 --mem=0 -t {minutes}",
+    "launch": "srun --ntasks-per-node=1 --cpus-per-task=4 --mpi=pmix -t 5 -N2",
+    "setup": "source /shared/data1/Users/l1065028/giomp_ib_test/env_cudampi.sh >/dev/null 2>&1; export OMP_TARGET_OFFLOAD=MANDATORY",
+    "args": "",
+    "repeats": 2,
+    "nsys": "/hrtc/apps/devtools/nvidia-hpcsdk/aarch64/24.5-cuda12.4.131/Linux_aarch64/24.5/compilers/bin/nsys"
+  },
+  "metric": {
+    "name": "time_s",
+    "regex": "CPU Time: *([0-9.eE+-]+)",
+    "goal": "min"
+  },
+  "checks": [
+    {
+      "name": "d_mass",
+      "regex": "d_mass: *(\\S+)",
+      "abs_tol": 1e-13
+    },
+    {
+      "name": "d_te",
+      "regex": "d_te: *(\\S+)",
+      "rel_tol": 1e-09
+    }
+  ],
+  "runtime_knobs": {
+    "OMP_NUM_TEAMS": {
+      "min": 0,
+      "max": 65536,
+      "note": "teams per kernel for every launch; 0 lets the runtime pick"
+    },
+    "OMP_TEAMS_THREAD_LIMIT": {
+      "min": 0,
+      "max": 1024,
+      "note": "threads per team; 0 lets the runtime pick"
+    }
+  },
+  "build_knobs": {
+    "OMPX_PIPE_PIECE_SHIFT": {
+      "min": 12,
+      "max": 24,
+      "default": 22,
+      "note": "pipeline piece size is 2^shift bytes"
+    },
+    "OMPX_PIPE_COUNT_MIN_LOG2": {
+      "min": 10,
+      "max": 24,
+      "default": 20,
+      "note": "puts smaller than 2^n bytes to a cross-node peer wait for the next quiet instead of being sent by the kernel"
+    }
+  }
+}
