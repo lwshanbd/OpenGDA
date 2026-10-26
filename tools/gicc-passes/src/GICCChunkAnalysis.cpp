@@ -74,6 +74,7 @@
 #include "GICCAfterPut.h"
 #include "GICCPassConfig.h"
 #include "OmpKernel.h"
+#include "TuneConfig.h"
 #include "WriteSet.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
@@ -376,6 +377,11 @@ class ChunkAnalyzer {
     // (lowerBoxCounting), both read before the distribute loop; null when
     // the kernel does not count.
     Value *countActive = nullptr, *countLatest = nullptr;
+    // Each put site of the kernel being read, by the id the tuning files
+    // name it with (tune::site): the kernel's name and its index there.
+    DenseMap<const CallInst *, std::string> siteIds;
+    // The distribute chunk the kernel being lowered widens to.
+    uint64_t distChunk = 0;
 
 public:
     ChunkAnalyzer(Module &M, FunctionAnalysisManager &FAM, bool lower)
@@ -566,6 +572,13 @@ private:
                 if (isCallTo(I, kPipelinedPut)) loopPuts.push_back(cast<CallInst>(&I));
         if (puts.empty() && plain.empty() && loopPuts.empty()) return;
 
+        siteIds.clear();
+        {
+            unsigned n = 0;
+            for (auto *list : {&puts, &loopPuts, &plain})
+                for (CallInst *CI : *list) siteIds[CI] = (F.getName() + "#" + Twine(n++)).str();
+        }
+        distChunk = tune::distChunk(F.getName()).value_or(getConfig().distChunk);
         out() << "[gicc-chunk] kernel " << F.getName() << "\n";
         if (KI && hoistThreadSlotLoads(*KI->outlined))
             FAM.invalidate(*KI->outlined, PreservedAnalyses::none());
@@ -636,18 +649,20 @@ private:
         KernelFacts KF{*KI, *W, SE, DT, PDT, LI,
                        bounds ? bounds->first : nullptr, bounds ? bounds->second : nullptr};
         SmallVector<Plan, 2> plans;
-        for (CallInst *CI : puts)
-            if (auto P = checkPut(KF, CI)) {
-                report(CI, Verdict::Legal, "");
-                printPlan(KF, *P);
-                plans.push_back(*P);
+        auto take = [&](CallInst *CI, std::optional<Plan> P) {
+            if (!P) return;
+            report(CI, Verdict::Legal, "", &*P);
+            printPlan(KF, *P);
+            // A put after the kernel the tuner keeps out of it stays on the
+            // host, as one the kernel cannot take does.
+            if (CI->hasMetadata(kAfterMarker) && tune::site(siteIds.lookup(CI)).pipeline == false) {
+                out() << "[gicc-chunk]   kept on the host: the tuning file turns its pipeline off\n";
+                return;
             }
-        for (CallInst *CI : loopPuts)
-            if (auto P = checkLoopPut(KF, CI)) {
-                report(CI, Verdict::Legal, "");
-                printPlan(KF, *P);
-                plans.push_back(*P);
-            }
+            plans.push_back(*P);
+        };
+        for (CallInst *CI : puts) take(CI, checkPut(KF, CI));
+        for (CallInst *CI : loopPuts) take(CI, checkLoopPut(KF, CI));
         if (!lower) return;
         postLoopPuts(F, plans, posts);
         // A box put to a peer that is not IPC-mapped is sent by the kernel
@@ -678,6 +693,10 @@ private:
             call->moveBefore(*then->getParent(), then->getIterator());
         }
         if (canCount) {
+            json::Object rec{{"kind", "kernel"}, {"id", F.getName()}, {"option", "dist_chunk"},
+                             {"pipelined", true}, {"default", static_cast<int64_t>(getConfig().distChunk)}};
+            if (tune::distChunk(F.getName())) rec["chosen"] = static_cast<int64_t>(distChunk);
+            tune::record(std::move(rec));
             lowerBoxCounting(*KI, bounds->first, bounds->second, sends);
             out() << "[gicc-chunk]   a peer that is not IPC-mapped is sent to by the kernel, "
                      "once the chunks that write the range have run (rotated to run first)\n";
@@ -1223,7 +1242,8 @@ private:
             P.put->eraseFromParent();
             return std::nullopt;
         }
-        bool element = getConfig().chunkGrain == ChunkGrain::Element;
+        bool element = tune::site(siteIds.lookup(P.put)).grain.value_or(getConfig().chunkGrain) ==
+                       ChunkGrain::Element;
         if (element && !P.covered) {
             out() << "[gicc-chunk]   no write covers the range on every iteration, and "
                      "the element grain sends only what is stored: using block grain\n";
@@ -1524,7 +1544,7 @@ private:
         // kChunksPerTeam chunks: an iteration may be a whole row (a
         // sequential loop in the body), and 8192 of those in one chunk left
         // one team running a 2048-row sweep alone.
-        Value *chunk = KI.widenDistChunk(lb0, ub0, getConfig().distChunk);
+        Value *chunk = KI.widenDistChunk(lb0, ub0, distChunk);
         // The loop's iterations, and its chunks' span: computed where they
         // are used, both rarely -- the span's is a 64-bit division.
         auto itersAt = [&](IRBuilder<> &B) { return B.CreateAdd(B.CreateSub(ub0, lb0), one); };
@@ -1738,8 +1758,40 @@ private:
         return IRBuilder<>(at->getParent(), at).CreateCall(send, {vPeer, vDst, vSrc, vLen});
     }
 
-    void report(CallInst *CI, Verdict v, const std::string &why) {
+    // The site's line in GICC_SITES_OUT: its verdict and, when LEGAL, the
+    // choices a tuning file may make for it.
+    void recordSite(CallInst *CI, const char *verdict, const std::string &why, const Plan *P) {
+        const bool after = CI->hasMetadata(kAfterMarker);
+        json::Object rec{{"kind", "site"},
+                         {"id", siteIds.lookup(CI)},
+                         {"kernel", CI->getFunction()->getName()},
+                         {"form", after ? "after-kernel" : P && P->loop ? "in-loop" : "in-kernel"},
+                         {"verdict", verdict}};
+        if (const DebugLoc &DLc = CI->getDebugLoc()) rec["line"] = DLc.getLine();
+        if (!why.empty()) rec["why"] = why;
+        if (P) {
+            json::Object opts;
+            // Only a put after the kernel has a host path to fall back to.
+            opts["pipeline"] = after ? json::Array{true, false} : json::Array{true};
+            // A box is always sent by element; the element grain needs a
+            // write that covers the range.
+            opts["grain"] = P->box ? json::Array{"element"}
+                            : P->covered ? json::Array{"element", "block"}
+                                         : json::Array{"block"};
+            rec["options"] = std::move(opts);
+            rec["box"] = P->box;
+            json::Object chosen;
+            const tune::SiteChoice c = tune::site(siteIds.lookup(CI));
+            if (c.pipeline) chosen["pipeline"] = *c.pipeline;
+            if (c.grain) chosen["grain"] = *c.grain == ChunkGrain::Element ? "element" : "block";
+            if (!chosen.empty()) rec["chosen"] = std::move(chosen);
+        }
+        tune::record(std::move(rec));
+    }
+
+    void report(CallInst *CI, Verdict v, const std::string &why, const Plan *P = nullptr) {
         const char *name = v == Verdict::Legal ? "LEGAL" : v == Verdict::Race ? "RACE" : "ILLEGAL";
+        recordSite(CI, name, why, P);
         // A put after the kernel that cannot be moved into it simply stays
         // on the host.
         const bool after = CI->hasMetadata(kAfterMarker);

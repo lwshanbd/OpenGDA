@@ -68,6 +68,7 @@ endif()
 set(_GICC_PASS_SOURCES
     src/PluginEntry.cpp
     src/GICCPassConfig.cpp
+    src/TuneConfig.cpp
     src/SiteId.cpp
     src/HostMirrorAnnotation.cpp
     src/GICCDeviceDiscovery.cpp

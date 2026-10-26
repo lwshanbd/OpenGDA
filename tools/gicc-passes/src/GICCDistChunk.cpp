@@ -1,4 +1,7 @@
 #include "GICCDistChunk.h"
+#include "TuneConfig.h"
+
+#include <cstdlib>
 #include "GICCPassConfig.h"
 #include "OmpKernel.h"
 
@@ -55,7 +58,9 @@ bool defaultChunk(Value *chunk) {
 
 PreservedAnalyses GICCDistChunkPass::run(Module &M, ModuleAnalysisManager &) {
     const Config &cfg = getConfig();
-    if (!cfg.distChunkSet || cfg.distChunk == 0) return PreservedAnalyses::all();
+    const char *sitesOut = std::getenv("GICC_SITES_OUT");
+    const bool reporting = sitesOut && *sitesOut;
+    if (!cfg.distChunkSet && !tune::anyDistChunk() && !reporting) return PreservedAnalyses::all();
     const Triple T(M.getTargetTriple());
     if (!T.isNVPTX() && !T.isAMDGPU()) return PreservedAnalyses::all();
     bool changed = false;
@@ -83,10 +88,18 @@ PreservedAnalyses GICCDistChunkPass::run(Module &M, ModuleAnalysisManager &) {
             IRBuilder<> B(St->getNextNode());
             return KI->distSigned ? B.CreateSExt(V, I64) : B.CreateZExt(V, I64);
         };
+        // The chunk the tuning file names for this kernel, else
+        // GICC_DIST_CHUNK's; 0 leaves the kernel as clang made it.
+        const uint64_t want =
+            tune::distChunk(K.getName()).value_or(cfg.distChunkSet ? cfg.distChunk : 0);
+        json::Object rec{{"kind", "kernel"}, {"id", K.getName()}, {"option", "dist_chunk"}};
+        if (want) rec["chosen"] = static_cast<int64_t>(want);
+        tune::record(std::move(rec));
+        if (want == 0) continue;
         Value *lb0 = wide(bounds->first), *ub0 = wide(bounds->second);
-        KI->widenDistChunk(lb0, ub0, cfg.distChunk);
+        KI->widenDistChunk(lb0, ub0, want);
         errs() << "[gicc-dist-chunk] " << K.getName() << ": chunk " << *chunk
-               << " -> up to " << cfg.distChunk << "\n";
+               << " -> up to " << want << "\n";
         changed = true;
     }
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
