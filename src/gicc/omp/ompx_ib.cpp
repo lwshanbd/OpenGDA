@@ -55,9 +55,12 @@ cudaStream_t g_ipc_stream  = nullptr;
 // the same thing on every rank. A put_signal writes its value with an inline
 // RDMA WRITE, so unlike DWQ no source cell is needed.
 constexpr int kSigSlots = 64;
+// The inbox is mapped pinned host memory: the host waits on it with plain
+// loads instead of a device-to-host copy per poll, and kernels read it
+// through its device mapping.
 gicc::Buffer g_sig{};
-uint64_t*    g_sig_dev = nullptr;
-uint64_t*    g_sig_host = nullptr;   // pinned bounce for host reads
+uint64_t*    g_sig_host = nullptr;   // the inbox, as the host addresses it
+uint64_t*    g_sig_dev = nullptr;    // the same inbox, as kernels address it
 
 // ---- symmetric heap ---------------------------------------------------------
 gicc::Buffer g_heap{};
@@ -138,10 +141,12 @@ void create_heap() {
     g_blocks.push_back(HeapBlock{0, g_heap_bytes, false});
 
     const size_t sig_bytes = kSigSlots * sizeof(uint64_t);
-    require_cuda(cudaMalloc(&g_sig_dev, sig_bytes), "allocate signal inbox");
-    require_cuda(cudaMemset(g_sig_dev, 0, sig_bytes), "zero signal inbox");
-    require_cuda(cudaMallocHost(&g_sig_host, sizeof(uint64_t)), "allocate signal bounce");
-    g_sig = g_runtime->register_buffer(g_sig_dev, sig_bytes, /*is_device=*/true);
+    require_cuda(cudaHostAlloc((void**)&g_sig_host, sig_bytes, cudaHostAllocMapped),
+                 "allocate signal inbox");
+    std::memset(g_sig_host, 0, sig_bytes);
+    require_cuda(cudaHostGetDevicePointer((void**)&g_sig_dev, g_sig_host, 0),
+                 "map signal inbox");
+    g_sig = g_runtime->register_buffer(g_sig_host, sig_bytes, /*is_device=*/false);
 
     g_runtime->exchange();
     g_runtime->set_symmetric_heap(ptr, g_heap.index);
@@ -180,11 +185,7 @@ size_t offset_of(const void* addr, const char* what) {
 }
 
 uint64_t read_slot(int sig) {
-    require_cuda(cudaMemcpyAsync(g_sig_host, g_sig_dev + sig, sizeof(uint64_t),
-                                 cudaMemcpyDeviceToHost, g_stream),
-                 "read signal slot");
-    require_cuda(cudaStreamSynchronize(g_stream), "read signal slot");
-    return *g_sig_host;
+    return __atomic_load_n(g_sig_host + sig, __ATOMIC_ACQUIRE);
 }
 
 // ---- pipelined puts (ompx_pipe_deferred in gicc/omp.h) ----------------------
@@ -274,8 +275,7 @@ void ompx_finalize() {
         g_blocks.clear();
         g_binds.clear();
     }
-    if (g_sig_dev != nullptr) {
-        (void)cudaFree(g_sig_dev);
+    if (g_sig_host != nullptr) {
         (void)cudaFreeHost(g_sig_host);
         g_sig_dev = nullptr;
         g_sig_host = nullptr;
@@ -437,9 +437,7 @@ unsigned long long ompx_signal_read_host(int sig) {
 
 void ompx_signal_reset(int sig) {
     check_slot(sig, "ompx_signal_reset");
-    require_cuda(cudaMemsetAsync(g_sig_dev + sig, 0, sizeof(uint64_t), g_stream),
-                 "reset signal slot");
-    require_cuda(cudaStreamSynchronize(g_stream), "reset signal slot");
+    __atomic_store_n(g_sig_host + sig, 0, __ATOMIC_RELEASE);
 }
 
 void ompx_signal_wait_host(int sig, unsigned long long ge) {

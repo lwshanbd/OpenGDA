@@ -139,9 +139,10 @@ def main(rd: Path) -> None:
         else:
             bad = [] if setup or ref is None else core.check(app, runs[0], ref["values"])
             row.update(status="check_failed" if bad else "ok", why="; ".join(bad + errors))
-        prof = rd / f"{j['tag']}.prof.out"
-        ptime = core.parse_run(app, prof.read_text(errors="replace")).get(metric) if prof.is_file() else None
-        row["breakdown"] = core.kernel_breakdown(rd / f"{j['tag']}_cuda_gpu_kern_sum.csv", ptime)
+        # The kernels' GPU time from the profiled run, set against the timed
+        # runs' median: the profiler slows the run it watches.
+        row["breakdown"] = core.kernel_breakdown(rd / f"{j['tag']}_cuda_gpu_kern_sum.csv",
+                                                 row["summary"].get(metric))
         results.append(row)
 
     if setup:

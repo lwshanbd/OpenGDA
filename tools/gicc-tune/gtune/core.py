@@ -225,8 +225,8 @@ def check(app: App, got: dict[str, Any], ref: dict[str, Any]) -> list[str]:
 
 def kernel_breakdown(csv_path: Path, wall: float | None, top: int = 8) -> dict[str, Any] | None:
     """Where rank 0's time went, from Nsight Systems' cuda_gpu_kern_sum: GPU time
-    per kernel, and the rest of the profiled run's measured time (communication
-    and host work that no kernel covers)."""
+    per kernel, and the rest of the measured time *wall* (communication and host
+    work that no kernel covers)."""
     import csv
     if not csv_path.is_file():
         return None
@@ -245,7 +245,6 @@ def kernel_breakdown(csv_path: Path, wall: float | None, top: int = 8) -> dict[s
            "top_kernels": [{"kernel": n, "seconds": round(s, 4), "launches": c,
                             "avg_us": round(s / c * 1e6, 1) if c else None} for n, s, c in ker[:top]]}
     if wall:
-        out["profiled_run_time_s"] = round(wall, 4)
         out["outside_kernels_s"] = round(wall - total, 4)
     return out
 
