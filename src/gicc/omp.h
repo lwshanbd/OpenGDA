@@ -214,8 +214,13 @@ void ompx__loop_done(unsigned long long kernel, int i);
 #if defined(_OPENMP) && !defined(__HIPCC__) && !defined(__CUDACC__)
 #pragma omp declare target
 #endif
+// The piece the pipeline aims for, as a shift: 22 is 4 MB. A build-time
+// knob for the tuner (tools/gicc-tune), not part of the API.
+#ifndef OMPX_PIPE_PIECE_SHIFT
+#define OMPX_PIPE_PIECE_SHIFT 22
+#endif
 static inline unsigned long long ompx__pipe_piece(unsigned long long bytes, int pieces_max) {
-    const unsigned long long want = bytes >> 22;
+    const unsigned long long want = bytes >> OMPX_PIPE_PIECE_SHIFT;
     if (want <= 1 || pieces_max <= 1) return bytes;
     const unsigned long long most = (unsigned long long)pieces_max;
     const unsigned long long pieces =

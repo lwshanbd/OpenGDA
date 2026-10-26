@@ -89,7 +89,11 @@ ompx__box_due(int n, int64_t ran, const int64_t* due, const int32_t* peer, void*
 // whatever the put's size; a put smaller than this goes out in less time
 // than that, so it waits for the next quiet instead, as one after the
 // kernel would.
-constexpr size_t kOmpxCountMinBytes = size_t(1) << 20;
+// A build-time knob for the tuner (tools/gicc-tune), not part of the API.
+#ifndef OMPX_PIPE_COUNT_MIN
+#define OMPX_PIPE_COUNT_MIN (size_t(1) << 20)
+#endif
+constexpr size_t kOmpxCountMinBytes = OMPX_PIPE_COUNT_MIN;
 
 static inline ompx_pipe_deferred* ompx__pipe_list() {
     ompx_pipe_deferred* q = ompx__pipe_deferred;
