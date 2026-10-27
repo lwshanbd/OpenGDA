@@ -11,6 +11,9 @@
 //   {"sites":   {"<kernel>#<n>": {"pipeline": false, "grain": "block"}},
 //    "kernels": {"<kernel>":     {"dist_chunk": 16384}}}
 //
+// A site id of "*" applies to every site; a site's own entry overrides it
+// field by field.
+//
 // A choice only ever selects among lowerings the analysis proved correct: a
 // site that is not LEGAL is never pipelined whatever it asks, and one that
 // asks for what its site cannot do is reported and ignored.

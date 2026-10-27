@@ -66,8 +66,15 @@ const Choices &choices() {
 }  // namespace
 
 SiteChoice site(StringRef id) {
-    auto it = choices().sites.find(id);
-    return it == choices().sites.end() ? SiteChoice{} : it->second;
+    // A site's own entry wins field by field over the "*" entry.
+    const auto &all = choices().sites;
+    SiteChoice s;
+    if (auto it = all.find("*"); it != all.end()) s = it->second;
+    if (auto it = all.find(id); it != all.end()) {
+        if (it->second.pipeline) s.pipeline = it->second.pipeline;
+        if (it->second.grain) s.grain = it->second.grain;
+    }
+    return s;
 }
 
 std::optional<uint64_t> distChunk(StringRef kernel) {
