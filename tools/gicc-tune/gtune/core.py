@@ -86,9 +86,45 @@ def parse_sites(lines: list[str]) -> dict[str, Any]:
 def short_kernel(name: str) -> str:
     """The source function and line in an offload kernel's name."""
     line = re.search(r"_l(\d+)$", name)
-    m = re.search(r"_Z(\d+)", name)
+    m = re.search(r"_ZL?(\d+)", name)
     fn = name[m.end():m.end() + int(m.group(1))] if m else name
     return f"{fn}:{line.group(1)}" if line else fn
+
+
+def site_default(rec: dict[str, Any]) -> dict[str, Any]:
+    """What the compiler does at a site when the tuning file says nothing:
+    a legal site is pipelined, at element grain where that is legal."""
+    if rec.get("verdict") != "LEGAL":
+        return {}
+    grains = rec.get("options", {}).get("grain", [])
+    return {"pipeline": True, "grain": "element" if "element" in grains else (grains or [None])[0]}
+
+
+def knob_defaults(app: App) -> dict[str, dict[str, Any]]:
+    """The default of every choice a configuration can make, by section."""
+    s = load_sites(app)
+    return {
+        "sites": {a: site_default(r) for a, r in s["sites"].items()},
+        "kernels": {a: {"dist_chunk": r.get("default")} for a, r in s["kernels"].items()},
+        "build": {k: v.get("default") for k, v in app.spec.get("build_knobs", {}).items()},
+        "runtime": {k: None for k in app.spec.get("runtime_knobs", {})},
+    }
+
+
+def changes(app: App, cfg: dict[str, Any]) -> list[str]:
+    """The choices in *cfg* that differ from the default, as section.alias.key."""
+    d = knob_defaults(app)
+    out = []
+    for section in ("sites", "kernels"):
+        for alias, choice in (cfg.get(section) or {}).items():
+            for key, val in (choice or {}).items():
+                if val != d[section].get(alias, {}).get(key):
+                    out.append(f"{section}.{alias}.{key}")
+    for section in ("build", "runtime"):
+        for key, val in (cfg.get(section) or {}).items():
+            if val != d[section].get(key) and not (section == "runtime" and not val):
+                out.append(f"{section}.{key}")
+    return out
 
 
 def describe_sites(app: App) -> dict[str, Any]:
@@ -97,12 +133,25 @@ def describe_sites(app: App) -> dict[str, Any]:
     for alias, rec in s["sites"].items():
         sites.append({"alias": alias, "kernel": short_kernel(rec["kernel"]), "form": rec.get("form"),
                       "verdict": rec["verdict"], "why": rec.get("why", ""),
-                      "options": rec.get("options", {}), "box": rec.get("box")})
+                      "options": rec.get("options", {}), "default": site_default(rec),
+                      "box": rec.get("box")})
+    # GPU time each kernel took in the reference run; a kernel that never ran
+    # there cannot matter.
+    ref = reference(app) or {}
+    # (Older references kept the full name before the line.)
+    spent = {short_kernel(k["kernel"].rsplit(":", 1)[0]) if "_l" in k["kernel"] else k["kernel"]: k for k in (ref.get("breakdown") or {}).get("top_kernels", [])}
     kernels = []
     for alias, rec in s["kernels"].items():
-        kernels.append({"alias": alias, "kernel": short_kernel(rec["id"]),
-                        "pipelined": bool(rec.get("pipelined")),
-                        "default_chunk": rec.get("default", "clang default (one element per thread)")})
+        k = {"alias": alias, "kernel": short_kernel(rec["id"]), "pipelined": bool(rec.get("pipelined")),
+             "default_chunk": rec.get("default", "clang default (one element per thread)")}
+        hit = spent.get(k["kernel"])
+        k["reference_gpu_s"] = hit["seconds"] if hit else 0.0
+        if hit:
+            k["reference_launches"] = hit["launches"]
+        kernels.append(k)
+    ran = {k["kernel"] for k in kernels if k["reference_gpu_s"] > 0}
+    for site in sites:
+        site["kernel_ran_in_reference"] = site["kernel"] in ran
     return {"sites": sites, "kernels": kernels,
             "runtime_knobs": app.spec.get("runtime_knobs", {}),
             "build_knobs": app.spec.get("build_knobs", {})}
@@ -297,8 +346,15 @@ def history(app: App, top: int = 10) -> dict[str, Any]:
         return out
     failed = [{"trial": r["trial"], "status": r["status"], "why": r.get("why", "")[:300], "config": r["config"]}
               for r in rows if r.get("status") != "ok"]
+    # The choices no trial has moved off the default yet.
+    tried = {c for r in rows for c in changes(app, r.get("config") or {})}
+    d = knob_defaults(app)
+    every = [f"{sec}.{a}.{k}" for sec in ("sites", "kernels") for a, ch in d[sec].items() for k in ch
+             if not (sec == "sites" and k == "grain" and len(load_sites(app)["sites"][a].get("options", {}).get("grain", [])) < 2)]
+    every += [f"{sec}.{k}" for sec in ("build", "runtime") for k in d[sec]]
     return {"reference": ref.get("summary") if ref else None, "trials": len(rows),
-            "best": [row(r) for r in ok[:top]], "failed": failed[-top:]}
+            "best": [row(r) for r in ok[:top]], "failed": failed[-top:],
+            "never_varied": [c for c in every if c not in tried]}
 
 
 def reference(app: App) -> dict[str, Any] | None:

@@ -48,8 +48,21 @@ def submit(app_name: str, configs: list[dict], repeats: int | None = None) -> di
         return {"error": "at most 8 candidates per round"}
     rejected, cands = [], []
     trial = core.next_trial(app)
+    seen = set()
     for cfg in configs:
         errs = core.validate(app, cfg)
+        if not errs:
+            # A candidate that only restates defaults measures the default
+            # again; the plain {} is the one way to ask for that.
+            moved = core.changes(app, cfg)
+            body = {k: v for k, v in cfg.items() if k != "note" and v}
+            if body and not moved:
+                errs.append("every choice here equals the default, so this is the default configuration "
+                            "again; submit {} if a control is wanted (gtune_sites lists each default)")
+            key = json.dumps(core.materialize(app, cfg), sort_keys=True)
+            if key in seen:
+                errs.append("the same configuration as another candidate in this round")
+            seen.add(key)
         if errs:
             rejected.append({"config": cfg, "errors": errs})
         else:

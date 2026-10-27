@@ -14,7 +14,11 @@ reference run's results; a candidate whose values differ is reported as
 ## The tools
 
 - `gtune_sites(app)`: the sites (S0, S1, ...) and kernels (K0, ...) with
-  their legal options, the run-time and build knobs, and the reference run.
+  their legal options and their **default** (what the build does when the
+  configuration says nothing), the run-time and build knobs, and the
+  reference run. Each kernel carries `reference_gpu_s`, its GPU time in the
+  reference run, and each site `kernel_ran_in_reference`: a kernel at 0 s
+  and the sites on it cannot change the time, so leave them alone.
 - `gtune_setup(app)`: once per application, when gtune_sites says there is no
   site report or no reference yet. Then `gtune_wait`.
 - `gtune_submit(app, configs)`: up to 8 candidates in one round. They are
@@ -23,7 +27,13 @@ reference run's results; a candidate whose values differ is reported as
 - `gtune_wait(app, round)`: blocks up to 15 minutes. A round spends most of
   its time queued for nodes; call it again while it is `queued`, `running` or
   `building`. Do not submit another round while one is waiting.
-- `gtune_history(app)`: the best trials so far and the failures.
+- `gtune_history(app)`: the best trials so far, the failures, and
+  `never_varied`: the choices no trial has moved off their default yet.
+
+A candidate whose every choice equals the default is rejected: it would only
+measure the default again. Submit `{}` when you want the default as a
+control. In particular, a legal site is already pipelined by default, so
+`"pipeline": true` changes nothing; the experiment is `"pipeline": false`.
 
 ## What the knobs do
 
@@ -43,6 +53,9 @@ reference run's results; a candidate whose values differ is reported as
   finely the send overlaps the compute.
 - **`runtime.OMP_NUM_TEAMS` / `OMP_TEAMS_THREAD_LIMIT`**: launch geometry for
   every kernel. A GH200 has 132 SMs; multiples of it are natural choices.
+  The runtime's own choice (unset) has been at least as good as any fixed
+  value on every program tuned so far, so one round on this axis is enough
+  unless a kernel is visibly under-occupied.
 - **`build.OMPX_PIPE_PIECE_SHIFT`**: a pipelined put is split into pieces of
   about 2^shift bytes (default 22, 4 MB). Smaller pieces start sending
   earlier but cost more messages.
@@ -56,6 +69,11 @@ reference run's results; a candidate whose values differ is reported as
    kernels take the time, how large the time outside kernels is (that is
    communication and host work). State in one or two sentences where you
    think time can be saved and why.
+   Before the first round, list the axes that can matter (the knobs of the
+   kernels that take the time, the sites on them, the build knobs if any
+   site is pipelined, the launch geometry) and plan to touch each of them
+   at least once within the budget. Do not spend more than one round on an
+   axis that has shown no gain, unless the breakdown points at it.
 2. **Propose a round** that tests one hypothesis with 3 to 6 candidates:
    vary the knob you believe matters, keep the rest at the default, include
    one point on each side of the value you expect to win. Put the hypothesis
@@ -65,7 +83,9 @@ reference run's results; a candidate whose values differ is reported as
    result. Look at the breakdown to see *where* a change came from: a
    pipelined site should shrink the time outside kernels; a chunk change
    should move the kernel it targets.
-4. **Revise.** Keep what won, drop what did not, and form the next hypothesis
+4. **Revise.** Check `never_varied` in `gtune_history` before planning the
+   next round, and prefer an axis that is still untested over refining one
+   that has already been mapped. Keep what won, drop what did not, and form the next hypothesis
    from the measurements, not from the previous guess. Combine winning
    settings only after each has won on its own, then confirm the combination
    in its own round.
