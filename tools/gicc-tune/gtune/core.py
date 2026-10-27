@@ -199,7 +199,9 @@ def parse_run(app: App, text: str) -> dict[str, Any]:
         r[app.spec["metric"]["name"]] = float(m[-1])
     for c in app.spec.get("checks", []):
         m = re.findall(c["regex"], text)
-        if m:
+        if m and c.get("exact"):
+            r[c["name"]] = m[-1]
+        elif m:
             try:
                 r[c["name"]] = float(m[-1])
             except ValueError:
@@ -215,7 +217,13 @@ def check(app: App, got: dict[str, Any], ref: dict[str, Any]) -> list[str]:
         if n not in got:
             bad.append(f"{n} missing from the output")
             continue
-        if n not in ref or not isinstance(got[n], float):
+        if n not in ref:
+            continue
+        if c.get("exact"):
+            if got[n] != ref[n]:
+                bad.append(f"{n}={got[n]}, reference {ref[n]}")
+            continue
+        if not isinstance(got[n], float):
             continue
         a, b = got[n], ref[n]
         if "abs_tol" in c and abs(a - b) > c["abs_tol"]:
