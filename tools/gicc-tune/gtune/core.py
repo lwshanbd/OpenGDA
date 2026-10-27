@@ -91,20 +91,32 @@ def short_kernel(name: str) -> str:
     return f"{fn}:{line.group(1)}" if line else fn
 
 
-def site_default(rec: dict[str, Any]) -> dict[str, Any]:
-    """What the compiler does at a site when the tuning file says nothing:
-    a legal site is pipelined, at element grain where that is legal."""
+def start(app: App) -> dict[str, Any]:
+    """The app's starting point: tuning-file entries every build begins from
+    (by compiler id, "*" for every site), under the candidate's own choices.
+    Without one, the start is what the compiler does on its own."""
+    return app.spec.get("start", {})
+
+
+def site_default(app: App, rec: dict[str, Any]) -> dict[str, Any]:
+    """What a build does at a site when the configuration says nothing: the
+    app's start, else the compiler's own choice (a legal site is pipelined,
+    at element grain where that is legal)."""
     if rec.get("verdict") != "LEGAL":
         return {}
     grains = rec.get("options", {}).get("grain", [])
-    return {"pipeline": True, "grain": "element" if "element" in grains else (grains or [None])[0]}
+    d = {"pipeline": True, "grain": "element" if "element" in grains else (grains or [None])[0]}
+    st = start(app).get("sites", {})
+    d.update(st.get("*", {}))
+    d.update(st.get(rec["id"], {}))
+    return d
 
 
 def knob_defaults(app: App) -> dict[str, dict[str, Any]]:
     """The default of every choice a configuration can make, by section."""
     s = load_sites(app)
     return {
-        "sites": {a: site_default(r) for a, r in s["sites"].items()},
+        "sites": {a: site_default(app, r) for a, r in s["sites"].items()},
         "kernels": {a: {"dist_chunk": r.get("default")} for a, r in s["kernels"].items()},
         "build": {k: v.get("default") for k, v in app.spec.get("build_knobs", {}).items()},
         "runtime": {k: None for k in app.spec.get("runtime_knobs", {})},
@@ -133,7 +145,7 @@ def describe_sites(app: App) -> dict[str, Any]:
     for alias, rec in s["sites"].items():
         sites.append({"alias": alias, "kernel": short_kernel(rec["kernel"]), "form": rec.get("form"),
                       "verdict": rec["verdict"], "why": rec.get("why", ""),
-                      "options": rec.get("options", {}), "default": site_default(rec),
+                      "options": rec.get("options", {}), "default": site_default(app, rec),
                       "box": rec.get("box")})
     # GPU time each kernel took in the reference run; a kernel that never ran
     # there cannot matter.
@@ -215,12 +227,15 @@ def validate(app: App, cfg: dict[str, Any]) -> list[str]:
 
 def materialize(app: App, cfg: dict[str, Any]) -> dict[str, Any]:
     """The tuning file, -D flags and run-time environment *cfg* stands for."""
-    s = load_sites(app)
-    tune = {"sites": {}, "kernels": {}}
-    for alias, choice in (cfg.get("sites") or {}).items():
-        tune["sites"][s["sites"][alias]["id"]] = choice
-    for alias, choice in (cfg.get("kernels") or {}).items():
-        tune["kernels"][s["kernels"][alias]["id"]] = choice
+    st = start(app)
+    tune = {"sites": {k: dict(v) for k, v in st.get("sites", {}).items()},
+            "kernels": {k: dict(v) for k, v in st.get("kernels", {}).items()}}
+    if cfg.get("sites") or cfg.get("kernels"):
+        s = load_sites(app)
+        for alias, choice in (cfg.get("sites") or {}).items():
+            tune["sites"].setdefault(s["sites"][alias]["id"], {}).update(choice)
+        for alias, choice in (cfg.get("kernels") or {}).items():
+            tune["kernels"].setdefault(s["kernels"][alias]["id"], {}).update(choice)
     defs = []
     for key, val in (cfg.get("build") or {}).items():
         if key == "OMPX_PIPE_COUNT_MIN_LOG2":

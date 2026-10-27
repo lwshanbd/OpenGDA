@@ -95,8 +95,7 @@ def main(rd: Path) -> None:
     core.write_status(rd, "building", builds=len(keys))
     mats = {}
     for c in cands:
-        mats.setdefault(c["build"], core.materialize(app, c["config"]) if not setup
-                        else {"tune": {}, "defs": "", "env": {}})
+        mats.setdefault(c["build"], core.materialize(app, c["config"] if not setup else {}))
     with ThreadPoolExecutor(max_workers=int(app.spec["build"].get("parallel", 4))) as ex:
         built = dict(zip(mats, ex.map(lambda b: build(app, rd / f"b{b}", mats[b]), mats)))
 

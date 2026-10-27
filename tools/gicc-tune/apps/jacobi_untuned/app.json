@@ -1,0 +1,72 @@
+{
+  "name": "jacobi_untuned",
+  "description": "Jacobi 2-D relaxation (GiOMP port): 16384 x 16384 mesh, 1000 iterations, rows split over the ranks; each iteration's sweep is followed by two puts of one 128 KB row to the top and bottom neighbours, then a fence. One GH200 per rank, 2 nodes. The program first runs the same solve on one GPU and checks every cell of the distributed result against it. Starting point: an untuned build, every put left to the host after its kernel (no site pipelined) and every kernel at clang's own distribute chunk.",
+  "host": "maple-1",
+  "build": {
+    "script": "apps/jacobi/build.sh",
+    "env": {
+      "JC_SOURCE": "/shared/data1/Users/l1065028/giomp_bench/jacobi/jacobi_giomp.cpp",
+      "JC_DEFS": ""
+    },
+    "parallel": 4
+  },
+  "run": {
+    "alloc": "salloc -p maple --account=app -N2 --ntasks-per-node=1 --cpus-per-task=4 --gres=gpu:1 --mem=0 -t {minutes}",
+    "launch": "srun --ntasks-per-node=1 --cpus-per-task=4 --mpi=pmix -t 5 -N2",
+    "setup": "source /shared/data1/Users/l1065028/giomp_ib_test/env_cudampi.sh >/dev/null 2>&1; export OMP_TARGET_OFFLOAD=MANDATORY",
+    "args": "-niter 1000",
+    "repeats": 2,
+    "nsys": "/hrtc/apps/devtools/nvidia-hpcsdk/aarch64/24.5-cuda12.4.131/Linux_aarch64/24.5/compilers/bin/nsys",
+    "prof_args": "-niter 1000 -noref"
+  },
+  "metric": {
+    "name": "time_s",
+    "regex": "\\d+ GPUs: *([0-9.eE+-]+) s",
+    "goal": "min"
+  },
+  "checks": [
+    {
+      "name": "ranks_verified",
+      "regex": "Num GPUs: *(\\d+)",
+      "abs_tol": 0
+    },
+    {
+      "name": "l2_norm",
+      "regex": "\\n *\\d+, ([0-9.]+)\\n",
+      "rel_tol": 1e-06
+    }
+  ],
+  "runtime_knobs": {
+    "OMP_NUM_TEAMS": {
+      "min": 0,
+      "max": 65536,
+      "note": "teams per kernel for every launch; 0 lets the runtime pick"
+    },
+    "OMP_TEAMS_THREAD_LIMIT": {
+      "min": 32,
+      "max": 1024,
+      "note": "threads per team, at least a warp; unset lets the runtime pick"
+    }
+  },
+  "build_knobs": {
+    "OMPX_PIPE_PIECE_SHIFT": {
+      "min": 12,
+      "max": 24,
+      "default": 22,
+      "note": "pipeline piece size is 2^shift bytes"
+    },
+    "OMPX_PIPE_COUNT_MIN_LOG2": {
+      "min": 10,
+      "max": 24,
+      "default": 20,
+      "note": "puts smaller than 2^n bytes to a cross-node peer wait for the next quiet instead of being sent by the kernel"
+    }
+  },
+  "start": {
+    "sites": {
+      "*": {
+        "pipeline": false
+      }
+    }
+  }
+}
