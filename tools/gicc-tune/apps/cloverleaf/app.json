@@ -1,0 +1,57 @@
+{
+  "name": "cloverleaf",
+  "description": "CloverLeaf (UoB-HPC, omp-target model, GiOMP halo exchange): 2-D Lagrangian-Eulerian hydro, 7680 x 7680 cells, 87 steps, about 170 small 2-D kernels (advection, PdV, viscosity, halo pack/unpack). One GH200 per rank, 2 nodes. The halo is sent with host-side puts (no pipelined sites); the kernels' distribute chunk is the tunable part.",
+  "host": "maple-1",
+  "build": {
+    "script": "apps/cloverleaf/build.sh",
+    "env": {},
+    "parallel": 3
+  },
+  "run": {
+    "alloc": "salloc -p maple --account=app -N2 --ntasks-per-node=1 --cpus-per-task=4 --gres=gpu:1 --mem=0 -t {minutes}",
+    "launch": "srun --ntasks-per-node=1 --cpus-per-task=4 --mpi=pmix -t 5 -N2",
+    "setup": "source /shared/data1/Users/l1065028/giomp_ib_test/env_cudampi.sh >/dev/null 2>&1; export OMP_TARGET_OFFLOAD=MANDATORY OMPX_HEAP_SIZE=2G LD_LIBRARY_PATH=/shared/data1/Users/l1065028/giomp_ib_test/lib4:$LD_LIBRARY_PATH",
+    "args": "--file /shared/data1/Users/l1065028/giomp_bench/cloverleaf/src/InputDecks/clover_bm64_short.in --out /dev/stdout --staging-buffer false",
+    "repeats": 2,
+    "nsys": "/hrtc/apps/devtools/nvidia-hpcsdk/aarch64/24.5-cuda12.4.131/Linux_aarch64/24.5/compilers/bin/nsys"
+  },
+  "metric": {
+    "name": "time_s",
+    "regex": "Wall clock *([0-9.eE+-]+)",
+    "goal": "min"
+  },
+  "checks": [
+    {
+      "name": "invariants",
+      "regex": "Invariant checks (PASSED)",
+      "exact": true
+    },
+    {
+      "name": "internal_energy",
+      "regex": "step: *87 +(?:\\S+ +){4}(\\S+)",
+      "rel_tol": 1e-06
+    },
+    {
+      "name": "kinetic_energy",
+      "regex": "step: *87 +(?:\\S+ +){5}(\\S+)",
+      "rel_tol": 1e-06
+    },
+    {
+      "name": "total_energy",
+      "regex": "step: *87 +(?:\\S+ +){6}(\\S+)",
+      "rel_tol": 1e-06
+    }
+  ],
+  "runtime_knobs": {
+    "OMP_NUM_TEAMS": {
+      "min": 0,
+      "max": 65536,
+      "note": "teams per kernel for every launch; 0 lets the runtime pick"
+    },
+    "OMP_TEAMS_THREAD_LIMIT": {
+      "min": 32,
+      "max": 1024,
+      "note": "threads per team, at least a warp; unset lets the runtime pick"
+    }
+  }
+}
