@@ -494,8 +494,30 @@ private:
         while (h.outstanding >= (int)host_depth_) host_progress();
     }
 
+    // A transfer whose written side (the remote address of a WRITE, the
+    // local one of a READ) does not start on a 64-byte boundary lands every
+    // packet across cache lines, and into GPU memory that runs about five
+    // times slower (2 MB between GH200 nodes: 1070 us against 207 us). The
+    // first few bytes go as a message of their own, so the rest starts
+    // aligned.
     void host_post(int peer, ibv_wr_opcode op, uint64_t laddr, uint32_t lkey,
                    uint64_t raddr, uint32_t rkey, size_t bytes) {
+        const uint64_t written = op == IBV_WR_RDMA_WRITE ? raddr : laddr;
+        const size_t head = (size_t)(-written & (kWriteAlign - 1));
+        if (head != 0 && bytes >= kAlignSplitMin) {
+            host_post_chunks(peer, op, laddr, lkey, raddr, rkey, head);
+            laddr += head;
+            raddr += head;
+            bytes -= head;
+        }
+        host_post_chunks(peer, op, laddr, lkey, raddr, rkey, bytes);
+    }
+
+    static constexpr uint64_t kWriteAlign = 64;
+    static constexpr size_t kAlignSplitMin = 4096;   // one packet gains nothing
+
+    void host_post_chunks(int peer, ibv_wr_opcode op, uint64_t laddr, uint32_t lkey,
+                          uint64_t raddr, uint32_t rkey, size_t bytes) {
         HostQp& h = host_qps_[peer];
         for (size_t done = 0; done < bytes; done += kMaxMsg) {
             const size_t len = bytes - done < kMaxMsg ? bytes - done : kMaxMsg;

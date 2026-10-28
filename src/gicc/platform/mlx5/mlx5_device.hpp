@@ -428,14 +428,37 @@ GICC_MLX5_FN void write_inline(const QpView* qp, uint64_t slot, uint64_t raddr,
     if (ds == 4) st_v4(w + 12, d[4], d[5], d[6], d[7]);
 }
 
-GICC_MLX5_FN uint32_t chunks(size_t bytes) {
-    return (uint32_t)((bytes + kMaxMsg - 1) / kMaxMsg);
+// A transfer whose written side (the remote address of a WRITE, the local
+// one of a READ) does not start on a 64-byte boundary lands every packet
+// across cache lines, and into GPU memory that runs about five times slower.
+// Its first few bytes then go as a WQE of their own, so the rest starts
+// aligned (transport.hpp's host_post does the same).
+constexpr uint64_t kWriteAlign = 64;
+constexpr size_t kAlignSplitMin = 4096;   // one packet gains nothing
+
+GICC_MLX5_FN size_t align_head(uint64_t written, size_t bytes) {
+    const size_t head = (size_t)(-written & (kWriteAlign - 1));
+    return head != 0 && bytes >= kAlignSplitMin ? head : 0;
 }
 
-// Write the WQEs of one transfer, split at kMaxMsg, starting at `slot`.
+// WQEs of one transfer: split at kMaxMsg, plus the aligning head.
+GICC_MLX5_FN uint32_t chunks(uint64_t written, size_t bytes) {
+    const size_t head = align_head(written, bytes);
+    return (head ? 1u : 0u) + (uint32_t)((bytes - head + kMaxMsg - 1) / kMaxMsg);
+}
+
+// Write the WQEs of one transfer, chunks(written, bytes) of them, starting
+// at `slot`.
 GICC_MLX5_FN void write_transfer(const QpView* qp, uint64_t slot, uint32_t opcode,
                                 uint64_t laddr, uint32_t lkey,
                                 uint64_t raddr, uint32_t rkey, size_t bytes) {
+    const size_t head = align_head(opcode == kOpRdmaRead ? laddr : raddr, bytes);
+    if (head) {
+        write_rdma(qp, slot++, opcode, laddr, lkey, raddr, rkey, (uint32_t)head);
+        laddr += head;
+        raddr += head;
+        bytes -= head;
+    }
     for (size_t done = 0; done < bytes; done += kMaxMsg, ++slot) {
         const size_t len = bytes - done < kMaxMsg ? bytes - done : kMaxMsg;
         write_rdma(qp, slot, opcode, laddr + done, lkey, raddr + done, rkey,
@@ -469,7 +492,7 @@ GICC_MLX5_FN void post_put(const DeviceCtx* c, int peer, int dst_buf, size_t dst
         publish(qp, first, 1, doorbell);
         return;
     }
-    const uint32_t n = chunks(bytes);
+    const uint32_t n = chunks(c->rbuf_addr[r] + dst_off, bytes);
     const uint64_t first = reserve(qp, n);
     write_transfer(qp, first, kOpRdmaWrite,
                    c->lbuf_addr[src_buf] + src_off, c->lbuf_lkey[src_buf],
@@ -497,7 +520,7 @@ GICC_MLX5_FN void get(const DeviceCtx* c, int peer, int src_buf, size_t src_off,
     if (bytes == 0) return;
     QpView* qp = qp_of(c, peer, lane);
     const int r = peer * c->nbufs + src_buf;
-    const uint32_t n = chunks(bytes);
+    const uint32_t n = chunks(c->lbuf_addr[dst_buf] + dst_off, bytes);
     const uint64_t first = reserve(qp, n);
     write_transfer(qp, first, kOpRdmaRead,
                    c->lbuf_addr[dst_buf] + dst_off, c->lbuf_lkey[dst_buf],
@@ -517,7 +540,7 @@ GICC_MLX5_FN void put_signal(const DeviceCtx* c, int peer, int dst_buf, size_t d
     const bool inl = bytes > 0 && bytes <= kInlineMax;
     uint32_t d[8];
     if (inl) load_inline((const void*)(c->lbuf_addr[src_buf] + src_off), (uint32_t)bytes, d);
-    const uint32_t n = (inl ? 1 : chunks(bytes)) + 1;
+    const uint32_t n = (inl ? 1 : chunks(c->rbuf_addr[r] + dst_off, bytes)) + 1;
     const uint64_t first = reserve(qp, n);
     if (inl) {
         write_inline(qp, first, c->rbuf_addr[r] + dst_off, c->rbuf_rkey[r], d,
