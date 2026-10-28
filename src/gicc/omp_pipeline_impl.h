@@ -46,8 +46,9 @@ ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count
 ompx__box_piece(size_t bytes, int32_t counted, int pieces_max, int after)
     __asm__("ompx__box_piece");
 [[omp::assume("ompx_spmd_amenable")]] static void
-ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, const int64_t* stride,
-               const int64_t* extent, int64_t elem, int64_t* lo, int64_t* hi)
+ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, int loop_dims,
+               const int64_t* stride, const int64_t* extent, int64_t elem, int64_t* lo,
+               int64_t* hi)
     __asm__("ompx__box_hull");
 [[omp::assume("ompx_spmd_amenable")]] static void
 ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* hi,
@@ -572,15 +573,17 @@ ompx__box_piece(size_t bytes, int32_t counted, int pieces_max, int after) {
 // ompx__box_hull's interval, as values.
 #if defined(__NVPTX__) || defined(__AMDGCN__)
 static inline void ompx__hull(const void* src, size_t bytes, const void* box, int dims,
-                              const int64_t* stride, const int64_t* extent, int64_t elem,
-                              int64_t& lo, int64_t& hi) {
+                              int loop_dims, const int64_t* stride, const int64_t* extent,
+                              int64_t elem, int64_t& lo, int64_t& hi) {
     lo = 0;
     hi = -1;
     if (dims <= 0 || bytes == 0 || extent[0] <= 0) return;
     int64_t inner = 1, min_rest = 0, max_rest = 0;
     for (int d = 1; d < dims; ++d) {
         if (extent[d] <= 0) return;
-        inner *= extent[d];
+        // A dim past loop_dims is a sequential loop each iteration runs
+        // whole: it widens a slab's stores, not its iterations.
+        if (d < loop_dims) inner *= extent[d];
         const int64_t span = stride[d] * (extent[d] - 1);
         (span < 0 ? min_rest : max_rest) += span;
     }
@@ -610,18 +613,22 @@ static inline void ompx__hull(const void* src, size_t bytes, const void* box, in
 
 // The iterations [*lo, *hi] of the kernel's collapsed loop that include
 // every one storing into [src, src + bytes); *hi < *lo when none does. The
-// dims are as the loop nests them, outermost first, so iteration x has the
-// digits x = q_0 * R_1 + ... with R_1 the product of the inner extents:
+// dims are as the loop nests them, outermost first, the first loop_dims of
+// them the loop's digits and the rest sequential loops inside it, so
+// iteration x has the digits x = q_0 * R_1 + ... with R_1 the product of
+// the extents of digits 1 to loop_dims - 1:
 // the interval is the slabs of q_0 whose stores reach the range. *lo and *hi
 // are team memory every thread stores to, once each, with the same value.
 static __attribute__((used)) void
-ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, const int64_t* stride,
-               const int64_t* extent, int64_t elem, int64_t* lo, int64_t* hi) {
+ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, int loop_dims,
+               const int64_t* stride, const int64_t* extent, int64_t elem, int64_t* lo,
+               int64_t* hi) {
     int64_t l = 0, h = -1;
 #if defined(__NVPTX__) || defined(__AMDGCN__)
-    ompx__hull(src, bytes, box, dims, stride, extent, elem, l, h);
+    ompx__hull(src, bytes, box, dims, loop_dims, stride, extent, elem, l, h);
 #else
-    (void)src; (void)bytes; (void)box; (void)dims; (void)stride; (void)extent; (void)elem;
+    (void)src; (void)bytes; (void)box; (void)dims; (void)loop_dims; (void)stride; (void)extent;
+    (void)elem;
 #endif
     *lo = l;
     *hi = h;

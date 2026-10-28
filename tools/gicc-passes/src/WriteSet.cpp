@@ -337,7 +337,7 @@ private:
                 return fail("collapse radix " + scevStr(R) +
                             " cannot be proven positive (a division the source wrote?)");
         if (!N) return fail("the distribute loop's iteration count is unknown");
-        BoxWrite bw{St, obj, {}, {}, nullptr,
+        BoxWrite bw{St, obj, {}, {}, nullptr, b->innerDims,
                     KI.DL.getTypeStoreSize(St->getValueOperand()->getType()), false,
                     b->trustedTrunc};
         const SCEV *R1 = b->radix.empty() ? nullptr : KI.toKernel(b->radix[0], SK);

@@ -31,6 +31,9 @@ struct BoxWrite {
     llvm::Value     *obj;           // the kernel formal written (`base`)
     llvm::SmallVector<const llvm::SCEV *, 4> extent, stride;   // outermost first
     const llvm::SCEV *offset;
+    // The last innerDims dims are sequential loops nested in the
+    // worksharing loop, not digits of its iterations.
+    unsigned innerDims;
     uint64_t storeSize;
     bool unconditional;             // runs on every iteration
     bool trustedTrunc;              // relied on the loop-variable trunc rule

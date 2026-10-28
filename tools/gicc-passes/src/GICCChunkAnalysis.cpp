@@ -351,6 +351,7 @@ struct Plan {
     bool box = false;
     const SCEV *rangeOff = nullptr, *bytes = nullptr, *boxOffset = nullptr;
     SmallVector<const SCEV *, 4> boxStride, boxExtent;
+    unsigned boxInnerDims = 0;   // trailing dims that are nested sequential loops
     SmallVector<EntryFact, 4> runs;
     uint64_t elem = 0;
     // A put in the loop's body (checkLoopPut), and its index among the
@@ -535,6 +536,7 @@ private:
         Value *peer, *dst, *src, *len, *box, *stride, *extent;
         Value *counted;   // i1: the kernel sends it by count
         unsigned dims;
+        unsigned loopDims;   // the leading dims that are digits of the loop's iterations
         uint64_t elem;
         Value *after;     // i32: the put's index among the launch's posts, or -1
     };
@@ -1132,6 +1134,7 @@ private:
         P.boxOffset = first->offset;
         P.boxStride.assign(first->stride.begin(), first->stride.end());
         P.boxExtent.assign(first->extent.begin(), first->extent.end());
+        P.boxInnerDims = first->innerDims;
         P.runs.assign(KF.W.preconditions.begin(), KF.W.preconditions.end());
         P.elem = elem;
         return P;
@@ -1421,8 +1424,8 @@ private:
             Value *remote = BT.CreateGEP(I8, St->getPointerOperand(), oDelta);
             BT.CreateAlignedStore(St->getValueOperand(), remote, St->getAlign());
         }
-        return BoxSend{peerV,  dstV,    srcV, lenV,   boxV, strideArr,
-                       extentArr, counted, D,   P.elem, after};
+        return BoxSend{peerV,     dstV,    srcV, lenV, boxV, strideArr,
+                       extentArr, counted, D,    D - P.boxInnerDims, P.elem, after};
     }
 
     // The stores that hand the parallel region its block bounds (slots 0
@@ -1566,7 +1569,8 @@ private:
         }
         IRBuilder<> B(planned);
         FunctionCallee hullFn = M.getOrInsertFunction(
-            "ompx__box_hull", Type::getVoidTy(Ctx), Ptr, I64, Ptr, I32, Ptr, Ptr, I64, Ptr, Ptr);
+            "ompx__box_hull", Type::getVoidTy(Ctx), Ptr, I64, Ptr, I32, I32, Ptr, Ptr, I64, Ptr,
+            Ptr);
         FunctionCallee pieceFn =
             M.getOrInsertFunction("ompx__box_piece", I64, I64, I32, I32, I32);
         Type *I8 = Type::getInt8Ty(Ctx);
@@ -1624,7 +1628,8 @@ private:
                 Instruction *full, *empty;
                 SplitBlockAndInsertIfThenElse(nonEmpty, L.GetInsertPoint(), &full, &empty);
                 IRBuilder<> F(full);
-                F.CreateCall(hullFn, {src, len, S.box, ConstantInt::get(I32, S.dims), S.stride,
+                F.CreateCall(hullFn, {src, len, S.box, ConstantInt::get(I32, S.dims),
+                                      ConstantInt::get(I32, S.loopDims), S.stride,
                                       S.extent, ConstantInt::get(I64, S.elem),
                                       F.CreateAddrSpaceCast(loP, Ptr),
                                       F.CreateAddrSpaceCast(hiP, Ptr)});

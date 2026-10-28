@@ -401,8 +401,9 @@ std::optional<AccessDecomposer::Lin> AccessDecomposer::build(Value *v, std::stri
         // the sign-extended trip count and multiplies back by the
         // zero-extended one): use the radix and leave R' == R_d for the
         // kernel to prove.
+        // Only a digit has a radix; keys from kInner on are nested loops.
         if (var.c0->isZero() && var.t.size() == 1 && var.t[0].first >= 0 &&
-            var.t[0].second->isOne()) {
+            var.t[0].first < kInner && var.t[0].second->isOne()) {
             const SCEV *R = chain[var.t[0].first];
             if (!eq(factor, R) && castBase(factor) == castBase(R)) {
                 if (llvm::none_of(assumed, [&](auto &p) { return p.first == R && p.second == factor; }))
