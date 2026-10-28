@@ -3,6 +3,7 @@
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/GetElementPtrTypeIterator.h"
 #include "llvm/IR/Operator.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 
@@ -644,9 +645,15 @@ std::optional<AccessDecomp> AccessDecomposer::decompose(Value *ptr, std::string 
     D.extent.push_back(nullptr);   // n_1 = N / R_1, known to the kernel only
     for (unsigned d = 1; d < K; ++d) {
         const SCEV *n = exactDivide(SE, chain[d - 1], chain[d]);
+        // clang may spell the radices of one collapse with different casts
+        // (zext of an i32 product over sext of an i32 factor).
+        if (!n) n = exactDivideCarriers(SE, chain[d - 1], chain[d]);
         if (!n) {
-            why = "collapse radix " + std::to_string(d - 1) +
-                  " is not a multiple of radix " + std::to_string(d);
+            std::string a, b;
+            raw_string_ostream(a) << *chain[d - 1];
+            raw_string_ostream(b) << *chain[d];
+            why = "collapse radix " + std::to_string(d - 1) + " (" + a +
+                  ") is not a multiple of radix " + std::to_string(d) + " (" + b + ")";
             return std::nullopt;
         }
         D.extent.push_back(n);
