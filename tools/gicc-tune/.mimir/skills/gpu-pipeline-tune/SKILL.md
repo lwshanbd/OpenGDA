@@ -64,8 +64,13 @@ control. In particular, a legal site is already pipelined by default, so
   lists (includes waiting for slower ranks), `inside_s` the overlapped part,
   `fence_s` what was left of the transfers, `outside_s` the rest; counters of
   launches that could not split say why (`not_split_no_fence`: no fence was
-  pending). Split composes with the sites' `pipeline`: a pipelined site sends
-  during its own kernel, a split kernel hides what remains after it.
+  pending). Split and a pipelined site exclude each other: a kernel whose
+  site is pipelined sends by itself, and while any kernel of the program
+  may send by itself no fence is deferred. So `split: true` needs
+  `pipeline: false` on the sites of that kernel (gtune_submit rejects the
+  combination on one kernel); compare it against the pipelined
+  configuration, not on top of it. A round whose `split_stats` show no
+  split launch tells you the split did not happen.
 - **`runtime.OMP_NUM_TEAMS` / `OMP_TEAMS_THREAD_LIMIT`**: launch geometry for
   every kernel. A GH200 has 132 SMs; multiples of it are natural choices.
   The runtime's own choice (unset) has been at least as good as any fixed

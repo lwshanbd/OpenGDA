@@ -239,6 +239,15 @@ def validate(app: App, cfg: dict[str, Any]) -> list[str]:
                                 f"{s['kernels'][alias].get('split_why', 'not reported')}")
                 elif not isinstance(val, bool):
                     errs.append(f"kernel {alias}: split must be true or false")
+                elif val:
+                    # A pipelined site makes its kernel send by itself, and
+                    # then no fence is deferred for any kernel.
+                    kname = short_kernel(s["kernels"][alias]["id"])
+                    on = [a for a, rec in s["sites"].items() if short_kernel(rec["kernel"]) == kname
+                          and {**site_default(app, rec), **((cfg.get("sites") or {}).get(a) or {})}.get("pipeline")]
+                    if on:
+                        errs.append(f"kernel {alias}: split needs its sites unpipelined, but "
+                                    f"{', '.join(on)} pipeline (set \"pipeline\": false on them)")
             elif key != "dist_chunk":
                 errs.append(f"kernel {alias}: unknown choice {key!r}")
             elif not isinstance(val, int) or not (_is_pow2(val) and 32 <= val <= 1 << 22):

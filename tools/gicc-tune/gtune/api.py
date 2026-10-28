@@ -90,6 +90,8 @@ def _compact(app: core.App, r: dict[str, Any], ref: dict[str, Any] | None) -> di
         out["breakdown"] = r["breakdown"]
     if r.get("split_stats"):
         out["split_stats"] = r["split_stats"]
+    if r.get("split_note"):
+        out["split_note"] = r["split_note"]
     return out
 
 

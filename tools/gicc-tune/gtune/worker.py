@@ -141,6 +141,10 @@ def main(rd: Path) -> None:
         split = core.split_stats(f.read_text(errors="replace")) if f.is_file() else []
         if split:
             row["split_stats"] = split
+        asked = any((k or {}).get("split") for k in (c["config"].get("kernels") or {}).values())
+        if asked and not any(r["split"] or r["not_split_no_fence"] for r in split):
+            row["split_note"] = ("split was asked for but no launch was split: the compiler deferred "
+                                 "no fence (some kernel of the program may send by itself)")
         if not runs:
             row.update(status="run_failed", why="; ".join(errors))
         else:
