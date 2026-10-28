@@ -1,0 +1,63 @@
+{
+  "name": "himeno3",
+  "description": "Himeno benchmark (RIKEN C+MPI v3.0, GiOMP port): point-Jacobi solve of the pressure Poisson equation, XL grid (513 x 513 x 1025), 1000 iterations, split over the ranks in I. Each iteration runs the 19-point sweep (with the residual's sum reduction), the residual's MPI_Allreduce, the copy P = wrk2, then puts one 2.1 MB I plane to each neighbour and fences. The compiler can move those puts into the copy kernel. One GH200 per rank, 3 nodes (the middle rank has two cross-node neighbours). Time is the measured loop; the program also prints the time of each phase.",
+  "host": "maple-1",
+  "build": {
+    "script": "apps/himeno3/build.sh",
+    "env": {
+      "HM_SOURCE": "/shared/data1/Users/l1065028/giomp_bench/himeno/himeno_giomp.cpp"
+    },
+    "parallel": 4
+  },
+  "run": {
+    "alloc": "salloc -p maple --account=app -N3 --ntasks-per-node=1 --cpus-per-task=4 --gres=gpu:1 --mem=0 -t {minutes}",
+    "launch": "srun --ntasks-per-node=1 --cpus-per-task=4 --mpi=pmix -t 5 -N3",
+    "setup": "source /shared/data1/Users/l1065028/giomp_ib_test/env_cudampi.sh >/dev/null 2>&1; export OMP_TARGET_OFFLOAD=MANDATORY",
+    "args": "-size XL -niter 1000",
+    "repeats": 2,
+    "nsys": "/hrtc/apps/devtools/nvidia-hpcsdk/aarch64/24.5-cuda12.4.131/Linux_aarch64/24.5/compilers/bin/nsys"
+  },
+  "metric": {
+    "name": "time_s",
+    "regex": "cpu : *([0-9.eE+-]+) sec",
+    "goal": "min"
+  },
+  "checks": [
+    {
+      "name": "field_xor",
+      "regex": "field_xor = ([0-9a-f]+)",
+      "exact": true
+    },
+    {
+      "name": "gosa",
+      "regex": "Gosa : *(\\S+)",
+      "rel_tol": 1e-05
+    }
+  ],
+  "runtime_knobs": {
+    "OMP_NUM_TEAMS": {
+      "min": 0,
+      "max": 65536,
+      "note": "teams per kernel for every launch; 0 lets the runtime pick"
+    },
+    "OMP_TEAMS_THREAD_LIMIT": {
+      "min": 32,
+      "max": 1024,
+      "note": "threads per team, at least a warp; unset lets the runtime pick"
+    }
+  },
+  "build_knobs": {
+    "OMPX_PIPE_PIECE_SHIFT": {
+      "min": 12,
+      "max": 24,
+      "default": 22,
+      "note": "pipeline piece size is 2^shift bytes"
+    },
+    "OMPX_PIPE_COUNT_MIN_LOG2": {
+      "min": 10,
+      "max": 24,
+      "default": 20,
+      "note": "puts smaller than 2^n bytes to a cross-node peer wait for the next quiet instead of being sent by the kernel"
+    }
+  }
+}
