@@ -14,6 +14,8 @@
 #include <cstdio>
 
 #pragma omp declare target
+#include "gicc/omp_box.h"
+
 extern "C" int8_t __kmpc_is_spmd_exec_mode();
 
 // Internal linkage with fixed symbol names: the pass inserts calls by these
@@ -74,6 +76,9 @@ ompx__box_due(int n, int64_t ran, const int64_t* due, const int32_t* peer, void*
               const void* const* src, const int64_t* bytes, unsigned* const* counter,
               const int32_t* after, int pieces, int64_t lb0, int64_t chunk)
     __asm__("ompx__box_due");
+[[omp::assume("ompx_spmd_amenable")]] static int32_t
+ompx__split_window(int64_t* lo, int64_t* hi)
+    __asm__("ompx__split_window");
 
 #if defined(__NVPTX__) || defined(__AMDGCN__)
 // No printf here or in anything else a rewritten kernel calls: one gives the
@@ -202,6 +207,7 @@ ompx__block_put(int peer, void* dst, const void* src, size_t bytes) {
         if (ompx__sequential_thread()) ompx__proxy_put(q, peer, dst, src, bytes);
         return;
     }
+    if (ompx__sequential_thread()) q->dev_comm = 1;
     const char* s = static_cast<const char*>(src);
     if (((reinterpret_cast<uintptr_t>(d) | reinterpret_cast<uintptr_t>(s)) & 3) == 0) {
         uint32_t* dw = reinterpret_cast<uint32_t*>(d);
@@ -504,6 +510,7 @@ ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count
         if (peer >= 0) {
             ompx_pipe_deferred* q = ompx__pipe_list();
             p = ompx__peer_base(q, peer, dst);
+            if (p != nullptr) q->dev_comm = 1;   // its stores are mirrored there
             if (p == nullptr) {
                 if (q->proxy_on) {
                     if (can_count && bytes >= kOmpxCountMinBytes) by_count = 1;
@@ -529,16 +536,6 @@ ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count
     return p;
 }
 
-#if defined(__NVPTX__) || defined(__AMDGCN__)
-static inline int64_t ompx__floor_div(int64_t a, int64_t b) {
-    const int64_t q = a / b;
-    return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q;
-}
-static inline int64_t ompx__ceil_div(int64_t a, int64_t b) {
-    const int64_t q = a / b;
-    return (a % b != 0 && ((a < 0) == (b < 0))) ? q + 1 : q;
-}
-#endif
 
 // A counted put goes out in pieces, each sent once the chunks it waits for
 // have run (ompx__box_count): sent whole, a put over most of the loop would leave
@@ -570,46 +567,6 @@ ompx__box_piece(size_t bytes, int32_t counted, int pieces_max, int after) {
     return static_cast<int64_t>(piece);
 }
 
-// ompx__box_hull's interval, as values.
-#if defined(__NVPTX__) || defined(__AMDGCN__)
-static inline void ompx__hull(const void* src, size_t bytes, const void* box, int dims,
-                              int loop_dims, const int64_t* stride, const int64_t* extent,
-                              int64_t elem, int64_t& lo, int64_t& hi) {
-    lo = 0;
-    hi = -1;
-    if (dims <= 0 || bytes == 0 || extent[0] <= 0) return;
-    int64_t inner = 1, min_rest = 0, max_rest = 0;
-    for (int d = 1; d < dims; ++d) {
-        if (extent[d] <= 0) return;
-        // A dim past loop_dims is a sequential loop each iteration runs
-        // whole: it widens a slab's stores, not its iterations.
-        if (d < loop_dims) inner *= extent[d];
-        const int64_t span = stride[d] * (extent[d] - 1);
-        (span < 0 ? min_rest : max_rest) += span;
-    }
-    // Slab q stores into [S0*q + min_rest, S0*q + max_rest + elem) from the
-    // box's origin; it meets the range [s, e) when S0*q lies in [a, b].
-    const int64_t s = static_cast<const char*>(src) - static_cast<const char*>(box);
-    const int64_t e = s + static_cast<int64_t>(bytes);
-    const int64_t a = s - elem - max_rest + 1, b = e - min_rest - 1;
-    const int64_t s0 = stride[0];
-    int64_t q_lo = 0, q_hi = extent[0] - 1;
-    if (s0 > 0) {
-        q_lo = ompx__ceil_div(a, s0);
-        q_hi = ompx__floor_div(b, s0);
-    } else if (s0 < 0) {
-        q_lo = ompx__ceil_div(b, s0);
-        q_hi = ompx__floor_div(a, s0);
-    } else if (a > 0 || b < 0) {
-        return;
-    }
-    if (q_lo < 0) q_lo = 0;
-    if (q_hi > extent[0] - 1) q_hi = extent[0] - 1;
-    if (q_lo > q_hi) return;
-    lo = q_lo * inner;
-    hi = (q_hi + 1) * inner - 1;
-}
-#endif
 
 // The iterations [*lo, *hi] of the kernel's collapsed loop that include
 // every one storing into [src, src + bytes); *hi < *lo when none does. The
@@ -1008,4 +965,24 @@ ompx__loop_after(unsigned long long kernel, int i, int src_arg, int peer, void* 
 #endif
     return r;
 }
+
+// ---- a kernel split around a deferred fence ---------------------------------
+//
+// What the launch runs of a kernel the pass split (GICCSplitLaunch.h): read
+// at the kernel's start, by every thread, from device memory the host writes
+// before each launch (ompx__split_next) -- not from mapped host memory, which
+// every thread of a launch reading made a 0.6 ms kernel half again as long.
+// Nonzero: only the iterations [*lo, *hi) of the distribute loop.
+static __attribute__((used)) int32_t ompx__split_window(int64_t* lo, int64_t* hi) {
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    *lo = ompx__split_ctl.lo;
+    *hi = ompx__split_ctl.hi;
+    return ompx__split_ctl.range;
+#else
+    *lo = 0;
+    *hi = 0;
+    return 0;
+#endif
+}
+
 #pragma omp end declare target

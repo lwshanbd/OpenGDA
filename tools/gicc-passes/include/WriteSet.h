@@ -34,9 +34,10 @@ struct BoxWrite {
     // The last innerDims dims are sequential loops nested in the
     // worksharing loop, not digits of its iterations.
     unsigned innerDims;
-    uint64_t storeSize;
+    uint64_t storeSize;             // bytes the access touches
     bool unconditional;             // runs on every iteration
     bool trustedTrunc;              // relied on the loop-variable trunc rule
+    llvm::LoadInst *ld = nullptr;   // a load (WriteSet::reads), st null
 };
 
 struct WriteSet {
@@ -52,6 +53,11 @@ struct WriteSet {
     // Some loop exits on "i.next < UB + 1": equivalent to "i <= UB" only
     // while UB + 1 does not wrap, which the caller must prove.
     bool ubPlusOne = false;
+    // collectAccesses only: every load of what the kernel is handed, as a
+    // box (a load outside the loop as one point, stride 0, that every
+    // iteration reads), and the loop's iteration count (null unless known).
+    llvm::SmallVector<BoxWrite, 8> reads;
+    const llvm::SCEV *iterations = nullptr;
 };
 
 // What to do with a store whose address cannot be described: give up on
@@ -61,6 +67,11 @@ enum class UnknownStore { Fail, Record };
 std::optional<WriteSet> collectWrites(const OmpKernel &KI,
                                       llvm::FunctionAnalysisManager &FAM,
                                       UnknownStore policy, std::string &why);
+
+// collectWrites under UnknownStore::Fail, and the loads as well: everything
+// the kernel reads or writes of what it is handed, or nullopt with `why`.
+std::optional<WriteSet> collectAccesses(const OmpKernel &KI,
+                                        llvm::FunctionAnalysisManager &FAM, std::string &why);
 
 // What holds on every path into `target`, read off the comparisons of the
 // branches whose taken edge dominates it: a < b gives b - a > 0, a <= b

@@ -197,13 +197,65 @@ typedef struct ompx_pipe_deferred {
     int                    fail;        // OMPX_PIPE_FAIL_*, 0 if none
     int                    fail_reserved;
     long long              fail_arg;
+    // Set by a kernel that sends or fetches anything itself, which no fence
+    // deferred after it (ompx__fence_defer) may then take for complete.
+    int                    dev_comm;
+    int                    dev_comm_reserved;
 } ompx_pipe_deferred;
+
+// Internal: what a kernel split around a deferred fence runs of its
+// distribute loop (ompx__split_next): all of it, or (`range` set) the
+// iterations [lo, hi). Device memory the host writes between launches;
+// ompx_prepare tells the runtime where (ompx__split_ctl_at).
+typedef struct ompx_split_ctl {
+    int       range;
+    int       reserved;
+    long long lo, hi;
+} ompx_split_ctl;
+void ompx__split_ctl_at(ompx_split_ctl* dev);
 ompx_pipe_deferred* ompx__pipe_deferred_list(void);   // its device address
 void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, int peer,
                       void* dst, const void* src, long long src_rel, size_t bytes);
 void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
                       const void* src, size_t bytes);
 void ompx__loop_done(unsigned long long kernel, int i);
+
+// Internal: a fence deferred past part of the next kernel. The gicc-passes
+// plugin (GICCSplitLaunch.h) turns an ompx_fence into ompx__fence_defer,
+// calls ompx__fence_flush before anything that may see what the fence
+// orders, and launches a kernel it can split as
+//
+//     if (ompx__split_begin(kernel, n, accesses, iterations))
+//         while (ompx__split_next(&tripcount))
+//             launch;   // one range of the loop's iterations, `tripcount` long
+//     else
+//         launch;
+//
+// The ranges come in two groups, the fence made between them: first those
+// that touch no transfer of the epoch, then the others.
+//
+// Each access is one load or store of the kernel's loop as a box (see
+// gicc/omp_box.h), its origin computed from what the launch hands it.
+#define OMPX_SPLIT_DIMS_MAX 8
+typedef struct ompx_split_access {
+    // The box's origin, a device address; or, `mapped`, the host address of
+    // the mapped variable the box is `offset` bytes into -- in the heap only
+    // if ompx_bind put it there.
+    const char* box;
+    long long   stride[OMPX_SPLIT_DIMS_MAX];
+    long long   extent[OMPX_SPLIT_DIMS_MAX];
+    long long   offset;
+    int         dims, loop_dims;
+    int         store;    // 1 a store, 0 a load
+    int         elem;     // bytes it accesses
+    int         mapped;
+    int         reserved;
+} ompx_split_access;
+void ompx__fence_defer(void);
+void ompx__fence_flush(void);
+int  ompx__split_begin(unsigned long long kernel, int n, const ompx_split_access* acc,
+                       long long iterations);
+int  ompx__split_next(unsigned long long* tripcount);
 
 // Internal: the size of the pieces a pipelined put to a peer that is not
 // IPC-mapped goes out in, each sent once the kernel has written it: at least
@@ -253,6 +305,17 @@ static inline unsigned long long ompx__pipe_piece(unsigned long long bytes, int 
 // unit's kernels would never see the context.
 __attribute__((weak)) ompx_ctx* ompx__ctx = 0;
 __attribute__((weak)) ompx_pipe_deferred* ompx__pipe_deferred = 0;   // ompx__pipe_deferred_list
+__attribute__((weak)) ompx_split_ctl ompx__split_ctl = {0, 0, 0, 0};
+#pragma omp end declare target
+
+#pragma omp declare target
+// A kernel communicates itself: no deferred fence may count on knowing
+// every transfer of the epoch (ompx__fence_defer).
+static inline void ompx__dev_comm(void) {
+#if defined(__AMDGCN__) || defined(__NVPTX__)
+    if (ompx__pipe_deferred) ompx__pipe_deferred->dev_comm = 1;
+#endif
+}
 #pragma omp end declare target
 
 // The runtime's DeviceCtx is host-pinned and mapped and prepare() returns the
@@ -265,8 +328,10 @@ static inline ompx_ctx* ompx_prepare(void) {
     if (ompx__ctx != c || ompx__pipe_deferred != q) {
         ompx__ctx = c;
         ompx__pipe_deferred = q;
-        #pragma omp target is_device_ptr(c, q)
-        { ompx__ctx = c; ompx__pipe_deferred = q; }
+        ompx_split_ctl* ctl = 0;
+        #pragma omp target is_device_ptr(c, q) map(from: ctl)
+        { ompx__ctx = c; ompx__pipe_deferred = q; ctl = &ompx__split_ctl; }
+        ompx__split_ctl_at(ctl);
     }
     return c;
 }
@@ -295,6 +360,7 @@ static inline size_t ompx__off(ompx_ctx* c, const void* a) {
 inline void ompx_put(int peer, void* dst, const void* src, size_t bytes,
                      int lane = 0) {
 #if defined(__AMDGCN__) || defined(__NVPTX__)
+    ompx__dev_comm();
     ompx_ctx* c = ompx__ctx;
     gicc::omp::put(c, peer, c->heap_buf, ompx__off(c, dst),
                    c->heap_buf, ompx__off(c, src), bytes, lane);
@@ -306,6 +372,7 @@ inline void ompx_put(int peer, void* dst, const void* src, size_t bytes,
 inline void ompx_get(int peer, void* dst, const void* src, size_t bytes,
                      int lane = 0) {
 #if defined(__AMDGCN__) || defined(__NVPTX__)
+    ompx__dev_comm();
     ompx_ctx* c = ompx__ctx;
     gicc::omp::get(c, peer, c->heap_buf, ompx__off(c, src),
                    c->heap_buf, ompx__off(c, dst), bytes, lane);
@@ -318,6 +385,7 @@ inline void ompx_get(int peer, void* dst, const void* src, size_t bytes,
 // until the matching quiet, which skips the contended ring CAS. Device only.
 inline void ompx_get_single(int peer, void* dst, const void* src, size_t bytes,
                             int lane = 0) {
+    ompx__dev_comm();
     ompx_ctx* c = ompx__ctx;
     gicc::omp::get_single(c, peer, c->heap_buf, ompx__off(c, src),
                           c->heap_buf, ompx__off(c, dst), bytes, lane);
@@ -336,6 +404,7 @@ inline void ompx_quiet(int lane = 0) {
 inline void ompx_put_signal(int peer, void* dst, const void* src, size_t bytes,
                             int sig, unsigned long long value, int lane = 0) {
 #if defined(__AMDGCN__) || defined(__NVPTX__)
+    ompx__dev_comm();
     ompx_ctx* c = ompx__ctx;
     if (c->sig_trigger) {
         // DWQ. The NIC reads `src` once the doorbell rings, so the payload

@@ -79,6 +79,8 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/JSON.h"
 
@@ -89,6 +91,8 @@
 namespace llvm {
 class SCEV;
 class Function;
+class CallInst;
+class Module;
 }  // namespace llvm
 
 namespace gicc::pass {
@@ -134,6 +138,23 @@ void writeLoopPutSites(llvm::StringRef kernel, llvm::ArrayRef<LoopPutSite> sites
 
 // Every kernel's in-loop puts recorded in GICC_META_DIR.
 llvm::StringMap<llvm::SmallVector<LoopPutSite, 1>> readLoopPutSites();
+
+// For other host passes (GICCSplitLaunch.h), launch L as this pass reads
+// it: the kernel it starts, whether it waits for it, what it hands it by
+// argument with the map types, and an expression of loopPutExpr's computed
+// before it from that (null when an argument it needs is not handed over as
+// is). sharesHostMemory: a requires directive has host and device share
+// memory.
+struct HostLaunch {
+    llvm::SmallVector<llvm::Value *, 16> args;
+    llvm::SmallVector<uint64_t, 16> types;
+};
+std::string launchedKernelOf(llvm::CallInst *L);
+bool launchWaits(llvm::CallInst *L, llvm::DominatorTree &DT);
+HostLaunch readHostLaunch(llvm::CallInst *L, llvm::DominatorTree &DT);
+llvm::Value *buildLaunchExpr(const llvm::json::Value &V, llvm::IRBuilder<> &B,
+                             const HostLaunch &H);
+bool sharesHostMemory(const llvm::Module &M);
 
 struct GICCAfterPutPass : llvm::PassInfoMixin<GICCAfterPutPass> {
     llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &MAM);

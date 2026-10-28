@@ -65,6 +65,10 @@ std::string objName(const llvm::Value *V);
 std::string scevStr(const llvm::SCEV *S);
 // V without pointer casts, an inttoptr, and one integer cast.
 llvm::Value *stripIntCasts(llvm::Value *V);
+// Whether K, or anything defined here it calls or hands to a call (the
+// outlined region __kmpc_parallel runs), asks which team or block it runs
+// in: its result then depends on the chunks each team is dealt.
+bool asksTeam(const llvm::Function &K);
 // The unique store to Obj (after pointer-cast stripping) in F, or null.
 llvm::StoreInst *uniqueStoreTo(llvm::Function &F, const llvm::Value *Obj);
 

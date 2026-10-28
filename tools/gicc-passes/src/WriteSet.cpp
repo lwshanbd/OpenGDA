@@ -4,6 +4,7 @@
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <functional>
 
@@ -90,6 +91,7 @@ class Collector {
     FunctionAnalysisManager &FAM;
     UnknownStore policy;
     std::string &why;
+    bool reads;   // the loads too (collectAccesses)
     Function &O;
     ScalarEvolution &SE, &SK;
     LoopInfo &LI;
@@ -104,8 +106,8 @@ class Collector {
 
 public:
     Collector(const OmpKernel &KI, FunctionAnalysisManager &FAM, UnknownStore policy,
-              std::string &why)
-        : KI(KI), FAM(FAM), policy(policy), why(why), O(*KI.outlined),
+              std::string &why, bool reads = false)
+        : KI(KI), FAM(FAM), policy(policy), why(why), reads(reads), O(*KI.outlined),
           SE(FAM.getResult<ScalarEvolutionAnalysis>(O)),
           SK(FAM.getResult<ScalarEvolutionAnalysis>(KI.K)),
           LI(FAM.getResult<LoopAnalysis>(O)), DT(FAM.getResult<DominatorTreeAnalysis>(O)),
@@ -121,6 +123,8 @@ public:
             const SCEV *ub0 = KI.normalize(SK, SK.getSCEV(bounds->second->getValueOperand()));
             if (lb0->isZero()) N = SK.getAddExpr(KI.extDist(SK, ub0, I64), SK.getOne(I64));
         }
+        W.iterations = N;
+        if (reads && !kernelLoads()) return std::nullopt;
         for (Instruction &I : instructions(O)) {
             if (auto *CB = dyn_cast<CallBase>(&I)) {
                 if (!isBenignCall(*CB)) {
@@ -136,10 +140,14 @@ public:
                 why = "atomic write in the parallel region";
                 return std::nullopt;
             }
+            if (auto *Ld = dyn_cast<LoadInst>(&I)) {
+                if (reads && !load(Ld)) return std::nullopt;
+                continue;
+            }
             auto *St = dyn_cast<StoreInst>(&I);
             if (!St || isa<AllocaInst>(getUnderlyingObject(St->getPointerOperand())))
                 continue;   // thread-private
-            if (kernelLocal(St)) continue;
+            if (kernelLocal(St->getPointerOperand())) continue;
             if (!store(St)) return std::nullopt;
         }
         return std::move(W);
@@ -182,8 +190,8 @@ private:
     // memory, or __kmpc_alloc_shared, as a reduction variable or a value
     // the region shares is -- and no put can send: put sources are kernel
     // arguments.
-    bool kernelLocal(StoreInst *St) {
-        Value *obj = getUnderlyingObject(St->getPointerOperand());
+    bool kernelLocal(Value *ptr) {
+        Value *obj = getUnderlyingObject(ptr);
         if (isa<Argument>(obj)) obj = KI.resolveOutlined(obj);
         if (!obj) return false;
         obj = getUnderlyingObject(obj);
@@ -195,8 +203,9 @@ private:
 
     // A store the analysis cannot describe: listed under Record (go on),
     // fatal under Fail.
-    bool unknown(StoreInst *St, const std::string &reason) {
-        if (policy == UnknownStore::Record) { W.unknown.push_back({St, reason}); return true; }
+    bool unknown(Instruction *I, const std::string &reason) {
+        auto *St = dyn_cast<StoreInst>(I);
+        if (St && policy == UnknownStore::Record) { W.unknown.push_back({St, reason}); return true; }
         why = reason;
         return false;
     }
@@ -213,7 +222,81 @@ private:
         // per-element compute loop, where the address does not move with it,
         // or a row the address walks, which the box takes as one more
         // dimension (AccessDecomposer::innerIV).
-        return box(St, L, iv, inner);
+        return box(St, St->getPointerOperand(), L, iv, inner);
+    }
+
+    // Memory no put reaches: the kernel's own (stack, team memory) or a
+    // global of its image -- puts reach the symmetric heap only.
+    bool notHeap(Value *ptr) {
+        if (isa<AllocaInst>(getUnderlyingObject(ptr)) || kernelLocal(ptr)) return true;
+        Value *obj = getUnderlyingObject(ptr);
+        if (isa<Argument>(obj)) obj = KI.resolveOutlined(obj);
+        return obj && isa<GlobalVariable>(getUnderlyingObject(obj));
+    }
+
+    // A load of the parallel region: in its worksharing loop, a box as for
+    // a store; anywhere else, at an address the loop does not move, the
+    // one point every iteration reads.
+    bool load(LoadInst *Ld) {
+        Value *ptr = Ld->getPointerOperand();
+        if (notHeap(ptr)) return true;
+        // The thread ids the runtime hands the region.
+        if (auto *A = dyn_cast<Argument>(getUnderlyingObject(ptr));
+            A && A->getParent() == &O && A->getArgNo() < kmpc::OutlinedFirstSlot)
+            return true;
+        if (!Ld->isUnordered()) return unknown(Ld, "a volatile or atomic load");
+        Loop *inner = LI.getLoopFor(Ld->getParent());
+        Loop *L = inner;
+        while (L && L->getParentLoop()) L = L->getParentLoop();
+        if (!L || SE.isLoopInvariant(SE.getSCEV(ptr), L))
+            return point(Ld, KI.toKernel(SE.getSCEV(ptr), SK));
+        const SCEVAddRecExpr *iv = loopCoversBlock(L);
+        if (!iv) return false;
+        return box(Ld, ptr, L, iv, inner);
+    }
+
+    // Loads of the kernel itself, outside its parallel regions, from what
+    // it is handed: each the point every iteration depends on.
+    bool kernelLoads() {
+        for (Instruction &I : instructions(KI.K)) {
+            auto *Ld = dyn_cast<LoadInst>(&I);
+            if (!Ld) continue;
+            Value *obj = getUnderlyingObject(Ld->getPointerOperand());
+            if (!isa<Argument>(obj)) continue;   // its stack, team memory, a global
+            if (!Ld->isUnordered()) return unknown(Ld, "a volatile or atomic load in the kernel");
+            if (!point(Ld, SK.getSCEV(Ld->getPointerOperand()))) return false;
+        }
+        return true;
+    }
+
+    // An address the whole loop reads, in kernel values, as a box of one
+    // dim whose stride is 0: every iteration reaches the same word.
+    bool point(LoadInst *Ld, const SCEV *addr) {
+        std::string what;
+        raw_string_ostream os(what);
+        os << *Ld << " in " << Ld->getFunction()->getName() << " from";
+        for (Value *v = Ld->getPointerOperand(), *prev = nullptr; v && v != prev && what.size() < 2000;) {
+            os << " | " << *v;
+            prev = v;
+            if (auto *I = dyn_cast<Instruction>(v); I && I->getNumOperands())
+                v = I->getOperand(0);
+        }
+        if (!addr || !N)
+            return unknown(Ld, "a load whose address has no counterpart in kernel values:" + what);
+        auto *base = dyn_cast<SCEVUnknown>(SK.getPointerBase(addr));
+        if (!base) return unknown(Ld, "a load from no single object:" + what);
+        // The address as another address space sees it: the same object.
+        Value *b = base->getValue();
+        if (auto *C = dyn_cast<AddrSpaceCastOperator>(b)) b = C->getPointerOperand();
+        if (isa<GlobalVariable>(b)) return true;
+        auto *A = dyn_cast<Argument>(b);
+        if (!A || A->getParent() != &KI.K)
+            return unknown(Ld, "a load from something the kernel is not handed:" + what);
+        BoxWrite bw{nullptr, A, {N}, {SK.getZero(I64)}, SK.getMinusSCEV(addr, base), 0,
+                    KI.DL.getTypeStoreSize(Ld->getType()), true, false};
+        bw.ld = Ld;
+        W.reads.push_back(bw);
+        return true;
     }
 
     // x > 0 for an outlined-function value, whenever the loop body runs:
@@ -271,7 +354,7 @@ private:
     // it is in nested sequential loops, on every iteration of those: each
     // one entered unless a guard the same on every iteration of L says
     // otherwise (the box's extent then reads as no iterations).
-    bool everyIteration(StoreInst *St, Loop *L, Loop *inner) {
+    bool everyIteration(Instruction *St, Loop *L, Loop *inner) {
         BasicBlock *latch = L->getLoopLatch();
         if (inner == L) return latch && DT.dominates(St->getParent(), latch);
         for (Loop *l = inner; l != L; l = l->getParentLoop()) {
@@ -298,9 +381,10 @@ private:
         return true;
     }
 
-    bool box(StoreInst *St, Loop *L, const SCEVAddRecExpr *iv, Loop *inner) {
+    bool box(Instruction *St, Value *ptr, Loop *L, const SCEVAddRecExpr *iv, Loop *inner) {
+        auto *Ld = dyn_cast<LoadInst>(St);
         auto fail = [&](const std::string &reason) {
-            return unknown(St, "store address: " + reason);
+            return unknown(St, std::string(Ld ? "load" : "store") + " address: " + reason);
         };
         // The phi may be narrower than the IV the exit test sees (an i32
         // loop compared through a sext); match it widened.
@@ -312,7 +396,7 @@ private:
                 ivPhi = &PN;
         if (!ivPhi) return fail("the loop IV is not a header phi");
         std::string reason;
-        auto b = AccessDecomposer(SE, KI.DL, L, ivPhi).decompose(St->getPointerOperand(), reason);
+        auto b = AccessDecomposer(SE, KI.DL, L, ivPhi).decompose(ptr, reason);
         if (!b) return fail(reason);
         for (auto &[R, R2] : b->assumedEqual)
             if (!provenEqual(L, R, R2))
@@ -337,9 +421,10 @@ private:
                 return fail("collapse radix " + scevStr(R) +
                             " cannot be proven positive (a division the source wrote?)");
         if (!N) return fail("the distribute loop's iteration count is unknown");
-        BoxWrite bw{St, obj, {}, {}, nullptr, b->innerDims,
-                    KI.DL.getTypeStoreSize(St->getValueOperand()->getType()), false,
-                    b->trustedTrunc};
+        BoxWrite bw{dyn_cast<StoreInst>(St), obj, {}, {}, nullptr, b->innerDims,
+                    KI.DL.getTypeStoreSize(Ld ? Ld->getType()
+                                              : cast<StoreInst>(St)->getValueOperand()->getType()),
+                    false, b->trustedTrunc};
         const SCEV *R1 = b->radix.empty() ? nullptr : KI.toKernel(b->radix[0], SK);
         const SCEV *n1 = b->radix.empty() ? N
                          : R1 ? exactDivide(SK, N, SK.getNoopOrSignExtend(R1, I64)) : nullptr;
@@ -360,8 +445,13 @@ private:
         bw.offset = KI.toKernel(b->offset, SK);
         if (!bw.offset) return fail("the box has no counterpart in kernel values");
         bw.unconditional = everyIteration(St, L, inner);
+        if (Ld) {
+            bw.ld = Ld;
+            W.reads.push_back(bw);
+            return true;
+        }
         W.boxes.push_back(bw);
-        W.storesTo[obj].push_back(St);
+        W.storesTo[obj].push_back(cast<StoreInst>(St));
         return true;
     }
 
@@ -497,6 +587,11 @@ private:
 std::optional<WriteSet> collectWrites(const OmpKernel &KI, FunctionAnalysisManager &FAM,
                                       UnknownStore policy, std::string &why) {
     return Collector(KI, FAM, policy, why).run();
+}
+
+std::optional<WriteSet> collectAccesses(const OmpKernel &KI, FunctionAnalysisManager &FAM,
+                                        std::string &why) {
+    return Collector(KI, FAM, UnknownStore::Fail, why, /*reads=*/true).run();
 }
 
 }  // namespace gicc::pass

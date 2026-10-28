@@ -16,6 +16,7 @@ namespace {
 struct Choices {
     StringMap<SiteChoice> sites;
     StringMap<uint64_t>   chunks;
+    StringMap<bool>       splits;
 };
 
 [[noreturn]] void bad(const std::string &path, const std::string &why) {
@@ -51,9 +52,16 @@ Choices load() {
     if (const json::Object *kernels = top->getObject("kernels"))
         for (const auto &[id, val] : *kernels) {
             const json::Object *o = val.getAsObject();
-            auto n = o ? o->getInteger("dist_chunk") : std::nullopt;
-            if (!n || *n < 0) bad(path, "kernel " + id.str() + ": dist_chunk must be a count");
-            c.chunks[id] = static_cast<uint64_t>(*n);
+            if (!o) bad(path, "kernel " + id.str() + " is not an object");
+            if (const json::Value *v = o->get("dist_chunk")) {
+                auto n = v->getAsInteger();
+                if (!n || *n < 0) bad(path, "kernel " + id.str() + ": dist_chunk must be a count");
+                c.chunks[id] = static_cast<uint64_t>(*n);
+            }
+            if (const json::Value *v = o->get("split")) {
+                if (!v->getAsBoolean()) bad(path, "kernel " + id.str() + ": split must be a bool");
+                c.splits[id] = *v->getAsBoolean();
+            }
         }
     return c;
 }
@@ -84,6 +92,12 @@ std::optional<uint64_t> distChunk(StringRef kernel) {
 }
 
 bool anyDistChunk() { return !choices().chunks.empty(); }
+
+std::optional<bool> split(StringRef kernel) {
+    auto it = choices().splits.find(kernel);
+    if (it == choices().splits.end()) return std::nullopt;
+    return it->second;
+}
 
 void record(json::Object rec) {
     const char *path = std::getenv("GICC_SITES_OUT");

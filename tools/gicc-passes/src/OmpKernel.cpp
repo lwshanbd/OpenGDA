@@ -1,6 +1,8 @@
 #include "OmpKernel.h"
 #include "KernelInventory.h"
 
+#include "llvm/ADT/SmallPtrSet.h"
+
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
@@ -358,6 +360,35 @@ OmpKernel::distBounds(DominatorTree &DT) const {
     }
     if (!lbSt || !ubSt) return std::nullopt;
     return std::make_pair(lbSt, ubSt);
+}
+
+static bool asksTeam(const Function &F, SmallPtrSetImpl<const Function *> &seen) {
+    if (!seen.insert(&F).second) return false;
+    for (const Instruction &I : instructions(F)) {
+        const auto *CB = dyn_cast<CallBase>(&I);
+        if (!CB) continue;
+        for (const Value *A : CB->args())
+            if (const auto *H = dyn_cast<Function>(A->stripPointerCasts()))
+                if (!H->isDeclaration() && asksTeam(*H, seen)) return true;
+        const Function *G = CB->getCalledFunction();
+        if (!G) {
+            if (!CB->isInlineAsm()) return true;   // an indirect call: unknown
+            continue;
+        }
+        StringRef n = G->getName();
+        if (n == "omp_get_team_num" || n.starts_with("ompx_block_id") ||
+            n.starts_with("llvm.nvvm.read.ptx.sreg.ctaid") ||
+            n.starts_with("llvm.amdgcn.workgroup.id") ||
+            n == "__kmpc_get_hardware_num_blocks")
+            return true;
+        if (!G->isDeclaration() && asksTeam(*G, seen)) return true;
+    }
+    return false;
+}
+
+bool asksTeam(const Function &K) {
+    SmallPtrSet<const Function *, 16> seen;
+    return asksTeam(K, seen);
 }
 
 Value *OmpKernel::widenDistChunk(Value *lb0, Value *ub0, uint64_t target) const {

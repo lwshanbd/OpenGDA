@@ -1335,4 +1335,27 @@ PreservedAnalyses GICCAfterPutPass::run(Module &M, ModuleAnalysisManager &MAM) {
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
+std::string launchedKernelOf(CallInst *L) { return launchedKernel(L); }
+
+bool launchWaits(CallInst *L, DominatorTree &DT) {
+    auto *flags = dyn_cast_or_null<ConstantInt>(
+        launchField(L, kArgsFlags, DT, L->getModule()->getDataLayout()));
+    return flags && !(flags->getZExtValue() & 1);
+}
+
+HostLaunch readHostLaunch(CallInst *L, DominatorTree &DT) {
+    HostLaunch H;
+    H.args = launchArgs(L, DT, L->getModule()->getDataLayout(), &H.types);
+    return H;
+}
+
+Value *buildLaunchExpr(const json::Value &V, IRBuilder<> &B, const HostLaunch &H) {
+    LaunchView LV;
+    LV.args.assign(H.args.begin(), H.args.end());
+    LV.types.assign(H.types.begin(), H.types.end());
+    return buildExpr(V, B, LV);
+}
+
+bool sharesHostMemory(const Module &M) { return unifiedMemory(M); }
+
 }  // namespace gicc::pass

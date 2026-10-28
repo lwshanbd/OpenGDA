@@ -611,6 +611,24 @@ void ompx_fence() {
     ompx_barrier();
 }
 
+// A deferred fence (gicc/omp.h): not deferred on libfabric yet, so no
+// kernel is ever split around one.
+void ompx__fence_defer() {
+    ompx_fence();
+}
+
+void ompx__fence_flush() {}
+
+int ompx__split_begin(unsigned long long, int, const ompx_split_access*, long long) {
+    return 0;
+}
+
+int ompx__split_next(unsigned long long*) {
+    return 0;
+}
+
+void ompx__split_ctl_at(ompx_split_ctl*) {}
+
 // ---- device-side ------------------------------------------------------------
 
 ompx_ctx* ompx_prepare_ctx() {
