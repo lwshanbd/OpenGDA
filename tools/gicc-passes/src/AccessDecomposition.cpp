@@ -386,6 +386,14 @@ std::optional<AccessDecomposer::Lin> AccessDecomposer::build(Value *v, std::stri
             usedTrunc = true;
             r.sx = true;
         }
+        // Two exact narrow indices summed with no flags: instcombine
+        // reassociates the source's (iy*n + ix) - 1 into iy*n + (ix - 1)
+        // and drops nsw. The sum is still the index the source computed in
+        // its narrow type, which fits it -- the trunc rule's trust.
+        if (!r.sx && I->getType()->getIntegerBitWidth() < 64 && a->sx && b->sx && !r.t.empty()) {
+            usedTrunc = true;
+            r.sx = true;
+        }
         return done(r);
     }
     case Instruction::Mul: {

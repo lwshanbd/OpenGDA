@@ -14,6 +14,7 @@
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -84,6 +85,18 @@ void writeRecord(StringRef kernel, json::Object rec) {
 
 // ---- device side --------------------------------------------------------------
 
+// Inline assembly that only computes its results (libdevice's math has
+// some): no side effects, no memory operand, no memory clobber.
+bool pureAsm(const InlineAsm &IA) {
+    if (IA.hasSideEffects()) return false;
+    for (const InlineAsm::ConstraintInfo &C : IA.ParseConstraints()) {
+        if (C.isIndirect) return false;
+        for (const std::string &code : C.Codes)
+            if (code == "{memory}" || code == "m") return false;
+    }
+    return true;
+}
+
 // Whether the kernel, or anything it runs, may send or fetch by itself:
 // reads the GiOMP device context or the pipelined-put list, makes an atomic
 // access, or calls what the pass cannot see into. `what` says which.
@@ -112,6 +125,8 @@ bool communicates(Function &K, std::string &what) {
                 if (auto *H = dyn_cast<Function>(A->stripPointerCasts()); H && !H->isDeclaration())
                     work.push_back(H);
             Function *G = CB->getCalledFunction();
+            if (auto *IA = dyn_cast<InlineAsm>(CB->getCalledOperand()); IA && pureAsm(*IA))
+                continue;
             if (!G) {
                 what = CB->isInlineAsm() ? "inline assembly" : "an indirect call";
                 return true;
@@ -548,36 +563,58 @@ bool rewriteLaunch(Module &M, CallInst *L, StringRef kernel, const json::Object 
 
 // ompx_fence, and ompx_quiet with an ompx_barrier after it in the same
 // block and nothing between but benign calls, become ompx__fence_defer.
+// The instruction after I on its path: an invoke continues in its normal
+// destination when that has no other way in.
+Instruction *nextOnPath(Instruction *I) {
+    if (Instruction *N = I->getNextNode()) return N;
+    if (auto *II = dyn_cast<InvokeInst>(I))
+        if (BasicBlock *D = II->getNormalDest(); D->getSinglePredecessor())
+            return &D->front();
+    return nullptr;
+}
+
+// Removes a call to a function that returns nothing; an invoke becomes a
+// branch to where it returns to.
+void eraseCall(CallBase *CB) {
+    if (auto *II = dyn_cast<InvokeInst>(CB)) {
+        II->getUnwindDest()->removePredecessor(II->getParent());
+        BranchInst::Create(II->getNormalDest(), II->getIterator());
+    }
+    CB->eraseFromParent();
+}
+
 unsigned deferFences(Module &M) {
     LLVMContext &C = M.getContext();
     FunctionCallee defer = M.getOrInsertFunction(kDefer, Type::getVoidTy(C));
     unsigned n = 0;
-    SmallVector<CallInst *, 8> fences, quiets;
+    // A call or an invoke (C++ code calls them under its exception edges).
+    SmallVector<CallBase *, 8> fences, quiets;
     for (Function &F : M)
         for (Instruction &I : instructions(F))
-            if (auto *CI = dyn_cast<CallInst>(&I)) {
-                StringRef callee = calleeName(*CI);
-                if (callee == "ompx_fence") fences.push_back(CI);
-                else if (callee == "ompx_quiet_host") quiets.push_back(CI);
+            if (auto *CB = dyn_cast<CallBase>(&I)) {
+                StringRef callee = calleeName(*CB);
+                if (callee == "ompx_fence") fences.push_back(CB);
+                else if (callee == "ompx_quiet_host") quiets.push_back(CB);
             }
-    for (CallInst *CI : fences) {
-        CallInst::Create(defer, "", CI->getIterator());
-        CI->eraseFromParent();
+    for (CallBase *CB : fences) {
+        CB->setCalledFunction(defer);
         ++n;
     }
-    for (CallInst *Q : quiets) {
-        CallInst *barrier = nullptr;
-        for (Instruction *I = Q->getNextNode(); I; I = I->getNextNode()) {
+    for (CallBase *Q : quiets) {
+        CallBase *barrier = nullptr;
+        for (Instruction *I = nextOnPath(Q); I; I = nextOnPath(I)) {
             auto *CB = dyn_cast<CallBase>(I);
-            if (!CB || isa<IntrinsicInst>(CB)) continue;
-            if (calleeName(*CB) == "ompx_barrier") barrier = cast<CallInst>(CB);
+            if (!CB || isa<IntrinsicInst>(CB)) {
+                if (I->isTerminator() && !isa<InvokeInst>(I)) break;
+                continue;
+            }
+            if (calleeName(*CB) == "ompx_barrier") barrier = CB;
             else if (CB->getCalledFunction() && benignCall(*CB->getCalledFunction())) continue;
             break;
         }
         if (!barrier) continue;
-        CallInst::Create(defer, "", Q->getIterator());
-        Q->eraseFromParent();
-        barrier->eraseFromParent();
+        Q->setCalledFunction(defer);
+        eraseCall(barrier);
         ++n;
     }
     return n;
@@ -601,7 +638,7 @@ unsigned insertFlushes(Module &M) {
                 if (!G && callsDefinedOnly(CB->getCalledOperand())) continue;
                 if (G && (G->getName().starts_with("ompx_") || benignCall(*G))) continue;
                 at.push_back(CB);
-            } else if (isa<ReturnInst>(I) &&
+            } else if ((isa<ReturnInst>(I) || isa<ResumeInst>(I)) &&
                        (!F.hasLocalLinkage() || hasAddressTaken(F) || F.getName() == "main")) {
                 at.push_back(&I);
             }
