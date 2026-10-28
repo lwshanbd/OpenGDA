@@ -5,5 +5,5 @@
 set -o pipefail
 T=/shared/data1/Users/l1065028/giomp_ib_test
 OUT=$1
-GIOMP_EXTRA_FLAGS="$MW_DEFS ${GTUNE_DEFS:-}" bash $T/scen/build.sh "$MW_SOURCE" "$OUT"
+LIBDIR=$T/lib5 GIOMP_EXTRA_FLAGS="$MW_DEFS ${GTUNE_DEFS:-}" bash $T/scen/build.sh "$MW_SOURCE" "$OUT"
 [ -x "$OUT" ]

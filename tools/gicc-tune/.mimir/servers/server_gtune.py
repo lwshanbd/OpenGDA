@@ -66,7 +66,7 @@ def gtune_submit(
     configs: Annotated[list[dict], Field(description=(
         "1 to 8 candidate configurations, built in parallel and run in one allocation. "
         "Each is {\"sites\": {\"S0\": {\"pipeline\": false, \"grain\": \"block\"}}, "
-        "\"kernels\": {\"K3\": {\"dist_chunk\": 16384}}, \"build\": {\"OMPX_PIPE_PIECE_SHIFT\": 18}, "
+        "\"kernels\": {\"K3\": {\"dist_chunk\": 16384, \"split\": true}}, \"build\": {\"OMPX_PIPE_PIECE_SHIFT\": 18}, "
         "\"runtime\": {\"OMP_NUM_TEAMS\": 528}, \"note\": \"the hypothesis it tests\"}; "
         "omit anything left at its default. {} is the default configuration."))],
     repeats: Annotated[int | None, Field(description="Timed runs per candidate (default from the app, usually 2).")] = None,

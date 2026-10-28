@@ -73,8 +73,17 @@ def parse_sites(lines: list[str]) -> dict[str, Any]:
         if rec.get("kind") == "site":
             sites.setdefault(rec["id"], rec)
         elif rec.get("kind") == "kernel":
-            k = kernels.setdefault(rec["id"], rec)
-            k.update({key: v for key, v in rec.items() if key not in k})
+            # One record per option the compiler offers on the kernel.
+            k = kernels.setdefault(rec["id"], {"kind": "kernel", "id": rec["id"], "options": []})
+            opt = rec.pop("option", None)
+            if opt and opt not in k["options"]:
+                k["options"].append(opt)
+            if opt == "split":
+                k["splittable"] = bool(rec.get("splittable"))
+                if not k["splittable"]:
+                    k["split_why"] = rec.get("why", "")
+            else:
+                k.update({key: v for key, v in rec.items() if key not in ("kind", "id", "why")})
     out: dict[str, Any] = {"sites": {}, "kernels": {}}
     for i, sid in enumerate(sorted(sites)):
         out["sites"][f"S{i}"] = sites[sid]
@@ -112,12 +121,21 @@ def site_default(app: App, rec: dict[str, Any]) -> dict[str, Any]:
     return d
 
 
+def kernel_default(app: App, rec: dict[str, Any]) -> dict[str, Any]:
+    """What a build does on a kernel when the configuration says nothing."""
+    d: dict[str, Any] = {"dist_chunk": rec.get("default")}
+    if rec.get("splittable"):
+        st = start(app).get("kernels", {})
+        d["split"] = bool({**st.get("*", {}), **st.get(rec["id"], {})}.get("split", False))
+    return d
+
+
 def knob_defaults(app: App) -> dict[str, dict[str, Any]]:
     """The default of every choice a configuration can make, by section."""
     s = load_sites(app)
     return {
         "sites": {a: site_default(app, r) for a, r in s["sites"].items()},
-        "kernels": {a: {"dist_chunk": r.get("default")} for a, r in s["kernels"].items()},
+        "kernels": {a: kernel_default(app, r) for a, r in s["kernels"].items()},
         "build": {k: v.get("default") for k, v in app.spec.get("build_knobs", {}).items()},
         "runtime": {k: None for k in app.spec.get("runtime_knobs", {})},
     }
@@ -155,7 +173,12 @@ def describe_sites(app: App) -> dict[str, Any]:
     kernels = []
     for alias, rec in s["kernels"].items():
         k = {"alias": alias, "kernel": short_kernel(rec["id"]), "pipelined": bool(rec.get("pipelined")),
-             "default_chunk": rec.get("default", "clang default (one element per thread)")}
+             "default_chunk": rec.get("default", "clang default (one element per thread)"),
+             "splittable": bool(rec.get("splittable"))}
+        if rec.get("splittable"):
+            k["default_split"] = kernel_default(app, rec)["split"]
+        elif rec.get("split_why"):
+            k["not_splittable_because"] = rec["split_why"]
         hit = spent.get(k["kernel"])
         k["reference_gpu_s"] = hit["seconds"] if hit else 0.0
         if hit:
@@ -210,7 +233,13 @@ def validate(app: App, cfg: dict[str, Any]) -> list[str]:
             errs.append(f"kernel {alias}: no such kernel")
             continue
         for key, val in (choice or {}).items():
-            if key != "dist_chunk":
+            if key == "split":
+                if not s["kernels"][alias].get("splittable"):
+                    errs.append(f"kernel {alias}: the compiler cannot split it: "
+                                f"{s['kernels'][alias].get('split_why', 'not reported')}")
+                elif not isinstance(val, bool):
+                    errs.append(f"kernel {alias}: split must be true or false")
+            elif key != "dist_chunk":
                 errs.append(f"kernel {alias}: unknown choice {key!r}")
             elif not isinstance(val, int) or not (_is_pow2(val) and 32 <= val <= 1 << 22):
                 errs.append(f"kernel {alias}: dist_chunk must be a power of two in [32, 4194304]")
@@ -321,6 +350,23 @@ def kernel_breakdown(csv_path: Path, wall: float | None, top: int = 8) -> dict[s
     if wall:
         out["outside_kernels_s"] = round(wall - total, 4)
     return out
+
+
+def split_stats(text: str) -> list[dict[str, Any]]:
+    """Each rank's OMPX_SPLIT_STATS line: launches split, the seconds before the
+    first part (waiting for the other ranks' transfer lists), in the part that
+    overlaps the transfers, in the fence, and in the rest."""
+    pat = (r"rank (\d+): (\d+) split launches \((\d+) run whole before the fence; not split: "
+           r"(\d+) with no fence deferred, (\d+) unknown, (\d+) with nothing left\): before ([\d.]+) s, "
+           r"inside ([\d.]+) s, fence ([\d.]+) s, outside ([\d.]+) s")
+    out = []
+    for m in re.finditer(pat, text):
+        g = m.groups()
+        out.append({"rank": int(g[0]), "split": int(g[1]), "whole_before_fence": int(g[2]),
+                    "not_split_no_fence": int(g[3]), "not_split_unknown": int(g[4]),
+                    "not_split_nothing_left": int(g[5]), "before_s": float(g[6]),
+                    "inside_s": float(g[7]), "fence_s": float(g[8]), "outside_s": float(g[9])})
+    return sorted(out, key=lambda r: r["rank"])
 
 
 def summarize(app: App, runs: list[dict[str, Any]]) -> dict[str, Any]:

@@ -61,7 +61,7 @@ def run_script(app: core.App, rd: Path, jobs: list[dict], repeats: int) -> Path:
     # over all of them rather than landing on one.
     for rep in range(repeats):
         for j in jobs:
-            env = " ".join(f"{k}={shlex.quote(v)}" for k, v in j["env"].items())
+            env = " ".join(f"{k}={shlex.quote(v)}" for k, v in {"OMPX_SPLIT_STATS": "1", **j["env"]}.items())
             lines.append(f"env {env} {r['launch']} {j['exe']} {r.get('args', '')} "
                          f"> {j['tag']}.r{rep}.out 2>&1 </dev/null")
     # One profiled run each, apart from the timed ones: Nsight Systems on every
@@ -135,6 +135,12 @@ def main(rd: Path) -> None:
                 continue
             runs.append(got)
         row = {"trial": c["trial"], "config": c["config"], "runs": runs, "summary": core.summarize(app, runs)}
+        # Where each rank's split launches spent their time, from the first
+        # timed run (the runtime prints it only when a launch was split).
+        f = rd / f"{j['tag']}.r0.out"
+        split = core.split_stats(f.read_text(errors="replace")) if f.is_file() else []
+        if split:
+            row["split_stats"] = split
         if not runs:
             row.update(status="run_failed", why="; ".join(errors))
         else:

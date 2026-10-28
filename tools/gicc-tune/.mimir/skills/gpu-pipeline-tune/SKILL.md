@@ -1,6 +1,6 @@
 ---
 name: gpu-pipeline-tune
-description: Tune a GiOMP program's pipelining (which put sites are pipelined, grain, distribute chunk, teams, piece size) by proposing configurations, measuring them on the GPU cluster with the gtune tools, and revising from the measurements.
+description: Tune a GiOMP program's pipelining (which put sites are pipelined, grain, distribute chunk, kernel split around the fence, teams, piece size) by proposing configurations, measuring them on the GPU cluster with the gtune tools, and revising from the measurements.
 ---
 
 # Tuning GiOMP pipelines from measurements
@@ -51,6 +51,21 @@ control. In particular, a legal site is already pipelined by default, so
   end (load imbalance) and, for a pipelined kernel, delays the first send.
   Kernels marked `pipelined` count chunks, so their chunk also sets how
   finely the send overlaps the compute.
+- **Kernel `split`** (only on kernels marked `splittable`; off by default):
+  the fence before the kernel is deferred, and the kernel runs as two or
+  three launches -- first the iterations that touch none of the data the
+  fence waits for, overlapping the transfers, then the fence, then the rest.
+  It pays when the transfers before the kernel take long and most of its
+  iterations do not touch them (a stencil reading only an edge halo). It
+  costs a launch per extra range (tens of microseconds even when tiny), an
+  exchange of transfer lists among all ranks, and a rank with neighbours on
+  both sides runs one launch more than an edge rank. A round with split on
+  reports `split_stats` per rank: `before_s` is the wait for the other ranks'
+  lists (includes waiting for slower ranks), `inside_s` the overlapped part,
+  `fence_s` what was left of the transfers, `outside_s` the rest; counters of
+  launches that could not split say why (`not_split_no_fence`: no fence was
+  pending). Split composes with the sites' `pipeline`: a pipelined site sends
+  during its own kernel, a split kernel hides what remains after it.
 - **`runtime.OMP_NUM_TEAMS` / `OMP_TEAMS_THREAD_LIMIT`**: launch geometry for
   every kernel. A GH200 has 132 SMs; multiples of it are natural choices.
   The runtime's own choice (unset) has been at least as good as any fixed

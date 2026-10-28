@@ -310,13 +310,16 @@ bool runDevice(Module &M, ModuleAnalysisManager &MAM) {
         std::optional<OmpKernel> KI;
         if (comm) why = "it may communicate itself: " + what;
         else if (!canSplit) why = "the unit does not include gicc/omp_pipeline.h";
-        else if (!tune::split(K.getName()).value_or(splitDefault()))
-            why = "not asked for (GICC_SPLIT=1, or split: true in the tuning file)";
         else if (auto located = OmpKernel::locate(K, why)) {
             KI.emplace(std::move(*located));
             P = plan(*KI, FAM, why);
         }
+        // The report says what could be split; only what is asked for is.
         site["splittable"] = P.has_value();
+        if (P && !tune::split(K.getName()).value_or(splitDefault())) {
+            P.reset();
+            why = "not asked for (GICC_SPLIT=1, or split: true in the tuning file)";
+        }
         if (P) {
             lowerRange(*KI, FAM.getResult<ScalarEvolutionAnalysis>(K));
             FAM.invalidate(K, PreservedAnalyses::none());

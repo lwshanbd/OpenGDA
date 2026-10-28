@@ -88,6 +88,8 @@ def _compact(app: core.App, r: dict[str, Any], ref: dict[str, Any] | None) -> di
             out["vs_reference"] = f"{(ref['summary'][metric] / s[metric] - 1) * 100:+.1f}%"
     if r.get("breakdown"):
         out["breakdown"] = r["breakdown"]
+    if r.get("split_stats"):
+        out["split_stats"] = r["split_stats"]
     return out
 
 
