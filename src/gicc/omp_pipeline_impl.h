@@ -861,9 +861,11 @@ ompx__box_grab_done(unsigned long long* next, unsigned* done, int64_t* shared) {
 // counted put waits for: counts the chunk for every put whose due[p] lies
 // past it. Entry p is piece p % pieces of its put, and waits for the
 // (due[p] - lb0) / chunk chunks before due[p]. One fence and one barrier
-// for all the entries, which the team's threads then count one each, not
-// a fence and a barrier per entry: a put in 64 small pieces has 64 of
-// them in every chunk that writes it. Not kept out of line: a
+// for all the entries, which the team's thread 0 then counts, not a fence
+// and a barrier per entry: a put in 64 small pieces has 64 of them in
+// every chunk that writes it. Only thread 0 posts, as one thread per team
+// did before: with the entries spread over the team's threads, MiniMod at
+// 1056 teams left WQEs that the NIC never completed. Not kept out of line: a
 // kernel is given the vector registers of the hungriest function it calls,
 // and this one, compiled on its own, needed 85 where the minimod stencil
 // needs 78 -- a wave per SIMD less. Inlined into its rare branch it costs
@@ -879,10 +881,8 @@ ompx__box_due(int n, int64_t ran, const int64_t* due, const int32_t* peer, void*
     __atomic_thread_fence(__ATOMIC_RELEASE);
 #endif
     ompx_sync_block_acq_rel();
-    const int bx = ompx_block_dim_x(), by = ompx_block_dim_y();
-    const int id = ompx_thread_id_x() + bx * (ompx_thread_id_y() + by * ompx_thread_id_z());
-    const int threads = bx * by * ompx_block_dim_z();
-    for (int p = id; p < n; p += threads) {
+    if (ompx_thread_id_x() != 0 || ompx_thread_id_y() != 0 || ompx_thread_id_z() != 0) return;
+    for (int p = 0; p < n; ++p) {
         if (due[p] != INT64_MAX && ran < due[p])
             ompx__box_count(counter[p], peer[p], dst[p], src[p], static_cast<size_t>(bytes[p]),
                             after[p], p & (pieces - 1), pieces,
