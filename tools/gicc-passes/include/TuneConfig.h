@@ -9,7 +9,8 @@
 // GICC_TUNE_IN names a JSON file of choices keyed by those ids:
 //
 //   {"sites":   {"<kernel>#<n>": {"pipeline": false, "grain": "block"}},
-//    "kernels": {"<kernel>":     {"dist_chunk": 16384, "split": false}}}
+//    "kernels": {"<kernel>":     {"dist_chunk": 16384, "split": false,
+//                                 "teams": 264, "threads": 128}}}
 //
 // A site id of "*" applies to every site; a site's own entry overrides it
 // field by field.
@@ -47,6 +48,12 @@ bool anyDistChunk();
 // Whether a kernel may be split around a deferred fence (GICCSplitLaunch.h),
 // when the file says.
 std::optional<bool> split(llvm::StringRef kernel);
+
+// The team count and thread limit chosen for a kernel's launches
+// (GICCLaunchShape.h), when the file names them.
+std::optional<uint32_t> teams(llvm::StringRef kernel);
+std::optional<uint32_t> threads(llvm::StringRef kernel);
+bool anyLaunchShape();
 
 // Appends one record to GICC_SITES_OUT; does nothing when it is unset.
 void record(llvm::json::Object rec);

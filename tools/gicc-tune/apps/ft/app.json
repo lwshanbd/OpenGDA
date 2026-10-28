@@ -1,0 +1,57 @@
+{
+  "name": "ft",
+  "description": "NAS Parallel Benchmarks FT (GiOMP port of NPB-CPP's FT with NPB-MPI's 1-D slab layout), class C (512^3, 20 iterations), 2 ranks on 2 nodes. Each iteration runs the z FFT over the rank's slab, the transpose (half of the slab, 512 MB, to the other rank), then the y and x FFTs. The z FFT kernel writes the half the peer needs in the order the peer reads it, and the compiler can make that kernel send it itself as its chunks finish (the pipelined site); the transpose then only waits for what is still in flight. One wave of teams finishes every chunk at the end, so the send overlaps the compute only when that kernel runs in several waves. One GH200 per rank. Time is NPB's timed loop; the program also prints each phase's time.",
+  "host": "maple-1",
+  "build": {
+    "script": "apps/ft/build.sh",
+    "env": {
+      "FT_SOURCE": "/shared/data1/Users/l1065028/giomp_bench/npbft/ft_giomp.cpp"
+    },
+    "parallel": 4
+  },
+  "run": {
+    "alloc": "salloc -p maple --account=app -N2 --ntasks-per-node=1 --cpus-per-task=4 --gres=gpu:1 --mem=0 -t {minutes}",
+    "launch": "srun --ntasks-per-node=1 --cpus-per-task=4 --mpi=pmix -t 3 -N2",
+    "setup": "source /shared/data1/Users/l1065028/giomp_ib_test/env_cudampi.sh >/dev/null 2>&1; export OMP_TARGET_OFFLOAD=MANDATORY",
+    "args": "-class C",
+    "repeats": 2,
+    "nsys": "/hrtc/apps/devtools/nvidia-hpcsdk/aarch64/24.5-cuda12.4.131/Linux_aarch64/24.5/compilers/bin/nsys"
+  },
+  "metric": {
+    "name": "time_s",
+    "regex": "Time in seconds = *([0-9.eE+-]+)",
+    "goal": "min"
+  },
+  "checks": [
+    {
+      "name": "verification",
+      "regex": "Verification += *(\\S+)",
+      "exact": true
+    },
+    {
+      "name": "checksum_re",
+      "regex": "T = +20 +Checksum = *(\\S+)",
+      "rel_tol": 1e-10
+    }
+  ],
+  "runtime_knobs": {
+    "OMP_NUM_TEAMS": {
+      "min": 0,
+      "max": 65536,
+      "note": "teams per kernel for every launch; 0 lets the runtime pick"
+    },
+    "OMP_TEAMS_THREAD_LIMIT": {
+      "min": 32,
+      "max": 1024,
+      "note": "threads per team, at least a warp; unset lets the runtime pick"
+    }
+  },
+  "build_knobs": {
+    "OMPX_PIPE_PIECE_SHIFT": {
+      "min": 12,
+      "max": 24,
+      "default": 22,
+      "note": "pipeline piece size is 2^shift bytes (at most 64 pieces per put)"
+    }
+  }
+}

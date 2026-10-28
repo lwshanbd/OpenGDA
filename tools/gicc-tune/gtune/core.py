@@ -12,7 +12,7 @@ A configuration names sites and kernels by alias (S0, K3) so a model never
 copies the compiler's mangled names:
 
     {"sites":   {"S0": {"pipeline": false}},
-     "kernels": {"K3": {"dist_chunk": 16384}},
+     "kernels": {"K3": {"dist_chunk": 16384, "teams": 264, "threads": 128}},
      "build":   {"OMPX_PIPE_PIECE_SHIFT": 18},
      "runtime": {"OMP_NUM_TEAMS": 528}}
 
@@ -124,6 +124,10 @@ def site_default(app: App, rec: dict[str, Any]) -> dict[str, Any]:
 def kernel_default(app: App, rec: dict[str, Any]) -> dict[str, Any]:
     """What a build does on a kernel when the configuration says nothing."""
     d: dict[str, Any] = {"dist_chunk": rec.get("default")}
+    # None: the runtime's choice, or OMP_NUM_TEAMS / OMP_TEAMS_THREAD_LIMIT.
+    for opt in ("teams", "threads"):
+        if opt in rec.get("options", []):
+            d[opt] = None
     if rec.get("splittable"):
         st = start(app).get("kernels", {})
         d["split"] = bool({**st.get("*", {}), **st.get(rec["id"], {})}.get("split", False))
@@ -175,6 +179,9 @@ def describe_sites(app: App) -> dict[str, Any]:
         k = {"alias": alias, "kernel": short_kernel(rec["id"]), "pipelined": bool(rec.get("pipelined")),
              "default_chunk": rec.get("default", "clang default (one element per thread)"),
              "splittable": bool(rec.get("splittable"))}
+        for opt in ("teams", "threads"):
+            if opt in rec.get("options", []):
+                k[opt] = "fixed by the source" if rec.get(f"{opt}_fixed") else "tunable (default: the runtime's choice)"
         if rec.get("splittable"):
             k["default_split"] = kernel_default(app, rec)["split"]
         elif rec.get("split_why"):
@@ -248,6 +255,16 @@ def validate(app: App, cfg: dict[str, Any]) -> list[str]:
                     if on:
                         errs.append(f"kernel {alias}: split needs its sites unpipelined, but "
                                     f"{', '.join(on)} pipeline (set \"pipeline\": false on them)")
+            elif key in ("teams", "threads"):
+                rec = s["kernels"][alias]
+                if key not in rec.get("options", []):
+                    errs.append(f"kernel {alias}: no {key} reported for it (never launched from host code the compiler saw)")
+                elif rec.get(f"{key}_fixed"):
+                    errs.append(f"kernel {alias}: the source fixes its {key}")
+                elif key == "teams" and not (isinstance(val, int) and 1 <= val <= 65536):
+                    errs.append(f"kernel {alias}: teams must be an integer in [1, 65536]")
+                elif key == "threads" and not (isinstance(val, int) and 32 <= val <= 1024 and val % 32 == 0):
+                    errs.append(f"kernel {alias}: threads must be a multiple of 32 in [32, 1024]")
             elif key != "dist_chunk":
                 errs.append(f"kernel {alias}: unknown choice {key!r}")
             elif not isinstance(val, int) or not (_is_pow2(val) and 32 <= val <= 1 << 22):

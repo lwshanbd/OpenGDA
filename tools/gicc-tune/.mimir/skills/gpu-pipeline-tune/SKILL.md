@@ -71,14 +71,27 @@ control. In particular, a legal site is already pipelined by default, so
   combination on one kernel); compare it against the pipelined
   configuration, not on top of it. A round whose `split_stats` show no
   split launch tells you the split did not happen.
+- **Kernel `teams` / `threads`** (on kernels whose source does not fix them):
+  the launch geometry of that kernel alone; unset, the runtime chooses (or
+  the run-time knobs below). This is the pipeline's wave knob: when a
+  pipelined kernel's teams all fit on the GPU at once, every piece of its
+  puts is written at the very end and nothing overlaps; fewer teams than
+  its chunks (each team then runs several chunks in order) let the pieces
+  written by the first chunks go out while the later ones compute. Fewer
+  teams also means less of the GPU busy, so the kernel itself slows down;
+  the gain is the transfer hidden minus that. Set it on the pipelined
+  kernel only, so the other kernels keep their speed.
 - **`runtime.OMP_NUM_TEAMS` / `OMP_TEAMS_THREAD_LIMIT`**: launch geometry for
   every kernel. A GH200 has 132 SMs; multiples of it are natural choices.
   The runtime's own choice (unset) has been at least as good as any fixed
   value on every program tuned so far, so one round on this axis is enough
   unless a kernel is visibly under-occupied.
 - **`build.OMPX_PIPE_PIECE_SHIFT`**: a pipelined put is split into pieces of
-  about 2^shift bytes (default 22, 4 MB). Smaller pieces start sending
-  earlier but cost more messages.
+  about 2^shift bytes (default 22, 4 MB), at most 64 pieces per put, at
+  least 4 KB. A piece goes out once every chunk that writes it has run, so
+  smaller pieces only start sending earlier when the chunks writing the put
+  run at different times (several waves, see `teams`); when they all
+  finish together, smaller pieces only add messages.
 - **`build.OMPX_PIPE_COUNT_MIN_LOG2`**: a pipelined put smaller than 2^n bytes
   (default 20, 1 MB) to a cross-node peer is not sent by the kernel but waits
   for the next quiet. Lowering it lets smaller halos be pipelined.

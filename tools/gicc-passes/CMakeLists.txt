@@ -84,6 +84,7 @@ set(_GICC_PASS_SOURCES
     src/WriteSet.cpp
     src/GICCChunkAnalysis.cpp
     src/GICCDistChunk.cpp
+    src/GICCLaunchShape.cpp
     src/GICCSplitLaunch.cpp
     src/GICCAfterPut.cpp
     src/GICCWriteSummary.cpp

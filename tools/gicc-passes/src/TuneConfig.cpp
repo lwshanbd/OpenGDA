@@ -17,6 +17,7 @@ struct Choices {
     StringMap<SiteChoice> sites;
     StringMap<uint64_t>   chunks;
     StringMap<bool>       splits;
+    StringMap<uint32_t>   teams, threads;
 };
 
 [[noreturn]] void bad(const std::string &path, const std::string &why) {
@@ -62,6 +63,13 @@ Choices load() {
                 if (!v->getAsBoolean()) bad(path, "kernel " + id.str() + ": split must be a bool");
                 c.splits[id] = *v->getAsBoolean();
             }
+            for (auto [key, into] : {std::pair{"teams", &c.teams}, std::pair{"threads", &c.threads}})
+                if (const json::Value *v = o->get(key)) {
+                    auto n = v->getAsInteger();
+                    if (!n || *n <= 0 || *n > (1ll << 31) - 1)
+                        bad(path, "kernel " + id.str() + ": " + key + " must be a positive count");
+                    (*into)[id] = static_cast<uint32_t>(*n);
+                }
         }
     return c;
 }
@@ -98,6 +106,20 @@ std::optional<bool> split(StringRef kernel) {
     if (it == choices().splits.end()) return std::nullopt;
     return it->second;
 }
+
+std::optional<uint32_t> teams(StringRef kernel) {
+    auto it = choices().teams.find(kernel);
+    if (it == choices().teams.end()) return std::nullopt;
+    return it->second;
+}
+
+std::optional<uint32_t> threads(StringRef kernel) {
+    auto it = choices().threads.find(kernel);
+    if (it == choices().threads.end()) return std::nullopt;
+    return it->second;
+}
+
+bool anyLaunchShape() { return !choices().teams.empty() || !choices().threads.empty(); }
 
 void record(json::Object rec) {
     const char *path = std::getenv("GICC_SITES_OUT");
