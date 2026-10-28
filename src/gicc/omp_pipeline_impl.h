@@ -762,25 +762,19 @@ static inline void ompx__after_release(ompx_pipe_deferred* q, int after, int pie
 }
 #endif
 
-// Called by every thread of a team that has run one of the `need` chunks
-// piece `piece` of a put (laid out in pieces_max) waits for. The call that
-// makes `need` sends the range: every team's part of it has reached the
-// device's L2 by then, and a system-scope fence writes it back for the NIC.
-// Chunks, not teams, are counted: a team the GPU has not started yet runs
-// none of them, since the chunks go out in order (ompx__box_grab), and
-// waiting for it held the range back until the last wave. The counter is
-// left at zero for the next launch.
-static __attribute__((used)) void
-ompx__box_count(unsigned* counter, int peer, void* dst, const void* src, size_t bytes,
-                int after, int piece, int pieces_max, unsigned need) {
+// Counts, for the team that has run one of the `need` chunks piece `piece`
+// of a put (laid out in pieces_max) waits for, that chunk; called by one
+// thread of the team, after ompx__box_due has made the team's writes
+// visible. The count that makes `need` sends the range: every team's part
+// of it has reached the device's L2 by then, and a system-scope fence
+// writes it back for the NIC. Chunks, not teams, are counted: a team the
+// GPU has not started yet runs none of them, since the chunks go out in
+// order (ompx__box_grab), and waiting for it held the range back until the
+// last wave. The counter is left at zero for the next launch.
+static inline void ompx__box_count(unsigned* counter, int peer, void* dst, const void* src,
+                                   size_t bytes, int after, int piece, int pieces_max,
+                                   unsigned need) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
-#if defined(__AMDGCN__)
-    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
-#else
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-#endif
-    ompx_sync_block_acq_rel();
-    if (ompx_thread_id_x() != 0 || ompx_thread_id_y() != 0 || ompx_thread_id_z() != 0) return;
     if (__scoped_atomic_fetch_add(counter, 1u, __ATOMIC_ACQ_REL, __MEMORY_SCOPE_DEVICE) !=
         need - 1)
         return;
@@ -866,7 +860,10 @@ ompx__box_grab_done(unsigned long long* next, unsigned* done, int64_t* shared) {
 // (its position in the order of ompx__box_grab) when that may be one some
 // counted put waits for: counts the chunk for every put whose due[p] lies
 // past it. Entry p is piece p % pieces of its put, and waits for the
-// (due[p] - lb0) / chunk chunks before due[p]. Not kept out of line: a
+// (due[p] - lb0) / chunk chunks before due[p]. One fence and one barrier
+// for all the entries, which the team's threads then count one each, not
+// a fence and a barrier per entry: a put in 64 small pieces has 64 of
+// them in every chunk that writes it. Not kept out of line: a
 // kernel is given the vector registers of the hungriest function it calls,
 // and this one, compiled on its own, needed 85 where the minimod stencil
 // needs 78 -- a wave per SIMD less. Inlined into its rare branch it costs
@@ -876,7 +873,16 @@ ompx__box_due(int n, int64_t ran, const int64_t* due, const int32_t* peer, void*
               const void* const* src, const int64_t* bytes, unsigned* const* counter,
               const int32_t* after, int pieces, int64_t lb0, int64_t chunk) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
-    for (int p = 0; p < n; ++p) {
+#if defined(__AMDGCN__)
+    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
+#else
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+#endif
+    ompx_sync_block_acq_rel();
+    const int bx = ompx_block_dim_x(), by = ompx_block_dim_y();
+    const int id = ompx_thread_id_x() + bx * (ompx_thread_id_y() + by * ompx_thread_id_z());
+    const int threads = bx * by * ompx_block_dim_z();
+    for (int p = id; p < n; p += threads) {
         if (due[p] != INT64_MAX && ran < due[p])
             ompx__box_count(counter[p], peer[p], dst[p], src[p], static_cast<size_t>(bytes[p]),
                             after[p], p & (pieces - 1), pieces,
