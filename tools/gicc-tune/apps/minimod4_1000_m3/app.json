@@ -1,0 +1,63 @@
+{
+  "name": "minimod4_1000_m3",
+  "description": "MiniMod (GiOMP port): 3-D acoustic wave propagation, 1000^3 grid split over the ranks in z, 1000 steps (250 x 1000 x 1000 cells per GPU; the halo is a small part of the time). Each step computes the slice with the seven region kernels of the original, the same kernels as the MPI version, and puts the two z faces to the neighbours right after the last of them, the top PML slab (GICC_HALO_OVERLAP=3); the compiler can move those puts into that kernel. One GH200 per rank, 4 nodes (the two middle ranks have two cross-node neighbours). Time is the modeling loop; comm is the halo wait. Starting point: an untuned build, every put left to the host after its kernel (no site pipelined) and every kernel at clang's own distribute chunk.",
+  "host": "maple-1",
+  "build": {
+    "script": "apps/minimod/build.sh",
+    "env": {},
+    "parallel": 4
+  },
+  "run": {
+    "alloc": "salloc -p maple_night --account=app -N4 --ntasks-per-node=1 --cpus-per-task=4 --gres=gpu:1 --mem=0 -t {minutes}",
+    "launch": "srun --ntasks-per-node=1 --cpus-per-task=4 --mpi=pmix -t 8 -N4",
+    "setup": "source /shared/data1/Users/l1065028/giomp_ib_test/env_cudampi.sh >/dev/null 2>&1; export OMP_TARGET_OFFLOAD=MANDATORY; export GICC_HALO_OVERLAP=3",
+    "args": "--grid 1000 --nsteps 1000 --niters 1 --ngpus 4",
+    "repeats": 2,
+    "nsys": "/hrtc/apps/devtools/nvidia-hpcsdk/aarch64/24.5-cuda12.4.131/Linux_aarch64/24.5/compilers/bin/nsys"
+  },
+  "metric": {
+    "name": "time_s",
+    "regex": "ITER \\d+ modeling=([0-9.eE+-]+)",
+    "goal": "min"
+  },
+  "checks": [
+    {
+      "name": "field_xor",
+      "regex": "FINAL field_xor = ([0-9a-f]+)",
+      "exact": true
+    }
+  ],
+  "runtime_knobs": {
+    "OMP_NUM_TEAMS": {
+      "min": 0,
+      "max": 65536,
+      "note": "teams per kernel for every launch; 0 lets the runtime pick"
+    },
+    "OMP_TEAMS_THREAD_LIMIT": {
+      "min": 32,
+      "max": 1024,
+      "note": "threads per team, at least a warp; unset lets the runtime pick"
+    }
+  },
+  "build_knobs": {
+    "OMPX_PIPE_PIECE_SHIFT": {
+      "min": 12,
+      "max": 24,
+      "default": 22,
+      "note": "pipeline piece size is 2^shift bytes"
+    },
+    "OMPX_PIPE_COUNT_MIN_LOG2": {
+      "min": 10,
+      "max": 24,
+      "default": 20,
+      "note": "puts smaller than 2^n bytes to a cross-node peer wait for the next quiet instead of being sent by the kernel"
+    }
+  },
+  "start": {
+    "sites": {
+      "*": {
+        "pipeline": false
+      }
+    }
+  }
+}
