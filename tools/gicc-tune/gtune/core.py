@@ -12,7 +12,8 @@ A configuration names sites and kernels by alias (S0, K3) so a model never
 copies the compiler's mangled names:
 
     {"sites":   {"S0": {"pipeline": false}},
-     "kernels": {"K3": {"dist_chunk": 16384, "teams": 264, "threads": 128}},
+     "kernels": {"K3": {"dist_chunk": 16384, "teams": 264, "threads": 128,
+                        "dynamic": true}},
      "build":   {"OMPX_PIPE_PIECE_SHIFT": 18},
      "runtime": {"OMP_NUM_TEAMS": 528}}
 
@@ -82,6 +83,11 @@ def parse_sites(lines: list[str]) -> dict[str, Any]:
                 k["splittable"] = bool(rec.get("splittable"))
                 if not k["splittable"]:
                     k["split_why"] = rec.get("why", "")
+            elif opt == "dynamic":
+                k["dynamicable"] = bool(rec.get("dynamicable"))
+                k["dynamic_signal"] = bool(rec.get("signal"))
+                if not k["dynamicable"]:
+                    k["dynamic_why"] = rec.get("why", "")
             else:
                 k.update({key: v for key, v in rec.items() if key not in ("kind", "id", "why")})
     out: dict[str, Any] = {"sites": {}, "kernels": {}}
@@ -98,6 +104,40 @@ def short_kernel(name: str) -> str:
     m = re.search(r"_ZL?(\d+)", name)
     fn = name[m.end():m.end() + int(m.group(1))] if m else name
     return f"{fn}:{line.group(1)}" if line else fn
+
+
+# Build knobs that only shape how a put is pipelined.
+PIPELINE_BUILD_KNOBS = ("OMPX_PIPE_PIECE_SHIFT", "OMPX_DYN_PIECE_SHIFT", "OMPX_PIPE_COUNT_MIN_LOG2")
+
+
+def pipeline_only(app: App) -> bool:
+    """The app limits tuning to how puts are pipelined ("pipeline_only": true):
+    no launch geometry, no run-time knobs, and a kernel's chunk only where the
+    kernel counts it for a pipelined put -- choices that would speed up the
+    computation for any transport, the MPI baseline's too."""
+    return bool(app.spec.get("pipeline_only"))
+
+
+def allowed(app: App, section: str, key: str, rec: dict[str, Any] | None = None) -> bool:
+    if not pipeline_only(app):
+        return True
+    if section == "kernels":
+        if key == "dist_chunk":
+            return bool(rec and rec.get("pipelined"))
+        return key in ("split", "dynamic")
+    if section == "build":
+        return key in PIPELINE_BUILD_KNOBS
+    if section == "runtime":
+        return False
+    return True
+
+
+def build_knobs(app: App) -> dict[str, Any]:
+    return {k: v for k, v in app.spec.get("build_knobs", {}).items() if allowed(app, "build", k)}
+
+
+def runtime_knobs(app: App) -> dict[str, Any]:
+    return {k: v for k, v in app.spec.get("runtime_knobs", {}).items() if allowed(app, "runtime", k)}
 
 
 def start(app: App) -> dict[str, Any]:
@@ -128,10 +168,12 @@ def kernel_default(app: App, rec: dict[str, Any]) -> dict[str, Any]:
     for opt in ("teams", "threads"):
         if opt in rec.get("options", []):
             d[opt] = None
+    st = {**start(app).get("kernels", {}).get("*", {}), **start(app).get("kernels", {}).get(rec["id"], {})}
     if rec.get("splittable"):
-        st = start(app).get("kernels", {})
-        d["split"] = bool({**st.get("*", {}), **st.get(rec["id"], {})}.get("split", False))
-    return d
+        d["split"] = bool(st.get("split", False))
+    if rec.get("dynamicable"):
+        d["dynamic"] = bool(st.get("dynamic", False))
+    return {k: v for k, v in d.items() if allowed(app, "kernels", k, rec)}
 
 
 def knob_defaults(app: App) -> dict[str, dict[str, Any]]:
@@ -140,8 +182,8 @@ def knob_defaults(app: App) -> dict[str, dict[str, Any]]:
     return {
         "sites": {a: site_default(app, r) for a, r in s["sites"].items()},
         "kernels": {a: kernel_default(app, r) for a, r in s["kernels"].items()},
-        "build": {k: v.get("default") for k, v in app.spec.get("build_knobs", {}).items()},
-        "runtime": {k: None for k in app.spec.get("runtime_knobs", {})},
+        "build": {k: v.get("default") for k, v in build_knobs(app).items()},
+        "runtime": {k: None for k in runtime_knobs(app)},
     }
 
 
@@ -177,15 +219,23 @@ def describe_sites(app: App) -> dict[str, Any]:
     kernels = []
     for alias, rec in s["kernels"].items():
         k = {"alias": alias, "kernel": short_kernel(rec["id"]), "pipelined": bool(rec.get("pipelined")),
-             "default_chunk": rec.get("default", "clang default (one element per thread)"),
              "splittable": bool(rec.get("splittable"))}
+        if allowed(app, "kernels", "dist_chunk", rec):
+            k["default_chunk"] = rec.get("default", "clang default (one element per thread)")
         for opt in ("teams", "threads"):
-            if opt in rec.get("options", []):
+            if opt in rec.get("options", []) and allowed(app, "kernels", opt, rec):
                 k[opt] = "fixed by the source" if rec.get(f"{opt}_fixed") else "tunable (default: the runtime's choice)"
         if rec.get("splittable"):
             k["default_split"] = kernel_default(app, rec)["split"]
         elif rec.get("split_why"):
             k["not_splittable_because"] = rec["split_why"]
+        if rec.get("dynamicable"):
+            k["dynamic"] = ("tunable (default " + str(kernel_default(app, rec)["dynamic"]).lower() +
+                            "): its put after the launch" +
+                            (", an ompx_put_signal," if rec.get("dynamic_signal") else "") +
+                            " can be sent from the kernel by run-time counting")
+        elif rec.get("dynamic_why"):
+            k["not_dynamic_because"] = rec["dynamic_why"]
         hit = spent.get(k["kernel"])
         k["reference_gpu_s"] = hit["seconds"] if hit else 0.0
         if hit:
@@ -194,9 +244,13 @@ def describe_sites(app: App) -> dict[str, Any]:
     ran = {k["kernel"] for k in kernels if k["reference_gpu_s"] > 0}
     for site in sites:
         site["kernel_ran_in_reference"] = site["kernel"] in ran
-    return {"sites": sites, "kernels": kernels,
-            "runtime_knobs": app.spec.get("runtime_knobs", {}),
-            "build_knobs": app.spec.get("build_knobs", {})}
+    out = {"sites": sites, "kernels": kernels,
+           "runtime_knobs": runtime_knobs(app), "build_knobs": build_knobs(app)}
+    if pipeline_only(app):
+        out["scope"] = ("pipeline only: tune how the puts are sent (site pipeline/grain, kernel "
+                        "dynamic/split, the chunk of pipelined kernels, the piece-size build knobs); "
+                        "launch geometry and run-time knobs are not choices here")
+    return out
 
 
 def load_sites(app: App) -> dict[str, Any]:
@@ -240,6 +294,9 @@ def validate(app: App, cfg: dict[str, Any]) -> list[str]:
             errs.append(f"kernel {alias}: no such kernel")
             continue
         for key, val in (choice or {}).items():
+            if not allowed(app, "kernels", key, s["kernels"][alias]):
+                errs.append(f"kernel {alias}: {key} is not a choice here (pipeline-only tuning)")
+                continue
             if key == "split":
                 if not s["kernels"][alias].get("splittable"):
                     errs.append(f"kernel {alias}: the compiler cannot split it: "
@@ -255,6 +312,12 @@ def validate(app: App, cfg: dict[str, Any]) -> list[str]:
                     if on:
                         errs.append(f"kernel {alias}: split needs its sites unpipelined, but "
                                     f"{', '.join(on)} pipeline (set \"pipeline\": false on them)")
+            elif key == "dynamic":
+                if not s["kernels"][alias].get("dynamicable"):
+                    errs.append(f"kernel {alias}: no put after it can be counted at run time: "
+                                f"{s['kernels'][alias].get('dynamic_why', 'not reported')}")
+                elif not isinstance(val, bool):
+                    errs.append(f"kernel {alias}: dynamic must be true or false")
             elif key in ("teams", "threads"):
                 rec = s["kernels"][alias]
                 if key not in rec.get("options", []):
@@ -269,8 +332,7 @@ def validate(app: App, cfg: dict[str, Any]) -> list[str]:
                 errs.append(f"kernel {alias}: unknown choice {key!r}")
             elif not isinstance(val, int) or not (_is_pow2(val) and 32 <= val <= 1 << 22):
                 errs.append(f"kernel {alias}: dist_chunk must be a power of two in [32, 4194304]")
-    for section, knobs in (("build", app.spec.get("build_knobs", {})),
-                           ("runtime", app.spec.get("runtime_knobs", {}))):
+    for section, knobs in (("build", build_knobs(app)), ("runtime", runtime_knobs(app))):
         for key, val in (cfg.get(section) or {}).items():
             k = knobs.get(key)
             if k is None:

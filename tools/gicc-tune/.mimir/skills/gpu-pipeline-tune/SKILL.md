@@ -1,6 +1,6 @@
 ---
 name: gpu-pipeline-tune
-description: Tune a GiOMP program's pipelining (which put sites are pipelined, grain, distribute chunk, kernel split around the fence, teams, piece size) by proposing configurations, measuring them on the GPU cluster with the gtune tools, and revising from the measurements.
+description: Tune a GiOMP program's pipelining (which put sites are pipelined, grain, distribute chunk, kernel split around the fence, run-time counting of puts after a kernel, teams, piece size) by proposing configurations, measuring them on the GPU cluster with the gtune tools, and revising from the measurements.
 ---
 
 # Tuning GiOMP pipelines from measurements
@@ -71,6 +71,18 @@ control. In particular, a legal site is already pipelined by default, so
   combination on one kernel); compare it against the pipelined
   configuration, not on top of it. A round whose `split_stats` show no
   split launch tells you the split did not happen.
+- **Kernel `dynamic`** (only on kernels marked with a `dynamic` entry; off by
+  default): the put (or `ompx_put_signal`) the host makes after this kernel
+  is sent from the kernel by run-time counting -- each store into the put's
+  range is counted per piece, and a piece goes out the moment it is fully
+  written; for an `ompx_put_signal` the signal follows the last piece. It is
+  the only way to overlap a put whose writes land where data says (an MoE
+  expert writing the rows of its tokens), which the pipelined sites cannot
+  prove. It pays when the kernel writing the range runs long enough to hide
+  the transfer; it costs a few instructions per store and one atomic per
+  warp and piece. It assumes the kernel writes every byte of the range
+  exactly once; a wrong result (the checks fail) means it does not, and the
+  knob must stay off on that kernel.
 - **Kernel `teams` / `threads`** (on kernels whose source does not fix them):
   the launch geometry of that kernel alone; unset, the runtime chooses (or
   the run-time knobs below). This is the pipeline's wave knob: when a
@@ -92,6 +104,10 @@ control. In particular, a legal site is already pipelined by default, so
   smaller pieces only start sending earlier when the chunks writing the put
   run at different times (several waves, see `teams`); when they all
   finish together, smaller pieces only add messages.
+- **`build.OMPX_DYN_PIECE_SHIFT`**: the smallest piece run-time counting
+  (`dynamic`) sends, 2^shift bytes (default 17, 128 KB; at most 1024 pieces
+  per put). Smaller pieces start sending earlier but add messages and
+  atomics.
 - **`build.OMPX_PIPE_COUNT_MIN_LOG2`**: a pipelined put smaller than 2^n bytes
   (default 20, 1 MB) to a cross-node peer is not sent by the kernel but waits
   for the next quiet. Lowering it lets smaller halos be pipelined.

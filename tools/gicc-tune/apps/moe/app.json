@@ -1,0 +1,52 @@
+{
+  "name": "moe",
+  "description": "One mixture-of-experts layer with expert parallelism, 2 ranks on 2 nodes (one GH200 each): 8192 tokens per rank, hidden 2048, FFN 512, 16 experts (8 per rank), top-2 routing. Each step: a router kernel, a count and a scan kernel, a dispatch kernel that copies each token's row to the segment of the rank owning its expert, one put of that segment to each other rank with a signal, then the expert kernels (two GEMMs with ReLU, launched once per source segment: the local one first, then each remote one as its signal arrives), then an ompx_put_signal after the second GEMM of each remote segment returns its rows to their source rank, and a combine kernel once every return signal is in. The second GEMM writes rows at offsets read from the routing counts, so the compiler cannot prove which teams write which bytes. Time is the median time per layer over 20 steps (max over ranks).",
+  "host": "maple-1",
+  "build": {
+    "script": "apps/moe/build.sh",
+    "env": {
+      "MOE_SOURCE": "/shared/data1/Users/l1065028/new-gicc/examples/omp/moe/moe.cpp"
+    },
+    "parallel": 4
+  },
+  "run": {
+    "alloc": "salloc -p maple --account=app -N2 --ntasks-per-node=1 --cpus-per-task=4 --gres=gpu:1 --mem=0 -t {minutes}",
+    "launch": "srun --ntasks-per-node=1 --cpus-per-task=4 --mpi=pmix -t 3 -N2",
+    "setup": "source /shared/data1/Users/l1065028/giomp_ib_test/env_cudampi.sh >/dev/null 2>&1; export OMP_TARGET_OFFLOAD=MANDATORY OMPX_HEAP_SIZE=4G",
+    "args": "--iters=20",
+    "repeats": 2,
+    "nsys": "/hrtc/apps/devtools/nvidia-hpcsdk/aarch64/24.5-cuda12.4.131/Linux_aarch64/24.5/compilers/bin/nsys"
+  },
+  "metric": {
+    "name": "time_ms",
+    "regex": "median ([0-9.]+) ms",
+    "goal": "min"
+  },
+  "checks": [
+    {
+      "name": "checksum",
+      "regex": "checksum ([-0-9.eE+]+)",
+      "rel_tol": 1e-9
+    }
+  ],
+  "runtime_knobs": {
+    "OMP_NUM_TEAMS": {
+      "min": 0,
+      "max": 65536,
+      "note": "teams per kernel for every launch; 0 lets the runtime pick"
+    },
+    "OMP_TEAMS_THREAD_LIMIT": {
+      "min": 32,
+      "max": 1024,
+      "note": "threads per team, at least a warp; unset lets the runtime pick"
+    }
+  },
+  "build_knobs": {
+    "OMPX_DYN_PIECE_SHIFT": {
+      "min": 12,
+      "max": 22,
+      "default": 17,
+      "note": "run-time counting (kernel dynamic) sends pieces of 2^shift bytes, at most 1024 per put"
+    }
+  }
+}

@@ -38,6 +38,12 @@ def configure_backend(model: str) -> None:
 def query_for(app: str, rounds: int, extra: str) -> str:
     skill = (ROOT / ".mimir/skills/gpu-pipeline-tune/SKILL.md").read_text()
     skill = skill.split("---", 2)[-1].strip()
+    spec = json.loads((ROOT / "apps" / app / "app.json").read_text())
+    if spec.get("pipeline_only"):
+        extra = ("This run tunes only how the puts are pipelined: site pipeline and grain, "
+                 "kernel dynamic and split, the chunk of pipelined kernels, and the piece-size "
+                 "build knobs. Launch geometry (teams, threads) and run-time knobs are not "
+                 "choices here; gtune_submit rejects them. " + extra)
     return (
         f"Tune the application '{app}' with the gtune tools, following the method below. "
         f"You have a budget of {rounds} trial rounds after the reference (gtune_setup does not count), "
