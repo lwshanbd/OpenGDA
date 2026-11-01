@@ -5,7 +5,7 @@
   "build": {
     "script": "apps/ft/build.sh",
     "env": {
-      "FT_SOURCE": "/shared/data1/Users/l1065028/giomp_bench/npbft/ft_giomp.cpp"
+      "FT_SOURCE": "/shared/data1/Users/l1065028/new-gicc/examples/omp/npbft/ft_giomp.cpp"
     },
     "parallel": 4
   },
