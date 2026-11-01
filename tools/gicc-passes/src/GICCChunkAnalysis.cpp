@@ -466,6 +466,13 @@ private:
         const bool amdgpu = Triple(M.getTargetTriple()).isAMDGPU();
         for (unsigned i = 0; i < site.srcArgs.size(); ++i) {
             const unsigned j = site.srcArgs[i];
+            // Its signal would stay on the host and could overtake the
+            // pieces the kernel sends; GICCDynamicPut sends both or neither.
+            if (i < site.signals.size() && site.signals[i]) {
+                keep("put " + std::to_string(i) + ": an ompx_put_signal, sent from the kernel "
+                     "only by run-time counting (tuning file: \"dynamic\")");
+                continue;
+            }
             if (j + 1 >= F.arg_size() || !F.getArg(j + 1)->getType()->isPointerTy()) {
                 keep("put " + std::to_string(i) + ": the host hands the kernel no pointer as "
                      "argument " + std::to_string(j));

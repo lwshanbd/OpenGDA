@@ -87,6 +87,7 @@ set(_GICC_PASS_SOURCES
     src/GICCLaunchShape.cpp
     src/GICCSplitLaunch.cpp
     src/GICCAfterPut.cpp
+    src/GICCDynamicPut.cpp
     src/GICCWriteSummary.cpp
     src/GICCFeatureExtraction.cpp
     src/GICCTraceSynthesis.cpp

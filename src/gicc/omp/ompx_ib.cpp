@@ -903,6 +903,9 @@ void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, 
     e.fired = 0;
     e.pieces = 0;
     e.piece = 0;
+    e.sig = -1;
+    e.value = 0;
+    e.dyn_ok = 1;
     if (armed) {
         e.peer    = peer;
         e.src_arg = src_arg;
@@ -914,6 +917,37 @@ void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, 
     q->after.kernel = kernel;
 }
 
+void ompx__after_post_signal(unsigned long long kernel, int i, int src_arg, int armed, int peer,
+                             void* dst, const void* src, long long src_rel, size_t bytes,
+                             int sig, unsigned long long value) {
+    if (armed) check_slot(sig, "ompx_put_signal");
+    ompx__after_post(kernel, i, src_arg, armed, peer, dst, src, src_rel, bytes);
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    if (q == nullptr || i < 0 || i >= OMPX_PIPE_AFTER_MAX) return;
+    q->after.e[i].sig = sig;
+    q->after.e[i].value = value;
+}
+
+// The kernel sent the payload and the signal behind it on one QP, or none of
+// it reached the peer as a whole: then the host sends all of it again, the
+// signal behind it, and clears the counters the kernel left part way.
+void ompx__after_done_signal(unsigned long long kernel, int i, int peer, void* dst,
+                             const void* src, size_t bytes, int sig, unsigned long long value) {
+    pipe_check();
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    bool sent = false;
+    if (q != nullptr && i >= 0 && i < OMPX_PIPE_AFTER_MAX && q->after.kernel == kernel) {
+        ompx_pipe_after_put& e = q->after.e[i];
+        sent = e.armed && __atomic_load_n(&e.handled, __ATOMIC_ACQUIRE);
+        if (!sent && e.dyn_cnt != nullptr)
+            require_cuda(cudaMemset(e.dyn_cnt, 0, OMPX_DYN_CNT_WORDS * sizeof(unsigned)),
+                         "clear the run-time counters");
+        e.armed = 0;
+        e.handled = 0;
+    }
+    if (!sent) ompx_put_signal_host(peer, dst, src, bytes, sig, value);
+}
+
 void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
                       const void* src, size_t bytes) {
     pipe_check();
@@ -922,6 +956,9 @@ void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
     if (q != nullptr && i >= 0 && i < OMPX_PIPE_AFTER_MAX && q->after.kernel == kernel) {
         ompx_pipe_after_put& e = q->after.e[i];
         sent = e.armed && __atomic_load_n(&e.handled, __ATOMIC_ACQUIRE);
+        if (!sent && e.dyn_cnt != nullptr)
+            require_cuda(cudaMemset(e.dyn_cnt, 0, OMPX_DYN_CNT_WORDS * sizeof(unsigned)),
+                         "clear the run-time counters");
         e.armed = 0;
         e.handled = 0;
     }

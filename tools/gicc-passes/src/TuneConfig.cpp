@@ -17,6 +17,7 @@ struct Choices {
     StringMap<SiteChoice> sites;
     StringMap<uint64_t>   chunks;
     StringMap<bool>       splits;
+    StringMap<bool>       dynamics;
     StringMap<uint32_t>   teams, threads;
 };
 
@@ -63,6 +64,10 @@ Choices load() {
                 if (!v->getAsBoolean()) bad(path, "kernel " + id.str() + ": split must be a bool");
                 c.splits[id] = *v->getAsBoolean();
             }
+            if (const json::Value *v = o->get("dynamic")) {
+                if (!v->getAsBoolean()) bad(path, "kernel " + id.str() + ": dynamic must be a bool");
+                c.dynamics[id] = *v->getAsBoolean();
+            }
             for (auto [key, into] : {std::pair{"teams", &c.teams}, std::pair{"threads", &c.threads}})
                 if (const json::Value *v = o->get(key)) {
                     auto n = v->getAsInteger();
@@ -104,6 +109,12 @@ bool anyDistChunk() { return !choices().chunks.empty(); }
 std::optional<bool> split(StringRef kernel) {
     auto it = choices().splits.find(kernel);
     if (it == choices().splits.end()) return std::nullopt;
+    return it->second;
+}
+
+std::optional<bool> dynamic(StringRef kernel) {
+    auto it = choices().dynamics.find(kernel);
+    if (it == choices().dynamics.end()) return std::nullopt;
     return it->second;
 }
 

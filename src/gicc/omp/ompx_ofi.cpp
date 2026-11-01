@@ -720,6 +720,9 @@ void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, 
     e.fired = 0;
     e.pieces = 0;
     e.piece = 0;
+    e.sig = -1;
+    e.value = 0;
+    e.dyn_ok = 0;   // run-time counting is wired on InfiniBand only
     if (armed) {
         e.peer    = peer;
         e.src_arg = src_arg;
@@ -763,6 +766,27 @@ void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
         e.handled = 0;
     }
     if (!sent) ompx_put_host(peer, dst, src, bytes);
+}
+
+// An ompx_put_signal after the launch stays on the host here: posted
+// unarmed, so no kernel sends any of it.
+void ompx__after_post_signal(unsigned long long kernel, int i, int src_arg, int armed, int peer,
+                             void* dst, const void* src, long long src_rel, size_t bytes,
+                             int sig, unsigned long long value) {
+    (void)armed; (void)sig; (void)value;
+    ompx__after_post(kernel, i, src_arg, 0, peer, dst, src, src_rel, bytes);
+}
+
+void ompx__after_done_signal(unsigned long long kernel, int i, int peer, void* dst,
+                             const void* src, size_t bytes, int sig, unsigned long long value) {
+    pipe_check();
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    if (q != nullptr && i >= 0 && i < OMPX_PIPE_AFTER_MAX && q->after.kernel == kernel) {
+        release_after(i);
+        q->after.e[i].armed = 0;
+        q->after.e[i].handled = 0;
+    }
+    ompx_put_signal_host(peer, dst, src, bytes, sig, value);
 }
 
 // After the launch of a kernel with an in-loop put the host posted as put

@@ -10,7 +10,8 @@
 //
 //   {"sites":   {"<kernel>#<n>": {"pipeline": false, "grain": "block"}},
 //    "kernels": {"<kernel>":     {"dist_chunk": 16384, "split": false,
-//                                 "teams": 264, "threads": 128}}}
+//                                 "teams": 264, "threads": 128,
+//                                 "dynamic": true}}}
 //
 // A site id of "*" applies to every site; a site's own entry overrides it
 // field by field.
@@ -48,6 +49,10 @@ bool anyDistChunk();
 // Whether a kernel may be split around a deferred fence (GICCSplitLaunch.h),
 // when the file says.
 std::optional<bool> split(llvm::StringRef kernel);
+
+// Whether a put after a kernel the chunk analysis cannot split may be sent
+// by run-time counting (GICCDynamicPut.h), when the file says.
+std::optional<bool> dynamic(llvm::StringRef kernel);
 
 // The team count and thread limit chosen for a kernel's launches
 // (GICCLaunchShape.h), when the file names them.

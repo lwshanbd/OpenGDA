@@ -79,6 +79,12 @@ ompx__box_due(int n, int64_t ran, const int64_t* due, const int32_t* peer, void*
 [[omp::assume("ompx_spmd_amenable")]] static int32_t
 ompx__split_window(int64_t* lo, int64_t* hi)
     __asm__("ompx__split_window");
+[[omp::assume("ompx_spmd_amenable")]] static void
+ompx__dyn_begin(unsigned long long kernel, int i, int src_arg, const void* base, void* team)
+    __asm__("ompx__dyn_begin");
+[[omp::assume("ompx_spmd_amenable")]] static void
+ompx__dyn_flush(const void* team, unsigned piece, unsigned long long bytes)
+    __asm__("ompx__dyn_flush");
 
 #if defined(__NVPTX__) || defined(__AMDGCN__)
 // No printf here or in anything else a rewritten kernel calls: one gives the
@@ -970,6 +976,134 @@ ompx__loop_after(unsigned long long kernel, int i, int src_arg, int peer, void* 
     (void)kernel; (void)i; (void)src_arg; (void)peer; (void)dst; (void)src_rel; (void)bytes;
 #endif
     return r;
+}
+
+// ---- a put after the kernel, sent by run-time counting ----------------------
+//
+// For a kernel the chunk analysis cannot split -- one whose stores land
+// where data the kernel reads says, such as an MoE expert writing its
+// tokens' rows -- GICCDynamicPut, when the tuning file asks, calls
+// ompx__dyn_begin at the start of each team. The put's range [src, src +
+// bytes) is cut into power-of-two pieces. After every store the pass adds
+// its bytes to a count the thread keeps in registers for the piece it is
+// storing into; when the thread moves to another piece, and when it leaves
+// the function, it hands the count to ompx__dyn_flush, which adds it to the
+// piece's counter (one atomic per warp and piece), and the flush that fills
+// a piece sends it. The one that
+// sends the last piece sends the signal behind it on the same QP, for an
+// ompx_put_signal, and marks the post handled. That is sound only if the
+// kernel writes every byte of the range exactly once, which the pass cannot
+// prove and the tuning file asserts: a byte written twice sends a piece
+// early, a byte never written leaves its piece to the host after the kernel
+// (ompx__after_done*), which then sends the whole put again.
+//
+// The post as the team read it, in team memory the pass allocates (64
+// bytes, 16-aligned) and hands both helpers. The pass reads src, bytes and
+// shift itself, at these offsets; bytes is 0 when there is nothing to count.
+#ifndef OMPX_DYN_PIECE_SHIFT
+#define OMPX_DYN_PIECE_SHIFT 17   // smallest piece: 128 KB; a tuner knob
+#endif
+struct ompx_dyn_post {
+    const char*        src;       // offset 0
+    char*              dst;
+    unsigned long long bytes;     // offset 16
+    unsigned long long value;
+    int                peer;      // -1: nothing to count
+    int                sig;
+    int                i;
+    int                shift;     // offset 44
+    unsigned           pieces;
+};
+static_assert(sizeof(ompx_dyn_post) <= 64, "the pass allocates 64 bytes of team memory");
+// Per post: OMPX_DYN_PIECES_MAX piece counters, then the pieces sent. Each
+// goes back to zero when its piece (or the put) is done.
+static unsigned ompx__dyn_cnt[OMPX_DYN_CNT_WORDS];
+
+static __attribute__((used)) void
+ompx__dyn_begin(unsigned long long kernel, int i, int src_arg, const void* base, void* team) {
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    if (ompx__sequential_thread()) {
+        ompx_dyn_post t;
+        t.peer = -1;
+        t.src = nullptr;
+        t.bytes = 0;
+        t.shift = 63;
+        ompx_pipe_deferred* q = ompx__pipe_deferred;
+        ompx_pipe_after_put* e = q != nullptr && i >= 0 && i < OMPX_PIPE_AFTER_MAX &&
+                                         q->after.kernel == kernel
+                                     ? &q->after.e[i]
+                                     : nullptr;
+        if (e != nullptr && e->armed && e->dyn_ok && e->src_arg == src_arg && e->peer >= 0 &&
+            e->bytes > 0) {
+            t.peer = e->peer;
+            t.src = static_cast<const char*>(base) + e->src_rel;
+            t.dst = q->heap_base + e->dst_off;
+            t.bytes = e->bytes;
+            t.sig = e->sig;
+            t.value = e->value;
+            t.i = i;
+            int shift = OMPX_DYN_PIECE_SHIFT;
+            while ((t.bytes >> shift) >= OMPX_DYN_PIECES_MAX) ++shift;
+            t.shift = shift;
+            t.pieces = static_cast<unsigned>((t.bytes + (1ull << shift) - 1) >> shift);
+            if (omp_get_team_num() == 0) e->dyn_cnt = ompx__dyn_cnt;
+        }
+        *static_cast<ompx_dyn_post*>(team) = t;
+    }
+    if (__kmpc_is_spmd_exec_mode()) ompx_sync_block_acq_rel();
+#else
+    (void)kernel; (void)i; (void)src_arg; (void)base; (void)team;
+#endif
+}
+
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+// Piece p of the team's post is written: send it, and after the last piece
+// the signal. Inlined, as is ompx__dyn_flush, which the pass inlines into
+// the kernel: ptxas gives a kernel the registers of the hungriest chain of
+// calls it makes on top of its own, and with the flush and the posts out of
+// line the MoE expert kernel's 110 registers became 154, a team per SM
+// fewer. Inlined, the posts sit on a branch where the kernel's loop
+// registers are dead.
+__attribute__((always_inline)) static inline void ompx__dyn_piece_done(const ompx_dyn_post& t, unsigned p,
+                                                          unsigned long long len) {
+    unsigned* base = ompx__dyn_cnt + t.i * (OMPX_DYN_PIECES_MAX + 1);
+    __scoped_atomic_store_n(&base[p], 0u, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+    const unsigned long long off = static_cast<unsigned long long>(p) << t.shift;
+    ompx_put(t.peer, t.dst + off, t.src + off, len);
+    unsigned* sent = &base[OMPX_DYN_PIECES_MAX];
+    if (__scoped_atomic_fetch_add(sent, 1u, __ATOMIC_ACQ_REL, __MEMORY_SCOPE_DEVICE) + 1 !=
+        t.pieces)
+        return;
+    __scoped_atomic_store_n(sent, 0u, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+    if (t.sig >= 0) ompx_put_signal(t.peer, t.dst, t.src, 0, t.sig, t.value);
+    ompx_pipe_deferred* q = ompx__pipe_deferred;
+    __atomic_store_n(&q->after.e[t.i].handled, 1, __ATOMIC_RELEASE);
+}
+#endif
+
+// A thread's count of `bytes` stored into piece `piece`.
+static __attribute__((used)) void ompx__dyn_flush(const void* team, unsigned piece,
+                                                          unsigned long long bytes) {
+#if defined(__NVPTX__) || defined(__AMDGCN__)
+    const ompx_dyn_post& t = *static_cast<const ompx_dyn_post*>(team);
+    unsigned add = static_cast<unsigned>(bytes);
+#if defined(__NVPTX__)
+    // The warp's lanes flushing the same piece add once, by the lowest;
+    // redux.sync also orders their stores before its atomic.
+    const unsigned active = __nvvm_activemask();
+    const unsigned same = __nvvm_match_any_sync_i32(active, piece);
+    add = __nvvm_redux_sync_add(add, same);
+    if (static_cast<int>(__nvvm_read_ptx_sreg_laneid()) != __builtin_ctz(same)) return;
+#endif
+    unsigned* c = ompx__dyn_cnt + t.i * (OMPX_DYN_PIECES_MAX + 1) + piece;
+    const unsigned prev = __scoped_atomic_fetch_add(c, add, __ATOMIC_ACQ_REL, __MEMORY_SCOPE_DEVICE);
+    const unsigned long long off = static_cast<unsigned long long>(piece) << t.shift;
+    const unsigned long long len =
+        t.bytes - off < (1ull << t.shift) ? t.bytes - off : (1ull << t.shift);
+    if (prev + add == len) ompx__dyn_piece_done(t, piece, len);
+#else
+    (void)team; (void)piece; (void)bytes;
+#endif
 }
 
 // ---- a kernel split around a deferred fence ---------------------------------

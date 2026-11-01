@@ -74,6 +74,10 @@ StringMap<AfterPutSite> readAfterPutSites() {
             AfterPutSite s;
             for (const json::Value &a : *args)
                 if (auto j = a.getAsInteger()) s.srcArgs.push_back(static_cast<unsigned>(*j));
+            s.signals.assign(s.srcArgs.size(), false);
+            if (const json::Array *sg = o->getArray("signals"))
+                for (unsigned k = 0; k < sg->size() && k < s.signals.size(); ++k)
+                    s.signals[k] = (*sg)[k].getAsBoolean().value_or(false);
             sites[*kernel] = std::move(s);
         }
     }
@@ -206,6 +210,10 @@ namespace {
 
 constexpr StringLiteral kLaunch  = "__tgt_target_kernel";
 constexpr StringLiteral kHostPut = "ompx_put_host";
+// An ompx_put_signal after the launch: the payload, then the signal, which
+// must not overtake it -- posted whole, for a kernel that sends both.
+constexpr StringLiteral kHostPutSignal = "ompx_put_signal_host";
+bool isHostPut(StringRef n) { return n == kHostPut || n == kHostPutSignal; }
 constexpr StringLiteral kLoopDone = "ompx__loop_done";
 constexpr StringLiteral kTask = "__kmpc_omp_task";
 constexpr StringLiteral kTaskDeps = "__kmpc_omp_task_with_deps";   // with depend clauses
@@ -232,6 +240,7 @@ struct FoundPut {
     Value *iter = nullptr;              // the iteration the put is in, at the put
     unsigned first = 0;                 // the post of its first iteration
     unsigned slots = 1;
+    bool signal = false;                // an ompx_put_signal (sig, value args 4, 5)
 };
 
 // The posts a loop of puts takes at most.
@@ -638,7 +647,7 @@ bool benign(Instruction &I) {
         StringRef n = calleeName(*CB);
         // Another put: it only writes the peer's memory. So does the end of
         // a launch with in-loop puts, which may ring their groups.
-        if (n == kHostPut || n == kLoopDone) return true;
+        if (isHostPut(n) || n == kLoopDone) return true;
         // The region's host fallback: the kernel itself, run on the host.
         if (n.starts_with("__omp_offloading_")) return true;
         if (isa<DbgInfoIntrinsic>(CB) || CB->isLifetimeStartOrEnd()) return true;
@@ -651,7 +660,7 @@ bool benign(Instruction &I) {
 bool writesHost(Instruction &I) {
     if (auto *CB = dyn_cast<CallBase>(&I)) {
         StringRef n = calleeName(*CB);
-        if (n == kHostPut || n == kLoopDone || CB->isLifetimeStartOrEnd() ||
+        if (isHostPut(n) || n == kLoopDone || CB->isLifetimeStartOrEnd() ||
             isa<DbgInfoIntrinsic>(CB))
             return false;
     }
@@ -679,6 +688,10 @@ bool checkPut(const Launch &Ln, CallInst *put, Analyses &A, AAResults *AA, Found
             return false;
         }
         P.loop = in;
+        if (calleeName(*put) == kHostPutSignal) {
+            why = "an ompx_put_signal in a loop after the launch";
+            return false;
+        }
     }
     auto here = [&](BasicBlock *B) {
         Loop *l = LI.getLoopFor(B);
@@ -749,7 +762,8 @@ bool checkPut(const Launch &Ln, CallInst *put, Analyses &A, AAResults *AA, Found
             why = "whether the put runs is decided by something the kernel may change";
             return false;
         }
-    for (unsigned k = 0; k < 4; ++k)
+    P.signal = calleeName(*put) == kHostPutSignal;
+    for (unsigned k = 0; k < (P.signal ? 6u : 4u); ++k)
         if (!H.can(put->getArgOperand(k))) {
             why = "argument " + std::to_string(k) + " of the put cannot be computed before "
                   "the launch";
@@ -843,7 +857,7 @@ std::optional<Launch> taskLaunch(CallInst *TC, FunctionAnalysisManager &FAM,
     auto stays = [&](const Twine &why) {
         if (any_of(instructions(F), [&](Instruction &I) {
                 auto *C = dyn_cast<CallInst>(&I);
-                return C && calleeName(*C) == kHostPut && afterRegion(TC, {}, C);
+                return C && isHostPut(calleeName(*C)) && afterRegion(TC, {}, C);
             }))
             out() << "[gicc-after] " << Ln.kernel << ": the puts after this nowait region stay "
                      "after it: " << why << "\n";
@@ -876,7 +890,7 @@ bool findSite(const Launch &Ln, ArrayRef<Launch> all, Analyses &A, FoundSite &S)
     unsigned used = 0;   // posts
     for (Instruction &I : instructions(F)) {
         auto *put = dyn_cast<CallInst>(&I);
-        if (!put || calleeName(*put) != kHostPut || !afterRegion(Ln.start, Ln.hosts, put)) continue;
+        if (!put || !isHostPut(calleeName(*put)) || !afterRegion(Ln.start, Ln.hosts, put)) continue;
         // The launch nearest before the put only.
         if (any_of(all, [&](const Launch &L2) {
                 return L2.start != Ln.start && afterRegion(Ln.start, Ln.hosts, L2.start) &&
@@ -938,6 +952,12 @@ void bracket(Module &M, FoundSite &S, DominatorTree &DT) {
                                                 I32, I32, I32, I32, Ptr, Ptr, I64, I64);
     FunctionCallee done = M.getOrInsertFunction("ompx__after_done", Type::getVoidTy(Ctx), I64,
                                                 I32, I32, Ptr, Ptr, I64);
+    FunctionCallee postSig = M.getOrInsertFunction("ompx__after_post_signal",
+                                                   Type::getVoidTy(Ctx), I64, I32, I32, I32, I32,
+                                                   Ptr, Ptr, I64, I64, I32, I64);
+    FunctionCallee doneSig = M.getOrInsertFunction("ompx__after_done_signal",
+                                                   Type::getVoidTy(Ctx), I64, I32, I32, Ptr, Ptr,
+                                                   I64, I32, I64);
     Constant *hash = ConstantInt::get(I64, afterPutHash(S.kernel));
     DomTreeUpdater DTU(DT, DomTreeUpdater::UpdateStrategy::Eager);
     for (FoundPut &P : S.puts) {
@@ -946,7 +966,21 @@ void bracket(Module &M, FoundSite &S, DominatorTree &DT) {
         // One put that loads nothing: posted armed by its conditions.
         const bool plain =
             !P.loop && all_of(P.conds, [&](auto &c) { return H.speculable(c.first); }) &&
-            all_of(seq(0u, 4u), [&](unsigned k) { return H.speculable(P.put->getArgOperand(k)); });
+            all_of(seq(0u, P.signal ? 6u : 4u),
+                   [&](unsigned k) { return H.speculable(P.put->getArgOperand(k)); });
+        // The signal's slot and value, appended to a post or done call.
+        auto sigArgs = [&](IRBuilder<> &B, auto arg, SmallVectorImpl<Value *> &v) {
+            if (!P.signal) return;
+            v.push_back(B.CreateSExtOrTrunc(arg(4), I32));
+            v.push_back(B.CreateZExtOrTrunc(arg(5), I64));
+        };
+        auto zeroSig = [&](SmallVectorImpl<Value *> &v) {
+            if (!P.signal) return;
+            v.push_back(ConstantInt::get(I32, -1));
+            v.push_back(ConstantInt::get(I64, 0));
+        };
+        FunctionCallee postFn = P.signal ? postSig : post;
+        FunctionCallee doneFn = P.signal ? doneSig : done;
         if (plain) {
             DenseMap<Value *, Value *> hoisted;
             IRBuilder<> B(S.launch);
@@ -958,19 +992,25 @@ void bracket(Module &M, FoundSite &S, DominatorTree &DT) {
             auto arg = [&](unsigned k) { return H.emit(P.put->getArgOperand(k), B, hoisted, nullptr); };
             Value *src = arg(2);
             Value *rel = B.CreateSub(B.CreatePtrToInt(src, I64), B.CreatePtrToInt(P.base, I64));
-            B.CreateCall(post, {hash, ConstantInt::get(I32, P.first), srcArg,
-                                B.CreateZExt(armed, I32), arg(0), arg(1), src, rel,
-                                B.CreateZExtOrTrunc(arg(3), I64)});
+            SmallVector<Value *, 11> v{hash, ConstantInt::get(I32, P.first), srcArg,
+                                       B.CreateZExt(armed, I32), arg(0), arg(1), src, rel,
+                                       B.CreateZExtOrTrunc(arg(3), I64)};
+            sigArgs(B, arg, v);
+            B.CreateCall(postFn, v);
         }
         // Otherwise each post unarmed, then armed once each condition in
         // turn holds, from the outermost: what one loads is safe to load
         // once the ones around it hold.
         for (unsigned j = 0; !plain && j < P.slots; ++j) {
             Constant *slot = ConstantInt::get(I32, P.first + j);
-            IRBuilder<>(S.launch).CreateCall(
-                post, {hash, slot, srcArg, ConstantInt::get(I32, 0), ConstantInt::get(I32, 0),
-                       ConstantPointerNull::get(Ptr), ConstantPointerNull::get(Ptr),
-                       ConstantInt::get(I64, 0), ConstantInt::get(I64, 0)});
+            {
+                SmallVector<Value *, 11> v{hash, slot, srcArg, ConstantInt::get(I32, 0),
+                                           ConstantInt::get(I32, 0), ConstantPointerNull::get(Ptr),
+                                           ConstantPointerNull::get(Ptr), ConstantInt::get(I64, 0),
+                                           ConstantInt::get(I64, 0)};
+                zeroSig(v);
+                IRBuilder<>(S.launch).CreateCall(postFn, v);
+            }
             DenseMap<Value *, Value *> hoisted;
             Value *iter = P.loop ? ConstantInt::get(I64, j) : nullptr;
             Instruction *at = S.launch;
@@ -991,8 +1031,10 @@ void bracket(Module &M, FoundSite &S, DominatorTree &DT) {
             auto arg = [&](unsigned k) { return H.emit(P.put->getArgOperand(k), B, hoisted, iter); };
             Value *peer = arg(0), *dst = arg(1), *src = arg(2), *bytes = arg(3);
             Value *rel = B.CreateSub(B.CreatePtrToInt(src, I64), B.CreatePtrToInt(P.base, I64));
-            B.CreateCall(post, {hash, slot, srcArg, ConstantInt::get(I32, 1), peer, dst, src, rel,
-                                B.CreateZExtOrTrunc(bytes, I64)});
+            SmallVector<Value *, 11> v{hash, slot, srcArg, ConstantInt::get(I32, 1), peer, dst,
+                                       src, rel, B.CreateZExtOrTrunc(bytes, I64)};
+            sigArgs(B, arg, v);
+            B.CreateCall(postFn, v);
         }
         CallInst *put = P.put;
         Value *slot = ConstantInt::get(I32, P.first);
@@ -1011,8 +1053,11 @@ void bracket(Module &M, FoundSite &S, DominatorTree &DT) {
             continue;
         }
         IRBuilder<> A(put);
-        A.CreateCall(done, {hash, slot, put->getArgOperand(0), put->getArgOperand(1),
-                            put->getArgOperand(2), A.CreateZExtOrTrunc(put->getArgOperand(3), I64)});
+        SmallVector<Value *, 8> v{hash, slot, put->getArgOperand(0), put->getArgOperand(1),
+                                  put->getArgOperand(2),
+                                  A.CreateZExtOrTrunc(put->getArgOperand(3), I64)};
+        sigArgs(A, [&](unsigned k) { return put->getArgOperand(k); }, v);
+        A.CreateCall(doneFn, v);
         put->eraseFromParent();
     }
 }
@@ -1219,7 +1264,8 @@ PreservedAnalyses GICCAfterPutPass::run(Module &M, ModuleAnalysisManager &MAM) {
     Triple T(M.getTargetTriple());
     if (T.isNVPTX() || T.isAMDGPU()) return PreservedAnalyses::all();
     if (!M.getFunction(kLaunch)) return PreservedAnalyses::all();
-    const bool hostPuts = M.getFunction(kHostPut) != nullptr;
+    const bool hostPuts =
+        M.getFunction(kHostPut) != nullptr || M.getFunction(kHostPutSignal) != nullptr;
     auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
     StringMap<AfterPutSite> known;
     StringMap<SmallVector<LoopPutSite, 1>> loops;
@@ -1234,10 +1280,13 @@ PreservedAnalyses GICCAfterPutPass::run(Module &M, ModuleAnalysisManager &MAM) {
     // Records (put-discover) or brackets (chunk-lower) the puts after one
     // launch.
     auto afterPuts = [&](FoundSite &S, DominatorTree &DT) {
-        json::Array srcArgs;
+        json::Array srcArgs, signals;
         SmallVector<unsigned, 8> slots;
         for (const FoundPut &P : S.puts)
-            for (unsigned j = 0; j < P.slots; ++j) slots.push_back(P.srcArg);
+            for (unsigned j = 0; j < P.slots; ++j) {
+                slots.push_back(P.srcArg);
+                signals.push_back(P.signal);
+            }
         for (unsigned a : slots) srcArgs.push_back(static_cast<int64_t>(a));
         out() << "[gicc-after] " << S.kernel << ": " << S.puts.size()
               << " put(s) after the launch can go from the kernel";
@@ -1245,7 +1294,11 @@ PreservedAnalyses GICCAfterPutPass::run(Module &M, ModuleAnalysisManager &MAM) {
             out() << ", in " << slots.size() << " posts (a loop's first iterations)";
         out() << "\n";
         if (discover) {
-            recorded.push_back(json::Object{{"kernel", S.kernel}, {"src_args", std::move(srcArgs)}});
+            json::Object rec{{"kernel", S.kernel}, {"src_args", std::move(srcArgs)}};
+            // Only when there is one: a record of plain puts reads as before.
+            if (any_of(S.puts, [](const FoundPut &P) { return P.signal; }))
+                rec["signals"] = std::move(signals);
+            recorded.push_back(std::move(rec));
             return;
         }
         // Bracket only what the first compile recorded the same way: the

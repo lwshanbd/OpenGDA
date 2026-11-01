@@ -105,6 +105,9 @@ uint64_t afterPutHash(llvm::StringRef kernel);
 // value, the kernel's formal 1).
 struct AfterPutSite {
     llvm::SmallVector<unsigned, 2> srcArgs;
+    // Per put: an ompx_put_signal, which only GICCDynamicPut sends from the
+    // kernel (the signal goes behind the payload's last piece).
+    llvm::SmallVector<bool, 2> signals;
 };
 
 // Every site recorded in GICC_META_DIR, by kernel name; empty when the

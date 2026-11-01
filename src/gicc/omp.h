@@ -167,7 +167,21 @@ typedef struct ompx_pipe_after_put {
     int                fired;     // groups the kernel rang
     int                pieces;    // groups queued behind `bell`
     unsigned long long piece;     // bytes per group, the last one shorter
+    // An ompx_put_signal after the kernel: its slot (-1 for a plain put) and
+    // value. A kernel that sends it by run-time counting (GICCDynamicPut)
+    // sends the signal behind the last piece and leaves where its counters
+    // are in dyn_cnt, for the host to clear when the kernel did not finish
+    // the put. dyn_ok: the runtime takes such a kernel's sends (IB only).
+    int                sig;
+    int                dyn_ok;
+    unsigned long long value;
+    unsigned*          dyn_cnt;
 } ompx_pipe_after_put;
+// Run-time counting: the most pieces one put is counted in, and the
+// counters a kernel keeps for it (OMPX_DYN_PIECES_MAX per post, then one
+// count of the pieces sent per post).
+#define OMPX_DYN_PIECES_MAX 1024
+#define OMPX_DYN_CNT_WORDS (OMPX_PIPE_AFTER_MAX * (OMPX_DYN_PIECES_MAX + 1))
 typedef struct ompx_pipe_after {
     unsigned long long  kernel;   // FNV-1a of the kernel's name
     ompx_pipe_after_put e[OMPX_PIPE_AFTER_MAX];
@@ -218,6 +232,12 @@ void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, 
                       void* dst, const void* src, long long src_rel, size_t bytes);
 void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
                       const void* src, size_t bytes);
+// The same for an ompx_put_signal after the launch.
+void ompx__after_post_signal(unsigned long long kernel, int i, int src_arg, int armed, int peer,
+                             void* dst, const void* src, long long src_rel, size_t bytes,
+                             int sig, unsigned long long value);
+void ompx__after_done_signal(unsigned long long kernel, int i, int peer, void* dst,
+                             const void* src, size_t bytes, int sig, unsigned long long value);
 void ompx__loop_done(unsigned long long kernel, int i);
 
 // Internal: a fence deferred past part of the next kernel. The gicc-passes

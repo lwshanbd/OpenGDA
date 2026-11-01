@@ -1,4 +1,5 @@
 #include "GICCAfterPut.h"
+#include "GICCDynamicPut.h"
 #include "GICCChunkAnalysis.h"
 #include "GICCDistChunk.h"
 #include "GICCLaunchShape.h"
@@ -134,6 +135,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     // Host side of puts after a launch; self-gated.
                     MPM.addPass(GICCAfterPutPass());
                     MPM.addPass(GICCChunkAnalysisPass());
+                    // After chunk-lower, which sends what it can prove; the
+                    // rest of the puts after a kernel the tuning file asks
+                    // for go by run-time counting. Device side, self-gated.
+                    MPM.addPass(GICCDynamicPutPass());
                     // After chunk-lower, so it sees which kernels send
                     // themselves, and before the dist-chunk pass, which
                     // then deals the chunks of the range a split kernel
@@ -215,6 +220,10 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
                     }
                     if (Name == "gicc-split-launch") {
                         MPM.addPass(GICCSplitLaunchPass());
+                        return true;
+                    }
+                    if (Name == "gicc-dynamic-put") {
+                        MPM.addPass(GICCDynamicPutPass());
                         return true;
                     }
                     if (Name == "gicc-after-put") {
