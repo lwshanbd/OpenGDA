@@ -219,14 +219,18 @@ typedef struct ompx_pipe_deferred {
 
 // Internal: what a kernel split around a deferred fence runs of its
 // distribute loop (ompx__split_next): all of it, or (`range` set) the
-// iterations [lo, hi). Device memory the host writes between launches;
-// ompx_prepare tells the runtime where (ompx__split_ctl_at).
+// iterations [lo, hi). Memory the host writes between launches: where the
+// runtime can, one block the GPU holds and the CPU stores into directly
+// (ompx__split_ctl_shared, coherent on Grace Hopper), else a device global
+// the runtime copies to; ompx_prepare tells the runtime which
+// (ompx__split_ctl_at) and the kernels (ompx__split_ctl_p).
 typedef struct ompx_split_ctl {
     int       range;
     int       reserved;
     long long lo, hi;
 } ompx_split_ctl;
 void ompx__split_ctl_at(ompx_split_ctl* dev);
+ompx_split_ctl* ompx__split_ctl_shared(void);   // null when the runtime has none
 ompx_pipe_deferred* ompx__pipe_deferred_list(void);   // its device address
 void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, int peer,
                       void* dst, const void* src, long long src_rel, size_t bytes);
@@ -275,6 +279,15 @@ void ompx__fence_defer(void);
 void ompx__fence_flush(void);
 int  ompx__split_begin(unsigned long long kernel, int n, const ompx_split_access* acc,
                        long long iterations);
+// The same, handed the launch itself (__tgt_target_kernel's operands) so the
+// runtime may launch the kernel's remaining ranges later: with a fence
+// deferred, each such kernel runs only the iterations the epoch's transfers
+// leave alone, and the rest of all of them run, in order, after the one
+// fence -- a chain, as long as no kernel of it touches what an earlier one
+// still has to write or read (OMPX_SPLIT_CHAIN=0 turns it off).
+int  ompx__split_begin_launch(unsigned long long kernel, int n, const ompx_split_access* acc,
+                              long long iterations, void* loc, long long device, int teams,
+                              int threads, void* host_ptr, void* kernel_args);
 int  ompx__split_next(unsigned long long* tripcount);
 
 // Internal: the size of the pieces a pipelined put to a peer that is not
@@ -326,6 +339,7 @@ static inline unsigned long long ompx__pipe_piece(unsigned long long bytes, int 
 __attribute__((weak)) ompx_ctx* ompx__ctx = 0;
 __attribute__((weak)) ompx_pipe_deferred* ompx__pipe_deferred = 0;   // ompx__pipe_deferred_list
 __attribute__((weak)) ompx_split_ctl ompx__split_ctl = {0, 0, 0, 0};
+__attribute__((weak)) ompx_split_ctl* ompx__split_ctl_p = 0;   // what kernels read
 #pragma omp end declare target
 
 #pragma omp declare target
@@ -349,8 +363,14 @@ static inline ompx_ctx* ompx_prepare(void) {
         ompx__ctx = c;
         ompx__pipe_deferred = q;
         ompx_split_ctl* ctl = 0;
-        #pragma omp target is_device_ptr(c, q) map(from: ctl)
-        { ompx__ctx = c; ompx__pipe_deferred = q; ctl = &ompx__split_ctl; }
+        ompx_split_ctl* shared = ompx__split_ctl_shared();
+        #pragma omp target is_device_ptr(c, q, shared) map(from: ctl)
+        {
+            ompx__ctx = c;
+            ompx__pipe_deferred = q;
+            ctl = shared ? shared : &ompx__split_ctl;
+            ompx__split_ctl_p = ctl;
+        }
         ompx__split_ctl_at(ctl);
     }
     return c;

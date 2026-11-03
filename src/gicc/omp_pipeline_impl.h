@@ -1109,15 +1109,19 @@ static __attribute__((used)) void ompx__dyn_flush(const void* team, unsigned pie
 // ---- a kernel split around a deferred fence ---------------------------------
 //
 // What the launch runs of a kernel the pass split (GICCSplitLaunch.h): read
-// at the kernel's start, by every thread, from device memory the host writes
+// at the kernel's start, by every thread, from GPU memory the host writes
 // before each launch (ompx__split_next) -- not from mapped host memory, which
 // every thread of a launch reading made a 0.6 ms kernel half again as long.
+// System-scope loads: on Grace Hopper the host stores into that memory
+// directly, rather than copying to it (a synchronous copy per launch cost
+// MiniMod 0.13 ms a step).
 // Nonzero: only the iterations [*lo, *hi) of the distribute loop.
 static __attribute__((used)) int32_t ompx__split_window(int64_t* lo, int64_t* hi) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
-    *lo = ompx__split_ctl.lo;
-    *hi = ompx__split_ctl.hi;
-    return ompx__split_ctl.range;
+    ompx_split_ctl* c = ompx__split_ctl_p ? ompx__split_ctl_p : &ompx__split_ctl;
+    *lo = __scoped_atomic_load_n(&c->lo, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
+    *hi = __scoped_atomic_load_n(&c->hi, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
+    return __scoped_atomic_load_n(&c->range, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
 #else
     *lo = 0;
     *hi = 0;

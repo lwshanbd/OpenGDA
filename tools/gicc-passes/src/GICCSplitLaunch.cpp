@@ -40,7 +40,7 @@ constexpr StringLiteral kWindow  = "ompx__split_window";
 constexpr StringLiteral kLaunch  = "__tgt_target_kernel";
 constexpr StringLiteral kDefer   = "ompx__fence_defer";
 constexpr StringLiteral kFlush   = "ompx__fence_flush";
-constexpr StringLiteral kBegin   = "ompx__split_begin";
+constexpr StringLiteral kBeginLaunch = "ompx__split_begin_launch";
 constexpr StringLiteral kNext    = "ompx__split_next";
 // Marks the launches the rewrite made, which no flush goes before.
 constexpr StringLiteral kSplitMD = "gicc.split";
@@ -513,11 +513,19 @@ bool rewriteLaunch(Module &M, CallInst *L, StringRef kernel, const json::Object 
     Value *iters = i64(itersV);
     if (!iters) return undo("its iteration count is not computed from what the launch hands over");
 
-    FunctionCallee begin = M.getOrInsertFunction(kBegin, I32, I64, I32, Ptr, I64);
+    // The launch's own operands go too, so the runtime may make the
+    // kernel's remaining ranges later, after other kernels' windows (a
+    // chain, gicc/omp.h).
+    FunctionCallee begin = M.getOrInsertFunction(kBeginLaunch, I32, I64, I32, Ptr, I64, Ptr, I64,
+                                                 I32, I32, Ptr, Ptr);
     FunctionCallee next = M.getOrInsertFunction(kNext, I32, Ptr);
     Value *split = B.CreateICmpNE(
         B.CreateCall(begin, {ConstantInt::get(I64, afterPutHash(kernel)), ConstantInt::get(I32, n),
-                             arr, iters}),
+                             arr, iters, L->getArgOperand(0),
+                             B.CreateSExtOrTrunc(L->getArgOperand(1), I64),
+                             B.CreateSExtOrTrunc(L->getArgOperand(2), I32),
+                             B.CreateSExtOrTrunc(L->getArgOperand(3), I32), L->getArgOperand(4),
+                             L->getArgOperand(5)}),
         ConstantInt::get(I32, 0));
     AllocaInst *trip = EB.CreateAlloca(I64, nullptr, "gicc.split.trip");
     // libomptarget rewrites the launch's arguments in place (NumArgs, the

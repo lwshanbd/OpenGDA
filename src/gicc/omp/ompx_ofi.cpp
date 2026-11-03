@@ -623,11 +623,20 @@ int ompx__split_begin(unsigned long long, int, const ompx_split_access*, long lo
     return 0;
 }
 
+int ompx__split_begin_launch(unsigned long long, int, const ompx_split_access*, long long, void*,
+                             long long, int, int, void*, void*) {
+    return 0;
+}
+
 int ompx__split_next(unsigned long long*) {
     return 0;
 }
 
 void ompx__split_ctl_at(ompx_split_ctl*) {}
+
+ompx_split_ctl* ompx__split_ctl_shared() {
+    return nullptr;
+}
 
 // ---- device-side ------------------------------------------------------------
 
