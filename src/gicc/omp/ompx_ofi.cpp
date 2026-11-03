@@ -10,17 +10,24 @@
 #include <mpi.h>
 #include <omp.h>
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <utility>
 #include <vector>
 
 #include "gicc/omp.h"
+#include "gicc/omp_box.h"
 #include "gicc/platform/ofi/internal/gpu_device_context.hpp"
 #include "gicc/platform/ofi/ofi_runtime.hpp"
 #include "gicc/platform/ofi/runtime_helpers.h"
+
+extern "C" int __tgt_target_kernel(void* loc, int64_t device, int32_t teams, int32_t threads,
+                                   void* host_ptr, void* args);
 
 namespace {
 
@@ -283,6 +290,350 @@ void pipe_check() {
     die(what);
 }
 
+// ---- deferred fences (ompx__fence_defer in gicc/omp.h) ----------------------
+// As in ompx_ib.cpp. The gicc-passes plugin defers an ompx_fence past the
+// part of the next kernel that touches nothing the epoch's transfers do. For
+// that every rank must know what the others did to its heap, which one-sided
+// transfers never tell it: so the host records what it sends and fetches,
+// and the fence that ends the epoch sends each rank one fixed-size record of
+// what this one did to its heap (MPI_Ialltoall, on a communicator of its own)
+// before it is deferred. A transfer the record cannot describe (a
+// put_signal, more than fits, one a kernel made itself) makes the epoch's
+// fence one that no kernel is split around.
+//
+// Every ompx call makes a deferred fence first, and the plugin makes it
+// before anything else that may see what it orders or wait on another rank
+// (every MPI call among them); so between the fence and where it is made, a
+// rank blocks on no other, and every rank makes its one barrier.
+struct EpochOp {
+    int peer;
+    bool put;            // a put writes the peer's [remote, + bytes); a get reads it
+    size_t remote;       // a heap offset at the peer
+    const char* local;   // what the put reads here, or the get writes
+    size_t bytes;
+};
+std::vector<EpochOp> g_epoch;
+bool g_epoch_untracked = false;
+bool g_fence_pending = false;
+bool g_split_off = false;          // OMPX_SPLIT=0
+MPI_Comm g_fence_comm = MPI_COMM_NULL;
+MPI_Request g_manifest_req = MPI_REQUEST_NULL;
+// Per pair of ranks: a count, kManifestUnknown when the record cannot say,
+// then kManifestMax entries of (heap offset, bytes, written), then which
+// of the sender's earlier epochs its records to every rank repeat (bit 0:
+// the previous one, bit 1: the one before).
+constexpr int kManifestMax = 16;
+constexpr long long kManifestUnknown = -1;
+constexpr int kManifestWords = 2 + 3 * kManifestMax;
+constexpr int kManifestSame = kManifestWords - 1;
+std::vector<long long> g_manifest_out, g_manifest_in;
+// OMPX_SPLIT_STABLE=1: the program asserts that its epochs transfer the
+// same ranges, every epoch or every other one (a time step that swaps two
+// fields). Once an exchange shows every rank's records repeating with one
+// period, every rank stops exchanging them at the same epoch and reuses,
+// in turn, the ones it received over the last period; a rank whose own
+// records then break the period stops the program.
+bool g_split_stable = false;
+bool g_stable_locked = false;
+int g_stable_period = 0, g_stable_phase = 0;
+std::vector<long long> g_out_hist[2], g_in_hist[2];   // [0]: last epoch, [1]: the one before
+std::vector<long long> g_lock_out[2], g_lock_in[2];   // what each phase sends and receives
+long long g_stable_reused = 0;
+struct Range { const char* lo; size_t bytes; };
+// This rank's own part of the epoch: what its gets write and its puts read.
+std::vector<Range> g_local_written, g_local_read;
+bool g_local_unknown = false;
+// ompx__split_ctl, where kernels read it: a device global the host copies
+// to before each launch. The CPU cannot store into GPU memory coherently
+// here, and host memory every wave reads would cost each launch far more.
+ompx_split_ctl* g_split_ctl_dev = nullptr;
+// The ranges of the kernel being split, those before the fence first.
+struct SplitRange { long long lo, hi; };
+std::vector<SplitRange> g_split_ranges;
+size_t g_split_before = 0, g_split_at = 0;
+long long g_split_lo = 0, g_split_hi = 0;     // its last window, for the stats
+long long g_split_rest = 0;
+// OMPX_SPLIT_STATS=1: seconds in each part of the split launches, printed
+// by ompx_finalize -- before the first launch (the record's wait, the
+// window), the first launch, the fence, the second launch.
+bool g_split_stats = false;
+double g_split_t[4] = {0, 0, 0, 0}, g_split_mark = 0;
+long long g_split_n = 0, g_split_whole = 0;
+// Launches that found no fence deferred, and those that made it whole: the
+// record could not say (unknown) or every iteration touches the epoch's
+// transfers (none left).
+long long g_split_idle = 0, g_split_unknown = 0, g_split_none = 0;
+void split_tick(int part) {
+    if (!g_split_stats) return;
+    const double now = MPI_Wtime();
+    if (part >= 0) g_split_t[part] += now - g_split_mark;
+    g_split_mark = now;
+}
+
+// A chain of split kernels (ompx__split_begin_launch): what each still has to
+// run after the fence, with a copy of its launch to make it again. A launch
+// is copied only when nothing of it is read from the host at launch time --
+// every argument a literal or a zero-length map of what is already mapped --
+// so making it later hands the kernel what it would have been handed now.
+struct KernelArgsCopy {   // libomptarget's KernelArgsTy, LLVM 19 to 22
+    uint32_t version, num_args;
+    void** base_ptrs;
+    void** ptrs;
+    int64_t* sizes;
+    int64_t* types;
+    void** names;
+    void** mappers;
+    uint64_t tripcount;
+    uint64_t flags;
+    uint32_t num_teams[3], thread_limit[3];
+    uint32_t dyn_cgroup_mem;
+};
+static_assert(sizeof(KernelArgsCopy) == 104 && offsetof(KernelArgsCopy, tripcount) == 56,
+              "KernelArgsTy layout (GICCSplitLaunch.cpp)");
+struct ChainedLaunch {
+    void* loc;
+    long long device;
+    int teams, threads;
+    void* host_ptr;
+    KernelArgsCopy args;
+    std::vector<void*> base_ptrs, ptrs;
+    std::vector<int64_t> sizes, types;
+    std::vector<ompx_split_access> acc;
+    std::vector<SplitRange> rest;
+};
+std::vector<ChainedLaunch> g_chain;
+bool g_split_chain = true;          // OMPX_SPLIT_CHAIN=0 turns it off
+bool g_split_chaining = false;      // the kernel being split ends at the window
+long long g_chain_n = 0, g_chain_conflict = 0, g_chain_copyless = 0;
+constexpr int64_t kMapLiteral = 0x100;   // OMP_TGT_MAPTYPE_LITERAL
+constexpr uint64_t kFlagNoWait = 1;
+
+// The copy of a launch the runtime can make again later; false when the
+// launch reads host memory, has a mapper or does not wait for the kernel.
+bool copy_launch(ChainedLaunch& c, const void* kargs) {
+    std::memcpy(&c.args, kargs, sizeof(c.args));
+    const KernelArgsCopy& a = c.args;
+    if (a.flags & kFlagNoWait) return false;
+    for (uint32_t i = 0; i < a.num_args; ++i) {
+        if (a.mappers != nullptr && a.mappers[i] != nullptr) return false;
+        if (!(a.types[i] & kMapLiteral) && a.sizes[i] != 0) return false;
+    }
+    c.base_ptrs.assign(a.base_ptrs, a.base_ptrs + a.num_args);
+    c.ptrs.assign(a.ptrs, a.ptrs + a.num_args);
+    c.sizes.assign(a.sizes, a.sizes + a.num_args);
+    c.types.assign(a.types, a.types + a.num_args);
+    return true;
+}
+
+static_assert(offsetof(ompx_split_access, stride) == 8 &&
+                  offsetof(ompx_split_access, extent) == 8 + 8 * OMPX_SPLIT_DIMS_MAX &&
+                  offsetof(ompx_split_access, offset) == 8 + 16 * OMPX_SPLIT_DIMS_MAX &&
+                  offsetof(ompx_split_access, dims) == 16 + 16 * OMPX_SPLIT_DIMS_MAX &&
+                  offsetof(ompx_split_access, mapped) == 32 + 16 * OMPX_SPLIT_DIMS_MAX &&
+                  sizeof(ompx_split_access) == 40 + 16 * OMPX_SPLIT_DIMS_MAX,
+              "ompx_split_access layout (GICCSplitLaunch.cpp)");
+
+// An access's box origin in the heap, or null when it is not in it: a device
+// address as is; a mapped variable where ompx_bind put it, found by the
+// variable's own host address.
+const char* heap_box(const ompx_split_access& a) {
+    if (!a.mapped) return a.box;
+    for (const HeapBind& b : g_binds)
+        if (a.box >= b.host && a.box < b.host + b.bytes) return b.dev + (a.box - b.host) + a.offset;
+    return nullptr;
+}
+
+// Byte span [lo, hi) of everything an access reaches.
+void access_span(const ompx_split_access& a, const char* box, const char** lo, const char** hi) {
+    int64_t mn = 0, mx = 0;
+    for (int d = 0; d < a.dims; ++d) {
+        const int64_t span = a.stride[d] * (a.extent[d] - 1);
+        (span < 0 ? mn : mx) += span;
+    }
+    *lo = box + mn;
+    *hi = box + mx + a.elem;
+}
+
+// An access's box origin as a device address: in the heap (heap_box), or a
+// mapped variable outside it through libomptarget's mapping; null if
+// neither.
+const char* device_box(const ompx_split_access& a) {
+    if (const char* b = heap_box(a)) return b;
+    if (!a.mapped) return nullptr;
+    void* d = omp_get_mapped_ptr(a.box, omp_get_default_device());
+    return d == nullptr ? nullptr : static_cast<const char*>(d) + a.offset;
+}
+
+// The digits of a byte offset in a layout of strides s[0] > s[1] > ...,
+// each a multiple of the next and the last one elem; false when the offset
+// is not on an element, or a digit with its box's extent leaves its dim.
+bool layout_digits(const ompx_split_access& a, int64_t off, int64_t* q) {
+    for (int d = 0; d < a.dims; ++d) {
+        q[d] = ompx__floor_div(off, a.stride[d]);
+        off -= q[d] * a.stride[d];
+        if (d > 0 && q[d] + a.extent[d] > a.stride[d - 1] / a.stride[d]) return false;
+    }
+    return off == 0;
+}
+
+// Whether two accesses may reach a common byte. Exact for two boxes of one
+// layout (the same strides, each a multiple of the next, in decreasing
+// order, the last one the element): their digits are compared dim by dim --
+// from the start of the variable for two boxes of one mapped variable,
+// whose offsets into it are known, else from the lower origin. Otherwise
+// only their spans are compared.
+bool accesses_meet(const ompx_split_access& a, const ompx_split_access& b) {
+    const char* ba = device_box(a);
+    const char* bb = device_box(b);
+    if (ba == nullptr || bb == nullptr) return true;
+    const char *alo, *ahi, *blo, *bhi;
+    access_span(a, ba, &alo, &ahi);
+    access_span(b, bb, &blo, &bhi);
+    if (ahi <= blo || bhi <= alo) return false;
+    if (a.dims != b.dims || a.elem != b.elem || a.dims <= 0 || a.dims > OMPX_SPLIT_DIMS_MAX)
+        return true;
+    for (int d = 0; d < a.dims; ++d) {
+        if (a.stride[d] != b.stride[d] || a.stride[d] <= 0) return true;
+        if (d + 1 < a.dims && (a.stride[d] <= a.stride[d + 1] || a.stride[d] % a.stride[d + 1]))
+            return true;
+    }
+    if (a.stride[a.dims - 1] != a.elem) return true;
+    int64_t qa[OMPX_SPLIT_DIMS_MAX], qb[OMPX_SPLIT_DIMS_MAX];
+    if (a.mapped && b.mapped && a.box == b.box) {
+        if (!layout_digits(a, a.offset, qa) || !layout_digits(b, b.offset, qb)) return true;
+    } else {
+        const bool a_low = ba <= bb;
+        const int64_t diff = a_low ? bb - ba : ba - bb;
+        int64_t* lowq = a_low ? qa : qb;
+        int64_t* highq = a_low ? qb : qa;
+        for (int d = 0; d < a.dims; ++d) lowq[d] = 0;
+        if (!layout_digits(a_low ? b : a, diff, highq)) return true;
+        for (int d = 1; d < a.dims; ++d)
+            if ((a_low ? a : b).extent[d] > a.stride[d - 1] / a.stride[d]) return true;
+    }
+    for (int d = 0; d < a.dims; ++d)
+        if (qa[d] + a.extent[d] <= qb[d] || qb[d] + b.extent[d] <= qa[d]) return false;
+    return true;
+}
+
+// Whether the kernel's accesses may meet what a chained kernel still has to
+// do, where either writes.
+bool meets_chain(int n, const ompx_split_access* acc) {
+    for (size_t k = 0; k < g_chain.size(); ++k)
+        for (size_t j = 0; j < g_chain[k].acc.size(); ++j) {
+            const ompx_split_access& b = g_chain[k].acc[j];
+            for (int i = 0; i < n; ++i)
+                if ((acc[i].store || b.store) && accesses_meet(acc[i], b)) return true;
+        }
+    return false;
+}
+
+// What the next launches of a split kernel run (ompx__split_ctl). A copy
+// from pageable memory: done when it returns, before the next launch.
+// ompx__split_ctl is a global of the OpenMP device image, which libomptarget
+// loaded and the HIP runtime has never seen, so libomptarget copies it.
+void set_split(int range, long long lo, long long hi) {
+    const ompx_split_ctl ctl{range, 0, lo, hi};
+    if (omp_target_memcpy(g_split_ctl_dev, &ctl, sizeof(ctl), 0, 0, g_local_device,
+                          omp_get_initial_device()) != 0)
+        die("set what a split kernel runs: omp_target_memcpy failed");
+}
+
+void record(int peer, bool put, size_t remote, const char* local, size_t bytes) {
+    if (bytes == 0 || peer < 0) return;
+    g_epoch.push_back(EpochOp{peer, put, remote, local, bytes});
+}
+
+// The epoch's records have arrived: lock them when every rank said its own
+// were those of its previous epoch (OMPX_SPLIT_STABLE).
+void manifest_arrived() {
+    if (!g_split_stable || g_stable_locked || g_manifest_in.empty()) return;
+    int n = 0;
+    MPI_Comm_size(MPI_COMM_WORLD, &n);
+    long long all = 3;
+    for (int r = 0; r < n; ++r) all &= g_manifest_in[(size_t)r * kManifestWords + kManifestSame];
+    // This epoch's records, sent and received, in the history.
+    std::vector<long long> in = g_manifest_in;
+    for (int r = 0; r < n; ++r) in[(size_t)r * kManifestWords + kManifestSame] = 0;
+    g_in_hist[1] = std::move(g_in_hist[0]);
+    g_in_hist[0] = std::move(in);
+    if (all == 0) return;
+    // The next epoch repeats the one `period` back: for period 2 the one
+    // before this, then this one.
+    g_stable_period = (all & 1) ? 1 : 2;
+    g_lock_out[0] = g_stable_period == 1 ? g_out_hist[0] : g_out_hist[1];
+    g_lock_in[0] = g_stable_period == 1 ? g_in_hist[0] : g_in_hist[1];
+    g_lock_out[1] = g_out_hist[0];
+    g_lock_in[1] = g_in_hist[0];
+    g_stable_phase = 0;
+    g_stable_locked = true;
+}
+
+void wait_manifest() {
+    if (g_manifest_req == MPI_REQUEST_NULL) return;
+    MPI_Wait(&g_manifest_req, MPI_STATUS_IGNORE);
+    manifest_arrived();
+}
+
+// The window of the kernel's iterations [0, iterations) that the epoch's
+// transfers leave alone, as split_begin hands it to the kernel: [lo, hi),
+// wrapping when lo > hi. Empty (lo == hi, *len 0) when nothing is left.
+void quiet_window(int n, const ompx_split_access* acc, long long iterations,
+                  const std::vector<Range>& written, const std::vector<Range>& read,
+                  long long* lo, long long* hi, long long* len) {
+    std::vector<std::pair<long long, long long>> hit;
+    auto meet = [&](const ompx_split_access& a, const Range& r) {
+        const char* box = heap_box(a);
+        if (box == nullptr) return;   // not in the heap: no transfer reaches it
+        int64_t l = 0, h = -1;
+        ompx__hull(r.lo, r.bytes, box, a.dims, a.loop_dims,
+                   reinterpret_cast<const int64_t*>(a.stride),
+                   reinterpret_cast<const int64_t*>(a.extent), a.elem, l, h);
+        if (h > iterations - 1) h = iterations - 1;
+        if (l < 0) l = 0;
+        if (l <= h) hit.push_back({l, h});
+    };
+    for (int i = 0; i < n; ++i) {
+        // A load may not see what arrives; a store may not race with it,
+        // nor change what a transfer still reads.
+        for (const Range& r : written) meet(acc[i], r);
+        if (acc[i].store)
+            for (const Range& r : read) meet(acc[i], r);
+    }
+    if (hit.empty()) {
+        *lo = 0;
+        *hi = iterations;
+        *len = iterations;
+        return;
+    }
+    std::sort(hit.begin(), hit.end());
+    std::vector<std::pair<long long, long long>> merged;
+    for (const auto& x : hit) {
+        if (!merged.empty() && x.first <= merged.back().second + 1)
+            merged.back().second = std::max(merged.back().second, x.second);
+        else
+            merged.push_back(x);
+    }
+    // The widest gap, the one past the last interval wrapping to the first.
+    long long best = -1, start = 0;
+    for (size_t i = 0; i < merged.size(); ++i) {
+        const long long from = merged[i].second + 1;
+        const long long to = i + 1 < merged.size() ? merged[i + 1].first
+                                                   : merged[0].first + iterations;
+        if (to - from > best) {
+            best = to - from;
+            start = from;
+        }
+    }
+    *len = best;
+    *lo = start % iterations;
+    *hi = (start + best) % iterations;
+}
+
+// A deferred fence, made now; then what the chained kernels left, in order.
+// Defined after the quiet, which it makes.
+void fence_flush();
+
 }  // namespace
 
 extern "C" {
@@ -315,9 +666,33 @@ void ompx_init() {
     omp_set_default_device(g_local_device);
 
     create_heap();
+    MPI_Comm_dup(MPI_COMM_WORLD, &g_fence_comm);
+    const char* split_env = std::getenv("OMPX_SPLIT");
+    g_split_off = split_env != nullptr && std::atoi(split_env) == 0;
+    const char* stable_env = std::getenv("OMPX_SPLIT_STABLE");
+    g_split_stable = stable_env != nullptr && std::atoi(stable_env) != 0;
+    const char* chain_env = std::getenv("OMPX_SPLIT_CHAIN");
+    g_split_chain = chain_env == nullptr || std::atoi(chain_env) != 0;
+    const char* stats_env = std::getenv("OMPX_SPLIT_STATS");
+    g_split_stats = stats_env != nullptr && std::atoi(stats_env) != 0;
 }
 
 void ompx_finalize() {
+    fence_flush();
+    if (g_split_stats)
+        std::fprintf(stderr, "[giomp] rank %d: %lld split launches (%lld run whole before the "
+                     "fence; not split: %lld with no fence deferred, %lld unknown, %lld with "
+                     "nothing left): before %.4f s, inside %.4f s, fence %.4f s, outside %.4f s; "
+                     "last window [%lld, %lld), %lld iterations outside\n", ompx_get_rank_num(),
+                     g_split_n, g_split_whole, g_split_idle, g_split_unknown, g_split_none,
+                     g_split_t[0], g_split_t[1], g_split_t[2], g_split_t[3], g_split_lo,
+                     g_split_hi, g_split_rest);
+    if (g_split_stats)
+        std::fprintf(stderr, "[giomp] rank %d: chain: %lld kernels chained, %lld stopped by a "
+                     "conflict, %lld launches not copyable; %lld epochs reused the locked "
+                     "records\n", ompx_get_rank_num(), g_chain_n, g_chain_conflict,
+                     g_chain_copyless, g_stable_reused);
+    if (g_fence_comm != MPI_COMM_NULL) MPI_Comm_free(&g_fence_comm);
     if (g_runtime != nullptr) g_runtime->reset();
     if (g_heap_base != nullptr) {
         (void)gpuFree(g_heap_base);
@@ -368,6 +743,7 @@ int ompx_get_num_ranks() {
 
 void* ompx_alloc(size_t bytes) {
     if (g_heap_base == nullptr) die("ompx_alloc before ompx_init");
+    fence_flush();
     const size_t want = align_up(bytes, kHeapAlign);
 
     for (size_t i = 0; i < g_blocks.size(); ++i) {
@@ -390,6 +766,7 @@ void* ompx_alloc(size_t bytes) {
 }
 
 void* ompx_bind(void* host_ptr, size_t bytes) {
+    fence_flush();
     void* dev = ompx_alloc(bytes);
     // Bind the heap allocation to the application's host pointer so its
     // existing `map` clauses and compute kernels transparently use it.
@@ -405,6 +782,7 @@ void* ompx_bind(void* host_ptr, size_t bytes) {
 
 void ompx_free(void* ptr) {
     if (ptr == nullptr || g_heap_base == nullptr) return;
+    fence_flush();
     const size_t off = offset_of(ptr, "ompx_free");
     // Drop any ompx_bind record first: a stale one keeps resolving a host
     // pointer whose heap block is about to be handed to the next allocation.
@@ -449,8 +827,10 @@ void* ompx_peer_ptr(int peer, const void* addr) {
 
 void ompx_put_host(int peer, void* dst, const void* src, size_t bytes) {
     if (g_runtime == nullptr) die("ompx_put before ompx_init");
+    fence_flush();
     const size_t src_off = offset_of(src, "ompx_put src");
     const size_t dst_off = offset_of(dst, "ompx_put dst");
+    record(peer, true, dst_off, g_heap_base + src_off, bytes);
 
     // Same node: copy straight into the peer's heap over NVLink/xGMI. The copy
     // rides the runtime's IPC stream, which ompx_quiet synchronizes.
@@ -479,8 +859,10 @@ void ompx_put_host(int peer, void* dst, const void* src, size_t bytes) {
 
 void ompx_get_host(int peer, void* dst, const void* src, size_t bytes) {
     if (g_runtime == nullptr) die("ompx_get before ompx_init");
+    fence_flush();
     const size_t dst_off = offset_of(dst, "ompx_get dst");
     const size_t src_off = offset_of(src, "ompx_get src");
+    record(peer, false, src_off, g_heap_base + dst_off, bytes);
 
     void* peer_base = g_ipc_enabled ? g_runtime->peer_mapped(peer, g_heap.index)
                                     : nullptr;
@@ -513,6 +895,7 @@ unsigned long long ompx_signal_read_host(int sig) {
 
 void ompx_signal_reset(int sig) {
     check_slot(sig, "ompx_signal_reset");
+    fence_flush();
     __atomic_store_n(&g_sig_host[sig], 0, __ATOMIC_RELEASE);
 }
 
@@ -521,6 +904,7 @@ void ompx_signal_reset(int sig) {
 // forever.
 void ompx_signal_wait_host(int sig, unsigned long long ge) {
     check_slot(sig, "ompx_signal_wait");
+    fence_flush();
     while (__atomic_load_n(&g_sig_host[sig], __ATOMIC_ACQUIRE) < ge) {
         ompx_trigger_host();          // release plain puts still staged
         g_runtime->progress();
@@ -533,6 +917,8 @@ void ompx_put_signal_host(int peer, void* dst, const void* src, size_t bytes,
                           int sig, unsigned long long value) {
     if (g_runtime == nullptr) die("ompx_put_signal before ompx_init");
     check_slot(sig, "ompx_put_signal");
+    fence_flush();
+    g_epoch_untracked = true;   // the signal lands outside the heap
     const size_t src_off = offset_of(src, "ompx_put_signal src");
     const size_t dst_off = offset_of(dst, "ompx_put_signal dst");
     if (g_dwq_enabled) {
@@ -554,6 +940,8 @@ void ompx_stage_put_signal(int peer, void* dst, const void* src, size_t bytes,
                            int sig, unsigned long long value) {
     if (g_runtime == nullptr) die("ompx_stage_put_signal before ompx_init");
     check_slot(sig, "ompx_stage_put_signal");
+    fence_flush();
+    g_epoch_untracked = true;   // a kernel releases it, and the signal lands outside the heap
     if (!g_dwq_enabled) return;
     stage_signal_dwq(peer, offset_of(dst, "ompx_stage_put_signal dst"),
                      offset_of(src, "ompx_stage_put_signal src"), bytes, sig, value);
@@ -584,7 +972,12 @@ static void send_deferred_pipelined() {
     __atomic_store_n(&q->n, 0u, __ATOMIC_RELEASE);
 }
 
-void ompx_quiet_host() {
+}  // extern "C"
+
+namespace {
+
+// Completes host-issued transfers and everything kernels handed over.
+void quiet_now() {
     if (g_runtime == nullptr) return;
     pipe_check();
     send_deferred_pipelined();
@@ -602,38 +995,261 @@ void ompx_quiet_host() {
     g_sig_next_cell = 0;          // every staged signal has completed
 }
 
+void fence_flush() {
+    if (!g_fence_pending) return;
+    g_fence_pending = false;
+    wait_manifest();
+    quiet_now();
+    MPI_Barrier(g_fence_comm);
+    if (g_chain.empty()) return;
+    split_tick(-1);
+    for (ChainedLaunch& c : g_chain)
+        for (const SplitRange& r : c.rest) {
+            set_split(1, r.lo, r.hi);
+            // libomptarget rewrites the arguments in place: a fresh copy each time.
+            KernelArgsCopy a = c.args;
+            a.base_ptrs = c.base_ptrs.data();
+            a.ptrs = c.ptrs.data();
+            a.sizes = c.sizes.data();
+            a.types = c.types.data();
+            a.tripcount = (uint64_t)(r.hi - r.lo);
+            if (__tgt_target_kernel(c.loc, c.device, c.teams, c.threads, c.host_ptr, &a) != 0)
+                die("a chained kernel's remaining range failed to launch");
+        }
+    set_split(0, 0, 0);
+    g_chain.clear();
+    split_tick(3);
+}
+
+}  // namespace
+
+extern "C" {
+
+void ompx_quiet_host() {
+    fence_flush();
+    quiet_now();
+}
+
 void ompx_barrier() {
+    fence_flush();
     MPI_Barrier(MPI_COMM_WORLD);
 }
 
 void ompx_fence() {
-    ompx_quiet_host();
-    ompx_barrier();
+    fence_flush();
+    quiet_now();
+    MPI_Barrier(MPI_COMM_WORLD);
 }
 
-// A deferred fence (gicc/omp.h): not deferred on libfabric yet, so no
-// kernel is ever split around one.
+// The fence at the end of an epoch, deferred: what this rank did to each
+// other's heap goes out now, and the fence is made where ompx__fence_flush
+// or the next ompx call says, or around a kernel split by
+// ompx__split_begin.
 void ompx__fence_defer() {
-    ompx_fence();
+    fence_flush();
+    if (g_runtime == nullptr) return;
+    if (g_split_off) {
+        ompx_fence();
+        return;
+    }
+    // Pipelined puts a kernel left for the quiet go now, recorded; and under
+    // DWQ the descriptors the epoch's puts staged are released now, so the
+    // transfers run while the kernels compute instead of waiting for the fence.
+    send_deferred_pipelined();
+    ompx_trigger_host();
+    const int n = ompx_get_num_ranks(), me = ompx_get_rank_num();
+    g_manifest_out.assign((size_t)n * kManifestWords, 0);
+    if (!g_stable_locked) g_manifest_in.assign((size_t)n * kManifestWords, 0);
+    g_local_written.clear();
+    g_local_read.clear();
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    g_local_unknown = g_epoch_untracked || (q != nullptr && q->dev_comm);
+    if (q != nullptr) q->dev_comm = 0;
+    for (const EpochOp& op : g_epoch) {
+        // What it does here.
+        (op.put ? g_local_read : g_local_written).push_back(Range{op.local, op.bytes});
+        if (op.peer == me) {
+            (op.put ? g_local_written : g_local_read)
+                .push_back(Range{g_heap_base + op.remote, op.bytes});
+            continue;
+        }
+        long long* m = &g_manifest_out[(size_t)op.peer * kManifestWords];
+        if (m[0] == kManifestUnknown) continue;
+        if (m[0] == kManifestMax) {
+            m[0] = kManifestUnknown;
+            continue;
+        }
+        long long* e = m + 1 + 3 * m[0]++;
+        e[0] = (long long)op.remote;
+        e[1] = (long long)op.bytes;
+        e[2] = op.put ? 1 : 0;
+    }
+    if (g_local_unknown)
+        for (int r = 0; r < n; ++r) g_manifest_out[(size_t)r * kManifestWords] = kManifestUnknown;
+    g_epoch.clear();
+    g_epoch_untracked = false;
+    if (g_split_stable) {
+        if (g_stable_locked) {
+            // The others go on from what they received for this phase; so
+            // must these.
+            if (g_manifest_out != g_lock_out[g_stable_phase])
+                die("OMPX_SPLIT_STABLE=1, but this epoch transfers other ranges than the "
+                    "epoch a period before");
+            g_manifest_in = g_lock_in[g_stable_phase];
+            g_stable_phase = (g_stable_phase + 1) % g_stable_period;
+            ++g_stable_reused;
+            g_fence_pending = true;
+            return;
+        }
+        const long long same = (g_manifest_out == g_out_hist[0] ? 1 : 0) |
+                               (g_manifest_out == g_out_hist[1] ? 2 : 0);
+        g_out_hist[1] = std::move(g_out_hist[0]);
+        g_out_hist[0] = g_manifest_out;
+        for (int r = 0; r < n; ++r)
+            g_manifest_out[(size_t)r * kManifestWords + kManifestSame] = same;
+    }
+    MPI_Ialltoall(g_manifest_out.data(), kManifestWords, MPI_LONG_LONG, g_manifest_in.data(),
+                  kManifestWords, MPI_LONG_LONG, g_fence_comm, &g_manifest_req);
+    g_fence_pending = true;
 }
 
-void ompx__fence_flush() {}
-
-int ompx__split_begin(unsigned long long, int, const ompx_split_access*, long long) {
-    return 0;
+void ompx__fence_flush() {
+    fence_flush();
 }
 
-int ompx__split_begin_launch(unsigned long long, int, const ompx_split_access*, long long, void*,
-                             long long, int, int, void*, void*) {
-    return 0;
+// Before a launch of a kernel the plugin can split. With a fence deferred,
+// works out which of its iterations touch what the epoch's transfers do:
+// none -- the kernel runs whole and the fence stays deferred (0); some --
+// the kernel is to run in the ranges ompx__split_next hands out, the others
+// first, then the fence, then the rest (1); all of them, or the record
+// cannot say -- the fence is made now and the kernel runs whole (0).
+int ompx__split_begin(unsigned long long kernel, int n, const ompx_split_access* acc,
+                      long long iterations) {
+    return ompx__split_begin_launch(kernel, n, acc, iterations, nullptr, 0, 0, 0, nullptr,
+                                    nullptr);
 }
 
-int ompx__split_next(unsigned long long*) {
-    return 0;
+int ompx__split_begin_launch(unsigned long long kernel, int n, const ompx_split_access* acc,
+                             long long iterations, void* loc, long long device, int teams,
+                             int threads, void* host_ptr, void* kernel_args) {
+    (void)kernel;
+    g_split_chaining = false;
+    if (!g_fence_pending) {
+        ++g_split_idle;
+        return 0;
+    }
+    // Whatever runs of this kernel now runs before what the chain left:
+    // where they may touch one another, the chain goes first.
+    if (!g_chain.empty() && (n < 0 || meets_chain(n, acc))) {
+        ++g_chain_conflict;
+        fence_flush();
+        ++g_split_idle;
+        return 0;
+    }
+    split_tick(-1);
+    if (g_split_ctl_dev == nullptr || iterations <= 0 || n < 0) {
+        fence_flush();
+        return 0;
+    }
+    wait_manifest();
+    const int ranks = ompx_get_num_ranks();
+    bool known = !g_local_unknown;
+    std::vector<Range> written = g_local_written, read = g_local_read;
+    for (int r = 0; r < ranks && known; ++r) {
+        const long long* m = &g_manifest_in[(size_t)r * kManifestWords];
+        if (m[0] == kManifestUnknown || m[0] < 0 || m[0] > kManifestMax) {
+            known = false;
+            break;
+        }
+        for (long long i = 0; i < m[0]; ++i) {
+            const long long* e = m + 1 + 3 * i;
+            (e[2] ? written : read).push_back(Range{g_heap_base + e[0], (size_t)e[1]});
+        }
+    }
+    if (!known) {
+        ++g_split_unknown;
+        fence_flush();
+        return 0;
+    }
+    long long lo = 0, hi = 0, len = 0;
+    quiet_window(n, acc, iterations, written, read, &lo, &hi, &len);
+    if (len == iterations) {   // the kernel touches none of it
+        ++g_split_whole;
+        return 0;
+    }
+    if (len == 0) {
+        ++g_split_none;
+        fence_flush();
+        return 0;
+    }
+    // The window [lo, lo + len) of [0, iterations), wrapping past the end,
+    // and the rest: each as one or two ranges.
+    g_split_ranges.clear();
+    auto add = [](long long a, long long b) {
+        if (a < b) g_split_ranges.push_back(SplitRange{a, b});
+    };
+    const long long end = lo + len;
+    add(lo, std::min(end, iterations));
+    add(0, end - iterations);
+    g_split_before = g_split_ranges.size();
+    add(std::max(end - iterations, 0LL), lo);
+    add(end, iterations);
+    g_split_at = 0;
+    g_split_lo = lo;
+    g_split_hi = hi;
+    g_split_rest = iterations - len;
+    ++g_split_n;
+    // A chain: the window now, the rest after the one fence.
+    if (g_split_chain && kernel_args != nullptr) {
+        ChainedLaunch c;
+        if (copy_launch(c, kernel_args)) {
+            c.loc = loc;
+            c.device = device;
+            c.teams = teams;
+            c.threads = threads;
+            c.host_ptr = host_ptr;
+            c.acc.assign(acc, acc + n);
+            c.rest.assign(g_split_ranges.begin() + g_split_before, g_split_ranges.end());
+            g_split_ranges.resize(g_split_before);
+            g_chain.push_back(std::move(c));
+            g_split_chaining = true;
+            ++g_chain_n;
+        } else {
+            ++g_chain_copyless;
+        }
+    }
+    split_tick(0);
+    return 1;
 }
 
-void ompx__split_ctl_at(ompx_split_ctl*) {}
+// The next range of the kernel being split, set for its next launch, with
+// its length for the launch's trip count; 0 when there is none left. The
+// fence goes between the ranges before it and the others.
+int ompx__split_next(unsigned long long* tripcount) {
+    if (g_split_at == g_split_before && !g_split_chaining) {
+        split_tick(1);
+        fence_flush();
+        split_tick(2);
+    }
+    if (g_split_at >= g_split_ranges.size()) {
+        split_tick(3);
+        set_split(0, 0, 0);
+        g_split_ranges.clear();
+        g_split_before = g_split_at = 0;
+        return 0;
+    }
+    const SplitRange& r = g_split_ranges[g_split_at++];
+    set_split(1, r.lo, r.hi);
+    *tripcount = (unsigned long long)(r.hi - r.lo);
+    return 1;
+}
 
+void ompx__split_ctl_at(ompx_split_ctl* dev) {
+    g_split_ctl_dev = dev;
+}
+
+// No control block the CPU stores into in place here: the kernels read the
+// device global ompx__split_ctl_at names, which set_split copies to.
 ompx_split_ctl* ompx__split_ctl_shared() {
     return nullptr;
 }
