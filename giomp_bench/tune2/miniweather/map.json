@@ -1,0 +1,17 @@
+{
+ "note": "different sources (miniWeather_mpi_omp.cpp vs miniWeather_giomp.cpp): each compute_tendencies_{x,z} has two kernels, the flux one then the tendency one; C_mpi set the second of each, mapped to the second of each here",
+ "c_mpi": {
+  "kernels": {
+   "K7": {
+    "dist_chunk": 8192
+   },
+   "K9": {
+    "dist_chunk": 8192
+   }
+  }
+ },
+ "map": {
+  "__omp_offloading_25e8f0c4_6e019eb5__Z20compute_tendencies_xPdS_S_d_l317": "__omp_offloading_25e8f0c4_6e019eb4__Z20compute_tendencies_xPdS_S_d_l328",
+  "__omp_offloading_25e8f0c4_6e019eb5__Z20compute_tendencies_zPdS_S_d_l376": "__omp_offloading_25e8f0c4_6e019eb4__Z20compute_tendencies_zPdS_S_d_l387"
+ }
+}

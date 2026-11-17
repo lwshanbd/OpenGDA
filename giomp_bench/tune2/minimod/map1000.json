@@ -1,0 +1,17 @@
+{
+ "note": "different sources (minimod-mpi target_3d.c vs minimod-giomp target_3d.c): the same region kernels by function; GiOMP's target_inner_3d has a plain (l152, the one that runs with one GPU per node) and a publishing variant (l148, same-node IPC), both get the MPI inner kernel's choice. C_mpi has no choice on target_pml_3d.",
+ "c_mpi": {
+  "kernels": {
+   "K3": {
+    "teams": 5280
+   }
+  },
+  "note": "final candidate: the winner attributed to K3 alone, K4 left at the runtime choice"
+ },
+ "map": {
+  "__omp_offloading_25e8f0c4_a0016396_target_inner_3d_l58": [
+   "__omp_offloading_25e8f0c4_2f019464__ZL15target_inner_3dxxxxxxxxxxxxPKfS0_S0_S0_PfS0_S1_xS1_x_l148",
+   "__omp_offloading_25e8f0c4_2f019464__ZL15target_inner_3dxxxxxxxxxxxxPKfS0_S0_S0_PfS0_S1_xS1_x_l152"
+  ]
+ }
+}

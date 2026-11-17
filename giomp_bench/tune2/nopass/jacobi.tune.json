@@ -1,0 +1,13 @@
+{
+ "sites": {
+  "*": {
+   "pipeline": false
+  }
+ },
+ "kernels": {
+  "__omp_offloading_25e8f0c4_d20132db__ZL12jacobi_sweepPfPKfiii_l85": {
+   "threads": 32,
+   "dist_chunk": 512
+  }
+ }
+}

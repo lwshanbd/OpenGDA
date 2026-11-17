@@ -1,0 +1,16 @@
+{
+ "note": "different sources (jacobi_mpi_omp.cpp vs jacobi_giomp.cpp): the one sweep kernel, by function",
+ "c_mpi": {
+  "kernels": {
+   "K1": {
+    "threads": 32,
+    "dist_chunk": 512
+   }
+  }
+ },
+ "map": {
+  "__omp_offloading_25e8f0c4_d20132dc__ZL12jacobi_sweepPfPKfiii_l75": [
+   "__omp_offloading_25e8f0c4_d20132db__ZL12jacobi_sweepPfPKfiii_l85"
+  ]
+ }
+}

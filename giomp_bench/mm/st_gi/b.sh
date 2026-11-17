@@ -1,0 +1,6 @@
+#!/bin/bash
+source /shared/data1/Users/l1065028/giomp_ib_test/env_cudampi.sh >/dev/null 2>&1
+T=/shared/data1/Users/l1065028/giomp_ib_test
+export GICC_ROOT=/shared/data1/Users/l1065028/new-gicc GIOMP_LIBDIR=$T/lib2
+cd /shared/data1/Users/l1065028/giomp_bench/mm/st_gi
+GIOMP_LINK_FLAGS=-Wl,--device-linker=--save-temps FORCE_LTO=1 PIPE=0 bash ../build_lto.sh $PWD/mm_v 2>&1 | grep -E " error|BUILT"

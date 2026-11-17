@@ -1,0 +1,14 @@
+{
+ "note": "same source (moe.cpp): MPI_MOE=1 and MOE_GIOMP=4 builds share kernel ids",
+ "c_mpi": {
+  "kernels": {
+   "K4": {
+    "teams": 132,
+    "threads": 1024
+   }
+  }
+ },
+ "map": {
+  "__omp_offloading_25e8f0c4_9801adb5__ZN12_GLOBAL__N_15Layer5routeEv_l226": "__omp_offloading_25e8f0c4_9801adb5__ZN12_GLOBAL__N_15Layer5routeEv_l226"
+ }
+}

@@ -1,0 +1,43 @@
+{
+ "note": "different sources (src vs src-giomp, the same kernels but the halo exchange): mapped by function and line, which only the halo files change",
+ "c_mpi": {
+  "kernels": {
+   "K0": {
+    "dist_chunk": 512
+   },
+   "K1": {
+    "dist_chunk": 512
+   },
+   "K13": {
+    "teams": 1056
+   },
+   "K17": {
+    "teams": 1056
+   },
+   "K173": {
+    "dist_chunk": 512
+   },
+   "K2": {
+    "dist_chunk": 512
+   },
+   "K31": {
+    "dist_chunk": 2048
+   },
+   "K36": {
+    "dist_chunk": 512
+   }
+  },
+  "note": "confirmation of the combination: chunk 512 on the five stable hot kernels, 2048 on calc_dt, teams 1056 on the two advec_mom kernels"
+ },
+ "map": {
+  "__omp_offloading_25e8f0c4_20008c50__Z10PdV_kernelbbiiiidR10field_type_l104": "__omp_offloading_25e8f0c4_d2007ce9__Z10PdV_kernelbbiiiidR10field_type_l104",
+  "__omp_offloading_25e8f0c4_20008c50__Z10PdV_kernelbbiiiidR10field_type_l60": "__omp_offloading_25e8f0c4_d2007ce9__Z10PdV_kernelbbiiiidR10field_type_l60",
+  "__omp_offloading_25e8f0c4_20008c53__Z16advec_mom_kernelbiiiiRN6clover8Buffer2DIdEER10field_typeiii_l157": "__omp_offloading_25e8f0c4_d2007cec__Z16advec_mom_kernelbiiiiRN6clover8Buffer2DIdEER10field_typeiii_l157",
+  "__omp_offloading_25e8f0c4_20008c53__Z16advec_mom_kernelbiiiiRN6clover8Buffer2DIdEER10field_typeiii_l252": "__omp_offloading_25e8f0c4_d2007cec__Z16advec_mom_kernelbiiiiRN6clover8Buffer2DIdEER10field_typeiii_l252",
+  "__omp_offloading_25e8f0c4_20008c65__Z16viscosity_kernelbiiiiR10field_type_l46": "__omp_offloading_25e8f0c4_d2007cfe__Z16viscosity_kernelbiiiiR10field_type_l46",
+  "__omp_offloading_25e8f0c4_20008c51__Z17accelerate_kernelbiiiidR10field_type_l54": "__omp_offloading_25e8f0c4_d2007cea__Z17accelerate_kernelbiiiidR10field_type_l54",
+  "__omp_offloading_25e8f0c4_20008c55__Z14calc_dt_kernelbiiiidddddR10field_typeRdRiS1_S1_S2_S2_S2__l62": "__omp_offloading_25e8f0c4_d2007cee__Z14calc_dt_kernelbiiiidddddR10field_typeRdRiS1_S1_S2_S2_S2__l62",
+  "__omp_offloading_25e8f0c4_20008c5c__Z16ideal_gas_kernelbiiiiR10field_typeRN6clover8Buffer2DIdEES4__l44": "__omp_offloading_25e8f0c4_d2007cf5__Z16ideal_gas_kernelbiiiiR10field_typeRN6clover8Buffer2DIdEES4__l44"
+ },
+ "unmapped": []
+}

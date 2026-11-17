@@ -1,0 +1,16 @@
+{
+ "note": "as map1000.json: MPI target_inner_3d (l58) -> GiOMP target_inner_3d l152 (plain) and l148 (publishing variant). C_mpi is the agent's reported best (trial 27).",
+ "c_mpi": {
+  "kernels": {
+   "K3": {
+    "dist_chunk": 8192
+   }
+  }
+ },
+ "map": {
+  "__omp_offloading_25e8f0c4_a0016396_target_inner_3d_l58": [
+   "__omp_offloading_25e8f0c4_2f019464__ZL15target_inner_3dxxxxxxxxxxxxPKfS0_S0_S0_PfS0_S1_xS1_x_l148",
+   "__omp_offloading_25e8f0c4_2f019464__ZL15target_inner_3dxxxxxxxxxxxxPKfS0_S0_S0_PfS0_S1_xS1_x_l152"
+  ]
+ }
+}

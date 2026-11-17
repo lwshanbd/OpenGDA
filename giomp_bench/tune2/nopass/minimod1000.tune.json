@@ -1,0 +1,15 @@
+{
+ "sites": {
+  "*": {
+   "pipeline": false
+  }
+ },
+ "kernels": {
+  "__omp_offloading_25e8f0c4_2f019464__ZL15target_inner_3dxxxxxxxxxxxxPKfS0_S0_S0_PfS0_S1_xS1_x_l148": {
+   "teams": 5280
+  },
+  "__omp_offloading_25e8f0c4_2f019464__ZL15target_inner_3dxxxxxxxxxxxxPKfS0_S0_S0_PfS0_S1_xS1_x_l152": {
+   "teams": 5280
+  }
+ }
+}

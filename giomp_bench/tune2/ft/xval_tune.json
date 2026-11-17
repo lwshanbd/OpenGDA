@@ -1,0 +1,9 @@
+{
+ "sites": {},
+ "kernels": {
+  "__omp_offloading_25e8f0c4_d20132d9__ZN12_GLOBAL__N_19fftz_sendEiPKNS_8dcomplexEPS0_S3_S3_iillllll_l236": {
+   "dist_chunk": 1024,
+   "teams": 264
+  }
+ }
+}

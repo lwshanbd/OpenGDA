@@ -1,0 +1,1 @@
+{"sites": {"*": {"pipeline": false}}, "kernels": {"__omp_offloading_25e8f0c4_2f0121c9__ZN12_GLOBAL__N_15sweepEv_l129": {"dist_chunk": 32768}, "__omp_offloading_25e8f0c4_2f0121c9__ZN12_GLOBAL__N_19copy_backEPfPKf_l152": {"dist_chunk": 4096}}}

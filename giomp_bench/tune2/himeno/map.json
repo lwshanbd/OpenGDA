@@ -1,0 +1,18 @@
+{
+ "note": "same source (himeno_giomp.cpp): C_mpi's kernel ids are the GiOMP build's own",
+ "c_mpi": {
+  "kernels": {
+   "K0": {
+    "dist_chunk": 2048
+   },
+   "K2": {
+    "dist_chunk": 4096
+   }
+  },
+  "note": "confirmation: K0 chunk 2048 and K2 chunk 4096 together"
+ },
+ "map": {
+  "__omp_offloading_25e8f0c4_2f0121c9__ZN12_GLOBAL__N_15sweepEv_l129": "__omp_offloading_25e8f0c4_2f0121c9__ZN12_GLOBAL__N_15sweepEv_l129",
+  "__omp_offloading_25e8f0c4_2f0121c9__ZN12_GLOBAL__N_19copy_backEPfPKf_l152": "__omp_offloading_25e8f0c4_2f0121c9__ZN12_GLOBAL__N_19copy_backEPfPKf_l152"
+ }
+}

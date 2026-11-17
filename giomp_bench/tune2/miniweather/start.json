@@ -1,0 +1,1 @@
+{"kernels": {"__omp_offloading_25e8f0c4_6e019eb4__Z20compute_tendencies_xPdS_S_d_l328": {"dist_chunk": 8192}, "__omp_offloading_25e8f0c4_6e019eb4__Z20compute_tendencies_zPdS_S_d_l387": {"dist_chunk": 8192}}}
