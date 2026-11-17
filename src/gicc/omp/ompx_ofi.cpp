@@ -390,6 +390,15 @@ struct KernelArgsCopy {   // libomptarget's KernelArgsTy, LLVM 19 to 22
 };
 static_assert(sizeof(KernelArgsCopy) == 104 && offsetof(KernelArgsCopy, tripcount) == 56,
               "KernelArgsTy layout (GICCSplitLaunch.cpp)");
+// An access's device box and byte span, looked up once: the chain check runs
+// for every pair of accesses of a kernel and the kernels chained before it,
+// and looking the boxes up per pair (a libomptarget map lookup for a mapped
+// variable) made it most of a split launch's host time.
+struct LocatedAccess {
+    const char* box;   // null: not found, which meets everything
+    const char* lo;
+    const char* hi;
+};
 struct ChainedLaunch {
     void* loc;
     long long device;
@@ -399,6 +408,7 @@ struct ChainedLaunch {
     std::vector<void*> base_ptrs, ptrs;
     std::vector<int64_t> sizes, types;
     std::vector<ompx_split_access> acc;
+    std::vector<LocatedAccess> located;   // acc's device boxes and spans
     std::vector<SplitRange> rest;
 };
 std::vector<ChainedLaunch> g_chain;
@@ -457,11 +467,22 @@ void access_span(const ompx_split_access& a, const char* box, const char** lo, c
 // An access's box origin as a device address: in the heap (heap_box), or a
 // mapped variable outside it through libomptarget's mapping; null if
 // neither.
+// The lookups of mapped variables are kept for the epoch (cleared by
+// ompx__fence_defer): every split launch of a step asks for the same few.
+std::vector<std::pair<const char*, const char*>> g_mapped_seen;
 const char* device_box(const ompx_split_access& a) {
     if (const char* b = heap_box(a)) return b;
     if (!a.mapped) return nullptr;
-    void* d = omp_get_mapped_ptr(a.box, omp_get_default_device());
-    return d == nullptr ? nullptr : static_cast<const char*>(d) + a.offset;
+    const char* d = nullptr;
+    auto seen = std::find_if(g_mapped_seen.begin(), g_mapped_seen.end(),
+                             [&](const auto& e) { return e.first == a.box; });
+    if (seen != g_mapped_seen.end()) {
+        d = seen->second;
+    } else {
+        d = static_cast<const char*>(omp_get_mapped_ptr(a.box, omp_get_default_device()));
+        g_mapped_seen.emplace_back(a.box, d);
+    }
+    return d == nullptr ? nullptr : d + a.offset;
 }
 
 // The digits of a byte offset in a layout of strides s[0] > s[1] > ...,
@@ -482,14 +503,19 @@ bool layout_digits(const ompx_split_access& a, int64_t off, int64_t* q) {
 // from the start of the variable for two boxes of one mapped variable,
 // whose offsets into it are known, else from the lower origin. Otherwise
 // only their spans are compared.
-bool accesses_meet(const ompx_split_access& a, const ompx_split_access& b) {
-    const char* ba = device_box(a);
-    const char* bb = device_box(b);
+// An access's device box and byte span, looked up once (LocatedAccess).
+LocatedAccess locate(const ompx_split_access& a) {
+    LocatedAccess l{device_box(a), nullptr, nullptr};
+    if (l.box != nullptr) access_span(a, l.box, &l.lo, &l.hi);
+    return l;
+}
+
+bool accesses_meet(const ompx_split_access& a, const LocatedAccess& la,
+                   const ompx_split_access& b, const LocatedAccess& lb) {
+    const char* ba = la.box;
+    const char* bb = lb.box;
     if (ba == nullptr || bb == nullptr) return true;
-    const char *alo, *ahi, *blo, *bhi;
-    access_span(a, ba, &alo, &ahi);
-    access_span(b, bb, &blo, &bhi);
-    if (ahi <= blo || bhi <= alo) return false;
+    if (la.hi <= lb.lo || lb.hi <= la.lo) return false;
     if (a.dims != b.dims || a.elem != b.elem || a.dims <= 0 || a.dims > OMPX_SPLIT_DIMS_MAX)
         return true;
     for (int d = 0; d < a.dims; ++d) {
@@ -516,14 +542,18 @@ bool accesses_meet(const ompx_split_access& a, const ompx_split_access& b) {
     return true;
 }
 
-// Whether the kernel's accesses may meet what a chained kernel still has to
-// do, where either writes.
-bool meets_chain(int n, const ompx_split_access* acc) {
+// Whether the kernel's accesses (located in `located`) may meet what a
+// chained kernel still has to do, where either writes. A chained kernel's
+// boxes were located when it joined the chain: no ompx call that could move
+// a mapping comes between that and the fence that empties the chain.
+bool meets_chain(int n, const ompx_split_access* acc, const std::vector<LocatedAccess>& located) {
     for (size_t k = 0; k < g_chain.size(); ++k)
         for (size_t j = 0; j < g_chain[k].acc.size(); ++j) {
             const ompx_split_access& b = g_chain[k].acc[j];
+            const LocatedAccess& lb = g_chain[k].located[j];
             for (int i = 0; i < n; ++i)
-                if ((acc[i].store || b.store) && accesses_meet(acc[i], b)) return true;
+                if ((acc[i].store || b.store) && accesses_meet(acc[i], located[i], b, lb))
+                    return true;
         }
     return false;
 }
@@ -532,11 +562,34 @@ bool meets_chain(int n, const ompx_split_access* acc) {
 // from pageable memory: done when it returns, before the next launch.
 // ompx__split_ctl is a global of the OpenMP device image, which libomptarget
 // loaded and the HIP runtime has never seen, so libomptarget copies it.
+// OMPX_SPLIT_STATS: the copies set_split made, the chained relaunches, and
+// the seconds each took.
+long long g_ctl_copies = 0, g_relaunches = 0;
+double g_ctl_copy_s = 0, g_relaunch_s = 0;
+// And the host time of each split_begin_launch call, its chain-conflict
+// check, its window and its launch copy, and of each split_next call.
+double g_begin_s = 0, g_meet_s = 0, g_window_s = 0, g_copy_launch_s = 0, g_next_s = 0;
+long long g_begin_n = 0, g_next_n = 0;
+
+// What ompx__split_ctl holds on the device (valid unless g_ctl_held_unknown).
+ompx_split_ctl g_ctl_held{0, 0, 0, 0};
+bool g_ctl_held_unknown = true;
+
 void set_split(int range, long long lo, long long hi) {
+    if (!g_ctl_held_unknown && g_ctl_held.range == range && g_ctl_held.lo == lo &&
+        g_ctl_held.hi == hi)
+        return;
+    const double t0 = g_split_stats ? MPI_Wtime() : 0;
     const ompx_split_ctl ctl{range, 0, lo, hi};
     if (omp_target_memcpy(g_split_ctl_dev, &ctl, sizeof(ctl), 0, 0, g_local_device,
                           omp_get_initial_device()) != 0)
         die("set what a split kernel runs: omp_target_memcpy failed");
+    g_ctl_held = ctl;
+    g_ctl_held_unknown = false;
+    if (g_split_stats) {
+        ++g_ctl_copies;
+        g_ctl_copy_s += MPI_Wtime() - t0;
+    }
 }
 
 void record(int peer, bool put, size_t remote, const char* local, size_t bytes) {
@@ -692,6 +745,15 @@ void ompx_finalize() {
                      "conflict, %lld launches not copyable; %lld epochs reused the locked "
                      "records\n", ompx_get_rank_num(), g_chain_n, g_chain_conflict,
                      g_chain_copyless, g_stable_reused);
+    if (g_split_stats)
+        std::fprintf(stderr, "[giomp] rank %d: split costs: %lld window copies %.4f s, "
+                     "%lld chained relaunches %.4f s\n", ompx_get_rank_num(), g_ctl_copies,
+                     g_ctl_copy_s, g_relaunches, g_relaunch_s);
+    if (g_split_stats)
+        std::fprintf(stderr, "[giomp] rank %d: split host time: %lld split_begin %.4f s (chain check "
+                     "%.4f, window %.4f, launch copy %.4f), %lld split_next %.4f s\n",
+                     ompx_get_rank_num(), g_begin_n, g_begin_s, g_meet_s, g_window_s,
+                     g_copy_launch_s, g_next_n, g_next_s);
     if (g_fence_comm != MPI_COMM_NULL) MPI_Comm_free(&g_fence_comm);
     if (g_runtime != nullptr) g_runtime->reset();
     if (g_heap_base != nullptr) {
@@ -1013,10 +1075,16 @@ void fence_flush() {
             a.sizes = c.sizes.data();
             a.types = c.types.data();
             a.tripcount = (uint64_t)(r.hi - r.lo);
+            const double t0 = g_split_stats ? MPI_Wtime() : 0;
             if (__tgt_target_kernel(c.loc, c.device, c.teams, c.threads, c.host_ptr, &a) != 0)
                 die("a chained kernel's remaining range failed to launch");
+            if (g_split_stats) {
+                ++g_relaunches;
+                g_relaunch_s += MPI_Wtime() - t0;
+            }
         }
-    set_split(0, 0, 0);
+    // ompx__split_ctl still holds the last range: a launch that runs whole
+    // resets it first (split_begin_launch), and only those launches read it.
     g_chain.clear();
     split_tick(3);
 }
@@ -1048,6 +1116,7 @@ void ompx_fence() {
 void ompx__fence_defer() {
     fence_flush();
     if (g_runtime == nullptr) return;
+    g_mapped_seen.clear();
     if (g_split_off) {
         ompx_fence();
         return;
@@ -1133,23 +1202,41 @@ int ompx__split_begin_launch(unsigned long long kernel, int n, const ompx_split_
                              long long iterations, void* loc, long long device, int teams,
                              int threads, void* host_ptr, void* kernel_args) {
     (void)kernel;
+    const double tb = g_split_stats ? MPI_Wtime() : 0;
+    struct BeginTimer {
+        double t;
+        ~BeginTimer() { if (g_split_stats) { g_begin_s += MPI_Wtime() - t; ++g_begin_n; } }
+    } begin_timer{tb};
+    // A launch this lets run whole reads ompx__split_ctl too: range 0 then.
+    auto whole = [] {
+        if (g_split_ctl_dev != nullptr) set_split(0, 0, 0);
+        return 0;
+    };
     g_split_chaining = false;
     if (!g_fence_pending) {
         ++g_split_idle;
-        return 0;
+        return whole();
     }
     // Whatever runs of this kernel now runs before what the chain left:
     // where they may touch one another, the chain goes first.
-    if (!g_chain.empty() && (n < 0 || meets_chain(n, acc))) {
+    const double tm = g_split_stats ? MPI_Wtime() : 0;
+    std::vector<LocatedAccess> located;
+    if (n > 0 && (g_split_chain || !g_chain.empty())) {
+        located.reserve(n);
+        for (int i = 0; i < n; ++i) located.push_back(locate(acc[i]));
+    }
+    const bool meets = !g_chain.empty() && (n < 0 || meets_chain(n, acc, located));
+    if (g_split_stats) g_meet_s += MPI_Wtime() - tm;
+    if (meets) {
         ++g_chain_conflict;
         fence_flush();
         ++g_split_idle;
-        return 0;
+        return whole();
     }
     split_tick(-1);
     if (g_split_ctl_dev == nullptr || iterations <= 0 || n < 0) {
         fence_flush();
-        return 0;
+        return whole();
     }
     wait_manifest();
     const int ranks = ompx_get_num_ranks();
@@ -1169,18 +1256,20 @@ int ompx__split_begin_launch(unsigned long long kernel, int n, const ompx_split_
     if (!known) {
         ++g_split_unknown;
         fence_flush();
-        return 0;
+        return whole();
     }
     long long lo = 0, hi = 0, len = 0;
+    const double tw = g_split_stats ? MPI_Wtime() : 0;
     quiet_window(n, acc, iterations, written, read, &lo, &hi, &len);
+    if (g_split_stats) g_window_s += MPI_Wtime() - tw;
     if (len == iterations) {   // the kernel touches none of it
         ++g_split_whole;
-        return 0;
+        return whole();
     }
     if (len == 0) {
         ++g_split_none;
         fence_flush();
-        return 0;
+        return whole();
     }
     // The window [lo, lo + len) of [0, iterations), wrapping past the end,
     // and the rest: each as one or two ranges.
@@ -1202,13 +1291,17 @@ int ompx__split_begin_launch(unsigned long long kernel, int n, const ompx_split_
     // A chain: the window now, the rest after the one fence.
     if (g_split_chain && kernel_args != nullptr) {
         ChainedLaunch c;
-        if (copy_launch(c, kernel_args)) {
+        const double tc = g_split_stats ? MPI_Wtime() : 0;
+        const bool copied = copy_launch(c, kernel_args);
+        if (g_split_stats) g_copy_launch_s += MPI_Wtime() - tc;
+        if (copied) {
             c.loc = loc;
             c.device = device;
             c.teams = teams;
             c.threads = threads;
             c.host_ptr = host_ptr;
             c.acc.assign(acc, acc + n);
+            c.located = located;
             c.rest.assign(g_split_ranges.begin() + g_split_before, g_split_ranges.end());
             g_split_ranges.resize(g_split_before);
             g_chain.push_back(std::move(c));
@@ -1226,6 +1319,11 @@ int ompx__split_begin_launch(unsigned long long kernel, int n, const ompx_split_
 // its length for the launch's trip count; 0 when there is none left. The
 // fence goes between the ranges before it and the others.
 int ompx__split_next(unsigned long long* tripcount) {
+    const double tn = g_split_stats ? MPI_Wtime() : 0;
+    struct NextTimer {
+        double t;
+        ~NextTimer() { if (g_split_stats) { g_next_s += MPI_Wtime() - t; ++g_next_n; } }
+    } next_timer{tn};
     if (g_split_at == g_split_before && !g_split_chaining) {
         split_tick(1);
         fence_flush();
@@ -1233,7 +1331,6 @@ int ompx__split_next(unsigned long long* tripcount) {
     }
     if (g_split_at >= g_split_ranges.size()) {
         split_tick(3);
-        set_split(0, 0, 0);
         g_split_ranges.clear();
         g_split_before = g_split_at = 0;
         return 0;
@@ -1246,6 +1343,7 @@ int ompx__split_next(unsigned long long* tripcount) {
 
 void ompx__split_ctl_at(ompx_split_ctl* dev) {
     g_split_ctl_dev = dev;
+    g_ctl_held_unknown = true;
 }
 
 // No control block the CPU stores into in place here: the kernels read the
