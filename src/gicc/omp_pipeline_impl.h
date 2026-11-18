@@ -90,6 +90,10 @@ ompx__dyn_flush(const void* team, unsigned piece, unsigned long long bytes)
 // No printf here or in anything else a rewritten kernel calls: one gives the
 // kernel a dynamic stack, and with it scratch for every wave. What goes wrong
 // is recorded for the host to report instead (ompx__pipe_fail).
+// The helpers the pass calls are always_inline for the same reason: on
+// AMDGPU a kernel that calls one out of line got a dynamic stack and twice
+// the registers (Himeno's copy kernel 85 VGPRs instead of 41), and FT's
+// streamed z FFT, which holds 16 KB per thread, overflowed the default stack.
 
 // This unit's deferred-put list, which also holds everything these helpers
 // look up (ompx_pipe_deferred in gicc/omp.h): it is cached by the GPU, the
@@ -174,7 +178,7 @@ static inline bool ompx__sequential_thread() {
 // Element-grain lowering: where `addr`'s object lives in a same-node peer's
 // heap, or null when the peer is not IPC-mapped (the pass then falls back to
 // ompx__block_put_one at run time). Called once per team.
-static __attribute__((used)) void* ompx__peer_addr(int peer, void* addr) {
+static __attribute__((used, always_inline)) void* ompx__peer_addr(int peer, void* addr) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     return ompx__peer_base(ompx__pipe_list(), peer, addr);
 #else
@@ -186,7 +190,7 @@ static __attribute__((used)) void* ompx__peer_addr(int peer, void* addr) {
 // Element-grain fallback for a peer ompx__peer_addr could not map: one proxy
 // put per block. No parallel region, so a kernel that only calls this
 // between its parallel regions can still be made SPMD by the device link.
-static __attribute__((used)) void
+static __attribute__((used, always_inline)) void
 ompx__block_put_one(int peer, void* dst, const void* src, size_t bytes) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     if (peer >= 0 && ompx__sequential_thread())
@@ -203,7 +207,7 @@ ompx__block_put_one(int peer, void* dst, const void* src, size_t bytes) {
 // put. Everything the copy loops use is firstprivate: a variable they shared
 // by reference would be globalized, a device-heap allocation per call.
 // schedule(static, 1) gives neighbouring threads neighbouring words.
-static __attribute__((used)) void
+static __attribute__((used, always_inline)) void
 ompx__block_put(int peer, void* dst, const void* src, size_t bytes) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     if (peer < 0) return;
@@ -430,7 +434,7 @@ static inline bool ompx__residual_plan(const char* s, size_t bytes, const void* 
 // -- the divisions are not worth doing in every thread -- and the team shares
 // each batch of gaps it lists. Otherwise the team's sequential thread does
 // both alone, and a large residual holds the whole kernel back.
-static __attribute__((used)) void
+static __attribute__((used, always_inline)) void
 ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* box, int dims,
                    const int64_t* stride, const int64_t* extent, int64_t elem, int loop_runs,
                    int team) {
@@ -498,7 +502,7 @@ ompx__box_residual(void* peer_dst, const void* src, size_t bytes, const void* bo
 #pragma omp allocate(ompx__peer_slot) allocator(omp_pteam_mem_alloc)
 #endif
 
-static __attribute__((used)) void*
+static __attribute__((used, always_inline)) void*
 ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count, int after,
                int32_t* counted) {
     int32_t by_count = 0;
@@ -554,7 +558,7 @@ ompx__box_peer(int peer, void* dst, const void* src, size_t bytes, int can_count
 // the whole put, whose last team then rings every piece. One piece when the
 // put is not counted. No division: every thread of every team of a counting
 // launch calls this for every put.
-static __attribute__((used)) int64_t
+static __attribute__((used, always_inline)) int64_t
 ompx__box_piece(size_t bytes, int32_t counted, int pieces_max, int after) {
     uint64_t piece = bytes;
 #if defined(__NVPTX__) || defined(__AMDGCN__)
@@ -582,7 +586,7 @@ ompx__box_piece(size_t bytes, int32_t counted, int pieces_max, int after) {
 // the extents of digits 1 to loop_dims - 1:
 // the interval is the slabs of q_0 whose stores reach the range. *lo and *hi
 // are team memory every thread stores to, once each, with the same value.
-static __attribute__((used)) void
+static __attribute__((used, always_inline)) void
 ompx__box_hull(const void* src, size_t bytes, const void* box, int dims, int loop_dims,
                const int64_t* stride, const int64_t* extent, int64_t elem, int64_t* lo,
                int64_t* hi) {
@@ -711,7 +715,7 @@ static inline void ompx__plan_shared(int n, const int32_t* counted, const int64_
 }
 #endif
 
-static __attribute__((used)) void
+static __attribute__((used, always_inline)) void
 ompx__box_plan(int n, const int32_t* counted, const int64_t* lo, const int64_t* hi,
                int64_t lb0, int64_t iters, int64_t chunk, int64_t* shift, int64_t* due,
                int64_t* first, int64_t* shared) {
@@ -812,7 +816,7 @@ static inline void ompx__box_count(unsigned* counter, int peer, void* dst, const
 // thread of the team: thread 0 takes it, and the team reads it from team
 // memory (*slot) between two barriers, the second so that no thread still
 // reads it when thread 0 writes the next.
-static __attribute__((used)) int64_t
+static __attribute__((used, always_inline)) int64_t
 ompx__box_grab(unsigned long long* next, int64_t* slot) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     if (ompx_thread_id_x() == 0 && ompx_thread_id_y() == 0 && ompx_thread_id_z() == 0)
@@ -833,7 +837,7 @@ ompx__box_grab(unsigned long long* next, int64_t* slot) {
 // next launch, and tells the host how many groups of each queued put the
 // kernel rang (every team has counted all its pieces by now) before
 // clearing that for the next launch too.
-static __attribute__((used)) void
+static __attribute__((used, always_inline)) void
 ompx__box_grab_done(unsigned long long* next, unsigned* done, int64_t* shared) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     if (ompx_thread_id_x() != 0 || ompx_thread_id_y() != 0 || ompx_thread_id_z() != 0) return;
@@ -876,7 +880,7 @@ ompx__box_grab_done(unsigned long long* next, unsigned* done, int64_t* shared) {
 // and this one, compiled on its own, needed 85 where the minimod stencil
 // needs 78 -- a wave per SIMD less. Inlined into its rare branch it costs
 // the loop none.
-static __attribute__((used)) void
+static __attribute__((used, always_inline)) void
 ompx__box_due(int n, int64_t ran, const int64_t* due, const int32_t* peer, void* const* dst,
               const void* const* src, const int64_t* bytes, unsigned* const* counter,
               const int32_t* after, int pieces, int64_t lb0, int64_t chunk) {
@@ -908,7 +912,7 @@ ompx__box_due(int n, int64_t ran, const int64_t* due, const int32_t* peer, void*
 // handled, so the host does not put it again. A negative peer -- which sends
 // nothing -- when the post is for another kernel, another source, or a put
 // the host will not reach.
-static __attribute__((used)) void
+static __attribute__((used, always_inline)) void
 ompx__after_put(unsigned long long kernel, int i, int src_arg, int32_t* peer, void** dst,
                 int64_t* src_rel, int64_t* bytes) {
     // The outs are team memory, and the post mapped host memory: the team's
@@ -957,7 +961,7 @@ ompx__after_put(unsigned long long kernel, int i, int src_arg, int32_t* peer, vo
 // says something else is recorded for the host, which stops before any of
 // its groups ring. Every thread of the team calls this, and every one
 // returns the same.
-static __attribute__((used)) int32_t
+static __attribute__((used, always_inline)) int32_t
 ompx__loop_after(unsigned long long kernel, int i, int src_arg, int peer, void* dst,
                  int64_t src_rel, int64_t bytes) {
     int32_t r = -1;
@@ -1019,7 +1023,7 @@ static_assert(sizeof(ompx_dyn_post) <= 64, "the pass allocates 64 bytes of team 
 // goes back to zero when its piece (or the put) is done.
 static unsigned ompx__dyn_cnt[OMPX_DYN_CNT_WORDS];
 
-static __attribute__((used)) void
+static __attribute__((used, always_inline)) void
 ompx__dyn_begin(unsigned long long kernel, int i, int src_arg, const void* base, void* team) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     if (ompx__sequential_thread()) {
@@ -1082,7 +1086,7 @@ __attribute__((always_inline)) static inline void ompx__dyn_piece_done(const omp
 #endif
 
 // A thread's count of `bytes` stored into piece `piece`.
-static __attribute__((used)) void ompx__dyn_flush(const void* team, unsigned piece,
+static __attribute__((used, always_inline)) void ompx__dyn_flush(const void* team, unsigned piece,
                                                           unsigned long long bytes) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     const ompx_dyn_post& t = *static_cast<const ompx_dyn_post*>(team);
@@ -1116,7 +1120,7 @@ static __attribute__((used)) void ompx__dyn_flush(const void* team, unsigned pie
 // directly, rather than copying to it (a synchronous copy per launch cost
 // MiniMod 0.13 ms a step).
 // Nonzero: only the iterations [*lo, *hi) of the distribute loop.
-static __attribute__((used)) int32_t ompx__split_window(int64_t* lo, int64_t* hi) {
+static __attribute__((used, always_inline)) int32_t ompx__split_window(int64_t* lo, int64_t* hi) {
 #if defined(__NVPTX__) || defined(__AMDGCN__)
     ompx_split_ctl* c = ompx__split_ctl_p ? ompx__split_ctl_p : &ompx__split_ctl;
     *lo = __scoped_atomic_load_n(&c->lo, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
