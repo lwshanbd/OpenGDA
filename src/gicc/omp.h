@@ -243,6 +243,17 @@ void ompx__after_post_signal(unsigned long long kernel, int i, int src_arg, int 
 void ompx__after_done_signal(unsigned long long kernel, int i, int peer, void* dst,
                              const void* src, size_t bytes, int sig, unsigned long long value);
 void ompx__loop_done(unsigned long long kernel, int i);
+// Before a launch of a kernel the plugin kept a plain copy of, once its puts
+// are posted: nonzero to run the kernel that sends them, zero to run the
+// plain copy, which leaves them to the host (omp/ompx_select.h).
+// `early` says the launch can also run in two ranges around its puts, which
+// the answer 2 asks for (1: the sender); ompx__early_begin_launch then
+// sets the ranges up as ompx__split_begin_launch does a split kernel's, or
+// returns 0 when there is nothing to gain, and the launch runs plain.
+int ompx__after_select(unsigned long long kernel, int early);
+int ompx__early_begin_launch(unsigned long long kernel, int n, const struct ompx_split_access* acc,
+                             long long iterations, void* loc, long long device, int teams,
+                             int threads, void* host_ptr, void* kernel_args);
 
 // Internal: a fence deferred past part of the next kernel. The gicc-passes
 // plugin (GICCSplitLaunch.h) turns an ompx_fence into ompx__fence_defer,

@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "gicc/omp.h"
+#include "ompx_select.h"
 #include "gicc/omp_box.h"
 #include "gicc/platform/mlx5/mlx5_runtime.hpp"
 
@@ -709,6 +710,7 @@ void ompx_finalize() {
                      "conflict, %lld launches not copyable; %lld epochs reused the locked "
                      "records\n", ompx_get_rank_num(), g_chain_n, g_chain_conflict,
                      g_chain_copyless, g_stable_reused);
+    if (g_split_stats) gicc_select::report(ompx_get_rank_num());
     if (g_fence_comm != MPI_COMM_NULL) MPI_Comm_free(&g_fence_comm);
     if (g_ipc_pending) {
         (void)cudaStreamSynchronize(g_ipc_stream);
@@ -1296,6 +1298,20 @@ void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
 
 // After the launch of a kernel with an in-loop put the host posted as put
 // i: the kernel has sent it. A post the kernel found wrong stops here.
+int ompx__after_select(unsigned long long kernel, int early) {
+    (void)early;   // no launch in two ranges here yet
+    const ompx_pipe_deferred* q = g_pipe_deferred_host;
+    bool armed = false;
+    if (q != nullptr && q->after.kernel == kernel)
+        for (int i = 0; i < OMPX_PIPE_AFTER_MAX; ++i) armed = armed || q->after.e[i].armed;
+    return gicc_select::select(kernel, armed, false, MPI_Wtime());
+}
+
+int ompx__early_begin_launch(unsigned long long, int, const ompx_split_access*, long long, void*,
+                             long long, int, int, void*, void*) {
+    return 0;
+}
+
 void ompx__loop_done(unsigned long long kernel, int i) {
     pipe_check();
     ompx_pipe_deferred* q = g_pipe_deferred_host;

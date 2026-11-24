@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "gicc/omp.h"
+#include "ompx_select.h"
 #include "gicc/omp_box.h"
 #include "gicc/platform/ofi/internal/gpu_device_context.hpp"
 #include "gicc/platform/ofi/ofi_runtime.hpp"
@@ -74,6 +75,16 @@ char**              g_pipe_peer_heap_dev  = nullptr;
 // Put i after a launch, queued under DWQ on slot kSigSlots + i when it was
 // posted, in this many groups (0: not queued); set until every group has rung.
 int g_after_queued[OMPX_PIPE_AFTER_MAX] = {};
+// Each armed post's source, for a launch in two ranges around its puts
+// (ompx__early_begin_launch), which makes them from here.
+const char* g_after_src[OMPX_PIPE_AFTER_MAX] = {};
+unsigned long long g_early_kernel = 0;   // ompx__after_select answered 2 for it
+bool g_early_sending = false;            // the ranges being run are such a launch's
+long long g_early_n = 0;
+// And the launches asked to that ran whole: nothing armed to send, the
+// kernel writes none of it, or too little of the loop is left to hide it.
+long long g_early_none = 0, g_early_unwritten = 0, g_early_short = 0;
+long long g_early_last_len = 0, g_early_last_iters = 0;
 
 // ---- symmetric heap ---------------------------------------------------------
 gicc::Buffer g_heap{};              // the heap as an address-book entry
@@ -754,6 +765,13 @@ void ompx_finalize() {
                      "%.4f, window %.4f, launch copy %.4f), %lld split_next %.4f s\n",
                      ompx_get_rank_num(), g_begin_n, g_begin_s, g_meet_s, g_window_s,
                      g_copy_launch_s, g_next_n, g_next_s);
+    if (g_split_stats) gicc_select::report(ompx_get_rank_num());
+    if (g_split_stats && g_early_n + g_early_none + g_early_unwritten + g_early_short)
+        std::fprintf(stderr, "[giomp] rank %d: %lld launches in two ranges around their puts; "
+                     "run whole instead: %lld with nothing to send, %lld that write none of it, "
+                     "%lld with under a quarter of the loop left; the last one's stretch %lld of "
+                     "%lld iterations\n", ompx_get_rank_num(), g_early_n, g_early_none,
+                     g_early_unwritten, g_early_short, g_early_last_len, g_early_last_iters);
     if (g_fence_comm != MPI_COMM_NULL) MPI_Comm_free(&g_fence_comm);
     if (g_runtime != nullptr) g_runtime->reset();
     if (g_heap_base != nullptr) {
@@ -1315,6 +1333,25 @@ int ompx__split_begin_launch(unsigned long long kernel, int n, const ompx_split_
     return 1;
 }
 
+// Makes the puts posted for the launch now running in two ranges: its
+// first ranges wrote all they send. A put queued on DWQ at its post is
+// rung; any other goes as a put after the kernel would. Marked handled, so
+// ompx__after_done does not make it again.
+static void early_send() {
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    for (int i = 0; i < OMPX_PIPE_AFTER_MAX; ++i) {
+        ompx_pipe_after_put& e = q->after.e[i];
+        if (!e.armed || e.peer < 0 || e.bytes == 0 || g_after_src[i] == nullptr) continue;
+        if (g_after_queued[i])
+            release_after(i);
+        else
+            ompx_put_host(e.peer, g_heap_base + e.dst_off, const_cast<char*>(g_after_src[i]),
+                          (size_t)e.bytes);
+        __atomic_store_n(&e.handled, 1, __ATOMIC_RELEASE);
+    }
+    ompx_trigger_host();
+}
+
 // The next range of the kernel being split, set for its next launch, with
 // its length for the launch's trip count; 0 when there is none left. The
 // fence goes between the ranges before it and the others.
@@ -1324,7 +1361,11 @@ int ompx__split_next(unsigned long long* tripcount) {
         double t;
         ~NextTimer() { if (g_split_stats) { g_next_s += MPI_Wtime() - t; ++g_next_n; } }
     } next_timer{tn};
-    if (g_split_at == g_split_before && !g_split_chaining) {
+    if (g_split_at == g_split_before && g_early_sending) {
+        // The ranges that write the posted puts' sources have run.
+        g_early_sending = false;
+        early_send();
+    } else if (g_split_at == g_split_before && !g_split_chaining) {
         split_tick(1);
         fence_flush();
         split_tick(2);
@@ -1446,6 +1487,11 @@ void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, 
     e.sig = -1;
     e.value = 0;
     e.dyn_ok = 0;   // run-time counting is wired on InfiniBand only
+    // Where it is in the heap: the put may name it by a host pointer
+    // ompx_bind put there.
+    g_after_src[i] = armed && peer >= 0 && bytes > 0
+                         ? g_heap_base + offset_of(src, "ompx_put src")
+                         : nullptr;
     if (armed) {
         e.peer    = peer;
         e.src_arg = src_arg;
@@ -1515,6 +1561,72 @@ void ompx__after_done_signal(unsigned long long kernel, int i, int peer, void* d
 // After the launch of a kernel with an in-loop put the host posted as put
 // i: the kernel has sent it, or is to be helped to. A post the kernel found
 // wrong stops the program here, before any of its groups ring.
+int ompx__after_select(unsigned long long kernel, int early) {
+    const ompx_pipe_deferred* q = g_pipe_deferred_host;
+    bool armed = false;
+    if (q != nullptr && q->after.kernel == kernel)
+        for (int i = 0; i < OMPX_PIPE_AFTER_MAX; ++i) armed = armed || q->after.e[i].armed;
+    g_early_kernel = 0;
+    const int v = gicc_select::select(kernel, armed, early != 0, MPI_Wtime());
+    if (v == 2) g_early_kernel = kernel;
+    return v;
+}
+
+// The launch ompx__after_select answered 2 for: the kernel's early copy in
+// ranges, as a split kernel's (ompx__split_next) -- first the iterations
+// that write what the posted puts send, then the puts, made by
+// ompx__split_next between the two, then the widest stretch of iterations
+// that write none of it, which runs while they travel. 0, and the launch
+// runs the plain copy whole, when no such stretch is worth a second launch.
+int ompx__early_begin_launch(unsigned long long kernel, int n, const ompx_split_access* acc,
+                             long long iterations, void* loc, long long device, int teams,
+                             int threads, void* host_ptr, void* kernel_args) {
+    (void)loc; (void)device; (void)teams; (void)threads; (void)host_ptr; (void)kernel_args;
+    if (g_early_kernel != kernel || kernel == 0) return 0;
+    g_early_kernel = 0;
+    const ompx_pipe_deferred* q = g_pipe_deferred_host;
+    if (q == nullptr || q->after.kernel != kernel || g_split_ctl_dev == nullptr || n <= 0 ||
+        iterations <= 0)
+        return 0;
+    fence_flush();
+    std::vector<Range> none, sent;
+    for (int i = 0; i < OMPX_PIPE_AFTER_MAX; ++i) {
+        const ompx_pipe_after_put& e = q->after.e[i];
+        if (e.armed && e.peer >= 0 && e.bytes > 0 && g_after_src[i] != nullptr)
+            sent.push_back(Range{g_after_src[i], (size_t)e.bytes});
+    }
+    if (sent.empty()) {
+        ++g_early_none;
+        return 0;
+    }
+    long long lo = 0, hi = 0, len = 0;
+    quiet_window(n, acc, iterations, none, sent, &lo, &hi, &len);
+    // Less than a quarter of the loop left to hide the puts behind is not
+    // worth the second launch; all of it means the kernel writes none of
+    // what they send, which this is not for.
+    g_early_last_len = len;
+    g_early_last_iters = iterations;
+    if (len >= iterations || len < iterations / 4) {
+        ++(len >= iterations ? g_early_unwritten : g_early_short);
+        return 0;
+    }
+    g_split_ranges.clear();
+    auto add = [](long long a, long long b) {
+        if (a < b) g_split_ranges.push_back(SplitRange{a, b});
+    };
+    const long long end = lo + len;
+    add(std::max(end - iterations, 0LL), lo);
+    add(end, iterations);
+    g_split_before = g_split_ranges.size();
+    add(lo, std::min(end, iterations));
+    add(0, end - iterations);
+    g_split_at = 0;
+    g_split_chaining = false;
+    g_early_sending = true;
+    ++g_early_n;
+    return 1;
+}
+
 void ompx__loop_done(unsigned long long kernel, int i) {
     pipe_check();
     ompx_pipe_deferred* q = g_pipe_deferred_host;
