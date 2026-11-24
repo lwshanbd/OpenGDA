@@ -394,9 +394,15 @@ static inline bool ompx__residual_plan(const char* s, size_t bytes, const void* 
         L.ended = 1;
         return true;
     }
-    // A dense innermost dim is one contiguous row; otherwise each point is.
+    // Dense inner dims are one contiguous row -- every dim whose stride is
+    // the span of the ones inside it, not just the innermost: thread 0 walks
+    // the rows one at a time while its team waits, and a dense 4 x 2000 x 2
+    // box walked as 8000 rows of two points took a 12 us kernel to 2.4 ms.
     L.row = elem;
-    if (n > 0 && L.S[n - 1] == elem) L.row = L.E[--n] * elem;
+    while (n > 0 && L.S[n - 1] == L.row) {
+        L.row *= L.E[n - 1];
+        --n;
+    }
     // The rows must come in address order without overlapping for the gaps
     // between them to be exactly what the box does not write.
     int64_t span = L.row;
