@@ -103,6 +103,7 @@
 #include "llvm/Transforms/Utils/LoopUtils.h"
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 #include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
 
 #include <optional>
 #include <string>
@@ -391,7 +392,8 @@ public:
     bool run() {
         const StringMap<AfterPutSite> after = readAfterPutSites();
         for (Function &F : M) {
-            if (!isOffloadKernel(F)) continue;
+            // A plain copy (makePlainCopy) stays as clang made it.
+            if (!isOffloadKernel(F) || isPlainCopy(F.getName())) continue;
             SmallVector<AfterPut, 2> made;
             unsigned posts = 0;   // the host's posts for the puts after the kernel
             if (auto it = after.find(F.getName()); it != after.end()) {
@@ -1818,6 +1820,88 @@ private:
     }
 };
 
+// A plain copy of kernel K (GICCAfterPut.h, kPlainSuffix or kEarlySuffix):
+// K, the regions clang outlined from it and its environment, under K's name
+// + suffix + the rest of theirs. Everything of K's is named <K> or <K>_<something
+// that is not a digit> (a kernel on line 42 is not one of line 428's). Made
+// before anything is rewritten, so the copy is the kernel a build without
+// the rewrite would have had. False, and nothing copied, when K reaches a
+// local function with a parallel region or a worksharing loop that is not
+// named as its own: the copy would share it, and the rewrite changes it for
+// K.
+bool makePlainCopy(Module &M, Function &K, StringRef suffix) {
+    const std::string base = K.getName().str();
+    auto own = [&](StringRef n) {
+        if (!n.consume_front(base)) return false;
+        return n.empty() || (n.size() > 1 && (n[0] == '_' || n[0] == '.') && !(n[1] >= '0' && n[1] <= '9'));
+    };
+    auto renamed = [&](StringRef n) {
+        return (base + suffix + n.substr(base.size())).str();
+    };
+    if (M.getNamedValue(renamed(base))) return false;
+    SmallVector<Function *, 4> fns{&K};
+    SmallPtrSet<Function *, 4> seen{&K};
+    for (size_t i = 0; i < fns.size(); ++i)
+        for (Instruction &I : instructions(*fns[i]))
+            for (Use &U : I.operands()) {
+                auto *F = dyn_cast<Function>(U->stripPointerCasts());
+                if (!F || F->isDeclaration() || !F->hasLocalLinkage()) continue;
+                if (own(F->getName())) {
+                    if (seen.insert(F).second) fns.push_back(F);
+                } else if (any_of(instructions(*F), [](Instruction &J) {
+                               auto *CB = dyn_cast<CallBase>(&J);
+                               if (!CB) return false;
+                               const StringRef c = calleeName(*CB);
+                               return isParallelCall(c) || c.contains("_static_init");
+                           })) {
+                    out() << "[gicc-chunk] kernel " << base << ": no plain copy: it shares "
+                          << F->getName() << ", which is not named as its own\n";
+                    return false;
+                }
+            }
+    SmallVector<GlobalVariable *, 2> vars;
+    for (GlobalVariable &G : M.globals())
+        if (own(G.getName())) vars.push_back(&G);
+    ValueToValueMapTy VMap;
+    for (GlobalVariable *G : vars) {
+        auto *N = new GlobalVariable(M, G->getValueType(), G->isConstant(), G->getLinkage(),
+                                     nullptr, renamed(G->getName()), G, G->getThreadLocalMode(),
+                                     G->getAddressSpace());
+        N->copyAttributesFrom(G);
+        VMap[G] = N;
+    }
+    for (Function *F : fns)
+        VMap[F] = Function::Create(F->getFunctionType(), F->getLinkage(), F->getAddressSpace(),
+                                   renamed(F->getName()), &M);
+    for (GlobalVariable *G : vars)
+        if (G->hasInitializer())
+            cast<GlobalVariable>(VMap[G])->setInitializer(MapValue(G->getInitializer(), VMap));
+    for (Function *F : fns) {
+        auto *N = cast<Function>(VMap[F]);
+        auto NA = N->arg_begin();
+        for (Argument &A : F->args()) {
+            NA->setName(A.getName());
+            VMap[&A] = &*NA++;
+        }
+        SmallVector<ReturnInst *, 4> rets;
+        CloneFunctionInto(N, F, VMap, CloneFunctionChangeType::LocalChangesOnly, rets);
+    }
+    // LLVM up to 19 names an NVPTX kernel in the module's annotations.
+    if (NamedMDNode *MD = M.getNamedMetadata("nvvm.annotations")) {
+        SmallVector<MDNode *, 2> add;
+        for (MDNode *N : MD->operands()) {
+            if (N->getNumOperands() == 0) continue;
+            auto *V = dyn_cast_or_null<ValueAsMetadata>(N->getOperand(0));
+            if (!V || V->getValue() != &K) continue;
+            SmallVector<Metadata *, 3> ops(N->op_begin(), N->op_end());
+            ops[0] = ValueAsMetadata::get(VMap[&K]);
+            add.push_back(MDNode::get(M.getContext(), ops));
+        }
+        for (MDNode *N : add) MD->addOperand(N);
+    }
+    return true;
+}
+
 }  // namespace
 
 PreservedAnalyses GICCChunkPrepPass::run(Module &M, ModuleAnalysisManager &MAM) {
@@ -1857,6 +1941,31 @@ PreservedAnalyses GICCChunkPrepPass::run(Module &M, ModuleAnalysisManager &MAM) 
                 return true;
         return false;
     };
+    // A plain copy of each kernel the host puts after, for the launches
+    // whose puts are not worth sending from the kernel (GICC_PLAIN_COPY=0:
+    // none). Not of a kernel with a put stated in its source: only the
+    // rewrite sends that one.
+    if (const char *e = std::getenv("GICC_PLAIN_COPY");
+        getConfig().mode == Mode::ChunkLower && !(e && *e == '0')) {
+        SmallVector<Function *, 4> kernels;
+        for (Function &F : M)
+            if (isOffloadKernel(F) && after.count(F.getName())) kernels.push_back(&F);
+        for (Function *K : kernels) {
+            bool stated = false;
+            for (Function &F : M)
+                stated = stated || (!F.isDeclaration() && F.getName().starts_with(K->getName()) &&
+                                    hasPut(F));
+            if (stated || !makePlainCopy(M, *K, kPlainSuffix)) continue;
+            notePlainCopy(K->getName());
+            // And one to run in two ranges, the puts made between them, if
+            // the split analysis can read it (GICCSplitLaunch.h).
+            const bool early = makePlainCopy(M, *K, kEarlySuffix);
+            out() << "[gicc-chunk] kernel " << K->getName() << ": kept a plain copy ("
+                  << kPlainSuffix << ") for the launches that send nothing from it"
+                  << (early ? ", and one to run in two ranges around its puts" : "") << "\n";
+            changed = true;
+        }
+    }
     for (Function &F : M) {
         if (F.isDeclaration()) continue;
         const bool kernelHasPut = hasPut(F) || hasAfter(F);

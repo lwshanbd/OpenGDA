@@ -92,6 +92,7 @@ namespace llvm {
 class SCEV;
 class Function;
 class CallInst;
+class GlobalVariable;
 class Module;
 }  // namespace llvm
 
@@ -138,6 +139,37 @@ std::optional<llvm::json::Value> loopPutExpr(const llvm::SCEV *S, const llvm::Fu
 // Records kernel's in-loop puts, replacing what an earlier compile left;
 // removes the record when there are none.
 void writeLoopPutSites(llvm::StringRef kernel, llvm::ArrayRef<LoopPutSite> sites);
+
+// A kernel the host puts after is kept twice on the device: the one the
+// rewrite turns into a sender, and a copy of it as clang made it, named
+// <kernel> + kPlainSuffix (its regions and environment <kernel> +
+// kPlainSuffix + the rest of their names). The host picks one per launch
+// (ompx__after_select): a launch whose puts are not worth sending from the
+// kernel then pays nothing for the rewrite -- no planning, no barriers, no
+// test after each store, the loop's own schedule. The copy is made before
+// anything is rewritten (GICCChunkPrepPass) and said in GICC_META_DIR, where
+// the host side of the same compile finds it.
+constexpr llvm::StringLiteral kPlainSuffix = "_ompx_plain";
+// And a third time, <kernel> + kEarlySuffix: a plain copy that runs the
+// range of its loop a launch names (GICCSplitLaunch.h lowers it so). The
+// host can then run the iterations that write what the puts send first,
+// make the puts, and run the rest while they travel -- with nothing added
+// to the kernel but the range, on any transport. Only when the split
+// analysis can read the kernel; the launch then picks among three.
+constexpr llvm::StringLiteral kEarlySuffix = "_ompx_early";
+// Whether `name` is such a copy's (or one of its regions'), and the name it
+// is a copy of.
+bool isPlainCopy(llvm::StringRef name);
+bool isEarlyCopy(llvm::StringRef name);
+std::string plainCopyOf(llvm::StringRef name);
+void notePlainCopy(llvm::StringRef kernel);
+bool hasPlainCopy(llvm::StringRef kernel);
+// The offload entry of kernel's copy named with `suffix`, made next to the
+// kernel's own (whose region id is `id`): its region id, or null when the
+// kernel's entry is not found in the shape clang emits (*why says).
+llvm::GlobalVariable *copyEntry(llvm::Module &M, llvm::GlobalVariable *id,
+                                llvm::StringRef kernel, llvm::StringRef suffix,
+                                const char **why);
 
 // Every kernel's in-loop puts recorded in GICC_META_DIR.
 llvm::StringMap<llvm::SmallVector<LoopPutSite, 1>> readLoopPutSites();

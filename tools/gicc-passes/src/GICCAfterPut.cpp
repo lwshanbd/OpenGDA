@@ -84,6 +84,94 @@ StringMap<AfterPutSite> readAfterPutSites() {
     return sites;
 }
 
+bool isEarlyCopy(StringRef name) { return name.contains(kEarlySuffix); }
+bool isPlainCopy(StringRef name) { return name.contains(kPlainSuffix) || isEarlyCopy(name); }
+
+std::string plainCopyOf(StringRef name) {
+    for (StringRef suffix : {StringRef(kPlainSuffix), StringRef(kEarlySuffix)}) {
+        const size_t at = name.find(suffix);
+        if (at != StringRef::npos)
+            return (name.substr(0, at) + name.substr(at + suffix.size())).str();
+    }
+    return name.str();
+}
+
+GlobalVariable *copyEntry(Module &M, GlobalVariable *id, StringRef kernel, StringRef suffix,
+                          const char **why) {
+    LLVMContext &Ctx = M.getContext();
+    const std::string name = (kernel + suffix).str();
+    if (GlobalVariable *made = M.getNamedGlobal("." + name + ".region_id")) return made;
+    GlobalVariable *entry = nullptr;
+    for (GlobalVariable &G : M.globals()) {
+        auto *CS = G.hasInitializer() ? dyn_cast<ConstantStruct>(G.getInitializer()) : nullptr;
+        if (CS && any_of(CS->operands(), [&](const Use &U) {
+                return cast<Constant>(U.get())->stripPointerCasts() == id;
+            })) {
+            if (entry) {
+                *why = "two offload entries name its region id";
+                return nullptr;
+            }
+            entry = &G;
+        }
+    }
+    if (!entry) {
+        *why = "no offload entry names its region id";
+        return nullptr;
+    }
+    auto *CS = cast<ConstantStruct>(entry->getInitializer());
+    GlobalVariable *oldName = nullptr;
+    for (const Use &U : CS->operands()) {
+        auto *G = dyn_cast<GlobalVariable>(cast<Constant>(U.get())->stripPointerCasts());
+        auto *D = G && G->hasInitializer() ? dyn_cast<ConstantDataArray>(G->getInitializer())
+                                           : nullptr;
+        if (D && D->isCString() && D->getAsCString() == kernel) oldName = G;
+    }
+    if (!oldName) {
+        *why = "its offload entry does not name it";
+        return nullptr;
+    }
+    auto *newId = new GlobalVariable(M, id->getValueType(), id->isConstant(), id->getLinkage(),
+                                     id->getInitializer(), "." + name + ".region_id");
+    newId->copyAttributesFrom(id);
+    Constant *str = ConstantDataArray::getString(Ctx, name, true);
+    auto *newName = new GlobalVariable(M, str->getType(), true, oldName->getLinkage(), str,
+                                       oldName->getName() + suffix);
+    newName->copyAttributesFrom(oldName);
+    SmallVector<Constant *, 10> ops;
+    for (const Use &U : CS->operands()) {
+        auto *C = cast<Constant>(U.get());
+        const Value *base = C->stripPointerCasts();
+        ops.push_back(base == id ? newId : base == oldName ? newName : C);
+    }
+    auto *newEntry = new GlobalVariable(M, CS->getType(), entry->isConstant(),
+                                        entry->getLinkage(), ConstantStruct::get(CS->getType(), ops),
+                                        entry->getName() + suffix);
+    newEntry->copyAttributesFrom(entry);
+    return newId;
+}
+
+namespace {
+SmallString<256> plainCopyFile(StringRef kernel) {
+    char name[64];
+    snprintf(name, sizeof(name), "plain-%016llx",
+             static_cast<unsigned long long>(afterPutHash(kernel)));
+    SmallString<256> path(getConfig().metaDir);
+    sys::path::append(path, name);
+    return path;
+}
+}  // namespace
+
+void notePlainCopy(StringRef kernel) {
+    if (!getConfig().metaDirSet) return;
+    std::error_code ec;
+    raw_fd_ostream os(plainCopyFile(kernel), ec);
+    if (!ec) os << kernel << "\n";
+}
+
+bool hasPlainCopy(StringRef kernel) {
+    return getConfig().metaDirSet && sys::fs::exists(plainCopyFile(kernel));
+}
+
 std::optional<json::Value> loopPutExpr(const SCEV *S, const Function &K) {
     Type *T = S->getType();
     if (T->isIntegerTy() && T->getIntegerBitWidth() > 64) return std::nullopt;
@@ -248,6 +336,7 @@ constexpr unsigned kLoopSlots = 6;
 
 struct FoundSite {
     CallInst *launch;
+    CallInst *call = nullptr;   // the __tgt_target_kernel call (in the task's entry, for a task)
     std::string kernel;
     SmallVector<FoundPut, 2> puts;
     AAResults *AA = nullptr;   // set when loads may move before the launch
@@ -268,6 +357,7 @@ struct Analyses {
 // the taskwait).
 struct Launch {
     CallInst *post = nullptr;       // the puts are posted before it
+    CallInst *call = nullptr;       // the __tgt_target_kernel call itself
     Instruction *start = nullptr;   // the kernel is over after it
     std::string kernel;
     SmallVector<Value *, 16> args;   // as launchArgs
@@ -279,7 +369,11 @@ struct Launch {
 // The kernel a launch starts: its region id is the global
 // ".<kernel>.region_id".
 std::string launchedKernel(CallInst *L) {
-    auto *G = dyn_cast<GlobalVariable>(L->getArgOperand(4)->stripPointerCasts());
+    Value *id = L->getArgOperand(4)->stripPointerCasts();
+    // A launch that picks between the kernel and its plain copy
+    // (selectPlain): the kernel's.
+    if (auto *S = dyn_cast<SelectInst>(id)) id = S->getTrueValue()->stripPointerCasts();
+    auto *G = dyn_cast<GlobalVariable>(id);
     if (!G) return "";
     StringRef n = G->getName();
     if (!n.consume_front(".") || !n.consume_back(".region_id")) return "";
@@ -811,6 +905,7 @@ bool checkPut(const Launch &Ln, CallInst *put, Analyses &A, AAResults *AA, Found
 Launch plainLaunch(CallInst *L, DominatorTree &DT, const DataLayout &DL) {
     Launch Ln;
     Ln.post = L;
+    Ln.call = L;
     Ln.start = L;
     Ln.kernel = launchedKernel(L);
     if (Ln.kernel.empty()) return Ln;
@@ -843,6 +938,7 @@ std::optional<Launch> taskLaunch(CallInst *TC, FunctionAnalysisManager &FAM,
     auto &EDT = FAM.getResult<DominatorTreeAnalysis>(*E);
     Launch Ln;
     Ln.post = TC;
+    Ln.call = TL;
     Ln.kernel = launchedKernel(TL);
     Ln.maps = launchMapTypes(TL, EDT, DL);
     StoreInst *bp = storeTo(*E, TL->getArgOperand(5)->stripPointerCasts(), 8, TL, EDT, DL);
@@ -882,6 +978,7 @@ std::optional<Launch> taskLaunch(CallInst *TC, FunctionAnalysisManager &FAM,
 
 bool findSite(const Launch &Ln, ArrayRef<Launch> all, Analyses &A, FoundSite &S) {
     S.launch = Ln.post;
+    S.call = Ln.call;
     S.kernel = Ln.kernel;
     if (Ln.args.empty()) return false;
     S.AA = loadsSurvive(*Ln.post->getModule(), Ln.maps) ? &A.AA : nullptr;
@@ -939,6 +1036,37 @@ bool prepareLoops(FoundSite &S, DominatorTree &DT, const DataLayout &DL) {
         if (!by.isOne()) d = B.CreateUDiv(d, ConstantInt::get(d->getType(), by));
         P.iter = B.CreateZExtOrTrunc(d, B.getInt64Ty(), "gicc.iter");
     }
+    return true;
+}
+
+// Has launch L, whose puts are posted by now, start either the kernel or its
+// plain copy (kPlainSuffix), as ompx__after_select says once it has seen the
+// posts. The copy gets an offload entry of its own next to the kernel's --
+// the same entry with another name and region id -- which is all the
+// offload runtime needs to find it in the device image. False, and nothing
+// changed, when the kernel's entry is not found in the shape clang emits.
+bool selectPlain(Module &M, CallInst *L, StringRef kernel) {
+    LLVMContext &Ctx = M.getContext();
+    auto *id = dyn_cast<GlobalVariable>(L->getArgOperand(4)->stripPointerCasts());
+    const char *why = "the launch's region id is not a global";
+    GlobalVariable *plain =
+        id && id->hasInitializer() ? copyEntry(M, id, kernel, kPlainSuffix, &why) : nullptr;
+    if (!plain) {
+        out() << "[gicc-after] " << kernel << ": always the kernel, not its plain copy: " << why
+              << "\n";
+        return false;
+    }
+    // 0 the plain copy, 1 the kernel; GICCSplitLaunch adds 2, the early copy
+    // (kSelectEarlyArg says there is one), where it can.
+    Type *I32 = Type::getInt32Ty(Ctx);
+    FunctionCallee pick =
+        M.getOrInsertFunction("ompx__after_select", I32, Type::getInt64Ty(Ctx), I32);
+    IRBuilder<> B(L);
+    Value *sends = B.CreateICmpEQ(
+        B.CreateCall(pick, {ConstantInt::get(Type::getInt64Ty(Ctx), afterPutHash(kernel)),
+                            ConstantInt::get(I32, 0)}),
+        ConstantInt::get(I32, 1));
+    L->setArgOperand(4, B.CreateSelect(sends, L->getArgOperand(4), plain));
     return true;
 }
 
@@ -1060,6 +1188,11 @@ void bracket(Module &M, FoundSite &S, DominatorTree &DT) {
         A.CreateCall(doneFn, v);
         put->eraseFromParent();
     }
+    // A nowait region's launch is in its task's entry, which runs after
+    // the posts too: they are made before the task is.
+    if (S.call && hasPlainCopy(S.kernel) && selectPlain(M, S.call, S.kernel))
+        out() << "[gicc-after] " << S.kernel << ": the launch picks between the kernel and "
+                 "its plain copy (ompx__after_select)\n";
 }
 
 

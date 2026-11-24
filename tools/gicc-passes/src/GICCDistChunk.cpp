@@ -1,4 +1,5 @@
 #include "GICCDistChunk.h"
+#include "GICCAfterPut.h"
 #include "TuneConfig.h"
 
 #include <cstdlib>
@@ -63,11 +64,14 @@ PreservedAnalyses GICCDistChunkPass::run(Module &M, ModuleAnalysisManager &) {
         };
         // The chunk the tuning file names for this kernel, else
         // GICC_DIST_CHUNK's; 0 leaves the kernel as clang made it.
-        const uint64_t want =
-            tune::distChunk(K.getName()).value_or(cfg.distChunkSet ? cfg.distChunk : 0);
+        // A plain copy (GICCAfterPut.h) runs in its kernel's chunk, and is
+        // not a kernel of its own to the tuner.
+        const bool copy = isPlainCopy(K.getName());
+        const uint64_t want = tune::distChunk(plainCopyOf(K.getName()))
+                                  .value_or(cfg.distChunkSet ? cfg.distChunk : 0);
         json::Object rec{{"kind", "kernel"}, {"id", K.getName()}, {"option", "dist_chunk"}};
         if (want) rec["chosen"] = static_cast<int64_t>(want);
-        tune::record(std::move(rec));
+        if (!copy) tune::record(std::move(rec));
         if (want == 0) continue;
         Value *lb0 = wide(bounds->first), *ub0 = wide(bounds->second);
         KI->widenDistChunk(lb0, ub0, want);

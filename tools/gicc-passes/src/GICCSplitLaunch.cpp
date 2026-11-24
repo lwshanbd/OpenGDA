@@ -41,6 +41,9 @@ constexpr StringLiteral kLaunch  = "__tgt_target_kernel";
 constexpr StringLiteral kDefer   = "ompx__fence_defer";
 constexpr StringLiteral kFlush   = "ompx__fence_flush";
 constexpr StringLiteral kBeginLaunch = "ompx__split_begin_launch";
+// The same for a kernel's early copy (GICCAfterPut.h, kEarlySuffix): the
+// ranges that write what the posted puts send, the puts, then the rest.
+constexpr StringLiteral kEarlyBegin = "ompx__early_begin_launch";
 constexpr StringLiteral kNext    = "ompx__split_next";
 // Marks the launches the rewrite made, which no flush goes before.
 constexpr StringLiteral kSplitMD = "gicc.split";
@@ -315,7 +318,12 @@ bool runDevice(Module &M, ModuleAnalysisManager &MAM) {
     const bool canSplit = window && !window->isDeclaration();
     bool changed = false;
     for (Function &K : M) {
-        if (K.isDeclaration() || !isOffloadKernel(K)) continue;
+        // Not a plain copy (GICCAfterPut.h): no launch of one is bracketed,
+        // so nothing would set the range it runs. An early copy is made to
+        // run in ranges, whatever the tuning file says of splits.
+        const bool early = isEarlyCopy(K.getName());
+        if (K.isDeclaration() || !isOffloadKernel(K) || (isPlainCopy(K.getName()) && !early))
+            continue;
         json::Object rec;
         json::Object site{{"kind", "kernel"}, {"id", K.getName()}, {"option", "split"}};
         std::string what, why;
@@ -331,7 +339,7 @@ bool runDevice(Module &M, ModuleAnalysisManager &MAM) {
         }
         // The report says what could be split; only what is asked for is.
         site["splittable"] = P.has_value();
-        if (P && !tune::split(K.getName()).value_or(splitDefault())) {
+        if (P && !early && !tune::split(K.getName()).value_or(splitDefault())) {
             P.reset();
             why = "not asked for (GICC_SPLIT=1, or split: true in the tuning file)";
         }
@@ -341,12 +349,14 @@ bool runDevice(Module &M, ModuleAnalysisManager &MAM) {
             if (std::getenv("GICC_SPLIT_DUMP")) KI->K.print(out());
             rec["split"] = std::move(*P);
             changed = true;
-            out() << "[gicc-split] " << K.getName() << ": split around a deferred fence\n";
+            out() << "[gicc-split] " << K.getName()
+                  << (early ? ": runs the range a launch names\n"
+                            : ": split around a deferred fence\n");
         } else {
             site["why"] = why;
             out() << "[gicc-split] " << K.getName() << ": not split: " << why << "\n";
         }
-        tune::record(std::move(site));
+        if (!early) tune::record(std::move(site));
         writeRecord(K.getName(), std::move(rec));
     }
     return changed;
@@ -426,8 +436,11 @@ bool hasAddressTaken(const Function &F) {
 
 // Rewrites launch L of a split kernel; false (and nothing changed) when the
 // launch does not wait for it or does not hand over what its boxes need.
+// With `partId`, the ranges are launches of that kernel (the early copy)
+// and `beginName` is asked instead of ompx__split_begin_launch.
 bool rewriteLaunch(Module &M, CallInst *L, StringRef kernel, const json::Object &P,
-                   DominatorTree &DT, std::string &why) {
+                   DominatorTree &DT, std::string &why, StringRef beginName = kBeginLaunch,
+                   Value *partId = nullptr) {
     if (!launchWaits(L, DT)) {
         why = "the launch may not wait for the kernel (nowait)";
         return false;
@@ -516,7 +529,7 @@ bool rewriteLaunch(Module &M, CallInst *L, StringRef kernel, const json::Object 
     // The launch's own operands go too, so the runtime may make the
     // kernel's remaining ranges later, after other kernels' windows (a
     // chain, gicc/omp.h).
-    FunctionCallee begin = M.getOrInsertFunction(kBeginLaunch, I32, I64, I32, Ptr, I64, Ptr, I64,
+    FunctionCallee begin = M.getOrInsertFunction(beginName, I32, I64, I32, Ptr, I64, Ptr, I64,
                                                  I32, I32, Ptr, Ptr);
     FunctionCallee next = M.getOrInsertFunction(kNext, I32, Ptr);
     Value *split = B.CreateICmpNE(
@@ -558,6 +571,7 @@ bool rewriteLaunch(Module &M, CallInst *L, StringRef kernel, const json::Object 
     Bd.CreateMemCpy(kargs, Align(8), saved, Align(8), kargsBytes);
     Bd.CreateStore(Bd.CreateLoad(I64, trip), Bd.CreateConstInBoundsGEP1_64(I8, kargs, kArgsTripcount));
     auto *part = cast<CallInst>(L->clone());
+    if (partId) part->setArgOperand(4, partId);
     Bd.Insert(part);
     sum->addIncoming(Bd.CreateOr(sum, part), body);
     Bd.CreateBr(head);
@@ -674,6 +688,34 @@ bool runHost(Module &M, ModuleAnalysisManager &MAM) {
         for (Instruction &I : instructions(F))
             if (auto *CI = dyn_cast<CallInst>(&I); CI && calleeName(*CI) == kLaunch)
                 launches.push_back({CI, launchedKernelOf(CI)});
+    // A launch that picks between a kernel and its plain copy
+    // (GICCAfterPut.h) gets a third way where the kernel's early copy was
+    // lowered to run in ranges: those that write what the posted puts send,
+    // the puts, the rest (ompx__early_begin_launch decides each time).
+    unsigned early = 0;
+    for (auto &[L, kernel] : launches) {
+        auto *pick = dyn_cast<SelectInst>(L->getArgOperand(4));
+        auto it = recs.find(kernel + kEarlySuffix.str());
+        if (!pick || it == recs.end() || !it->second.split) continue;
+        auto *cmp = dyn_cast<ICmpInst>(pick->getCondition());
+        auto *asked = cmp ? dyn_cast<CallInst>(cmp->getOperand(0)) : nullptr;
+        auto *id = dyn_cast<GlobalVariable>(pick->getTrueValue()->stripPointerCasts());
+        if (!asked || calleeName(*asked) != "ompx__after_select" || !id) continue;
+        const char *whyNot = "";
+        std::string why;
+        GlobalVariable *earlyId = copyEntry(M, id, kernel, kEarlySuffix, &whyNot);
+        auto &DT = FAM.getResult<DominatorTreeAnalysis>(*L->getFunction());
+        if (earlyId && rewriteLaunch(M, L, kernel, *it->second.split, DT, why, kEarlyBegin, earlyId)) {
+            asked->setArgOperand(1, ConstantInt::get(asked->getArgOperand(1)->getType(), 1));
+            FAM.invalidate(*L->getFunction(), PreservedAnalyses::none());
+            out() << "[gicc-split] " << kernel << ": the launch can run in two ranges around "
+                     "its puts (the early copy)\n";
+            ++early;
+        } else {
+            out() << "[gicc-split] " << kernel << ": no launch in two ranges around its puts: "
+                  << (earlyId ? why : std::string(whyNot)) << "\n";
+        }
+    }
     // A fence is deferred only past kernels that cannot communicate.
     std::string block;
     if (sharesHostMemory(M)) block = "the unit requires unified shared memory";
@@ -685,7 +727,7 @@ bool runHost(Module &M, ModuleAnalysisManager &MAM) {
     }
     if (!block.empty()) {
         out() << "[gicc-split] no fence deferred: " << block << "\n";
-        return false;
+        return early > 0;
     }
     unsigned rewritten = 0;
     for (auto &[L, kernel] : launches) {
@@ -702,7 +744,7 @@ bool runHost(Module &M, ModuleAnalysisManager &MAM) {
             out() << "[gicc-split] " << kernel << ": launch not split: " << why << "\n";
         }
     }
-    if (!rewritten) return false;
+    if (!rewritten) return early > 0;
     const unsigned fences = deferFences(M);
     const unsigned flushes = insertFlushes(M);
     out() << "[gicc-split] " << fences << " fence(s) deferred, " << flushes
