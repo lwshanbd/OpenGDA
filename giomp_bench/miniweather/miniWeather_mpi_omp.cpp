@@ -411,9 +411,11 @@ void set_halo_values_x( double *state ) {
 
     MPI_Request req_r[2], req_s[2];
 
+#ifndef MW_MPI_DEVICE
     //Prepost receives
     ierr = MPI_Irecv(recvbuf_l,hs*nz*NUM_VARS,MPI_DOUBLE, left_rank,0,MPI_COMM_WORLD,&req_r[0]);
     ierr = MPI_Irecv(recvbuf_r,hs*nz*NUM_VARS,MPI_DOUBLE,right_rank,1,MPI_COMM_WORLD,&req_r[1]);
+#endif
 
     //Pack the send buffers
 #pragma omp target teams distribute parallel for simd collapse(3) depend(inout:asyncid) nowait
@@ -426,6 +428,23 @@ void set_halo_values_x( double *state ) {
       }
     }
 
+#ifdef MW_MPI_DEVICE
+    //GPU-aware MPI: hand MPI the device addresses of the buffers, no host copies.
+    //The taskwait ends the pack kernel and every earlier kernel, among them the
+    //previous unpack, so the receives may overwrite recvbuf and the sends read
+    //packed data.
+#pragma omp taskwait
+#pragma omp target data use_device_ptr(sendbuf_l,sendbuf_r,recvbuf_l,recvbuf_r)
+    {
+      ierr = MPI_Irecv(recvbuf_l,hs*nz*NUM_VARS,MPI_DOUBLE, left_rank,0,MPI_COMM_WORLD,&req_r[0]);
+      ierr = MPI_Irecv(recvbuf_r,hs*nz*NUM_VARS,MPI_DOUBLE,right_rank,1,MPI_COMM_WORLD,&req_r[1]);
+      ierr = MPI_Isend(sendbuf_l,hs*nz*NUM_VARS,MPI_DOUBLE, left_rank,1,MPI_COMM_WORLD,&req_s[0]);
+      ierr = MPI_Isend(sendbuf_r,hs*nz*NUM_VARS,MPI_DOUBLE,right_rank,0,MPI_COMM_WORLD,&req_s[1]);
+    }
+
+    //Wait for receives to finish before the unpack kernel starts
+    ierr = MPI_Waitall(2,req_r,MPI_STATUSES_IGNORE);
+#else
 #pragma omp target update from(sendbuf_l[:nz*hs*NUM_VARS],sendbuf_r[:nz*hs*NUM_VARS]) depend(inout:asyncid) nowait
 #pragma omp taskwait
 
@@ -437,6 +456,7 @@ void set_halo_values_x( double *state ) {
     ierr = MPI_Waitall(2,req_r,MPI_STATUSES_IGNORE);
 
 #pragma omp target update to(recvbuf_l[:nz*hs*NUM_VARS],recvbuf_r[:nz*hs*NUM_VARS]) depend(inout:asyncid) nowait
+#endif
 
     //Unpack the receive buffers
 #pragma omp target teams distribute parallel for simd collapse(3) depend(inout:asyncid) nowait
