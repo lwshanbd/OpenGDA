@@ -23,6 +23,8 @@ using GpuIpcMemHandle_t = hipIpcMemHandle_t;
 #define GPU_SUCCESS              hipSuccess
 #define gpuGetDeviceCount        hipGetDeviceCount
 #define gpuSetDevice             hipSetDevice
+#define gpuGetDevice             hipGetDevice
+#define gpuStreamQuery           hipStreamQuery
 #define gpuGetDeviceProperties   hipGetDeviceProperties
 #define gpuGetErrorString        hipGetErrorString
 
@@ -106,6 +108,8 @@ using GpuIpcMemHandle_t = cudaIpcMemHandle_t;
 #define GPU_SUCCESS              cudaSuccess
 #define gpuGetDeviceCount        cudaGetDeviceCount
 #define gpuSetDevice             cudaSetDevice
+#define gpuGetDevice             cudaGetDevice
+#define gpuStreamQuery           cudaStreamQuery
 #define gpuGetDeviceProperties   cudaGetDeviceProperties
 #define gpuGetErrorString        cudaGetErrorString
 

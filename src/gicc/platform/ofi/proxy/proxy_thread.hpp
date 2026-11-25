@@ -24,6 +24,7 @@
 #include <bitset>
 #include <cstdint>
 #include <optional>
+#include <deque>
 #include <thread>
 #include <vector>
 
@@ -83,6 +84,37 @@ private:
     // hot QUIET drain. Updated alongside set/reset.
     size_t                       in_flight_count_ = 0;
     std::optional<PendingRetry>  pending_retry_;
+
+    // --- Same-node commands ---------------------------------------------------
+    // A WRITE or READ whose peer shares this node, both buffers IPC-mapped,
+    // is a device-to-device copy instead of a trip through the NIC
+    // (GICC_PROXY_LOCAL_IPC=0 keeps the NIC). Each peer has a stream of its
+    // own, so copies to different peers run side by side. A copy's slot is
+    // acked when its stream has run it. A SIGNAL to a peer whose stream is
+    // still copying is held back until it is done, so it cannot overtake
+    // the payload, and the worker goes on with the next command meanwhile;
+    // a QUIET waits for all of it.
+    struct LocalStream {
+        void*                     stream = nullptr;   // GpuStream_t
+        std::vector<uint64_t>     slots;              // copies not yet acked
+        std::deque<PendingRetry>  signals;            // held back behind them
+        uint64_t                  t0 = 0;
+    };
+    static constexpr int kLocalStreams = 16;
+    bool local_copy(const TransferCmd& c, uint64_t slot, bool read);
+    // True when the signal was taken (sent or held back); false: send as usual.
+    bool local_signal(const TransferCmd& c, uint64_t slot);
+    // Acks finished copies and sends the signals behind them; wait: all of
+    // them, before returning. Returns whether anything is still pending.
+    bool local_progress(bool wait);
+    void note_submitted(uint64_t slot);
+    bool                         local_ipc_    = false;
+    int                          local_device_ = 0;
+    int                          local_busy_   = 0;   // streams with work
+    LocalStream                  local_[kLocalStreams];
+    // Under GICC_PROXY_PROFILE: copies, bytes, ns from a stream's first copy
+    // to its ack, and signals held back.
+    uint64_t                     local_n_ = 0, local_bytes_ = 0, local_ns_ = 0, local_held_ = 0;
 
     // --- Optional hot-path profiling (GICC_PROXY_PROFILE=1) -----------------
     // Measures where each op's time goes WITHOUT a GPU profiler (the cost is

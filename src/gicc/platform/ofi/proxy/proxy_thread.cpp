@@ -96,6 +96,13 @@ ProxyThread::ProxyThread(::gicc::Runtime& rt, int ep_idx)
     , lf_(rt.fabric(), rt, ep_idx)
 {
     ring_host_ = allocate_d2h_ring_host<kProxyRingCapacity>(&ring_device_);
+    {
+        const char* ipc = std::getenv("GICC_HALO_IPC");
+        const char* off = std::getenv("GICC_PROXY_LOCAL_IPC");
+        local_ipc_ = ipc != nullptr && std::atoi(ipc) != 0 &&
+                     !(off != nullptr && std::atoi(off) == 0);
+        if (local_ipc_ && gpuGetDevice(&local_device_) != GPU_SUCCESS) local_ipc_ = false;
+    }
     if (const char* p = std::getenv("GICC_PROXY_PROFILE")) {
         if (std::atoi(p) != 0) {
             prof_enabled_ = true;
@@ -125,6 +132,11 @@ ProxyThread::~ProxyThread() {
             (unsigned long)prof_poll_hit_, (unsigned long)prof_poll_empty_,
             cq_hit_rate);
     }
+    if (prof_enabled_ && local_n_ > 0)
+        fprintf(stderr, "[proxy-profile] same-node copies=%lu, %.1f MB, %.4f s from a stream's "
+                "first copy to its ack; %lu signals held back\n",
+                (unsigned long)local_n_, local_bytes_ / 1048576.0, local_ns_ / 1e9,
+                (unsigned long)local_held_);
     if (ring_host_) {
         free_d2h_ring_host<kProxyRingCapacity>(ring_host_);
         ring_host_   = nullptr;
@@ -172,7 +184,108 @@ constexpr size_t ring_idx(uint64_t slot) {
 }
 } // namespace
 
+void ProxyThread::note_submitted(uint64_t slot) {
+    size_t bit = ring_idx(slot);
+    in_flight_.set(bit);
+    ++in_flight_count_;
+    if (prof_enabled_) {
+        prof_submit_ns_[bit] = now_ns();
+        ++prof_submit_calls_;
+        if (in_flight_count_ > prof_max_inflight_) prof_max_inflight_ = in_flight_count_;
+    }
+}
+
+bool ProxyThread::local_copy(const TransferCmd& c, uint64_t slot, bool read) {
+    if (!local_ipc_) return false;
+    // Both mapped: both are device buffers (the signal table is host memory).
+    void* peer = rt_.peer_mapped(c.dst_rank, c.dst_buf);
+    if (peer == nullptr || rt_.peer_mapped(c.dst_rank, c.src_buf) == nullptr) return false;
+    LocalStream& L = local_[c.dst_rank % kLocalStreams];
+    if (L.stream == nullptr) {
+        GpuStream_t s = nullptr;
+        if (gpuStreamCreateWithFlags(&s, gpuStreamNonBlocking) != GPU_SUCCESS) return false;
+        L.stream = s;
+    }
+    char* mine   = static_cast<char*>(rt_.local_buf_view(c.src_buf).ptr) + c.src_offset;
+    char* theirs = static_cast<char*>(peer) + c.dst_offset;
+    // An empty payload (a signal's) only takes its place in the stream's order.
+    if (c.bytes != 0 &&
+        gpuMemcpyAsync(read ? mine : theirs, read ? theirs : mine, c.bytes,
+                       gpuMemcpyDeviceToDevice,
+                       static_cast<GpuStream_t>(L.stream)) != GPU_SUCCESS) {
+        fprintf(stderr, "ProxyThread: same-node copy failed\n");
+        std::abort();
+    }
+    if (L.slots.empty() && L.signals.empty()) ++local_busy_;
+    if (L.slots.empty()) L.t0 = prof_enabled_ ? now_ns() : 0;
+    if (prof_enabled_) {
+        ++local_n_;
+        local_bytes_ += c.bytes;
+    }
+    L.slots.push_back(slot);
+    return true;
+}
+
+bool ProxyThread::local_signal(const TransferCmd& c, uint64_t slot) {
+    if (local_busy_ == 0) return false;
+    LocalStream& L = local_[c.dst_rank % kLocalStreams];
+    if (L.slots.empty() && L.signals.empty()) return false;
+    // Behind the stream's copies. A copy issued to the stream after this
+    // signal is acked with them, which only makes the signal later.
+    L.signals.push_back(PendingRetry{c, slot});
+    if (prof_enabled_) ++local_held_;
+    return true;
+}
+
+bool ProxyThread::local_progress(bool wait) {
+    for (int k = 0; local_busy_ > 0 && k < kLocalStreams; ++k) {
+        LocalStream& L = local_[k];
+        if (L.slots.empty() && L.signals.empty()) continue;
+        if (!L.slots.empty()) {
+            GpuStream_t s = static_cast<GpuStream_t>(L.stream);
+            if (wait) {
+                if (gpuStreamSynchronize(s) != GPU_SUCCESS) {
+                    fprintf(stderr, "ProxyThread: same-node copy did not complete\n");
+                    std::abort();
+                }
+            } else if (gpuStreamQuery(s) != GPU_SUCCESS) {
+                continue;
+            }
+            if (prof_enabled_) local_ns_ += now_ns() - L.t0;
+            for (uint64_t slot : L.slots) ring_host_->mark_acked(slot);
+            L.slots.clear();
+            ring_host_->advance_tail_from_mask();
+        }
+        while (!L.signals.empty()) {
+            const PendingRetry& r = L.signals.front();
+            int ret = lf_.submit_signal(r.cmd, r.slot);
+            if (ret == -FI_EAGAIN) {
+                if (!wait) break;
+                // Make room: reap completions, then try again.
+                Completion comps[kCqBatchMax];
+                int n = lf_.poll(comps, kCqBatch);
+                for (int i = 0; i < n; ++i) {
+                    uint64_t done = reinterpret_cast<uint64_t>(comps[i].context);
+                    ring_host_->mark_acked(done);
+                    size_t bit = ring_idx(done);
+                    if (in_flight_.test(bit)) {
+                        in_flight_.reset(bit);
+                        --in_flight_count_;
+                    }
+                }
+                if (n > 0) ring_host_->advance_tail_from_mask();
+                continue;
+            }
+            note_submitted(r.slot);
+            L.signals.pop_front();
+        }
+        if (L.slots.empty() && L.signals.empty()) --local_busy_;
+    }
+    return local_busy_ > 0;
+}
+
 void ProxyThread::main_loop() {
+    if (local_ipc_) (void)gpuSetDevice(local_device_);
     // Idle-backoff counter. Reset to 0 whenever we did any real work
     // (submitted, polled a completion, or popped a QUIET). Climbs while
     // ring + CQ stay empty so we can stop hot-spinning between shots.
@@ -256,6 +369,7 @@ void ProxyThread::main_loop() {
 
             switch (c.cmd_type) {
                 case CmdType::WRITE: {
+                    if (local_copy(c, slot, false)) break;
                     int ret = lf_.submit_write(c, slot);
                     if (ret == -FI_EAGAIN) {
                         pending_retry_ = PendingRetry{c, slot};
@@ -273,6 +387,7 @@ void ProxyThread::main_loop() {
                     break;
                 }
                 case CmdType::READ: {
+                    if (local_copy(c, slot, true)) break;
                     int ret = lf_.submit_read(c, slot);
                     if (ret == -FI_EAGAIN) {
                         pending_retry_ = PendingRetry{c, slot};
@@ -307,6 +422,7 @@ void ProxyThread::main_loop() {
                     break;
                 }
                 case CmdType::SIGNAL: {
+                    if (local_signal(c, slot)) break;
                     int ret = lf_.submit_signal(c, slot);
                     if (ret == -FI_EAGAIN) {
                         pending_retry_ = PendingRetry{c, slot};
@@ -356,6 +472,10 @@ void ProxyThread::main_loop() {
             ring_host_->advance_tail_from_mask();
             did_work = true;
         }
+        if (local_busy_ > 0) {
+            (void)local_progress(false);
+            did_work = true;
+        }
         if (did_work) {
             idle_iters = 0;
         } else {
@@ -370,6 +490,7 @@ void ProxyThread::main_loop() {
         }
     }
 
+    (void)local_progress(true);
     // Drain remaining completions on shutdown so we don't leak in-flight ops,
     // bounded by kShutdownDrainTimeout so a dropped completion can't hang
     // the destructor forever.
@@ -408,6 +529,7 @@ void ProxyThread::handle_quiet(uint64_t quiet_slot) {
     // snapshot copy — we just remember the count we entered with and
     // wait for it to drain to zero. Bounded by kQuietDrainTimeout so a
     // dropped completion doesn't hang the GPU's quiet() spin forever.
+    (void)local_progress(true);
     size_t target_remaining = in_flight_count_;
     auto deadline = std::chrono::steady_clock::now() + kQuietDrainTimeout;
     while (target_remaining > 0 &&
