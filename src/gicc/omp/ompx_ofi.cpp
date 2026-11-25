@@ -1470,6 +1470,7 @@ static void early_send() {
     for (int i = 0; i < OMPX_PIPE_AFTER_MAX; ++i) {
         ompx_pipe_after_put& e = q->after.e[i];
         if (!e.armed || e.peer < 0 || e.bytes == 0 || g_after_src[i] == nullptr) continue;
+        if (e.sig >= 0) continue;   // a put with a signal: the kernel's or the host's after it
         if (g_after_queued[i])
             release_after(i);
         else
@@ -1477,6 +1478,7 @@ static void early_send() {
                           (size_t)e.bytes);
         __atomic_store_n(&e.handled, 1, __ATOMIC_RELEASE);
     }
+    ipc_flush();   // they travel while the launch's last range runs
     ompx_trigger_host();
 }
 
@@ -1600,6 +1602,14 @@ static void release_after(int i) {
     for (int g = fired; g < groups; ++g) g_runtime->signal_slot_fire(kSigSlots + i);
 }
 
+// A kernel that counted its stores and did not send the whole put left its
+// counters part way: zero them for the next launch.
+static void after_clear_counts(ompx_pipe_after_put& e, bool sent) {
+    if (sent || e.dyn_cnt == nullptr) return;
+    require_gpu(gpuMemset(e.dyn_cnt, 0, OMPX_DYN_CNT_WORDS * sizeof(unsigned)),
+                "clear the run-time counters");
+}
+
 void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, int peer,
                       void* dst, const void* src, long long src_rel, size_t bytes) {
     ompx_pipe_deferred* q = g_pipe_deferred_host;
@@ -1614,7 +1624,9 @@ void ompx__after_post(unsigned long long kernel, int i, int src_arg, int armed, 
     e.piece = 0;
     e.sig = -1;
     e.value = 0;
-    e.dyn_ok = 0;   // run-time counting is wired on InfiniBand only
+    // Run-time counting (GICCDynamicPut) sends its pieces as device puts
+    // on the proxy ring; under DWQ there is nothing queued for it to ring.
+    e.dyn_ok = g_dwq_enabled ? 0 : 1;
     // Where it is in the heap: the put may name it by a host pointer
     // ompx_bind put there.
     g_after_src[i] = armed && peer >= 0 && bytes > 0
@@ -1659,31 +1671,46 @@ void ompx__after_done(unsigned long long kernel, int i, int peer, void* dst,
         ompx_pipe_after_put& e = q->after.e[i];
         sent = e.armed && (g_after_queued[i] || __atomic_load_n(&e.handled, __ATOMIC_ACQUIRE));
         release_after(i);
+        after_clear_counts(e, sent);
         e.armed = 0;
         e.handled = 0;
     }
     if (!sent) ompx_put_host(peer, dst, src, bytes);
 }
 
-// An ompx_put_signal after the launch stays on the host here: posted
-// unarmed, so no kernel sends any of it.
+// An ompx_put_signal after the launch: a kernel that counts its stores at
+// run time (GICCDynamicPut) sends the payload in pieces and the signal behind
+// the last, all on one proxy ring, whose worker keeps a signal behind the
+// payload. Under DWQ it stays on the host: posted unarmed.
 void ompx__after_post_signal(unsigned long long kernel, int i, int src_arg, int armed, int peer,
                              void* dst, const void* src, long long src_rel, size_t bytes,
                              int sig, unsigned long long value) {
-    (void)armed; (void)sig; (void)value;
-    ompx__after_post(kernel, i, src_arg, 0, peer, dst, src, src_rel, bytes);
+    if (g_dwq_enabled) armed = 0;
+    if (armed) check_slot(sig, "ompx_put_signal");
+    ompx__after_post(kernel, i, src_arg, armed, peer, dst, src, src_rel, bytes);
+    ompx_pipe_deferred* q = g_pipe_deferred_host;
+    if (q == nullptr || i < 0 || i >= OMPX_PIPE_AFTER_MAX || !armed) return;
+    q->after.e[i].sig = sig;
+    q->after.e[i].value = value;
 }
 
+// The kernel sent the payload and the signal behind it, or the peer has none
+// of it as a whole: then the host sends all of it again, the signal behind
+// it, and clears the counters the kernel left part way.
 void ompx__after_done_signal(unsigned long long kernel, int i, int peer, void* dst,
                              const void* src, size_t bytes, int sig, unsigned long long value) {
     pipe_check();
     ompx_pipe_deferred* q = g_pipe_deferred_host;
+    bool sent = false;
     if (q != nullptr && i >= 0 && i < OMPX_PIPE_AFTER_MAX && q->after.kernel == kernel) {
+        ompx_pipe_after_put& e = q->after.e[i];
+        sent = e.armed && e.sig >= 0 && __atomic_load_n(&e.handled, __ATOMIC_ACQUIRE);
         release_after(i);
-        q->after.e[i].armed = 0;
-        q->after.e[i].handled = 0;
+        after_clear_counts(e, sent);
+        e.armed = 0;
+        e.handled = 0;
     }
-    ompx_put_signal_host(peer, dst, src, bytes, sig, value);
+    if (!sent) ompx_put_signal_host(peer, dst, src, bytes, sig, value);
 }
 
 // After the launch of a kernel with an in-loop put the host posted as put
