@@ -30,6 +30,55 @@
 extern "C" int __tgt_target_kernel(void* loc, int64_t device, int32_t teams, int32_t threads,
                                    void* host_ptr, void* args);
 
+// ---- same-node puts: one copy kernel for a batch ----------------------------
+// A same-node put is a copy into the peer's heap as this GPU maps it. Issued
+// one hipMemcpyAsync each, a put costs the host 7 to 17 us in the call
+// whatever its size, and a 64 KB to 4 MB copy runs well below what the link
+// carries (examples/proxy/ipc_copy_sweep.cpp). So puts of OMPX_IPC_COPY_MIN
+// to OMPX_IPC_COPY_MAX bytes (32 KB to 512 KB) are collected and copied by
+// one kernel launch per batch, 16 bytes per thread and store where the
+// addresses allow: up to kIpcBatch of them, launched as soon as
+// kIpcBatchBytes are waiting and otherwise at the next quiet. Smaller puts
+// stay hipMemcpyAsync, which issues faster; so do larger ones, which it
+// hands to the GPU's copy engine: a kernel copying megabytes takes the
+// compute units from the program's own kernels, and Himeno's 2 MB planes
+// and FT's 4.7 MB slabs ran 6% slower by it. OMPX_IPC_COPY=memcpy turns the
+// kernel off.
+constexpr int kIpcBatch = 4;
+struct OmpxIpcCopy {
+    char*       dst;
+    const char* src;
+    size_t      bytes;
+    int         word;   // 16, 8, 4 or 1: what both addresses are aligned to
+};
+struct OmpxIpcBatch {
+    OmpxIpcCopy c[kIpcBatch];
+    int         n;
+};
+struct OmpxWord16 { uint64_t a, b; };
+
+template <typename T>
+static __device__ __forceinline__ void ompx_ipc_copy_words(const OmpxIpcCopy& c, size_t id,
+                                                           size_t threads) {
+    auto* d = reinterpret_cast<T*>(c.dst);
+    auto* s = reinterpret_cast<const T*>(c.src);
+    const size_t n = c.bytes / sizeof(T);
+    for (size_t i = id; i < n; i += threads) d[i] = s[i];
+    for (size_t b = n * sizeof(T) + id; b < c.bytes; b += threads) c.dst[b] = c.src[b];
+}
+
+static __global__ void ompx_ipc_copy_kernel(OmpxIpcBatch batch) {
+    const size_t id = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t threads = (size_t)gridDim.x * blockDim.x;
+    for (int k = 0; k < batch.n; ++k) {
+        const OmpxIpcCopy& c = batch.c[k];
+        if (c.word == 16) ompx_ipc_copy_words<OmpxWord16>(c, id, threads);
+        else if (c.word == 8) ompx_ipc_copy_words<uint64_t>(c, id, threads);
+        else if (c.word == 4) ompx_ipc_copy_words<uint32_t>(c, id, threads);
+        else ompx_ipc_copy_words<uint8_t>(c, id, threads);
+    }
+}
+
 namespace {
 
 // gicc/omp.h mirrors these two leading fields for C target regions.
@@ -81,6 +130,29 @@ const char* g_after_src[OMPX_PIPE_AFTER_MAX] = {};
 unsigned long long g_early_kernel = 0;   // ompx__after_select answered 2 for it
 bool g_early_sending = false;            // the ranges being run are such a launch's
 long long g_early_n = 0;
+// OMPX_SPLIT_STATS: where the host's communication time goes -- puts by
+// path (count, bytes, seconds in the call), and each part of a quiet and
+// the barriers.
+struct CommStats {
+    long long ipc_n = 0, ipc_bytes = 0, net_n = 0, net_bytes = 0, quiets = 0, barriers = 0;
+    double ipc_s = 0, net_s = 0, ipc_sync_s = 0, drain_s = 0, barrier_s = 0, quiet_s = 0;
+} g_comm;
+bool g_comm_stats = false;
+// The same-node puts waiting for their copy kernel, and when it is used.
+OmpxIpcBatch g_ipc_batch{};
+size_t g_ipc_batch_bytes = 0;
+bool g_ipc_kernel = true;                       // OMPX_IPC_COPY != memcpy
+size_t g_ipc_kernel_min = 32 * 1024;            // OMPX_IPC_COPY_MIN
+size_t g_ipc_kernel_max = 512 * 1024;           // OMPX_IPC_COPY_MAX
+constexpr size_t kIpcBatchBytes = 1 << 20;
+long long g_ipc_launches = 0;
+inline double comm_now() { return g_comm_stats ? MPI_Wtime() : 0; }
+inline void timed_barrier(MPI_Comm c) {
+    const double t = comm_now();
+    MPI_Barrier(c);
+    g_comm.barrier_s += comm_now() - t;
+    ++g_comm.barriers;
+}
 // And the launches asked to that ran whole: nothing armed to send, the
 // kernel writes none of it, or too little of the loop is left to hide it.
 long long g_early_none = 0, g_early_unwritten = 0, g_early_short = 0;
@@ -738,6 +810,13 @@ void ompx_init() {
     const char* chain_env = std::getenv("OMPX_SPLIT_CHAIN");
     g_split_chain = chain_env == nullptr || std::atoi(chain_env) != 0;
     const char* stats_env = std::getenv("OMPX_SPLIT_STATS");
+    g_comm_stats = stats_env != nullptr && *stats_env == '1';
+    const char* ipc_env = std::getenv("OMPX_IPC_COPY");
+    g_ipc_kernel = !(ipc_env != nullptr && std::strcmp(ipc_env, "memcpy") == 0);
+    if (const char* m = std::getenv("OMPX_IPC_COPY_MIN"); m != nullptr && *m)
+        g_ipc_kernel_min = (size_t)std::strtoull(m, nullptr, 10);
+    if (const char* m = std::getenv("OMPX_IPC_COPY_MAX"); m != nullptr && *m)
+        g_ipc_kernel_max = (size_t)std::strtoull(m, nullptr, 10);
     g_split_stats = stats_env != nullptr && std::atoi(stats_env) != 0;
 }
 
@@ -766,6 +845,15 @@ void ompx_finalize() {
                      ompx_get_rank_num(), g_begin_n, g_begin_s, g_meet_s, g_window_s,
                      g_copy_launch_s, g_next_n, g_next_s);
     if (g_split_stats) gicc_select::report(ompx_get_rank_num());
+    if (g_split_stats)
+        std::fprintf(stderr, "[giomp] rank %d: comm: same-node puts %lld, %.1f MB, %.4f s in the "
+                     "call; cross-node puts %lld, %.1f MB, %.4f s in the call; %lld quiets: IPC "
+                     "stream %.4f s, drain %.4f s; %lld barriers %.4f s; %lld copy kernels\n",
+                     ompx_get_rank_num(),
+                     g_comm.ipc_n, g_comm.ipc_bytes / 1048576.0, g_comm.ipc_s, g_comm.net_n,
+                     g_comm.net_bytes / 1048576.0, g_comm.net_s, g_comm.quiets,
+                     g_comm.ipc_sync_s, g_comm.drain_s, g_comm.barriers, g_comm.barrier_s,
+                     g_ipc_launches);
     if (g_split_stats && g_early_n + g_early_none + g_early_unwritten + g_early_short)
         std::fprintf(stderr, "[giomp] rank %d: %lld launches in two ranges around their puts; "
                      "run whole instead: %lld with nothing to send, %lld that write none of it, "
@@ -905,6 +993,24 @@ void* ompx_peer_ptr(int peer, const void* addr) {
     return static_cast<char*>(base) + offset_of(addr, "ompx_peer_ptr");
 }
 
+// Launches the copy kernel for the same-node puts collected so far, on the
+// IPC stream the next quiet waits for: a thread per 16 bytes of the largest
+// of them, in blocks of 256.
+static void ipc_flush() {
+    if (g_ipc_batch.n == 0) return;
+    size_t most = 0;
+    for (int k = 0; k < g_ipc_batch.n; ++k) most = std::max(most, g_ipc_batch.c[k].bytes);
+    size_t blocks = (most / 16 + 255) / 256;
+    blocks = std::min<size_t>(std::max<size_t>(blocks, 1), 65535);
+    hipLaunchKernelGGL(ompx_ipc_copy_kernel, dim3((unsigned)blocks), dim3(256), 0,
+                       gicc_runtime_ipc_stream(g_runtime), g_ipc_batch);
+    require_gpu(gpuGetLastError(), "same-node put (copy kernel)");
+    g_ipc_batch.n = 0;
+    g_ipc_batch_bytes = 0;
+    g_ipc_pending = true;
+    ++g_ipc_launches;
+}
+
 void ompx_put_host(int peer, void* dst, const void* src, size_t bytes) {
     if (g_runtime == nullptr) die("ompx_put before ompx_init");
     fence_flush();
@@ -916,13 +1022,25 @@ void ompx_put_host(int peer, void* dst, const void* src, size_t bytes) {
     // rides the runtime's IPC stream, which ompx_quiet synchronizes.
     void* peer_base = g_ipc_enabled ? g_runtime->peer_mapped(peer, g_heap.index)
                                     : nullptr;
+    const double t_put = comm_now();
     if (peer_base != nullptr) {
-        require_gpu(gpuMemcpyAsync(static_cast<char*>(peer_base) + dst_off,
-                                   g_heap_base + src_off, bytes,
-                                   gpuMemcpyDeviceToDevice,
-                                   gicc_runtime_ipc_stream(g_runtime)),
-                    "same-node put");
-        g_ipc_pending = true;
+        char* to = static_cast<char*>(peer_base) + dst_off;
+        const char* from = g_heap_base + src_off;
+        if (g_ipc_kernel && bytes >= g_ipc_kernel_min && bytes <= g_ipc_kernel_max) {
+            const uintptr_t both = reinterpret_cast<uintptr_t>(to) | reinterpret_cast<uintptr_t>(from);
+            g_ipc_batch.c[g_ipc_batch.n++] = OmpxIpcCopy{
+                to, from, bytes, (both & 15) == 0 ? 16 : (both & 7) == 0 ? 8 : (both & 3) == 0 ? 4 : 1};
+            g_ipc_batch_bytes += bytes;
+            if (g_ipc_batch.n == kIpcBatch || g_ipc_batch_bytes >= kIpcBatchBytes) ipc_flush();
+        } else {
+            require_gpu(gpuMemcpyAsync(to, from, bytes, gpuMemcpyDeviceToDevice,
+                                       gicc_runtime_ipc_stream(g_runtime)),
+                        "same-node put");
+            g_ipc_pending = true;
+        }
+        g_comm.ipc_s += comm_now() - t_put;
+        ++g_comm.ipc_n;
+        g_comm.ipc_bytes += (long long)bytes;
         return;
     }
 
@@ -935,6 +1053,9 @@ void ompx_put_host(int peer, void* dst, const void* src, size_t bytes) {
         g_runtime->proxy_push(gicc::proxy::CmdType::WRITE, peer,
                               g_heap.index, dst_off, g_heap.index, src_off, bytes);
     }
+    g_comm.net_s += comm_now() - t_put;
+    ++g_comm.net_n;
+    g_comm.net_bytes += (long long)bytes;
 }
 
 void ompx_get_host(int peer, void* dst, const void* src, size_t bytes) {
@@ -1066,12 +1187,18 @@ void quiet_now() {
     ompx_trigger_host();
     // Per-step completion only. The batch teardown in Runtime::reset() -- freeing
     // descriptors, zeroing the NIC counters -- runs once at ompx_finalize.
+    const double t0 = comm_now();
+    ipc_flush();
     if (g_ipc_pending) {
         g_ipc_pending = false;
         require_gpu(gpuStreamSynchronize(gicc_runtime_ipc_stream(g_runtime)),
                     "drain the IPC stream");
     }
+    const double t1 = comm_now();
     g_runtime->drain(/*sync_ipc=*/false);
+    g_comm.ipc_sync_s += t1 - t0;
+    g_comm.drain_s += comm_now() - t1;
+    ++g_comm.quiets;
     g_sig_next_cell = 0;          // every staged signal has completed
 }
 
@@ -1080,7 +1207,7 @@ void fence_flush() {
     g_fence_pending = false;
     wait_manifest();
     quiet_now();
-    MPI_Barrier(g_fence_comm);
+    timed_barrier(g_fence_comm);
     if (g_chain.empty()) return;
     split_tick(-1);
     for (ChainedLaunch& c : g_chain)
@@ -1118,13 +1245,13 @@ void ompx_quiet_host() {
 
 void ompx_barrier() {
     fence_flush();
-    MPI_Barrier(MPI_COMM_WORLD);
+    timed_barrier(MPI_COMM_WORLD);
 }
 
 void ompx_fence() {
     fence_flush();
     quiet_now();
-    MPI_Barrier(MPI_COMM_WORLD);
+    timed_barrier(MPI_COMM_WORLD);
 }
 
 // The fence at the end of an epoch, deferred: what this rank did to each
@@ -1143,6 +1270,7 @@ void ompx__fence_defer() {
     // DWQ the descriptors the epoch's puts staged are released now, so the
     // transfers run while the kernels compute instead of waiting for the fence.
     send_deferred_pipelined();
+    ipc_flush();
     ompx_trigger_host();
     const int n = ompx_get_num_ranks(), me = ompx_get_rank_num();
     g_manifest_out.assign((size_t)n * kManifestWords, 0);
