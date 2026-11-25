@@ -411,8 +411,8 @@ struct Layer {
     }
 
     void gemm(int s0, int s1, int t0, int tiles, const float* in, const float* w, float* o_,
-              int din, int dout, bool relu, unsigned long long rstep, int64_t put_rows = -1,
-              unsigned long long put_step = 0) {
+              int din, int dout, bool relu, unsigned long long rstep,
+              const int64_t* put_rows = nullptr, unsigned long long put_step = 0) {
         const int64_t* mi = meta_use;
         const int EL_ = EL, ct = (dout + kCT - 1) / kCT, me_ = me, tstride = tiles_max();
         const int64_t cap_ = cap;
@@ -480,10 +480,11 @@ struct Layer {
 #endif
         }
 #if defined(MOE_GIOMP) && MOE_GIOMP == 4
-        // GiOMP 4: return segment s0's rows to its source, as plain code.
-        if (put_rows >= 0)
-            ompx_put_signal(s0, ret + (size_t)me_ * cap_ * dout, o_ + (size_t)s0 * cap_ * dout,
-                            (size_t)put_rows * dout * 4, kRetSig + me_, put_step);
+        // GiOMP 4: return each segment's rows to its source, as plain code.
+        if (put_rows)
+            for (int s = s0; s < s1; ++s)
+                ompx_put_signal(s, ret + (size_t)me_ * cap_ * dout, o_ + (size_t)s * cap_ * dout,
+                                (size_t)put_rows[s - s0] * dout * 4, kRetSig + me_, put_step);
 #endif
         (void)put_rows; (void)put_step;
     }
@@ -700,21 +701,36 @@ struct Layer {
         tick(2);   // overlapped variants: "send" = local experts
         std::vector<char> left(P, 1);
         left[me] = 0;
+#if MOE_GIOMP == 4
+        // Segments that have arrived side by side run as one launch: a
+        // launch has a fixed cost, and at many ranks a segment is small.
+        static const bool one_by_one = std::getenv("MOE_NOBATCH") != nullptr;
+        std::vector<int64_t> counts((size_t)P * EL), rows(P);
+        for (int n = P - 1; n > 0;) {
+            for (int s = 0; s < P;) {
+                if (!left[s] || ompx_signal_read(s) < st) { ++s; continue; }
+                int e = s + 1;
+                while (!one_by_one && e < P && left[e] && ompx_signal_read(e) >= st) ++e;
+                omp_target_memcpy(counts.data(), meta_in + (size_t)s * EL, (size_t)(e - s) * EL * 8,
+                                  0, 0, omp_get_initial_device(), omp_get_default_device());
+                for (int k = 0; k < e - s; ++k) {
+                    rows[k] = 0;
+                    for (int q = 0; q < EL; ++q) rows[k] += counts[(size_t)k * EL + q];
+                }
+                snapshot(s, e);
+                gemm(s, e, 0, tiles_max(), recv, w1, hid, H, F, true, 0);
+                gemm(s, e, 0, tiles_max(), hid, w2, outr, F, H, false, 0, rows.data(), st);
+                for (int k = s; k < e; ++k) left[k] = 0;
+                n -= e - s;
+                s = e;
+            }
+        }
+#else
         for (int n = P - 1; n > 0;) {
             for (int s = 0; s < P; ++s)
                 if (left[s] && ompx_signal_read(s) >= st) {
 #if MOE_GIOMP == 3
                     experts(s, st);
-#elif MOE_GIOMP == 4
-                    {
-                        int64_t n[64], rows = 0;
-                        omp_target_memcpy(n, meta_in + (size_t)s * EL, EL * 8, 0, 0,
-                                          omp_get_initial_device(), omp_get_default_device());
-                        for (int q = 0; q < EL; ++q) rows += n[q];
-                        snapshot(s, s + 1);
-                        gemm(s, s + 1, 0, tiles_max(), recv, w1, hid, H, F, true, 0);
-                        gemm(s, s + 1, 0, tiles_max(), hid, w2, outr, F, H, false, 0, rows, st);
-                    }
 #else
                     experts(s);
                     give_back(s, st);
@@ -723,6 +739,7 @@ struct Layer {
                     --n;
                 }
         }
+#endif
         tick(3);
 #endif
         for (int s = 0; s < P; ++s)
